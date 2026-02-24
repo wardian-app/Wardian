@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@theme {
+  --color-wardian-bg: #040804;
+  --color-wardian-card: #0a120a;
+  --color-wardian-text: #e8f2e8;
+  --color-wardian-accent: #d4af37;
+  --color-wardian-accent-hover: #b8860b;
+  --color-wardian-border: #1b261b;
+  --color-wardian-success: #2e7d32;
+
+  /* Sidebar Widths */
+  --sidebar-primary-width: 64px;
+  --sidebar-content-width: 260px;
+  --sidebar-secondary-width: 280px;
+}
+
+:root {
+  background-color: var(--color-wardian-bg);
+  color: var(--color-wardian-text);
+  overflow: hidden;
+}
+
+/* Master Layout Transitions */
+.sidebar-transition {
+  transition:
+    width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+/* Hide xterm baseline cursor to stop duplicate ghosting since conpty renders its own */
+.xterm-cursor-layer {
+  display: none !important;
+}
+/* Maximized Mode Utility */
+.maximized-mode {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 100;
+  background: var(--color-wardian-bg);
+}
+
+.maximized-mode .terminal-container {
+  height: calc(100vh - 40px);
+}
+
+/* Inline Edit Style */
+.inline-edit-input {
+  background: transparent;
+  border: 1px solid var(--color-wardian-accent);
+  border-radius: 4px;
+  color: white;
+  padding: 2px 4px;
+  outline: none;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* Animation for list switching */
+.list-fade-enter {
+  opacity: 0;
+  transform: translateY(10px);
+}
+.list-fade-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.3s, transform 0.3s;
+}
+
+/* Grid Adjustments for Dashboard vs Grid */
+.dashboard-agent-card {
+  min-height: 80px;
+}
+
+.grid-agent-card {
+  height: 500px;
+}

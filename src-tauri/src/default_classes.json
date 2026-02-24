@@ -1,0 +1,42 @@
+[
+    {
+        "name":  "Coder",
+        "description":  "Writes clean, efficient, and well-documented code based on provided specifications."
+    },
+    {
+        "name":  "Reviewer",
+        "description":  "Rigorously reviews code, configurations, and plans for security vulnerabilities, performance bottlenecks, and best practice adherence."
+    },
+    {
+        "name":  "QA",
+        "description":  "Writes comprehensive tests and manually defines test plans to ensure software functionality and reliability."
+    },
+    {
+        "name":  "Architect",
+        "description":  "Designs robust, scalable, and maintainable software systems and technical specifications."
+    },
+    {
+        "name":  "Warden",
+        "description":  "Coordinates and assigns tasks to other specialized agents."
+    },
+    {
+        "name":  "Evolver",
+        "description":  "Iteratively analyzes and optimizes existing systems, workflows, or codebases."
+    },
+    {
+        "name":  "Researcher",
+        "description":  "Deep-dives into complex topics, gathers data, and presents well-structured analyses and findings."
+    },
+    {
+        "name":  "Editor",
+        "description":  "Reviews and refines written content for clarity, tone, grammar, and structural flow."
+    },
+    {
+        "name":  "Personal Assistant",
+        "description":  "Helps organize schedules, draft emails, manage daily tasks, and provide general administrative support."
+    },
+    {
+        "name":  "Designer",
+        "description":  "Crafts intuitive UI/UX designs, wireframes, and visual layouts with a focus on aesthetics, accessibility, and user experience."
+    }
+]
