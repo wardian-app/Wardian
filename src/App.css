@@ -74,7 +74,9 @@
 .list-fade-enter-active {
   opacity: 1;
   transform: translateY(0);
-  transition: opacity 0.3s, transform 0.3s;
+  transition:
+    opacity 0.3s,
+    transform 0.3s;
 }
 
 /* Grid Adjustments for Dashboard vs Grid */
@@ -84,4 +86,119 @@
 
 .grid-agent-card {
   height: 500px;
+}
+
+/* ── Watchlist Tab Pills ──────────────────────────────── */
+.watchlist-tab {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  background: transparent;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.watchlist-tab:hover {
+  color: white;
+  border-color: #6b7280;
+}
+.watchlist-tab.active {
+  color: var(--color-wardian-accent);
+  border-color: var(--color-wardian-accent);
+  background: rgba(212, 175, 55, 0.08);
+}
+
+/* ── Watchlist Agent Row ──────────────────────────────── */
+.watchlist-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.watchlist-row:hover {
+  background: rgba(55, 65, 81, 0.3);
+  border-color: rgba(75, 85, 99, 0.5);
+}
+.watchlist-row.selected {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+.watchlist-row.drag-over {
+  border-top: 2px solid var(--color-wardian-accent);
+}
+
+/* ── Context Menu ─────────────────────────────────────── */
+.context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 180px;
+  background: #1a1a2e;
+  border: 1px solid #2d2d44;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  animation: ctx-fade-in 0.12s ease-out;
+}
+@keyframes ctx-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #d1d5db;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s;
+  text-align: left;
+}
+.context-menu-item:hover {
+  background: rgba(75, 85, 99, 0.4);
+  color: white;
+}
+.context-menu-divider {
+  height: 1px;
+  background: #2d2d44;
+  margin: 4px 0;
+}
+.context-menu-submenu {
+  position: relative;
+}
+.context-submenu {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  min-width: 140px;
+  background: #1a1a2e;
+  border: 1px solid #2d2d44;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  animation: ctx-fade-in 0.12s ease-out;
+}
+.context-submenu.flip-left {
+  left: auto;
+  right: 100%;
 }
