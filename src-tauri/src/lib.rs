@@ -350,6 +350,34 @@ async fn delete_agent_class(
     Ok(manager::get_all_agent_classes(&app))
 }
 
+#[tauri::command]
+async fn load_watchlists(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    use tauri::Manager;
+    if let Ok(app_dir) = app.path().app_data_dir() {
+        let path = app_dir.join("watchlists.json");
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            let parsed: Vec<serde_json::Value> =
+                serde_json::from_str(&data).unwrap_or_default();
+            return Ok(parsed);
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+async fn save_watchlists(
+    watchlists: Vec<serde_json::Value>,
+    app: AppHandle,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let _ = std::fs::create_dir_all(&app_dir);
+    let path = app_dir.join("watchlists.json");
+    let json = serde_json::to_string_pretty(&watchlists).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -401,7 +429,9 @@ pub fn run() {
             rename_agent,
             list_agent_classes,
             create_agent_class,
-            delete_agent_class
+            delete_agent_class,
+            load_watchlists,
+            save_watchlists
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -6,6 +6,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import "./App.css";
+import AgentWatchlist from "./AgentWatchlist";
 import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
 
 const terminalMap = new Map<string, Terminal>();
@@ -115,11 +116,9 @@ function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
-  const [searchTerm, setSearchTerm] = useState("");
   const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
-  const [watchlistFilter, setWatchlistFilter] = useState<"all" | "active" | "archived">("all");
 
   // Drag and Drop State
   const [draggedAgentIndex, setDraggedAgentIndex] = useState<number | null>(null);
@@ -134,10 +133,15 @@ function App() {
   const handleDragStart = (e: React.DragEvent, index: number) => {
     if (viewMode !== 'dashboard') return;
     setDraggedAgentIndex(index);
-    // Optional: Make the drag ghost image semi-transparent
     if (e.target instanceof HTMLElement) {
       e.dataTransfer.effectAllowed = "move";
     }
+  };
+
+  /** Scroll to an agent's terminal card in the main view */
+  const scrollToAgent = (agentId: string) => {
+    const el = document.getElementById(`agent-card-${agentId}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -732,6 +736,7 @@ function App() {
 
               return (
                 <div
+                  id={`agent-card-${agentId}`}
                   key={agentId}
                   draggable={viewMode === 'dashboard'}
                   onDragStart={(e) => handleDragStart(e, index)}
@@ -870,88 +875,28 @@ function App() {
       </main>
 
       {/* --- SECONDARY SIDEBAR (RIGHT COLLAPSIBLE) --- */}
-      <aside className={`h-full bg-gray-900/50 border-l border-gray-800 sidebar-transition flex flex-col z-10 ${rightCollapsed ? 'w-0' : 'w-[var(--sidebar-secondary-width)]'}`}>
-        <div className="p-6 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-sm font-bold text-gray-500 uppercase tracking-widest">Agent Roster</h2>
-            <div className="flex gap-2">
-              <select 
-                className="bg-transparent text-[10px] font-bold text-gray-400 focus:outline-none border-b border-gray-800 hover:text-white cursor-pointer"
-                value={watchlistFilter}
-                onChange={(e) => setWatchlistFilter(e.target.value as any)}
-              >
-                <option value="all">ALL</option>
-                <option value="active">ACTIVE</option>
-                <option value="archived">ARCHIVED</option>
-              </select>
-              <button onClick={() => setRightCollapsed(true)} className="text-gray-500 hover:text-white">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
-              </button>
-            </div>
-          </div>
-
-          <div className="mb-4">
-            <input
-              className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-              placeholder="Search agents..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.currentTarget.value)}
-            />
-          </div>
-
-          <div className="flex-1 overflow-y-auto no-scrollbar space-y-2">
-            {agents
-              .filter(a => 
-                a.session_name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                a.agent_class.toLowerCase().includes(searchTerm.toLowerCase())
-              )
-              .map((agent) => {
-              const agentId = agent.session_id;
-              const isSelected = selectedAgentIds.has(agentId);
-              const metrics = telemetry[agentId];
-              
-              return (
-                <div 
-                  key={agentId} 
-                  onClick={() => {
-                    const next = new Set(selectedAgentIds);
-                    if (next.has(agentId)) next.delete(agentId);
-                    else next.add(agentId);
-                    setSelectedAgentIds(next);
-                  }}
-                  className={`p-3 rounded-lg border transition-all cursor-pointer flex items-center gap-3 group ${isSelected ? 'bg-emerald-900/20 border-emerald-500/50 shadow-lg shadow-emerald-900/10' : 'bg-gray-800/30 border-gray-700/50 hover:border-gray-500'}`}
-                >
-                  <div className={`w-2 h-2 rounded-full ${metrics?.current_status === 'Processing...' ? 'bg-[var(--color-wardian-accent)] animate-pulse' : 'bg-gray-500'}`}></div>
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-sm font-bold truncate ${isSelected ? 'text-white' : 'text-gray-300'}`}>{agent.session_name}</p>
-                    <p className="text-[10px] text-gray-500 font-mono truncate uppercase">{agent.agent_class}</p>
-                  </div>
-                  {isSelected && (
-                    <div className="w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center">
-                      <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="mt-6 pt-4 border-t border-gray-800 flex justify-between gap-2">
-            <button 
-              onClick={() => setSelectedAgentIds(new Set(agents.map(a => a.session_id)))}
-              className="text-[10px] font-bold text-gray-500 hover:text-white uppercase tracking-tighter"
-            >
-              Select All
-            </button>
-            <button 
-              onClick={() => setSelectedAgentIds(new Set())}
-              className="text-[10px] font-bold text-gray-500 hover:text-white uppercase tracking-tighter"
-            >
-              Clear
-            </button>
-          </div>
-        </div>
-      </aside>
+      <AgentWatchlist
+        agents={agents}
+        telemetry={telemetry}
+        terminalTitles={terminalTitles}
+        currentThoughts={currentThoughts}
+        selectedAgentIds={selectedAgentIds}
+        onSelectionChange={setSelectedAgentIds}
+        onAgentClick={scrollToAgent}
+        onRename={(id) => { setEditingAgentId(id); const a = agents.find(a => a.session_id === id); if (a) setTempName(a.session_name); }}
+        onQuery={(id) => { const el = document.getElementById(`terminal-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
+        onPause={(id) => sendCommand(id, "\x13")}
+        onRestart={async (id) => {
+          const agent = agents.find(a => a.session_id === id);
+          if (!agent || !confirm('Restart this agent?')) return;
+          await invoke('kill_agent', { sessionId: id });
+          await invoke('spawn_agent', { sessionName: agent.session_name, agentClass: agent.agent_class, folder: agent.folder, resumeSession: id });
+          fetchAgents();
+        }}
+        onDelete={async (id) => { if (confirm('Delete this agent?')) { await invoke('kill_agent', { sessionId: id }); fetchAgents(); } }}
+        collapsed={rightCollapsed}
+        onCollapse={() => setRightCollapsed(true)}
+      />
 
       {/* Right Sidebar Toggle (when collapsed) */}
       {rightCollapsed && (

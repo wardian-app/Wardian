@@ -157,20 +157,20 @@ describe("Agent Class Dropdown", () => {
   });
 });
 
-// ── Right Sidebar (Agent Roster) Tests ─────────────────────────────────
+// ── Right Sidebar (Agent Watchlist) Tests ──────────────────────────────
 
-describe("Agent Roster Sidebar", () => {
-  it("displays Agent Roster header", async () => {
+describe("Agent Watchlist Sidebar", () => {
+  it("displays Watchlists header", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {
       render(<App />);
     });
     await waitFor(() => {
-      expect(screen.getByText("Agent Roster")).toBeInTheDocument();
+      expect(screen.getByText("Watchlists")).toBeInTheDocument();
     });
   });
 
-  it("renders roster entries for each agent", async () => {
+  it("renders agent entries for each agent", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {
       render(<App />);
@@ -190,6 +190,28 @@ describe("Agent Roster Sidebar", () => {
       expect(screen.getByText("Select All")).toBeInTheDocument();
     });
     expect(screen.getByText("Clear")).toBeInTheDocument();
+  });
+
+  it("shows the All tab by default", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    await act(async () => {
+      render(<App />);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("All")).toBeInTheDocument();
+    });
+  });
+
+  it("shows column headers", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    await act(async () => {
+      render(<App />);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Agent")).toBeInTheDocument();
+      expect(screen.getByText("Status")).toBeInTheDocument();
+      expect(screen.getByText("Qry")).toBeInTheDocument();
+    });
   });
 });
 
@@ -258,14 +280,13 @@ describe("Broadcast", () => {
 // ── Sidebar Navigation Tests ───────────────────────────────────────────
 
 describe("Sidebar Navigation", () => {
-  it("renders sidebar nav buttons for all tabs", async () => {
+  it("renders sidebar nav buttons for primary tabs", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
     const buttons = screen.getAllByRole("button");
     const titles = buttons.map(b => b.getAttribute("title")).filter(Boolean);
     expect(titles).toContain("Explorer & Spawning");
-    expect(titles).toContain("Class Manager");
     expect(titles).toContain("Application Settings");
   });
 });
