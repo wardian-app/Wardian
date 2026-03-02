@@ -166,7 +166,7 @@ describe("Agent Watchlist Sidebar", () => {
       render(<App />);
     });
     await waitFor(() => {
-      expect(screen.getByText("Watchlists")).toBeInTheDocument();
+      expect(screen.getByText(/All Agents/i)).toBeInTheDocument();
     });
   });
 
