@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentOutputPayload, AgentJsonEvent, AgentTelemetry, AgentClassDefinition } from "./types";
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -10,8 +11,13 @@ import AgentWatchlist from "./AgentWatchlist";
 import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
 
 const terminalMap = new Map<string, Terminal>();
+const fitAddonMap = new Map<string, FitAddon>();
 
-function AgentTerminal({ sessionId, onTitleChange }: { sessionId: string; onTitleChange?: (title: string) => void }) {
+// Module-level flag: when true, ALL terminal fitting is suppressed.
+// Set by Tauri window move/resize events, cleared after settling.
+let windowOpActive = false;
+
+const AgentTerminal = memo(function AgentTerminal({ sessionId, onTitleChange }: { sessionId: string; onTitleChange?: (title: string) => void }) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
 
@@ -49,6 +55,7 @@ function AgentTerminal({ sessionId, onTitleChange }: { sessionId: string; onTitl
     }
     xtermRef.current = term;
     terminalMap.set(sessionId, term);
+    fitAddonMap.set(sessionId, fitAddon);
 
     setTimeout(() => term.focus(), 100);
 
@@ -68,18 +75,52 @@ function AgentTerminal({ sessionId, onTitleChange }: { sessionId: string; onTitl
     // Notify backend that terminal is ready, start reading from PTY
     invoke("attach_agent_pty", { sessionId }).catch(e => console.error(e));
 
+    // Minimum pixel dimensions to prevent fitting when containers are
+    // momentarily collapsed during window move/resize operations.
+    const MIN_WIDTH_PX = 100;
+    const MIN_HEIGHT_PX = 50;
+    // Minimum terminal dimensions to prevent PTY corruption.
+    // If fit() produces cols/rows below these, we skip the backend resize
+    // so the PTY never reformats output for a 1-column display.
+    const MIN_COLS = 10;
+    const MIN_ROWS = 3;
+
+    let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+    let lastCols = term.cols;
+    let lastRows = term.rows;
     const resizeObserver = new ResizeObserver(() => {
-      if (terminalRef.current && terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
-        try {
-          fitAddon.fit();
-        } catch (e) {
-          console.warn("xterm fit error", e);
-        }
-      }
+      // Completely skip if a window move/resize is in progress
+      if (windowOpActive) return;
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        if (windowOpActive) return;
+        requestAnimationFrame(() => {
+          if (windowOpActive) return;
+          const el = terminalRef.current;
+          if (!el || el.clientWidth < MIN_WIDTH_PX || el.clientHeight < MIN_HEIGHT_PX) return;
+          try {
+            const proposed = fitAddon.proposeDimensions();
+            if (proposed && (proposed.cols !== term.cols || proposed.rows !== term.rows)) {
+              fitAddon.fit();
+            } else {
+              // Same dimensions, but container might be un-hidden (e.g. view switch).
+              // Force webgl/canvas to repaint to avoid blank terminal glitch.
+              term.refresh(0, term.rows - 1);
+            }
+          } catch (e) {
+            console.warn("xterm fit error", e);
+          }
+        });
+      }, 250);
     });
     resizeObserver.observe(terminalRef.current);
 
     term.onResize((size) => {
+      // Guard: skip if dimensions unchanged or absurdly small
+      if (size.cols === lastCols && size.rows === lastRows) return;
+      if (size.cols < MIN_COLS || size.rows < MIN_ROWS) return;
+      lastCols = size.cols;
+      lastRows = size.rows;
       invoke("resize_agent_terminal", {
         sessionId,
         cols: size.cols,
@@ -88,14 +129,16 @@ function AgentTerminal({ sessionId, onTitleChange }: { sessionId: string; onTitl
     });
 
     return () => {
+      if (resizeTimeout) clearTimeout(resizeTimeout);
       resizeObserver.disconnect();
       terminalMap.delete(sessionId);
+      fitAddonMap.delete(sessionId);
       term.dispose();
     };
   }, [sessionId]);
 
-  return <div ref={terminalRef} className="w-full h-full overflow-hidden" />;
-}
+  return <div ref={terminalRef} className="w-full h-full overflow-hidden" style={{ willChange: 'transform' }} />;
+});
 
 function App() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
@@ -106,6 +149,9 @@ function App() {
   const [viewMode, setViewMode] = useState<"grid" | "dashboard">("grid");
   const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
   const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
+  const handleTitleChange = useCallback((agentId: string, title: string) => {
+    setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
+  }, []);
   const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
   const [notifications, setNotifications] = useState<{ id: string; session_id: string; message: string; type: string }[]>([]);
   const [broadcastMessage, setBroadcastMessage] = useState("");
@@ -215,10 +261,49 @@ function App() {
       fetchAgents();
     });
 
+    // ── Window move/resize gating ──────────────────────────────────
+    // Suppress ALL terminal fitting while the window is being
+    // moved or resized, then re-fit every terminal once it settles.
+    const appWindow = getCurrentWindow();
+    let windowSettleTimer: number | null = null;
+
+    const refitAllTerminals = () => {
+      terminalMap.forEach((term, sessionId) => {
+        const addon = fitAddonMap.get(sessionId);
+        if (addon) {
+          try {
+            const proposed = addon.proposeDimensions();
+            if (proposed && (proposed.cols !== term.cols || proposed.rows !== term.rows)) {
+              addon.fit();
+            } else {
+              term.refresh(0, term.rows - 1);
+            }
+          } catch { /* ignore */ }
+        }
+      });
+    };
+
+    const onWindowOp = () => {
+      windowOpActive = true;
+      if (windowSettleTimer) clearTimeout(windowSettleTimer);
+      windowSettleTimer = window.setTimeout(() => {
+        windowOpActive = false;
+        // Re-fit all terminals now that the operation is done
+        requestAnimationFrame(refitAllTerminals);
+      }, 500);
+    };
+
+    const unlistenMoved = appWindow.onMoved(onWindowOp);
+    const unlistenResized = appWindow.onResized(onWindowOp);
+
     return () => {
       unlistenOutput.then(fn => fn());
       unlistenJson.then(fn => fn());
       unlistenUpdate.then(fn => fn());
+      unlistenMoved.then(fn => fn());
+      unlistenResized.then(fn => fn());
+      if (windowSettleTimer) clearTimeout(windowSettleTimer);
+      windowOpActive = false;
     };
   }, []);
 
@@ -857,7 +942,7 @@ function App() {
 
                   <div className={`flex-1 bg-[#020402] p-4 overflow-hidden relative min-h-[300px] ${viewMode === 'grid' ? 'block' : 'hidden'}`}>
                     <div className="absolute inset-4">
-                      <AgentTerminal sessionId={agentId} onTitleChange={(title) => setTerminalTitles(prev => ({ ...prev, [agentId]: title }))} />
+                      <AgentTerminal sessionId={agentId} onTitleChange={(title) => handleTitleChange(agentId, title)} />
                     </div>
                   </div>
                 </div>

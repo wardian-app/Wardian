@@ -27,6 +27,13 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(() => Promise.resolve(() => {})),
 }));
 
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: vi.fn(() => ({
+    onMoved: vi.fn(() => Promise.resolve(() => {})),
+    onResized: vi.fn(() => Promise.resolve(() => {})),
+  })),
+}));
+
 // Mock xterm since it requires a real DOM canvas
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(() => ({
