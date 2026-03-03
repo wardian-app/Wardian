@@ -782,32 +782,10 @@ function App() {
             </div>
           )}
 
-          {maximizedAgentId && (
-            <div className="maximized-mode flex flex-col p-4 bg-black">
-              <div className="flex justify-between items-center mb-2 px-2">
-                <div className="flex items-center gap-3">
-                   <div className="w-3 h-3 rounded-full bg-[var(--color-wardian-accent)]"></div>
-                   <h2 className="text-lg font-bold text-white">
-                    {agents.find(a => a.session_id === maximizedAgentId)?.session_name} <span className="text-gray-500 font-normal">MAXIMIZED</span>
-                   </h2>
-                </div>
-                <button 
-                  onClick={() => setMaximizedAgentId(null)}
-                  className="bg-gray-800 hover:bg-gray-700 text-white px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                  MINIMIZE
-                </button>
-              </div>
-              <div className="flex-1 terminal-container">
-                <AgentTerminal sessionId={maximizedAgentId} />
-              </div>
-            </div>
-          )}
-
           <div className={`grid gap-6 auto-rows-max ${viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 flex flex-col'}`}>
             {agents.map((agent, index) => {
               const agentId = agent.session_id.toString();
+              const isMaximized = maximizedAgentId === agentId;
               const metrics = telemetry[agentId];
               const rawTitle = terminalTitles[agentId] || "";
               
@@ -823,16 +801,16 @@ function App() {
                 <div
                   id={`agent-card-${agentId}`}
                   key={agentId}
-                  draggable={viewMode === 'dashboard'}
+                  draggable={!isMaximized && viewMode === 'dashboard'}
                   onDragStart={(e) => handleDragStart(e, index)}
                   onDragOver={handleDragOver}
                   onDrop={(e) => handleDrop(e, index)}
-                  className={`bg-[var(--color-wardian-card)] transition-all rounded-xl overflow-hidden flex shadow-lg ${viewMode === 'dashboard'
+                  className={`bg-[var(--color-wardian-card)] transition-all overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none' : 'rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
                     ? 'flex-col md:flex-row border border-gray-700/50 hover:border-gray-500 w-full cursor-move'
-                    : 'flex-col border border-gray-700 h-[500px]'
-                    } ${draggedAgentIndex === index ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
+                    : !isMaximized ? 'flex-col border border-gray-700 h-[500px]' : 'flex-col'
+                    } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
                 >
-                  <div className={`${viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
+                  <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
                     <div className="flex flex-col justify-center p-4 bg-gray-800/50 min-w-[200px] max-w-[280px] border-r border-gray-700/50">
                       <div className="flex items-center gap-3 mb-1">
                         <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
@@ -911,7 +889,7 @@ function App() {
                     </div>
                   </div>
 
-                  <div className={`bg-gray-800 p-4 border-b border-gray-700 justify-between items-center group ${viewMode === 'grid' ? 'flex' : 'hidden'}`}>
+                  <div className={`bg-gray-800 p-4 border-b border-gray-700 justify-between items-center group ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'}`}>
                     <div className="flex items-center gap-3">
                       <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
                       {editingAgentId === agentId ? (
@@ -933,14 +911,24 @@ function App() {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                       <button onClick={() => setMaximizedAgentId(agentId)} className="text-gray-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 p-1">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
-                       </button>
+                       {isMaximized ? (
+                         <button 
+                           onClick={() => setMaximizedAgentId(null)}
+                           className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
+                         >
+                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                           MINIMIZE
+                         </button>
+                       ) : (
+                         <button onClick={() => setMaximizedAgentId(agentId)} className="text-gray-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 p-1">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
+                         </button>
+                       )}
                        <button onClick={async () => { if (confirm("Delete?")) { await invoke("kill_agent", { sessionId: agentId }); fetchAgents(); } }} className="text-gray-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                     </div>
                   </div>
 
-                  <div className={`flex-1 bg-[#020402] p-4 overflow-hidden relative min-h-[300px] ${viewMode === 'grid' ? 'block' : 'hidden'}`}>
+                  <div className={`flex-1 bg-[#020402] p-4 overflow-hidden relative min-h-[300px] ${isMaximized || viewMode === 'grid' ? 'block' : 'hidden'}`}>
                     <div className="absolute inset-4">
                       <AgentTerminal sessionId={agentId} onTitleChange={(title) => handleTitleChange(agentId, title)} />
                     </div>
