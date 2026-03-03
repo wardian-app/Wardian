@@ -158,7 +158,7 @@ function App() {
   const [isSpawning, setIsSpawning] = useState(false);
 
   // New Sidebar & Selection States
-  const [activeTab, setActiveTab] = useState<"explorer" | "ssh" | "warden" | "classes" | "settings">("explorer");
+  const [activeTab, setActiveTab] = useState<"explorer" | "ssh" | "workflows" | "classes" | "settings">("explorer");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
@@ -474,9 +474,9 @@ function App() {
         </button>
 
         <button
-          onClick={() => { setActiveTab("warden"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "warden" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
-          title="Warden Hub"
+          onClick={() => { setActiveTab("workflows"); setLeftCollapsed(false); }}
+          className={`p-3 rounded-xl transition-all ${activeTab === "workflows" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          title="Workflows"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
         </button>
@@ -610,10 +610,10 @@ function App() {
             </div>
           )}
 
-          {activeTab === "warden" && (
+          {activeTab === "workflows" && (
             <div className="flex flex-col items-center justify-center h-full text-gray-600 italic text-center p-4">
               <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
-              <p className="text-sm">Warden Logic Hub coming in Phase 3</p>
+              <p className="text-sm">Workflow Automation coming in Phase 3</p>
             </div>
           )}
 

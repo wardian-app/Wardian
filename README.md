@@ -108,7 +108,7 @@ wardian/
 | **Reviewer**           | Audits code for security, performance, and best practices |
 | **QA**                 | Writes tests and defines test plans                       |
 | **Architect**          | Designs scalable system architectures                     |
-| **Warden**             | Coordinates and delegates tasks between agents            |
+| **Coordinator**        | Coordinates and delegates tasks between agents            |
 | **Evolver**            | Iteratively optimizes systems and workflows               |
 | **Researcher**         | Deep-dives into topics with structured analysis           |
 | **Editor**             | Refines written content for clarity and flow              |

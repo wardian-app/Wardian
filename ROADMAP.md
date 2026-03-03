@@ -8,7 +8,7 @@ Wardian is an advanced Agent Terminal Manager designed for managing multiple aut
 
 - [ ] **Dual-Sidebar "Command Center" Architecture**
   - **Left Sidebar (Primary)**:
-    - A thin **Icon Bar** for switching between views (Explorer, Connections, Warden, Settings).
+    - A thin **Icon Bar** for switching between views (Explorer, Connections, Workflows, Settings).
     - A collapsible **Content Pane** that displays the menu for the active icon (e.g., Spawn Instance form, SSH hosts).
   - **Right Sidebar (Secondary)**:
     - A **collapsible, searchable agent list** (TradingView-style) for rapid selection, status monitoring, and drag-drop reordering.
