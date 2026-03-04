@@ -20,6 +20,7 @@ interface AgentWatchlistProps {
   terminalTitles: Record<string, string>;
   currentThoughts: Record<string, string>;
   selectedAgentIds: Set<string>;
+  offAgentIds: Set<string>;
   onSelectionChange: (ids: Set<string>) => void;
   onAgentClick: (agentId: string) => void;
   onRename: (agentId: string) => void;
@@ -37,6 +38,7 @@ export default function AgentWatchlist({
   terminalTitles,
   currentThoughts,
   selectedAgentIds,
+  offAgentIds,
   onSelectionChange,
   onAgentClick,
   onRename,
@@ -218,7 +220,8 @@ export default function AgentWatchlist({
     const rawTitle = terminalTitles[agentId] || "";
     const thought = currentThoughts[agentId];
     const metrics = telemetry[agentId];
-    return deriveCurrentThought(rawTitle, thought, metrics);
+    const isOff = offAgentIds.has(agentId);
+    return deriveCurrentThought(rawTitle, thought, metrics, isOff);
   };
 
   // ── Render ─────────────────────────────────────────────────────────
@@ -342,7 +345,7 @@ export default function AgentWatchlist({
                   </p>
                 </div>
                 <span className={`text-[9px] truncate max-w-[60px] ${status === "Processing..." ? "text-[var(--color-wardian-accent)]" : status === "Action Needed" ? "text-yellow-500" : "text-gray-500"}`}>
-                  {status === "Processing..." ? thought.substring(0, 12) : status === "Action Needed" ? "Action" : "Idle"}
+                  {status === "Processing..." ? thought.substring(0, 12) : status === "Action Needed" ? "Action" : status === "Off" ? "Off" : "Idle"}
                 </span>
                 <span className="text-[9px] text-gray-500 tabular-nums w-4 text-right">
                   {metrics?.query_count ?? "–"}
@@ -412,8 +415,10 @@ export default function AgentWatchlist({
           <div className="context-menu-divider" />
 
           <button
-            className="context-menu-item"
+            className={`context-menu-item ${contextMenu.agentId && offAgentIds.has(contextMenu.agentId) ? 'opacity-50 cursor-not-allowed' : ''}`}
+            disabled={contextMenu.agentId ? offAgentIds.has(contextMenu.agentId) : false}
             onClick={() => {
+              if (contextMenu.agentId && offAgentIds.has(contextMenu.agentId)) return;
               onPause(contextMenu.agentId!);
               setContextMenu((p) => ({ ...p, visible: false }));
             }}
@@ -429,7 +434,7 @@ export default function AgentWatchlist({
             }}
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-            Restart
+            {contextMenu.agentId && offAgentIds.has(contextMenu.agentId) ? 'Start' : 'Restart'}
           </button>
 
           <div className="context-menu-divider" />

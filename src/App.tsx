@@ -165,6 +165,7 @@ function App() {
   const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
+  const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
 
   // Drag and Drop State
   const [draggedAgentIndex, setDraggedAgentIndex] = useState<number | null>(null);
@@ -453,16 +454,24 @@ function App() {
     <div className="flex h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
       {/* --- PRIMARY SIDEBAR (ICON RAIL) --- */}
       <aside className="w-[64px] h-full bg-gray-900/80 border-r border-gray-800 flex flex-col items-center py-4 gap-4 z-30">
-        <div className="w-10 h-10 bg-[var(--color-wardian-accent)] rounded-lg flex items-center justify-center mb-4 shadow-[0_0_15px_rgba(241,211,130,0.3)]">
-          <span className="font-bold text-gray-900 text-xl italic">W</span>
+        <div className="w-10 h-10 flex items-center justify-center mb-4">
+          <img src="/icon.png" alt="Wardian" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(241,211,130,0.3)]" />
         </div>
 
         <button
           onClick={() => { setActiveTab("explorer"); setLeftCollapsed(false); }}
           className={`p-3 rounded-xl transition-all ${activeTab === "explorer" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
-          title="Explorer & Spawning"
+          title="Command Center"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("classes"); setLeftCollapsed(false); }}
+          className={`p-3 rounded-xl transition-all ${activeTab === "classes" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          title="Class Manager"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /><circle cx="12" cy="16" r="1.5" fill="currentColor" /></svg>
         </button>
 
         <button
@@ -483,13 +492,6 @@ function App() {
 
         <div className="mt-auto">
           <button
-            onClick={() => { setActiveTab("classes"); setLeftCollapsed(false); }}
-            className={`p-3 rounded-xl transition-all ${activeTab === "classes" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
-            title="Class Manager"
-          >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /><circle cx="12" cy="16" r="1.5" fill="currentColor" /></svg>
-          </button>
-          <button
             onClick={() => { setActiveTab("settings"); setLeftCollapsed(false); }}
             className={`p-3 rounded-xl transition-all ${activeTab === "settings" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
             title="Application Settings"
@@ -505,7 +507,7 @@ function App() {
           {activeTab === "explorer" && (
             <>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">EXPLORER</h2>
+                <h2 className="text-xl font-bold text-white tracking-tight">COMMAND</h2>
                 <button onClick={() => setLeftCollapsed(true)} className="text-gray-500 hover:text-white">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
@@ -584,7 +586,7 @@ function App() {
               </div>
 
               <div className="mt-auto pt-6 border-t border-gray-800">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Orchestration</h3>
+                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Broadcast</h3>
                 <form onSubmit={broadcastInput} className="flex flex-col gap-2">
                   <textarea
                     className="w-full bg-gray-800/30 border border-gray-700 rounded px-3 py-2 text-white text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
@@ -786,6 +788,10 @@ function App() {
             {agents.map((agent, index) => {
               const agentId = agent.session_id.toString();
               const isMaximized = maximizedAgentId === agentId;
+              const isOff = offAgentIds.has(agentId);
+              
+              if (isOff && !isMaximized) return null;
+              
               const metrics = telemetry[agentId];
               const rawTitle = terminalTitles[agentId] || "";
               
@@ -793,6 +799,7 @@ function App() {
                 rawTitle,
                 currentThoughts[agentId],
                 metrics,
+                isOff
               );
 
               const statusColorClass = getStatusColorClass(effectiveStatus);
@@ -851,20 +858,45 @@ function App() {
 
                     <div className="flex flex-col justify-center p-3 w-[260px] bg-gray-800/30 border-l border-gray-700/50">
                       <div className="grid grid-cols-2 gap-2 w-full">
-                        <button onClick={() => sendCommand(agentId, "\x13")} className="h-8 flex items-center justify-center bg-yellow-900/20 text-yellow-400 border border-yellow-800/30 text-[10px] rounded hover:bg-yellow-900/40 transition-colors">Pause</button>
+                        <button 
+                          onClick={() => {
+                            sendCommand(agentId, "\x13");
+                            setOffAgentIds(prev => new Set(prev).add(agentId));
+                          }} 
+                          disabled={isOff}
+                          className={`h-8 flex items-center justify-center border text-[10px] rounded transition-colors ${
+                            isOff 
+                              ? 'bg-gray-900/20 text-gray-600 border-gray-800/30 cursor-not-allowed'
+                              : 'bg-yellow-900/20 text-yellow-400 border-yellow-800/30 hover:bg-yellow-900/40'
+                          }`}
+                        >Pause</button>
                         <button 
                           onClick={async () => {
-                            if (!confirm("Restart?")) return;
+                            if (!confirm(isOff ? "Start?" : "Restart?")) return;
                             await invoke("kill_agent", { sessionId: agentId });
                             await invoke("spawn_agent", { sessionName: agent.session_name, agentClass: agent.agent_class, folder: agent.folder, resumeSession: agentId });
+                            
+                            setOffAgentIds(prev => {
+                              const next = new Set(prev);
+                              next.delete(agentId);
+                              return next;
+                            });
+                            
                             fetchAgents();
                           }} 
                           className="h-8 flex items-center justify-center bg-green-900/20 text-green-400 border border-green-800/30 text-[10px] rounded hover:bg-green-900/40 transition-colors"
-                        >Restart</button>
+                        >{isOff ? "Start" : "Restart"}</button>
                         <button 
                           onClick={async () => {
                             if (!confirm("Delete?")) return;
                             await invoke("kill_agent", { sessionId: agentId });
+                            
+                            setOffAgentIds(prev => {
+                              const next = new Set(prev);
+                              next.delete(agentId);
+                              return next;
+                            });
+                            
                             fetchAgents();
                           }} 
                           className="h-8 flex items-center justify-center bg-red-900/20 text-red-500 border border-red-800/30 text-[10px] rounded hover:bg-red-900/50 transition-colors"
@@ -924,7 +956,17 @@ function App() {
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                          </button>
                        )}
-                       <button onClick={async () => { if (confirm("Delete?")) { await invoke("kill_agent", { sessionId: agentId }); fetchAgents(); } }} className="text-gray-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                       <button onClick={async () => { 
+                         if (confirm("Delete?")) { 
+                           await invoke("kill_agent", { sessionId: agentId }); 
+                           setOffAgentIds(prev => {
+                             const next = new Set(prev);
+                             next.delete(agentId);
+                             return next;
+                           });
+                           fetchAgents(); 
+                         } 
+                       }} className="text-gray-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                     </div>
                   </div>
 
@@ -954,19 +996,38 @@ function App() {
         terminalTitles={terminalTitles}
         currentThoughts={currentThoughts}
         selectedAgentIds={selectedAgentIds}
+        offAgentIds={offAgentIds}
         onSelectionChange={setSelectedAgentIds}
         onAgentClick={scrollToAgent}
         onRename={(id) => { setEditingAgentId(id); const a = agents.find(a => a.session_id === id); if (a) setTempName(a.session_name); }}
         onQuery={(id) => { const el = document.getElementById(`terminal-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
-        onPause={(id) => sendCommand(id, "\x13")}
+        onPause={(id) => {
+          sendCommand(id, "\x13");
+          setOffAgentIds(prev => new Set(prev).add(id));
+        }}
         onRestart={async (id) => {
           const agent = agents.find(a => a.session_id === id);
-          if (!agent || !confirm('Restart this agent?')) return;
+          if (!agent || !confirm(offAgentIds.has(id) ? 'Start this agent?' : 'Restart this agent?')) return;
           await invoke('kill_agent', { sessionId: id });
           await invoke('spawn_agent', { sessionName: agent.session_name, agentClass: agent.agent_class, folder: agent.folder, resumeSession: id });
+          setOffAgentIds(prev => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
           fetchAgents();
         }}
-        onDelete={async (id) => { if (confirm('Delete this agent?')) { await invoke('kill_agent', { sessionId: id }); fetchAgents(); } }}
+        onDelete={async (id) => { 
+          if (confirm('Delete this agent?')) { 
+            await invoke('kill_agent', { sessionId: id }); 
+            setOffAgentIds(prev => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            fetchAgents(); 
+          } 
+        }}
         collapsed={rightCollapsed}
         onCollapse={() => setRightCollapsed(true)}
       />

@@ -46,6 +46,10 @@ describe("deriveEffectiveStatus", () => {
   it("returns Pending... when no metrics status", () => {
     expect(deriveEffectiveStatus("", undefined, undefined)).toBe("Pending...");
   });
+
+  it("returns Off when isOff is true regardless of title", () => {
+    expect(deriveEffectiveStatus("Working", "Active thought", "Processing...", true)).toBe("Off");
+  });
 });
 
 // ── cleanThought ───────────────────────────────────────────────────────
@@ -157,6 +161,12 @@ describe("deriveCurrentThought", () => {
     expect(result.thought).toBe("Booting...");
     expect(result.status).toBe("Idle");
   });
+
+  it("returns Off thought and Off status when isOff is true", () => {
+    const result = deriveCurrentThought("Working", "Generating code", baseMetrics, true);
+    expect(result.thought).toBe("Off");
+    expect(result.status).toBe("Off");
+  });
 });
 
 // ── classifyJsonEvent ──────────────────────────────────────────────────
@@ -215,19 +225,23 @@ describe("classifyJsonEvent", () => {
 // ── getStatusColorClass ────────────────────────────────────────────────
 
 describe("getStatusColorClass", () => {
-  it("returns accent pulse for Processing", () => {
+  it("returns cyan pulse for Processing", () => {
     expect(getStatusColorClass("Processing...")).toContain("animate-pulse");
-    expect(getStatusColorClass("Processing...")).toContain("wardian-accent");
+    expect(getStatusColorClass("Processing...")).toContain("cyan-400");
   });
 
-  it("returns yellow pulse for Action Needed", () => {
-    expect(getStatusColorClass("Action Needed")).toContain("animate-pulse");
-    expect(getStatusColorClass("Action Needed")).toContain("yellow-500");
+  it("returns amber bounce for Action Needed", () => {
+    expect(getStatusColorClass("Action Needed")).toContain("animate-bounce");
+    expect(getStatusColorClass("Action Needed")).toContain("amber-500");
   });
 
-  it("returns gray for Idle", () => {
-    expect(getStatusColorClass("Idle")).toContain("bg-gray-500");
+  it("returns emerald for Idle", () => {
+    expect(getStatusColorClass("Idle")).toContain("bg-emerald-500");
     expect(getStatusColorClass("Idle")).not.toContain("animate-pulse");
+  });
+
+  it("returns gray for Off", () => {
+    expect(getStatusColorClass("Off")).toContain("bg-gray-600");
   });
 
   it("returns gray for unknown status", () => {

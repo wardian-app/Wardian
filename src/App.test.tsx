@@ -289,7 +289,65 @@ describe("Sidebar Navigation", () => {
     await screen.findByText("No Active Instances");
     const buttons = screen.getAllByRole("button");
     const titles = buttons.map(b => b.getAttribute("title")).filter(Boolean);
-    expect(titles).toContain("Explorer & Spawning");
+    expect(titles).toContain("Command Center");
     expect(titles).toContain("Application Settings");
+  });
+});
+
+// ── Agent Off State Tests ──────────────────────────────────────────────
+
+import { fireEvent } from "@testing-library/react";
+
+describe("Agent Off State Operations", () => {
+  it("removes an agent from the main grid when paused and requires Start from context menu", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    await act(async () => {
+      render(<App />);
+    });
+    // Wait for the agent to render
+    await waitFor(() => {
+      expect(screen.getAllByText("Alpha").length).toBeGreaterThan(0);
+    });
+    
+    // Find the Pause button for the first agent
+    const pauseButtons = screen.getAllByText("Pause");
+    expect(pauseButtons.length).toBeGreaterThan(0);
+    
+    // Click the first Pause button
+    await act(async () => {
+      pauseButtons[0].click();
+    });
+
+    // The agent should no longer be in the main grid (only 1 occurrence remains from Watchlist)
+    await waitFor(() => {
+      const alphaElements = screen.getAllByText("Alpha");
+      expect(alphaElements.length).toBe(1);
+    });
+    
+    // Find the Watchlist row and fire context menu
+    const watchlistRowText = screen.getByText("Alpha");
+    const watchlistRow = watchlistRowText.closest("div.watchlist-row");
+    expect(watchlistRow).not.toBeNull();
+    
+    await act(async () => {
+      fireEvent.contextMenu(watchlistRow!);
+    });
+    
+    // The Start button should now be visible in the context menu
+    await waitFor(() => {
+      expect(screen.getAllByText("Start").length).toBeGreaterThan(0);
+    });
+
+    // Click Start
+    const startButtons = screen.getAllByText("Start");
+    await act(async () => {
+      startButtons[0].click();
+    });
+    
+    // The agent should reappear in the grid (2 occurrences again)
+    // Restart button should come back in the main grid
+    await waitFor(() => {
+      expect(screen.getAllByText("Restart").length).toBeGreaterThan(0);
+    });
   });
 });

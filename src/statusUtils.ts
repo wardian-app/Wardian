@@ -7,7 +7,10 @@ export function deriveEffectiveStatus(
   rawTitle: string,
   currentThought: string | undefined,
   metricsStatus: string | undefined,
-): "Idle" | "Processing..." | "Action Needed" | "Pending..." {
+  isOff?: boolean,
+): "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" {
+  if (isOff) return "Off";
+
   let effectiveStatus: string = metricsStatus || "Pending...";
 
   if (rawTitle.includes("Action Required")) {
@@ -20,7 +23,7 @@ export function deriveEffectiveStatus(
 
   if (currentThought) effectiveStatus = "Processing...";
 
-  return effectiveStatus as "Idle" | "Processing..." | "Action Needed" | "Pending...";
+  return effectiveStatus as "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off";
 }
 
 /**
@@ -43,9 +46,14 @@ export function deriveCurrentThought(
   rawTitle: string,
   liveThought: string | undefined,
   metrics: AgentTelemetry | undefined,
-): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." } {
-  let effectiveStatus = deriveEffectiveStatus(rawTitle, liveThought, metrics?.current_status);
+  isOff?: boolean,
+): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" } {
+  let effectiveStatus = deriveEffectiveStatus(rawTitle, liveThought, metrics?.current_status, isOff);
   let currentThought = cleanThought(liveThought || rawTitle.trim());
+
+  if (isOff) {
+    return { thought: "Off", status: "Off" };
+  }
 
   // Fallback chain when no live thought
   if (!liveThought) {
@@ -99,10 +107,20 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
  */
 export function getStatusColorClass(effectiveStatus: string): string {
   if (effectiveStatus === "Processing...") {
-    return "bg-[var(--color-wardian-accent)] shadow-[0_0_8px_var(--color-wardian-accent)] animate-pulse";
+    // Distinct cyan/blue for active processing
+    return "bg-cyan-400 shadow-[0_0_8px_var(--color-wardian-accent)] animate-pulse";
   }
   if (effectiveStatus === "Action Needed") {
-    return "bg-yellow-500 shadow-[0_0_8px_#eab308] animate-pulse";
+    // Distinct vibrant yellow/amber
+    return "bg-amber-500 shadow-[0_0_10px_#f59e0b] animate-bounce";
   }
-  return "bg-gray-500 shadow-none";
+  if (effectiveStatus === "Idle") {
+    // Distinct emerald green for ready/idle
+    return "bg-emerald-500 shadow-[0_0_8px_#10b981]";
+  }
+  if (effectiveStatus === "Off") {
+    // Gray for off/paused state (was previously the default for idle too)
+    return "bg-gray-600 shadow-none";
+  }
+  return "bg-gray-500 flex-shrink-0";
 }
