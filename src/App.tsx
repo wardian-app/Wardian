@@ -337,6 +337,14 @@ function App() {
       const list = await invoke<AgentConfig[]>("list_agents");
       console.log("list_agents returned:", list);
       setAgents(list);
+      
+      const newOffIds = new Set<string>();
+      for (const agent of list) {
+        if (agent.is_off) {
+          newOffIds.add(agent.session_id);
+        }
+      }
+      setOffAgentIds(newOffIds);
     } catch (e) {
       console.error(e);
     }
@@ -352,6 +360,7 @@ function App() {
         agentClass: newAgentClass,
         folder: newFolder,
         resumeSession: resumeSession || null,
+        isOff: false,
       });
       console.log("spawn_agent returned:", config);
       setAgents([...agents, config]);
@@ -759,7 +768,7 @@ function App() {
               <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-gray-600 uppercase tracking-widest">
                 <span>CPU: {Object.values(telemetry).reduce((acc, curr) => acc + curr.cpu_usage, 0).toFixed(1)}%</span>
                 <span>MEM: {Object.values(telemetry).reduce((acc, curr) => acc + curr.memory_mb, 0).toFixed(0)} MB</span>
-                <span className="text-[var(--color-wardian-accent)]">Active: {agents.length}</span>
+                <span className="text-[var(--color-wardian-accent)]">Active: {agents.filter(a => !offAgentIds.has(a.session_id)).length}</span>
               </div>
             </div>
           </header>
@@ -999,23 +1008,40 @@ function App() {
         offAgentIds={offAgentIds}
         onSelectionChange={setSelectedAgentIds}
         onAgentClick={scrollToAgent}
-        onRename={(id) => { setEditingAgentId(id); const a = agents.find(a => a.session_id === id); if (a) setTempName(a.session_name); }}
+        onRename={renameAgent}
+        onReorderAgents={async (newOrder) => {
+          const newAgents = [...agents];
+          newAgents.sort((a, b) => newOrder.indexOf(a.session_id) - newOrder.indexOf(b.session_id));
+          setAgents(newAgents);
+          try {
+            await invoke("reorder_agents", { sessionIds: newOrder });
+          } catch (e) {
+            console.error("Failed to reorder:", e);
+          }
+        }}
         onQuery={(id) => { const el = document.getElementById(`terminal-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
-        onPause={(id) => {
-          sendCommand(id, "\x13");
+        onPause={async (id) => {
+          try {
+            await invoke('pause_agent', { sessionId: id });
+          } catch(e) { 
+            console.error("Failed to pause agent:", e); 
+          }
           setOffAgentIds(prev => new Set(prev).add(id));
+          fetchAgents();
         }}
         onRestart={async (id) => {
-          const agent = agents.find(a => a.session_id === id);
-          if (!agent || !confirm(offAgentIds.has(id) ? 'Start this agent?' : 'Restart this agent?')) return;
-          await invoke('kill_agent', { sessionId: id });
-          await invoke('spawn_agent', { sessionName: agent.session_name, agentClass: agent.agent_class, folder: agent.folder, resumeSession: id });
-          setOffAgentIds(prev => {
-            const next = new Set(prev);
-            next.delete(id);
-            return next;
-          });
-          fetchAgents();
+          if (!confirm(offAgentIds.has(id) ? 'Start this agent?' : 'Restart this agent?')) return;
+          try {
+            await invoke('resume_agent', { sessionId: id });
+            setOffAgentIds(prev => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            fetchAgents();
+          } catch (e) {
+            console.error("Failed to resume agent:", e);
+          }
         }}
         onDelete={async (id) => { 
           if (confirm('Delete this agent?')) { 

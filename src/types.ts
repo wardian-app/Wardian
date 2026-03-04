@@ -4,6 +4,7 @@ export interface AgentConfig {
     agent_class: string;
     folder: string;
     resume_session?: string;
+    is_off: boolean;
 }
 
 export interface AgentOutputPayload {

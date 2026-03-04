@@ -9,6 +9,7 @@ async fn spawn_agent(
     agent_class: String,
     folder: String,
     resume_session: Option<String>,
+    is_off: Option<bool>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AgentConfig, String> {
@@ -54,6 +55,7 @@ async fn spawn_agent(
         agent_class,
         folder,
         resume_session: actual_resume_config,
+        is_off: is_off.unwrap_or(false),
     };
 
     let active_agent = manager::spawn_gemini_cli(app.clone(), config.clone(), false).await?;
@@ -94,7 +96,11 @@ async fn send_input_to_agent(
     let tx = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
-            agent.stdin_tx.clone()
+            if let Some(ref tx) = agent.stdin_tx {
+                tx.clone()
+            } else {
+                return Err(format!("Agent {} is currently off", session_id));
+            }
         } else {
             return Err(format!("Agent {} not found", session_id));
         }
@@ -118,28 +124,90 @@ async fn kill_agent(
     ));
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
-    if let Some(mut agent) = agents.remove(&session_id) {
+    if let Some(agent) = agents.remove(&session_id) {
         order.retain(|id| id != &session_id);
         manager::save_state(&app, &agents, &order);
-        match agent.child_process.kill() {
-            Ok(_) => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Successfully killed process for session {}",
-                    session_id
-                ));
-            }
-            Err(e) => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Failed to kill process for session {}: {}",
-                    session_id, e
-                ));
-            }
+        if let Some(mut child) = agent.child_process {
+            let _ = child.kill();
         }
         Ok(())
     } else {
         let err_msg = format!("Agent with session ID {} not found", session_id);
         manager::log_debug(&format!("[WARDIAN] {}", err_msg));
         Err(err_msg)
+    }
+}
+
+#[tauri::command]
+async fn pause_agent(
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    manager::log_debug(&format!(
+        "[WARDIAN] pause_agent called for session: {}",
+        session_id
+    ));
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+
+    if let Some(agent) = agents.get_mut(&session_id) {
+        if let Some(mut child) = agent.child_process.take() {
+            let _ = child.kill();
+        }
+        agent.pty_master = None;
+        agent.stdin_tx = None;
+        agent.process_id = None;
+        agent.config.is_off = true;
+        if let Ok(mut status) = agent.current_status.lock() {
+            *status = "Off".to_string();
+        }
+        manager::save_state(&app, &agents, &order);
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", session_id))
+    }
+}
+
+#[tauri::command]
+async fn resume_agent(
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    manager::log_debug(&format!(
+        "[WARDIAN] resume_agent called for session: {}",
+        session_id
+    ));
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+
+    if let Some(agent) = agents.get_mut(&session_id) {
+        agent.config.is_off = false;
+        // Ensure resume_session is set so gemini CLI resumes the correct conversation
+        if agent.config.resume_session.is_none() {
+            agent.config.resume_session = Some(agent.config.session_id.clone());
+        }
+        let new_active = manager::spawn_gemini_cli(app.clone(), agent.config.clone(), true).await?;
+
+        // Replace ALL fields so the reader/writer threads share state with the stored agent
+        agent.child_process = new_active.child_process;
+        agent.pty_master = new_active.pty_master;
+        agent.stdin_tx = new_active.stdin_tx;
+        agent.process_id = new_active.process_id;
+        agent.output_history = new_active.output_history;
+        agent.query_count = new_active.query_count;
+        agent.init_timestamp = new_active.init_timestamp;
+        agent.current_status = new_active.current_status;
+        agent.log_path = new_active.log_path;
+        #[cfg(windows)]
+        {
+            agent.job_object = new_active.job_object;
+        }
+        manager::save_state(&app, &agents, &order);
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", session_id))
     }
 }
 
@@ -171,7 +239,10 @@ async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<()
     manager::log_debug("[WARDIAN] broadcast_input called");
     let txs: Vec<_> = {
         let agents = state.agents.lock().await;
-        agents.values().map(|a| a.stdin_tx.clone()).collect()
+        agents
+            .values()
+            .filter_map(|a| a.stdin_tx.as_ref().cloned())
+            .collect()
     };
     for tx in txs {
         let _ = tx.send(input.clone()).await;
@@ -422,6 +493,8 @@ pub fn run() {
             list_agents,
             send_input_to_agent,
             kill_agent,
+            pause_agent,
+            resume_agent,
             broadcast_input,
             resize_agent_terminal,
             attach_agent_pty,

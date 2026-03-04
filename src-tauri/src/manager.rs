@@ -45,13 +45,16 @@ pub struct AgentConfig {
     pub agent_class: String,
     pub folder: String,
     pub resume_session: Option<String>,
+    #[serde(default)]
+    pub is_off: bool,
 }
 
 pub struct ActiveAgent {
     pub config: AgentConfig,
-    pub child_process: Box<dyn portable_pty::Child + Send>,
-    pub pty_master: std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
-    pub stdin_tx: tokio::sync::mpsc::Sender<String>,
+    pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
+    pub pty_master:
+        Option<std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
+    pub stdin_tx: Option<tokio::sync::mpsc::Sender<String>>,
     pub output_history: std::sync::Arc<std::sync::Mutex<String>>,
     pub process_id: Option<u32>,
     pub query_count: std::sync::Arc<std::sync::Mutex<usize>>,
@@ -106,6 +109,23 @@ pub async fn spawn_gemini_cli(
     } else {
         config.folder.clone()
     };
+
+    if config.is_off {
+        return Ok(ActiveAgent {
+            config,
+            child_process: None,
+            pty_master: None,
+            stdin_tx: None,
+            output_history: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            process_id: None,
+            query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_status: std::sync::Arc::new(std::sync::Mutex::new("Off".to_string())),
+            log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        });
+    }
 
     let pty_system = NativePtySystem::default();
 
@@ -373,9 +393,9 @@ pub async fn spawn_gemini_cli(
 
     Ok(ActiveAgent {
         config: final_config,
-        child_process: child,
-        pty_master: pty_master,
-        stdin_tx: tx,
+        child_process: Some(child),
+        pty_master: Some(pty_master),
+        stdin_tx: Some(tx),
         output_history: history,
         process_id,
         query_count,
@@ -396,7 +416,11 @@ pub async fn resize_pty(
     let master_arc = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
-            agent.pty_master.clone()
+            if let Some(ref pty) = agent.pty_master {
+                pty.clone()
+            } else {
+                return Err(format!("Agent {} is currently off (no PTY)", session_id));
+            }
         } else {
             return Err(format!("Agent {} not found", session_id));
         }
@@ -824,9 +848,11 @@ pub async fn kill_all_agents(state: &AppState) {
         agents.len()
     ));
 
-    for (sid, mut agent) in agents.drain() {
+    for (sid, agent) in agents.drain() {
         log_debug(&format!("[Wardian] Killing agent session {}", sid));
-        let _ = agent.child_process.kill();
+        if let Some(mut child) = agent.child_process {
+            let _ = child.kill();
+        }
         // Dropping the agent struct here will close pty_master and job_object handles
     }
     order.clear();
@@ -1039,6 +1065,7 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "C:/project".into(),
             resume_session: Some("def-456".into()),
+            is_off: true,
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
@@ -1047,6 +1074,7 @@ mod tests {
         assert_eq!(config.agent_class, deserialized.agent_class);
         assert_eq!(config.folder, deserialized.folder);
         assert_eq!(config.resume_session, deserialized.resume_session);
+        assert_eq!(config.is_off, deserialized.is_off);
     }
 
     #[test]
@@ -1057,6 +1085,7 @@ mod tests {
             agent_class: "QA".into(),
             folder: "".into(),
             resume_session: None,
+            is_off: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
@@ -1110,6 +1139,7 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "".into(),
             resume_session: Some("ui-override-id".into()),
+            is_off: false,
         };
         assert_eq!(determine_resume_id(&config, false), "ui-override-id");
         assert_eq!(determine_resume_id(&config, true), "ui-override-id");
@@ -1123,6 +1153,7 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "".into(),
             resume_session: None,
+            is_off: false,
         };
         assert_eq!(determine_resume_id(&config, true), "restored-id");
     }
@@ -1135,6 +1166,7 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "".into(),
             resume_session: None,
+            is_off: false,
         };
         assert_eq!(determine_resume_id(&config, false), "");
     }
@@ -1147,6 +1179,7 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "".into(),
             resume_session: Some("".into()),
+            is_off: false,
         };
         // Empty override falls through to is_restored check
         assert_eq!(determine_resume_id(&config, false), "");

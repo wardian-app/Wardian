@@ -23,7 +23,8 @@ interface AgentWatchlistProps {
   offAgentIds: Set<string>;
   onSelectionChange: (ids: Set<string>) => void;
   onAgentClick: (agentId: string) => void;
-  onRename: (agentId: string) => void;
+  onRename: (agentId: string, newName: string) => Promise<void>;
+  onReorderAgents: (newOrder: string[]) => void;
   onQuery: (agentId: string) => void;
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
@@ -42,6 +43,7 @@ export default function AgentWatchlist({
   onSelectionChange,
   onAgentClick,
   onRename,
+  onReorderAgents,
   onQuery,
   onPause,
   onRestart,
@@ -67,6 +69,9 @@ export default function AgentWatchlist({
   const [tabContextMenu, setTabContextMenu] = useState<{ visible: boolean; x: number; y: number; listId: string | null }>({
     visible: false, x: 0, y: 0, listId: null,
   });
+  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  const [editingAgentName, setEditingAgentName] = useState("");
+  const [isRenaming, setIsRenaming] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const wasDragging = useRef(false);
 
@@ -94,6 +99,22 @@ export default function AgentWatchlist({
     },
     [],
   );
+
+  // ── Prune stale agent IDs from watchlists when agents change ───────
+  useEffect(() => {
+    const validIds = new Set(agents.map((a) => a.session_id));
+    const pruned = watchlists.map((wl) => ({
+      ...wl,
+      agentIds: wl.agentIds.filter((id: string) => validIds.has(id)),
+    }));
+    // Only persist if something actually changed
+    const changed = pruned.some(
+      (wl, i) => wl.agentIds.length !== watchlists[i]?.agentIds.length
+    );
+    if (changed) {
+      persistWatchlists(pruned);
+    }
+  }, [agents]); // intentionally omitting watchlists/persistWatchlists to avoid loops
 
   // ── Close context menus on outside click ───────────────────────────
   useEffect(() => {
@@ -139,6 +160,20 @@ export default function AgentWatchlist({
     setEditingListId(null);
   };
 
+  const handleRenameAgentCommit = async (agentId: string) => {
+    if (isRenaming || !editingAgentId) return;
+    const trimmed = editingAgentName.trim();
+    if (trimmed) {
+      setIsRenaming(true);
+      try {
+        await onRename(agentId, trimmed);
+      } finally {
+        setIsRenaming(false);
+      }
+    }
+    setEditingAgentId(null);
+  };
+
   const handleTabContextMenu = (e: React.MouseEvent, listId: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -150,7 +185,6 @@ export default function AgentWatchlist({
 
   // ── Mouse-based Drag & Drop (WebView2-compatible) ──────────────────
   const handleMouseDown = (agentId: string) => {
-    if (activeListId === "all") return;
     setDraggedAgentId(agentId);
   };
 
@@ -161,16 +195,28 @@ export default function AgentWatchlist({
   };
 
   const handleMouseUp = async () => {
-    if (draggedAgentId && dragOverAgentId && activeList && draggedAgentId !== dragOverAgentId) {
-      const fromIndex = activeList.agentIds.indexOf(draggedAgentId);
-      const toIndex = activeList.agentIds.indexOf(dragOverAgentId);
-      if (fromIndex !== -1 && toIndex !== -1) {
-        const reordered = reorderWithinList(activeList.agentIds, fromIndex, toIndex);
-        const updated = watchlists.map((l) =>
-          l.id === activeList.id ? { ...l, agentIds: reordered } : l,
-        );
-        await persistWatchlists(updated);
-        wasDragging.current = true;
+    if (draggedAgentId && dragOverAgentId && draggedAgentId !== dragOverAgentId) {
+      if (activeListId === "all") {
+        const fromIndex = agents.findIndex(a => a.session_id === draggedAgentId);
+        const toIndex = agents.findIndex(a => a.session_id === dragOverAgentId);
+        if (fromIndex !== -1 && toIndex !== -1) {
+          const newOrder = [...agents.map(a => a.session_id)];
+          const [dragged] = newOrder.splice(fromIndex, 1);
+          newOrder.splice(toIndex, 0, dragged);
+          onReorderAgents(newOrder);
+          wasDragging.current = true;
+        }
+      } else if (activeList) {
+        const fromIndex = activeList.agentIds.indexOf(draggedAgentId);
+        const toIndex = activeList.agentIds.indexOf(dragOverAgentId);
+        if (fromIndex !== -1 && toIndex !== -1) {
+          const reordered = reorderWithinList(activeList.agentIds, fromIndex, toIndex);
+          const updated = watchlists.map((l) =>
+            l.id === activeList.id ? { ...l, agentIds: reordered } : l,
+          );
+          await persistWatchlists(updated);
+          wasDragging.current = true;
+        }
       }
     }
     setDraggedAgentId(null);
@@ -337,9 +383,32 @@ export default function AgentWatchlist({
               >
                 <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
                 <div className="flex-1 min-w-0">
-                  <p className={`text-xs font-bold truncate ${isSelected ? "text-white" : "text-gray-300"}`}>
-                    {agent.session_name}
-                  </p>
+                  {editingAgentId === agentId ? (
+                    <input
+                      className="text-xs font-bold text-white bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none w-full"
+                      autoFocus
+                      value={editingAgentName}
+                      onChange={(e) => setEditingAgentName(e.target.value)}
+                      onBlur={() => handleRenameAgentCommit(agentId)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleRenameAgentCommit(agentId);
+                        }
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setEditingAgentId(null);
+                        }
+                        e.stopPropagation();
+                      }}
+                      onClick={e => e.stopPropagation()}
+                      onMouseDown={e => e.stopPropagation()}
+                    />
+                  ) : (
+                    <p className={`text-xs font-bold truncate ${isSelected ? "text-white" : "text-gray-300"}`}>
+                      {agent.session_name}
+                    </p>
+                  )}
                   <p className="text-[9px] text-gray-500 font-mono truncate uppercase">
                     {agent.agent_class}
                   </p>
@@ -394,7 +463,9 @@ export default function AgentWatchlist({
           <button
             className="context-menu-item"
             onClick={() => {
-              onRename(contextMenu.agentId!);
+              setEditingAgentId(contextMenu.agentId);
+              const agentToEdit = agents.find(a => a.session_id === contextMenu.agentId);
+              if (agentToEdit) setEditingAgentName(agentToEdit.session_name);
               setContextMenu((p) => ({ ...p, visible: false }));
             }}
           >
