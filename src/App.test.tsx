@@ -111,9 +111,10 @@ describe("Agent Class Dropdown", () => {
   it("populates dropdown with default classes", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
-    await screen.findByText("No Active Instances");
+    
+    // Wait for the mocked classes to populate asynchronously
+    await screen.findByText("Architect");
 
-    // Find any select element
     const selects = document.querySelectorAll("select");
     const classSelect = Array.from(selects).find(s => {
       const options = Array.from(s.querySelectorAll("option"));
@@ -129,7 +130,9 @@ describe("Agent Class Dropdown", () => {
   it("separates default and custom classes into optgroups", async () => {
     setupDefaultMocks([], [...defaultClasses, ...customClasses]);
     render(<App />);
-    await screen.findByText("No Active Instances");
+    
+    // Wait for the mocked custom class to appear
+    await screen.findByText("DevOps");
 
     const selects = document.querySelectorAll("select");
     const classSelect = Array.from(selects).find(s => {

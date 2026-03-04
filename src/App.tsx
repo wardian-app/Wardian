@@ -137,7 +137,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, onTitleChange }: 
     };
   }, [sessionId]);
 
-  return <div ref={terminalRef} className="w-full h-full overflow-hidden" style={{ willChange: 'transform' }} />;
+  return <div ref={terminalRef} onClick={() => xtermRef.current?.focus()} className="w-full h-full overflow-hidden" style={{ willChange: 'transform' }} />;
 });
 
 function App() {
@@ -928,7 +928,7 @@ function App() {
                     </div>
                   </div>
 
-                  <div className={`flex-1 bg-[#020402] p-4 overflow-hidden relative min-h-[300px] ${isMaximized || viewMode === 'grid' ? 'block' : 'hidden'}`}>
+                  <div className={`bg-[#020402] p-4 overflow-hidden ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}>
                     <div className="absolute inset-4">
                       <AgentTerminal sessionId={agentId} onTitleChange={(title) => handleTitleChange(agentId, title)} />
                     </div>

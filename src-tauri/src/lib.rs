@@ -91,17 +91,19 @@ async fn send_input_to_agent(
         "[WARDIAN] send_input_to_agent called for session {} with input {:?}",
         session_id, input
     ));
-    let agents = state.agents.lock().await;
-    if let Some(agent) = agents.get(&session_id) {
-        agent
-            .stdin_tx
-            .send(input)
-            .await
-            .map_err(|e| format!("Failed to send input: {}", e))?;
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
-    }
+    let tx = {
+        let agents = state.agents.lock().await;
+        if let Some(agent) = agents.get(&session_id) {
+            agent.stdin_tx.clone()
+        } else {
+            return Err(format!("Agent {} not found", session_id));
+        }
+    }; // Lock dropped here
+
+    tx.send(input)
+        .await
+        .map_err(|e| format!("Failed to send input: {}", e))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -167,9 +169,12 @@ async fn rename_agent(
 #[tauri::command]
 async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
     manager::log_debug("[WARDIAN] broadcast_input called");
-    let mut agents = state.agents.lock().await;
-    for agent in agents.values_mut() {
-        let _ = agent.stdin_tx.send(input.clone()).await;
+    let txs: Vec<_> = {
+        let agents = state.agents.lock().await;
+        agents.values().map(|a| a.stdin_tx.clone()).collect()
+    };
+    for tx in txs {
+        let _ = tx.send(input.clone()).await;
     }
     Ok(())
 }
@@ -356,8 +361,7 @@ async fn load_watchlists(app: AppHandle) -> Result<Vec<serde_json::Value>, Strin
     if let Ok(app_dir) = app.path().app_data_dir() {
         let path = app_dir.join("watchlists.json");
         if let Ok(data) = std::fs::read_to_string(&path) {
-            let parsed: Vec<serde_json::Value> =
-                serde_json::from_str(&data).unwrap_or_default();
+            let parsed: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
             return Ok(parsed);
         }
     }
@@ -365,10 +369,7 @@ async fn load_watchlists(app: AppHandle) -> Result<Vec<serde_json::Value>, Strin
 }
 
 #[tauri::command]
-async fn save_watchlists(
-    watchlists: Vec<serde_json::Value>,
-    app: AppHandle,
-) -> Result<(), String> {
+async fn save_watchlists(watchlists: Vec<serde_json::Value>, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let _ = std::fs::create_dir_all(&app_dir);

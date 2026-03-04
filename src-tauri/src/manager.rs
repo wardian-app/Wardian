@@ -50,7 +50,7 @@ pub struct AgentConfig {
 pub struct ActiveAgent {
     pub config: AgentConfig,
     pub child_process: Box<dyn portable_pty::Child + Send>,
-    pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
+    pub pty_master: std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     pub stdin_tx: tokio::sync::mpsc::Sender<String>,
     pub output_history: std::sync::Arc<std::sync::Mutex<String>>,
     pub process_id: Option<u32>,
@@ -209,8 +209,8 @@ pub async fn spawn_gemini_cli(
         .take_writer()
         .map_err(|e| format!("Failed to get pty writer: {}", e))?;
 
-    // Keep master alive by cloning it for the ActiveAgent struct
-    let pty_master = pair.master;
+    // Wrap master to allow isolated background resizing across threads
+    let pty_master = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
 
     // Drop the slave handle to prevent deadlock (standard ConPTY practice)
     drop(pair.slave);
@@ -393,21 +393,31 @@ pub async fn resize_pty(
     rows: u16,
     state: &AppState,
 ) -> Result<(), String> {
-    let mut agents = state.agents.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        agent
-            .pty_master
-            .resize(PtySize {
+    let master_arc = {
+        let agents = state.agents.lock().await;
+        if let Some(agent) = agents.get(&session_id) {
+            agent.pty_master.clone()
+        } else {
+            return Err(format!("Agent {} not found", session_id));
+        }
+    }; // Agents lock is explicitly dropped here
+
+    // Execute synchronous resizing in a background thread.
+    // Windows ConPTY frequently deadlocks when resized while waiting for input.
+    // By decoupling it, we sacrifice future terminal resizes for this agent
+    // but protect the entire application from an unrecoverable global deadlock.
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(master) = master_arc.lock() {
+            let _ = master.resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
-            })
-            .map_err(|e| format!("Failed to resize PTY: {}", e))?;
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
-    }
+            });
+        }
+    });
+
+    Ok(())
 }
 
 // Helper struct to pass writer back and forth to tokio::spawn_blocking
