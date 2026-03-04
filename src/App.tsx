@@ -999,7 +999,17 @@ function App() {
         offAgentIds={offAgentIds}
         onSelectionChange={setSelectedAgentIds}
         onAgentClick={scrollToAgent}
-        onRename={(id) => { setEditingAgentId(id); const a = agents.find(a => a.session_id === id); if (a) setTempName(a.session_name); }}
+        onRename={renameAgent}
+        onReorderAgents={async (newOrder) => {
+          const newAgents = [...agents];
+          newAgents.sort((a, b) => newOrder.indexOf(a.session_id) - newOrder.indexOf(b.session_id));
+          setAgents(newAgents);
+          try {
+            await invoke("reorder_agents", { sessionIds: newOrder });
+          } catch (e) {
+            console.error("Failed to reorder:", e);
+          }
+        }}
         onQuery={(id) => { const el = document.getElementById(`terminal-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
         onPause={(id) => {
           sendCommand(id, "\x13");
