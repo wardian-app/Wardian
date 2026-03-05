@@ -6,3 +6,8 @@
 ## Technical Debt
 - [ ] **State Restoration Synchronization**: Ensure PTY history is correctly re-attached and emitted to the frontend during mass restoration on startup.
 - [ ] **Memory Management**: The `output_history` buffer in `ActiveAgent` needs a more sophisticated pruning strategy for extremely long-running sessions.
+
+## UX & UI Improvements
+- [ ] **Status Light Calibration**: Finalize colors—Processing is **Yellow**, Action Required is **Orange**.
+- [ ] **Advanced List Interactions**: Implement Shift-Click (range selection) and Right-Click context menus for the agent roster.
+- [ ] **Theme Support**: Add a "Light Mode" toggle to the application settings.

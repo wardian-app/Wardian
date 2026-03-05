@@ -1,8 +1,23 @@
 pub mod manager;
 
 use manager::{AgentClassDefinition, AgentConfig, AppState};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use uuid::Uuid;
+
+#[derive(serde::Deserialize, Clone)]
+struct TerminalInputPayload {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    input: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct TerminalResizePayload {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    cols: u16,
+    rows: u16,
+}
 #[tauri::command]
 async fn spawn_agent(
     session_name: String,
@@ -60,6 +75,13 @@ async fn spawn_agent(
 
     let active_agent = manager::spawn_gemini_cli(app.clone(), config.clone(), false).await?;
 
+    // Register input sender BEFORE locking agents map
+    if let Some(ref tx) = active_agent.stdin_tx {
+        if let Ok(mut senders) = state.input_senders.write() {
+            senders.insert(session_id.clone(), tx.clone());
+        }
+    }
+
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
     agents.insert(session_id.clone(), active_agent);
@@ -89,27 +111,38 @@ async fn send_input_to_agent(
     input: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    manager::log_debug(&format!(
-        "[WARDIAN] send_input_to_agent called for session {} with input {:?}",
-        session_id, input
-    ));
-    let tx = {
-        let agents = state.agents.lock().await;
-        if let Some(agent) = agents.get(&session_id) {
-            if let Some(ref tx) = agent.stdin_tx {
-                tx.clone()
-            } else {
-                return Err(format!("Agent {} is currently off", session_id));
-            }
-        } else {
-            return Err(format!("Agent {} not found", session_id));
+    // Use try_read to never block the async executor, even for a microsecond.
+    let senders = match state.input_senders.try_read() {
+        Ok(s) => s,
+        Err(_) => {
+            manager::log_debug(&format!(
+                "[Wardian] [{}] send_input_to_agent: input_senders write-locked, dropping keystroke",
+                session_id
+            ));
+            return Err("Input channel temporarily locked".to_string());
         }
-    }; // Lock dropped here
-
-    tx.send(input)
-        .await
-        .map_err(|e| format!("Failed to send input: {}", e))?;
-    Ok(())
+    };
+    if let Some(tx) = senders.get(&session_id) {
+        match tx.try_send(input) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                manager::log_debug(&format!(
+                    "[Wardian] [{}] send_input_to_agent: channel FULL (writer thread likely blocked on ConPTY write_all)",
+                    session_id
+                ));
+                Err("Terminal input buffer full - PTY may be stalled".to_string())
+            }
+            Err(e) => {
+                manager::log_debug(&format!(
+                    "[Wardian] [{}] send_input_to_agent: channel error: {}",
+                    session_id, e
+                ));
+                Err(format!("Failed to send input: {}", e))
+            }
+        }
+    } else {
+        Err(format!("Agent {} not found or is off", session_id))
+    }
 }
 
 #[tauri::command]
@@ -125,6 +158,10 @@ async fn kill_agent(
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
     if let Some(agent) = agents.remove(&session_id) {
+        // Remove from input_senders immediately
+        if let Ok(mut senders) = state.input_senders.write() {
+            senders.remove(&session_id);
+        }
         order.retain(|id| id != &session_id);
         manager::save_state(&app, &agents, &order);
         if let Some(mut child) = agent.child_process {
@@ -155,10 +192,23 @@ async fn pause_agent(
         if let Some(mut child) = agent.child_process.take() {
             let _ = child.kill();
         }
+
+        #[cfg(windows)]
+        {
+            // Explicitly take and drop the job object. The Drop impl of win32job::Job
+            // is what actually enforces the limit_kill_on_job_close() flag.
+            // If we don't drop it here, orphaned conhost.exe processes will leak and drain CPU.
+            let _ = agent.job_object.take();
+        }
+
         agent.pty_master = None;
         agent.stdin_tx = None;
         agent.process_id = None;
         agent.config.is_off = true;
+        // Remove from input_senders
+        if let Ok(mut senders) = state.input_senders.write() {
+            senders.remove(&session_id);
+        }
         if let Ok(mut status) = agent.current_status.lock() {
             *status = "Off".to_string();
         }
@@ -189,6 +239,13 @@ async fn resume_agent(
             agent.config.resume_session = Some(agent.config.session_id.clone());
         }
         let new_active = manager::spawn_gemini_cli(app.clone(), agent.config.clone(), true).await?;
+
+        // Register new input sender
+        if let Some(ref tx) = new_active.stdin_tx {
+            if let Ok(mut senders) = state.input_senders.write() {
+                senders.insert(session_id.clone(), tx.clone());
+            }
+        }
 
         // Replace ALL fields so the reader/writer threads share state with the stored agent
         agent.child_process = new_active.child_process;
@@ -236,16 +293,12 @@ async fn rename_agent(
 
 #[tauri::command]
 async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
-    manager::log_debug("[WARDIAN] broadcast_input called");
-    let txs: Vec<_> = {
-        let agents = state.agents.lock().await;
-        agents
-            .values()
-            .filter_map(|a| a.stdin_tx.as_ref().cloned())
-            .collect()
-    };
-    for tx in txs {
-        let _ = tx.send(input.clone()).await;
+    let senders = state
+        .input_senders
+        .read()
+        .map_err(|e| format!("Lock poisoned: {}", e))?;
+    for tx in senders.values() {
+        let _ = tx.try_send(input.clone());
     }
     Ok(())
 }
@@ -461,6 +514,87 @@ pub fn run() {
             // Generate Class Constraints globally inside AppData
             manager::init_agent_classes(&app_handle);
 
+            // Terminal input via Tauri events — completely bypasses the invoke/command pipeline.
+            // Events go through Tauri's event system which is independent of the Tokio command
+            // dispatcher. This makes terminal input immune to command queue saturation.
+            let event_handle = app.handle().clone();
+            app.listen_any("terminal-input", move |event| {
+                let raw = event.payload();
+                match serde_json::from_str::<TerminalInputPayload>(raw) {
+                    Ok(payload) => {
+                        let state = event_handle.state::<AppState>();
+                        let tx_clone = {
+                            let senders = match state.input_senders.try_read() {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    eprintln!(
+                                        "[Wardian] EVENT: input_senders LOCKED for {}",
+                                        payload.session_id
+                                    );
+                                    return;
+                                }
+                            };
+                            match senders.get(&payload.session_id) {
+                                Some(tx) => tx.clone(),
+                                None => {
+                                    eprintln!(
+                                        "[Wardian] EVENT: no sender for {}",
+                                        payload.session_id
+                                    );
+                                    return;
+                                }
+                            }
+                        };
+                        match tx_clone.try_send(payload.input) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "[Wardian] EVENT: try_send FAILED for {}: {}",
+                                    payload.session_id, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[Wardian] EVENT: failed to parse payload: {} raw={}",
+                            e, raw
+                        );
+                    }
+                }
+            });
+
+            // Terminal resize via Tauri events — same bypass as terminal-input.
+            let resize_handle = app.handle().clone();
+            app.listen_any("terminal-resize", move |event| {
+                if let Ok(payload) = serde_json::from_str::<TerminalResizePayload>(event.payload())
+                {
+                    let rh = resize_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = rh.state::<AppState>();
+                        let _ = manager::resize_pty(
+                            payload.session_id,
+                            payload.cols,
+                            payload.rows,
+                            &state,
+                        )
+                        .await;
+                    });
+                }
+            });
+
+            // Metrics push task — emits agent-metrics every 5 seconds via events.
+            // This eliminates invoke from the metrics path entirely.
+            let metrics_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let state = metrics_handle.state::<AppState>();
+                    let metrics = manager::get_all_metrics(&state).await;
+                    let _ = metrics_handle.emit("agent-metrics", &metrics);
+                }
+            });
+
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
                 if let Ok(app_dir) = app_handle.path().app_data_dir() {
@@ -477,6 +611,12 @@ pub fn run() {
                                 )
                                 .await
                                 {
+                                    // Register input sender
+                                    if let Some(ref tx) = agent.stdin_tx {
+                                        if let Ok(mut senders) = state.input_senders.write() {
+                                            senders.insert(config.session_id.clone(), tx.clone());
+                                        }
+                                    }
                                     order_map.push(config.session_id.clone());
                                     agents_map.insert(config.session_id.clone(), agent);
                                 }

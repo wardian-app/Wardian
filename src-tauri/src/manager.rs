@@ -70,6 +70,9 @@ pub struct AppState {
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
     pub system_metrics: std::sync::Arc<Mutex<sysinfo::System>>,
     pub agent_order: Mutex<Vec<String>>,
+    // Separate, lightweight map for stdin senders — completely independent from the
+    // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
+    pub input_senders: std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>,
 }
 
 impl AppState {
@@ -80,6 +83,7 @@ impl AppState {
             agents: Mutex::new(HashMap::new()),
             system_metrics: std::sync::Arc::new(Mutex::new(sys)),
             agent_order: Mutex::new(Vec::new()),
+            input_senders: std::sync::RwLock::new(HashMap::new()),
         }
     }
 }
@@ -235,28 +239,25 @@ pub async fn spawn_gemini_cli(
     // Drop the slave handle to prevent deadlock (standard ConPTY practice)
     drop(pair.slave);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(32);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
     let sid_in = config.session_id.clone();
 
-    // Stdin writer task
-    tokio::spawn(async move {
-        while let Some(input) = rx.recv().await {
-            let mut w = WriterThreadStruct { writer };
-            let Ok(res) = tokio::task::spawn_blocking(move || {
-                let _ = w.writer.write_all(input.as_bytes());
-                let _ = w.writer.flush();
-                w
-            })
-            .await
-            else {
+    // Stdin writer task — dedicated OS thread, fully isolated from Tokio runtime.
+    std::thread::spawn(move || {
+        while let Some(input) = rx.blocking_recv() {
+            let write_start = std::time::Instant::now();
+            let _ = writer.write_all(input.as_bytes());
+            let _ = writer.flush();
+            let elapsed = write_start.elapsed();
+            if elapsed.as_millis() > 500 {
                 log_debug(&format!(
-                    "[Wardian] [{}] Writer thread deadlock or panic",
-                    sid_in
+                    "[Wardian] [{}] SLOW write_all: took {}ms (ConPTY pipe may be stalling)",
+                    sid_in,
+                    elapsed.as_millis()
                 ));
-                break;
-            };
-            writer = res.writer;
+            }
         }
+        log_debug(&format!("[Wardian] [{}] Writer thread exited", sid_in));
     });
 
     let sid_out = config.session_id.clone();
@@ -271,6 +272,45 @@ pub async fn spawn_gemini_cli(
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
 
+    // Output batching: instead of emitting every read() as a separate IPC event,
+    // accumulate output in a buffer and flush at 50ms intervals (~20fps).
+    // This dramatically reduces WebView2 IPC bridge traffic, preventing saturation
+    // that blocks incoming terminal-input events.
+    let output_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let output_buffer_clone = output_buffer.clone();
+    let flush_sid = config.session_id.clone();
+    let flush_app = app.clone();
+    let reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader_alive_clone = reader_alive.clone();
+
+    // Flusher thread: drains output buffer every 33ms (~30fps).
+    // 30fps is visually smooth while keeping event rate sustainable across many agents.
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(33));
+        let text = {
+            let mut buf = match output_buffer_clone.lock() {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            if buf.is_empty() {
+                // If reader has exited and buffer is empty, stop the flusher
+                if !reader_alive_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            std::mem::take(&mut *buf)
+        };
+        let _ = flush_app.emit(
+            "agent-output",
+            serde_json::json!({
+                "session_id": flush_sid,
+                "text": text,
+                "stream": "stdout"
+            }),
+        );
+    });
+
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -279,6 +319,7 @@ pub async fn spawn_gemini_cli(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     log_debug(&format!("[Wardian] [{}] Reader EOF", sid_out));
+                    reader_alive.store(false, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
                 Ok(n) => {
@@ -298,17 +339,9 @@ pub async fn spawn_gemini_cli(
                         }
                     }
 
-                    if let Err(e) = app.emit(
-                        "agent-output",
-                        serde_json::json!(
-                            {
-                                "session_id": sid_out,
-                                "text": text,
-                                "stream": "stdout"
-                            }
-                        ),
-                    ) {
-                        log_debug(&format!("[Wardian] [{}] Emit error: {}", sid_out, e));
+                    // Append to batch buffer instead of emitting directly
+                    if let Ok(mut ob) = output_buffer.lock() {
+                        ob.push_str(&text);
                     }
 
                     // JSON parsing
@@ -380,6 +413,7 @@ pub async fn spawn_gemini_cli(
                 }
                 Err(e) => {
                     log_debug(&format!("[Wardian] [{}] Reader error: {}", sid_out, e));
+                    reader_alive.store(false, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
             }
@@ -413,11 +447,11 @@ pub async fn resize_pty(
     rows: u16,
     state: &AppState,
 ) -> Result<(), String> {
-    let master_arc = {
+    let (master_arc, status_arc) = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
             if let Some(ref pty) = agent.pty_master {
-                pty.clone()
+                (pty.clone(), agent.current_status.clone())
             } else {
                 return Err(format!("Agent {} is currently off (no PTY)", session_id));
             }
@@ -430,23 +464,59 @@ pub async fn resize_pty(
     // Windows ConPTY frequently deadlocks when resized while waiting for input.
     // By decoupling it, we sacrifice future terminal resizes for this agent
     // but protect the entire application from an unrecoverable global deadlock.
+    // CRITICAL FIX: We MUST use try_lock(). If the first resize deadlocks, the lock is
+    // held forever. If we use lock(), subsequent rapid resize events from the frontend
+    // will queue up 100+ tasks all blocked indefinitely on this mutex, instantly
+    // exhausting tokio's entire spawn_blocking thread pool and freezing ALL terminal inputs.
+    let sid_clone = session_id.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        if let Ok(master) = master_arc.lock() {
-            let _ = master.resize(PtySize {
+        // On Windows, ResizePseudoConsole can deadlock when the attached process
+        // is blocked on ReadFile. Skip resize entirely unless the agent is actively processing.
+        #[cfg(windows)]
+        {
+            if let Ok(status) = status_arc.lock() {
+                let s = status.as_str();
+                // Only allow resize when the agent is actively producing output.
+                // Any state where the process might be blocked on input risks a ConPTY deadlock.
+                if s != "Processing" && s != "Idle" {
+                    log_debug(&format!(
+                        "[Wardian] [{}] Skipping PTY resize (status={})",
+                        sid_clone, s
+                    ));
+                    return;
+                }
+            }
+        }
+
+        if let Ok(master) = master_arc.try_lock() {
+            // Use a timeout thread to detect ConPTY deadlocks instead of blocking forever.
+            let master_ref = &*master;
+            let resize_result = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done = resize_result.clone();
+
+            // The actual resize happens on the CURRENT thread; the timeout is a watchdog.
+            let watchdog = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    log_debug(&format!(
+                        "[Wardian] [{}] PTY resize TIMED OUT after 2s (ConPTY deadlock detected)",
+                        sid_clone
+                    ));
+                }
+            });
+
+            let _ = master_ref.resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
             });
+            resize_result.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = watchdog.join();
         }
     });
 
     Ok(())
-}
-
-// Helper struct to pass writer back and forth to tokio::spawn_blocking
-struct WriterThreadStruct {
-    pub writer: Box<dyn Write + Send>,
 }
 
 pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<String> {
@@ -510,191 +580,227 @@ pub struct AgentTelemetry {
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
-    let mut results = Vec::new();
-    let agents = state.agents.lock().await;
-
-    let mut sys = state.system_metrics.lock().await;
-    sys.refresh_all(); // Full refresh is more reliable for parent-child discovery in current sysinfo version
-
-    // Index processes by parent ID for O(1) child lookup
-    let mut children_map: HashMap<sysinfo::Pid, Vec<sysinfo::Pid>> = HashMap::new();
-    for (pid, process) in sys.processes() {
-        if let Some(parent) = process.parent() {
-            children_map.entry(parent).or_default().push(*pid);
-        }
+    // Phase 1: Snapshot lightweight agent data under the lock, then release it immediately.
+    struct AgentSnapshot {
+        session_id: String,
+        process_id: Option<u32>,
+        query_count: std::sync::Arc<std::sync::Mutex<usize>>,
+        init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        current_status: std::sync::Arc<std::sync::Mutex<String>>,
+        log_path: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     }
 
-    for (sid, agent) in agents.iter() {
-        let mut cpu_usage = 0.0;
-        let mut memory_mb = 0.0;
-        let mut uptime_seconds = 0;
+    let snapshots: Vec<AgentSnapshot> = {
+        let agents = state.agents.lock().await;
+        agents
+            .iter()
+            .map(|(sid, agent)| AgentSnapshot {
+                session_id: sid.clone(),
+                process_id: agent.process_id,
+                query_count: agent.query_count.clone(),
+                init_timestamp: agent.init_timestamp.clone(),
+                current_status: agent.current_status.clone(),
+                log_path: agent.log_path.clone(),
+            })
+            .collect()
+    }; // agents lock dropped here
 
-        if let Some(pid) = agent.process_id {
-            let root_pid = sysinfo::Pid::from_u32(pid);
+    // Phase 2: ALL expensive synchronous work runs inside spawn_blocking.
+    // This prevents blocking the tokio async executor thread, which would starve
+    // all other async tasks including send_input_to_agent IPC dispatch.
+    let sys_metrics = state.system_metrics.clone();
 
-            // Recursive function to sum up process tree
-            fn sum_tree(
-                pid: sysinfo::Pid,
-                sys: &sysinfo::System,
-                children_map: &HashMap<sysinfo::Pid, Vec<sysinfo::Pid>>,
-                cpu: &mut f32,
-                mem: &mut f64,
-                uptime: &mut u64,
-            ) {
-                if let Some(proc) = sys.process(pid) {
-                    *cpu += proc.cpu_usage();
-                    *mem += proc.memory() as f64 / 1_048_576.0;
-                    *uptime = std::cmp::max(*uptime, proc.run_time());
-                }
-                if let Some(children) = children_map.get(&pid) {
-                    for &child_pid in children {
-                        sum_tree(child_pid, sys, children_map, cpu, mem, uptime);
-                    }
-                }
+    tokio::task::spawn_blocking(move || {
+        let mut results = Vec::new();
+        let mut sys = sys_metrics.blocking_lock();
+        sys.refresh_all();
+
+        let mut children_map: HashMap<sysinfo::Pid, Vec<sysinfo::Pid>> = HashMap::new();
+        for (pid, process) in sys.processes() {
+            if let Some(parent) = process.parent() {
+                children_map.entry(parent).or_default().push(*pid);
             }
-
-            sum_tree(
-                root_pid,
-                &sys,
-                &children_map,
-                &mut cpu_usage,
-                &mut memory_mb,
-                &mut uptime_seconds,
-            );
         }
 
-        let mut queries_val = 0;
-        let mut init_ts_val = None;
-        let mut status_val = "Idle".to_string();
+        for snap in &snapshots {
+            let sid = &snap.session_id;
+            let mut cpu_usage = 0.0;
+            let mut memory_mb = 0.0;
+            let mut uptime_seconds = 0;
 
-        let mut log_path_lock = agent.log_path.lock().unwrap_or_else(|e| e.into_inner());
-        if log_path_lock.is_none() {
-            let home = if cfg!(windows) {
-                std::env::var("USERPROFILE")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("C:\\"))
-            } else {
-                std::env::var("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            };
+            if let Some(pid) = snap.process_id {
+                let root_pid = sysinfo::Pid::from_u32(pid);
 
-            let tmp_dir = home.join(".gemini/tmp");
-            if let Ok(entries) = std::fs::read_dir(tmp_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().is_dir() {
-                        let chats_dir = entry.path().join("chats");
-                        if chats_dir.exists() {
-                            if let Ok(chat_files) = std::fs::read_dir(chats_dir) {
-                                for chat_file in chat_files.flatten() {
-                                    if chat_file.path().is_file()
-                                        && chat_file.path().extension().and_then(|s| s.to_str())
-                                            == Some("json")
-                                    {
-                                        if let Ok(content) =
-                                            std::fs::read_to_string(chat_file.path())
+                fn sum_tree(
+                    pid: sysinfo::Pid,
+                    sys: &sysinfo::System,
+                    children_map: &HashMap<sysinfo::Pid, Vec<sysinfo::Pid>>,
+                    cpu: &mut f32,
+                    mem: &mut f64,
+                    uptime: &mut u64,
+                ) {
+                    if let Some(proc) = sys.process(pid) {
+                        *cpu += proc.cpu_usage();
+                        *mem += proc.memory() as f64 / 1_048_576.0;
+                        *uptime = std::cmp::max(*uptime, proc.run_time());
+                    }
+                    if let Some(children) = children_map.get(&pid) {
+                        for &child_pid in children {
+                            sum_tree(child_pid, sys, children_map, cpu, mem, uptime);
+                        }
+                    }
+                }
+
+                sum_tree(
+                    root_pid,
+                    &sys,
+                    &children_map,
+                    &mut cpu_usage,
+                    &mut memory_mb,
+                    &mut uptime_seconds,
+                );
+            }
+
+            let mut queries_val = 0;
+            let mut init_ts_val = None;
+            let mut status_val = "Idle".to_string();
+
+            let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
+            if log_path_lock.is_none() {
+                let home = if cfg!(windows) {
+                    std::env::var("USERPROFILE")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("C:\\"))
+                } else {
+                    std::env::var("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                };
+
+                let tmp_dir = home.join(".gemini/tmp");
+                if let Ok(entries) = std::fs::read_dir(tmp_dir) {
+                    for entry in entries.flatten() {
+                        if entry.path().is_dir() {
+                            let chats_dir = entry.path().join("chats");
+                            if chats_dir.exists() {
+                                if let Ok(chat_files) = std::fs::read_dir(chats_dir) {
+                                    for chat_file in chat_files.flatten() {
+                                        if chat_file.path().is_file()
+                                            && chat_file.path().extension().and_then(|s| s.to_str())
+                                                == Some("json")
                                         {
-                                            if let Ok(parsed) =
-                                                serde_json::from_str::<serde_json::Value>(&content)
+                                            if let Ok(content) =
+                                                std::fs::read_to_string(chat_file.path())
                                             {
-                                                if parsed.get("sessionId").and_then(|v| v.as_str())
-                                                    == Some(sid)
+                                                if let Ok(parsed) =
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        &content,
+                                                    )
                                                 {
-                                                    *log_path_lock = Some(chat_file.path());
-                                                    break;
+                                                    if parsed
+                                                        .get("sessionId")
+                                                        .and_then(|v| v.as_str())
+                                                        == Some(sid)
+                                                    {
+                                                        *log_path_lock = Some(chat_file.path());
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            if log_path_lock.is_some() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(ref path) = *log_path_lock {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(messages) = parsed.get("messages").and_then(|v| v.as_array()) {
-                        for msg in messages {
-                            if msg.get("type").and_then(|v| v.as_str()) == Some("user") {
-                                queries_val += 1;
-                            }
-                        }
-                        if let Some(last_msg) = messages.last() {
-                            if let Some(msg_type) = last_msg.get("type").and_then(|v| v.as_str()) {
-                                if msg_type == "user" {
-                                    status_val = "Processing...".to_string();
-                                } else if msg_type == "gemini"
-                                    || msg_type == "model"
-                                    || msg_type == "info"
-                                {
-                                    status_val = "Idle".to_string();
-                                } else {
-                                    status_val = "Action Needed".to_string();
+                                if log_path_lock.is_some() {
+                                    break;
                                 }
                             }
                         }
                     }
-                    if let Some(start_time) = parsed.get("startTime").and_then(|v| v.as_str()) {
-                        init_ts_val = Some(start_time.to_string());
+                }
+            }
+
+            if let Some(ref path) = *log_path_lock {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(messages) = parsed.get("messages").and_then(|v| v.as_array()) {
+                            for msg in messages {
+                                if msg.get("type").and_then(|v| v.as_str()) == Some("user") {
+                                    queries_val += 1;
+                                }
+                            }
+                            if let Some(last_msg) = messages.last() {
+                                if let Some(msg_type) =
+                                    last_msg.get("type").and_then(|v| v.as_str())
+                                {
+                                    if msg_type == "user" {
+                                        status_val = "Processing...".to_string();
+                                    } else if msg_type == "gemini"
+                                        || msg_type == "model"
+                                        || msg_type == "info"
+                                    {
+                                        status_val = "Idle".to_string();
+                                    } else {
+                                        status_val = "Action Needed".to_string();
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(start_time) = parsed.get("startTime").and_then(|v| v.as_str()) {
+                            init_ts_val = Some(start_time.to_string());
+                        }
                     }
                 }
             }
-        }
 
-        // Apply metadata directly to cached structs if we found better data in logs
-        if queries_val > 0 {
-            *agent.query_count.lock().unwrap_or_else(|e| e.into_inner()) = queries_val;
-        }
-        if let Some(ts) = init_ts_val {
-            *agent
+            if queries_val > 0 {
+                *snap.query_count.lock().unwrap_or_else(|e| e.into_inner()) = queries_val;
+            }
+            if let Some(ts) = init_ts_val {
+                *snap
+                    .init_timestamp
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(ts);
+            }
+            if status_val != "Idle"
+                || *snap
+                    .current_status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    == "Idle"
+            {
+                *snap
+                    .current_status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = status_val;
+            }
+
+            let query_count = *snap.query_count.lock().unwrap_or_else(|e| e.into_inner());
+            let init_timestamp = snap
                 .init_timestamp
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(ts);
-        }
-        if status_val != "Idle"
-            || *agent
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let current_status = snap
                 .current_status
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                == "Idle"
-        {
-            *agent
-                .current_status
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = status_val;
+                .clone();
+
+            results.push(AgentTelemetry {
+                session_id: sid.clone(),
+                cpu_usage,
+                memory_mb,
+                uptime_seconds,
+                query_count,
+                init_timestamp,
+                current_status,
+            });
         }
 
-        let query_count = *agent.query_count.lock().unwrap_or_else(|e| e.into_inner());
-        let init_timestamp = agent
-            .init_timestamp
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let current_status = agent
-            .current_status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-
-        results.push(AgentTelemetry {
-            session_id: sid.clone(),
-            cpu_usage,
-            memory_mb,
-            uptime_seconds,
-            query_count,
-            init_timestamp,
-            current_status,
-        });
-    }
-
-    results
+        results
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

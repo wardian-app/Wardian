@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentOutputPayload, AgentJsonEvent, AgentTelemetry, AgentClassDefinition } from "./types";
 import { Terminal } from '@xterm/xterm';
@@ -43,7 +43,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, onTitleChange }: 
     if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
       try {
         fitAddon.fit();
-        // Sync initial geometry with rust backend to fix cursor displacement
+        // Sync initial geometry with rust backend
         invoke("resize_agent_terminal", {
           sessionId,
           cols: term.cols,
@@ -61,8 +61,27 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, onTitleChange }: 
 
     // Handle user keystrokes in the terminal itself
     term.onData((data) => {
-      invoke("send_input_to_agent", { sessionId, input: data }).catch(e => console.error(e));
+      // CRITICAL FIX: Filter out xterm focus in/out escape sequences.
+      // The Gemini CLI enables focus reporting (\x1b[?1004h), which causes xterm.js to
+      // send \x1b[I (focus in) and \x1b[O (focus out) to the PTY on every focus change.
+      // When the CLI receives these, it redraws its prompt, producing output that triggers
+      // a React state update that briefly steals focus, creating an infinite feedback loop
+      // that makes the terminal appear completely frozen.
+      if (data === '\x1b[I' || data === '\x1b[O') return;
+      
+      // console.log(`[DIAG] onData fired for ${sessionId}, data=${JSON.stringify(data)}, focused=${term.textarea?.matches(':focus')}`);
+      emit('terminal-input', { sessionId, input: data });
     });
+
+    // Monitor for stuck IME composition sessions
+    if (term.textarea) {
+      term.textarea.addEventListener('compositionstart', () => {
+        // console.warn(`[DIAG] compositionstart on ${sessionId} - IME activated`);
+      });
+      term.textarea.addEventListener('compositionend', () => {
+        // console.warn(`[DIAG] compositionend on ${sessionId} - IME deactivated`);
+      });
+    }
 
     term.onTitleChange((title) => {
       if (onTitleChange) {
@@ -137,7 +156,15 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, onTitleChange }: 
     };
   }, [sessionId]);
 
-  return <div ref={terminalRef} onClick={() => xtermRef.current?.focus()} className="w-full h-full overflow-hidden" style={{ willChange: 'transform' }} />;
+  return (
+    <div 
+      ref={terminalRef} 
+      onClick={() => xtermRef.current?.focus()} 
+      // onKeyDown={(e) => console.log(`[DIAG] keydown on terminal container ${sessionId}: key=${e.key}, xterm_focused=${xtermRef.current?.textarea?.matches(':focus')}`)}
+      className="w-full h-full overflow-hidden" 
+      style={{ willChange: 'transform' }} 
+    />
+  );
 });
 
 function App() {
@@ -223,8 +250,12 @@ function App() {
     const unlistenOutput = listen<AgentOutputPayload>("agent-output", (event) => {
       const term = terminalMap.get(event.payload.session_id);
       if (term) {
+        // Smart auto-scroll: only scroll to bottom if user is already there.
+        // This lets users scroll up to read during heavy output without
+        // being yanked back to the bottom.
+        const isAtBottom = term.buffer.active.viewportY >= term.buffer.active.baseY - 2;
         term.write(event.payload.text, () => {
-          if (event.payload.text.length > 500) {
+          if (isAtBottom) {
             term.scrollToBottom();
           }
         });
@@ -308,26 +339,20 @@ function App() {
     };
   }, []);
 
+  // Receive metrics via Tauri events (push model).
+  // The backend emits agent-metrics every 3 seconds. This completely eliminates
+  // invoke from the metrics hot path, preventing IPC channel saturation.
   useEffect(() => {
-    let interval: number | undefined;
-    const fetchMetrics = async () => {
-      try {
-        const metrics = await invoke<AgentTelemetry[]>("get_agent_metrics");
-        const mapping: Record<string, AgentTelemetry> = {};
-        for (const m of metrics) {
-          mapping[m.session_id] = m;
-        }
-        setTelemetry(mapping);
-      } catch (e) {
-        console.error("Dashboard Telemetry Error:", e);
+    const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
+      const mapping: Record<string, AgentTelemetry> = {};
+      for (const m of event.payload) {
+        mapping[m.session_id] = m;
       }
-    };
-
-    fetchMetrics();
-    interval = window.setInterval(fetchMetrics, 3000); // 3s for battery/memory safety
+      setTelemetry(mapping);
+    });
 
     return () => {
-      if (interval !== undefined) clearInterval(interval);
+      unlistenMetrics.then(fn => fn());
     };
   }, [agents]);
 

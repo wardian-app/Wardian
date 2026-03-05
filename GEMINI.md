@@ -16,9 +16,10 @@ All agents contributing to the Wardian codebase must adhere to the following arc
   - **Left**: Persistent icon-based navigation bar with collapsible content panes.
   - **Right**: Collapsible, searchable agent list for rapid status monitoring and selection.
 - **Status Indicators**:
-  - **Idle**: Gray (`#6B7280`)
-  - **Processing**: Cyan (`#06b6d4`)
-  - **Action Required**: Yellow (`#EAB308`)
+  - **Idle**: Emerald (`#10b981`)
+  - **Processing**: Cyan (`#22d3ee`)
+  - **Action Required**: Amber (`#f59e0b`)
+  - **Off**: Gray (`#4b5563`)
   - **Critical/Error**: Red (`#EF4444`)
 
 ### 🛠️ Workflow Rules

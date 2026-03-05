@@ -86,4 +86,4 @@ _Goal: Expand the reach of Wardian across environments._
   - A dynamic, node-link swarm visualization of agents interacting in real-time.
   - Visualizes message passing, task delegation, and collective thought processes.
 - [ ] **File-System Watcher Hooks**: Trigger agent tasks based on local file changes.
-- [ ] **Theme Engine**: Support for system-wide themes and OLED black mode.
+- [ ] **Theme Engine**: Support for system-wide themes, OLED black mode, and a functional **Light Mode** toggle.
