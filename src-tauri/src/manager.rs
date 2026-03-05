@@ -55,7 +55,9 @@ pub struct ActiveAgent {
     pub pty_master:
         Option<std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     pub stdin_tx: Option<tokio::sync::mpsc::Sender<String>>,
-    pub output_history: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Drain-on-read output buffer. The reader thread pushes PTY output here;
+    /// the frontend polls via `read_agent_pty` which takes and clears it.
+    pub output_buffer: std::sync::Arc<std::sync::Mutex<String>>,
     pub process_id: Option<u32>,
     pub query_count: std::sync::Arc<std::sync::Mutex<usize>>,
     pub init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -120,7 +122,7 @@ pub async fn spawn_gemini_cli(
             child_process: None,
             pty_master: None,
             stdin_tx: None,
-            output_history: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             process_id: None,
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
             init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -261,8 +263,8 @@ pub async fn spawn_gemini_cli(
     });
 
     let sid_out = config.session_id.clone();
-    let history = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let history_clone = history.clone();
+    let output_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let output_buffer_clone = output_buffer.clone();
 
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
     let query_count_clone = query_count.clone();
@@ -272,44 +274,10 @@ pub async fn spawn_gemini_cli(
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
 
-    // Output batching: instead of emitting every read() as a separate IPC event,
-    // accumulate output in a buffer and flush at 50ms intervals (~20fps).
-    // This dramatically reduces WebView2 IPC bridge traffic, preventing saturation
-    // that blocks incoming terminal-input events.
-    let output_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let output_buffer_clone = output_buffer.clone();
-    let flush_sid = config.session_id.clone();
-    let flush_app = app.clone();
-    let reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let reader_alive_clone = reader_alive.clone();
-
-    // Flusher thread: drains output buffer every 33ms (~30fps).
-    // 30fps is visually smooth while keeping event rate sustainable across many agents.
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(33));
-        let text = {
-            let mut buf = match output_buffer_clone.lock() {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-            if buf.is_empty() {
-                // If reader has exited and buffer is empty, stop the flusher
-                if !reader_alive_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                continue;
-            }
-            std::mem::take(&mut *buf)
-        };
-        let _ = flush_app.emit(
-            "agent-output",
-            serde_json::json!({
-                "session_id": flush_sid,
-                "text": text,
-                "stream": "stdout"
-            }),
-        );
-    });
+    // Pull-based reader (tauri-terminal model): the reader thread just
+    // accumulates output in `output_buffer`. The frontend drains it via
+    // `invoke("read_agent_pty")` at requestAnimationFrame rate (~60fps).
+    // No Tauri events for output, no IPC saturation, no duplicate content.
 
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
@@ -319,31 +287,15 @@ pub async fn spawn_gemini_cli(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     log_debug(&format!("[Wardian] [{}] Reader EOF", sid_out));
-                    reader_alive.store(false, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
                 Ok(n) => {
                     let text = String::from_utf8_lossy(&buf[0..n]).to_string();
 
-                    // prevent UI memory starvation, cap length safely across unicode boundaries
-                    if let Ok(mut h) = history_clone.lock() {
+                    // Accumulate in drain-on-read buffer for frontend polling
+                    if let Ok(mut h) = output_buffer_clone.lock() {
                         h.push_str(&text);
-                        let len = h.len();
-                        if len > 20_000 {
-                            let split_idx = len - 10_000;
-                            let valid_idx = (split_idx..len)
-                                .find(|&i| h.is_char_boundary(i))
-                                .unwrap_or(split_idx);
-                            let suffix = h.split_off(valid_idx);
-                            *h = suffix; // keep last 10k
-                        }
                     }
-
-                    // Append to batch buffer instead of emitting directly
-                    if let Ok(mut ob) = output_buffer.lock() {
-                        ob.push_str(&text);
-                    }
-
                     // JSON parsing
                     current_line.push_str(&text);
                     loop {
@@ -413,7 +365,6 @@ pub async fn spawn_gemini_cli(
                 }
                 Err(e) => {
                     log_debug(&format!("[Wardian] [{}] Reader error: {}", sid_out, e));
-                    reader_alive.store(false, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
             }
@@ -430,7 +381,7 @@ pub async fn spawn_gemini_cli(
         child_process: Some(child),
         pty_master: Some(pty_master),
         stdin_tx: Some(tx),
-        output_history: history,
+        output_buffer,
         process_id,
         query_count,
         init_timestamp,
@@ -447,11 +398,16 @@ pub async fn resize_pty(
     rows: u16,
     state: &AppState,
 ) -> Result<(), String> {
-    let (master_arc, status_arc) = {
+    // Safety gate: ignore extremely narrow resizes to prevent "Reflow Hell"
+    if cols < 10 {
+        return Ok(());
+    }
+
+    let master_arc = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
             if let Some(ref pty) = agent.pty_master {
-                (pty.clone(), agent.current_status.clone())
+                pty.clone()
             } else {
                 return Err(format!("Agent {} is currently off (no PTY)", session_id));
             }
@@ -462,32 +418,8 @@ pub async fn resize_pty(
 
     // Execute synchronous resizing in a background thread.
     // Windows ConPTY frequently deadlocks when resized while waiting for input.
-    // By decoupling it, we sacrifice future terminal resizes for this agent
-    // but protect the entire application from an unrecoverable global deadlock.
-    // CRITICAL FIX: We MUST use try_lock(). If the first resize deadlocks, the lock is
-    // held forever. If we use lock(), subsequent rapid resize events from the frontend
-    // will queue up 100+ tasks all blocked indefinitely on this mutex, instantly
-    // exhausting tokio's entire spawn_blocking thread pool and freezing ALL terminal inputs.
     let sid_clone = session_id.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        // On Windows, ResizePseudoConsole can deadlock when the attached process
-        // is blocked on ReadFile. Skip resize entirely unless the agent is actively processing.
-        #[cfg(windows)]
-        {
-            if let Ok(status) = status_arc.lock() {
-                let s = status.as_str();
-                // Only allow resize when the agent is actively producing output.
-                // Any state where the process might be blocked on input risks a ConPTY deadlock.
-                if s != "Processing" && s != "Idle" {
-                    log_debug(&format!(
-                        "[Wardian] [{}] Skipping PTY resize (status={})",
-                        sid_clone, s
-                    ));
-                    return;
-                }
-            }
-        }
-
         if let Ok(master) = master_arc.try_lock() {
             // Use a timeout thread to detect ConPTY deadlocks instead of blocking forever.
             let master_ref = &*master;
@@ -954,12 +886,17 @@ pub async fn kill_all_agents(state: &AppState) {
         agents.len()
     ));
 
-    for (sid, agent) in agents.drain() {
+    for (sid, mut agent) in agents.drain() {
         log_debug(&format!("[Wardian] Killing agent session {}", sid));
         if let Some(mut child) = agent.child_process {
             let _ = child.kill();
         }
-        // Dropping the agent struct here will close pty_master and job_object handles
+        #[cfg(windows)]
+        {
+            // Explicitly drop the job object to ensure all processes in the tree (including PTY hosts) are killed.
+            let _ = agent.job_object.take();
+        }
+        // Dropping the agent struct here will close pty_master handles
     }
     order.clear();
 }

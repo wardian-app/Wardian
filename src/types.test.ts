@@ -9,6 +9,7 @@ describe("TypeScript Interface Shape Tests", () => {
         session_name: "Coder_Alpha",
         agent_class: "Coder",
         folder: "C:/projects/my-app",
+        is_off: false,
       };
       expect(config.session_id).toBe("abc-123");
       expect(config.agent_class).toBe("Coder");
@@ -21,6 +22,7 @@ describe("TypeScript Interface Shape Tests", () => {
         agent_class: "Architect",
         folder: "",
         resume_session: "def-456",
+        is_off: false,
       };
       expect(config.resume_session).toBe("def-456");
     });
@@ -31,6 +33,7 @@ describe("TypeScript Interface Shape Tests", () => {
         session_name: "Fresh Agent",
         agent_class: "QA",
         folder: "/tmp",
+        is_off: false,
       };
       expect(config.resume_session).toBeUndefined();
     });

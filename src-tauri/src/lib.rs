@@ -10,14 +10,6 @@ struct TerminalInputPayload {
     session_id: String,
     input: String,
 }
-
-#[derive(serde::Deserialize, Clone)]
-struct TerminalResizePayload {
-    #[serde(rename = "sessionId")]
-    session_id: String,
-    cols: u16,
-    rows: u16,
-}
 #[tauri::command]
 async fn spawn_agent(
     session_name: String,
@@ -157,7 +149,7 @@ async fn kill_agent(
     ));
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
-    if let Some(agent) = agents.remove(&session_id) {
+    if let Some(mut agent) = agents.remove(&session_id) {
         // Remove from input_senders immediately
         if let Ok(mut senders) = state.input_senders.write() {
             senders.remove(&session_id);
@@ -166,6 +158,11 @@ async fn kill_agent(
         manager::save_state(&app, &agents, &order);
         if let Some(mut child) = agent.child_process {
             let _ = child.kill();
+        }
+        #[cfg(windows)]
+        {
+            // Explicitly drop the job object to ensure all processes in the tree (including PTY hosts) are killed.
+            let _ = agent.job_object.take();
         }
         Ok(())
     } else {
@@ -252,7 +249,7 @@ async fn resume_agent(
         agent.pty_master = new_active.pty_master;
         agent.stdin_tx = new_active.stdin_tx;
         agent.process_id = new_active.process_id;
-        agent.output_history = new_active.output_history;
+        agent.output_buffer = new_active.output_buffer;
         agent.query_count = new_active.query_count;
         agent.init_timestamp = new_active.init_timestamp;
         agent.current_status = new_active.current_status;
@@ -318,33 +315,25 @@ async fn resize_agent_terminal(
 }
 
 #[tauri::command]
-async fn attach_agent_pty(
+async fn read_agent_pty(
     session_id: String,
     state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    manager::log_debug(&format!(
-        "[WARDIAN] attach_agent_pty called for session {}",
-        session_id
-    ));
+) -> Result<Option<String>, String> {
     let agents = state.agents.lock().await;
     if let Some(agent) = agents.get(&session_id) {
-        if let Ok(history) = agent.output_history.lock() {
-            if !history.is_empty() {
-                let _ = app.emit(
-                    "agent-output",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "text": history.as_str(),
-                        "stream": "stdout"
-                    }),
-                );
+        if let Ok(mut buf) = agent.output_buffer.lock() {
+            if buf.is_empty() {
+                Ok(None)
+            } else {
+                // Drain-on-read: take all accumulated output and clear the buffer
+                Ok(Some(std::mem::take(&mut *buf)))
             }
+        } else {
+            Ok(None)
         }
     } else {
-        return Err(format!("Agent {} not found", session_id));
+        Err(format!("Agent {} not found", session_id))
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -564,25 +553,6 @@ pub fn run() {
                 }
             });
 
-            // Terminal resize via Tauri events — same bypass as terminal-input.
-            let resize_handle = app.handle().clone();
-            app.listen_any("terminal-resize", move |event| {
-                if let Ok(payload) = serde_json::from_str::<TerminalResizePayload>(event.payload())
-                {
-                    let rh = resize_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = rh.state::<AppState>();
-                        let _ = manager::resize_pty(
-                            payload.session_id,
-                            payload.cols,
-                            payload.rows,
-                            &state,
-                        )
-                        .await;
-                    });
-                }
-            });
-
             // Metrics push task — emits agent-metrics every 5 seconds via events.
             // This eliminates invoke from the metrics path entirely.
             let metrics_handle = app.handle().clone();
@@ -637,7 +607,7 @@ pub fn run() {
             resume_agent,
             broadcast_input,
             resize_agent_terminal,
-            attach_agent_pty,
+            read_agent_pty,
             get_agent_metrics,
             reorder_agents,
             rename_agent,

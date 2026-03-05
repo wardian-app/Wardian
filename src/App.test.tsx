@@ -37,9 +37,9 @@ const customClasses: AgentClassDefinition[] = [
 ];
 
 const sampleAgents: AgentConfig[] = [
-  { session_id: "agent-1", session_name: "Alpha", agent_class: "Coder", folder: "C:/project" },
-  { session_id: "agent-2", session_name: "Beta", agent_class: "Architect", folder: "C:/other" },
-  { session_id: "agent-3", session_name: "Gamma", agent_class: "DevOps", folder: "/tmp" },
+  { session_id: "agent-1", session_name: "Alpha", agent_class: "Coder", folder: "C:/project", is_off: false },
+  { session_id: "agent-2", session_name: "Beta", agent_class: "Architect", folder: "C:/other", is_off: false },
+  { session_id: "agent-3", session_name: "Gamma", agent_class: "DevOps", folder: "/tmp", is_off: false },
 ];
 
 beforeEach(() => {

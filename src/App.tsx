@@ -1,208 +1,281 @@
-import { useState, useEffect, useRef, useCallback, memo } from "react";
+import React, { useState, useEffect, useRef, useCallback, memo, Component, ErrorInfo, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AgentConfig, AgentOutputPayload, AgentJsonEvent, AgentTelemetry, AgentClassDefinition } from "./types";
+import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition } from "./types";
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import "./App.css";
+
 import AgentWatchlist from "./AgentWatchlist";
 import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
 
 const terminalMap = new Map<string, Terminal>();
 const fitAddonMap = new Map<string, FitAddon>();
 
-// Module-level flag: when true, ALL terminal fitting is suppressed.
-// Set by Tauri window move/resize events, cleared after settling.
-let windowOpActive = false;
-
-const AgentTerminal = memo(function AgentTerminal({ sessionId, onTitleChange }: { sessionId: string; onTitleChange?: (title: string) => void }) {
+const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTitleChange }: { sessionId: string; isMaximized?: boolean; onTitleChange?: (title: string) => void }) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const pollStartedRef = useRef(false);
+  const onTitleChangeRef = useRef(onTitleChange);
+  const [initError, setInitError] = useState<string | null>(null);
 
+  // Sync ref with latest prop
   useEffect(() => {
-    if (!terminalRef.current) return;
+    onTitleChangeRef.current = onTitleChange;
+  }, [onTitleChange]);
 
-    const term = new Terminal({
-      theme: { 
-        background: '#020402',
-        foreground: '#EEF2EE',
-        cursor: '#F1D382',
-        selectionBackground: '#1E261E',
-      },
-      fontFamily: 'monospace',
-      fontSize: 14,
-      cursorBlink: true,
-      convertEol: true,
-    });
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
+  const performFit = useCallback((forceInvoke = false) => {
+    const term = xtermRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!term || !fitAddon || !terminalRef.current) return;
+    
+    // offsetParent is null if hidden (e.g. display: none)
+    if (terminalRef.current.offsetParent === null) return;
 
-    term.open(terminalRef.current);
-    if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
-      try {
-        fitAddon.fit();
-        // Sync initial geometry with rust backend
-        invoke("resize_agent_terminal", {
-          sessionId,
-          cols: term.cols,
-          rows: term.rows
-        }).catch(e => console.error("Initial resize error:", e));
-      } catch (e) {
-        console.warn("xterm initial fit error", e);
+    try {
+      fitAddon.fit();
+      if (term.cols > 10 && term.rows > 3) {
+        if (forceInvoke || pollStartedRef.current) {
+          invoke("resize_agent_terminal", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
+        }
       }
-    }
-    xtermRef.current = term;
-    terminalMap.set(sessionId, term);
-    fitAddonMap.set(sessionId, fitAddon);
-
-    setTimeout(() => term.focus(), 100);
-
-    // Handle user keystrokes in the terminal itself
-    term.onData((data) => {
-      // CRITICAL FIX: Filter out xterm focus in/out escape sequences.
-      // The Gemini CLI enables focus reporting (\x1b[?1004h), which causes xterm.js to
-      // send \x1b[I (focus in) and \x1b[O (focus out) to the PTY on every focus change.
-      // When the CLI receives these, it redraws its prompt, producing output that triggers
-      // a React state update that briefly steals focus, creating an infinite feedback loop
-      // that makes the terminal appear completely frozen.
-      if (data === '\x1b[I' || data === '\x1b[O') return;
-      
-      // console.log(`[DIAG] onData fired for ${sessionId}, data=${JSON.stringify(data)}, focused=${term.textarea?.matches(':focus')}`);
-      emit('terminal-input', { sessionId, input: data });
-    });
-
-    // Monitor for stuck IME composition sessions
-    if (term.textarea) {
-      term.textarea.addEventListener('compositionstart', () => {
-        // console.warn(`[DIAG] compositionstart on ${sessionId} - IME activated`);
-      });
-      term.textarea.addEventListener('compositionend', () => {
-        // console.warn(`[DIAG] compositionend on ${sessionId} - IME deactivated`);
-      });
-    }
-
-    term.onTitleChange((title) => {
-      if (onTitleChange) {
-        onTitleChange(title);
-      }
-    });
-
-    // Event listening moved to global app level to reduce overhead
-
-    // Notify backend that terminal is ready, start reading from PTY
-    invoke("attach_agent_pty", { sessionId }).catch(e => console.error(e));
-
-    // Minimum pixel dimensions to prevent fitting when containers are
-    // momentarily collapsed during window move/resize operations.
-    const MIN_WIDTH_PX = 100;
-    const MIN_HEIGHT_PX = 50;
-    // Minimum terminal dimensions to prevent PTY corruption.
-    // If fit() produces cols/rows below these, we skip the backend resize
-    // so the PTY never reformats output for a 1-column display.
-    const MIN_COLS = 10;
-    const MIN_ROWS = 3;
-
-    let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
-    let lastCols = term.cols;
-    let lastRows = term.rows;
-    const resizeObserver = new ResizeObserver(() => {
-      // Completely skip if a window move/resize is in progress
-      if (windowOpActive) return;
-      if (resizeTimeout) clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(() => {
-        if (windowOpActive) return;
-        requestAnimationFrame(() => {
-          if (windowOpActive) return;
-          const el = terminalRef.current;
-          if (!el || el.clientWidth < MIN_WIDTH_PX || el.clientHeight < MIN_HEIGHT_PX) return;
-          try {
-            const proposed = fitAddon.proposeDimensions();
-            if (proposed && (proposed.cols !== term.cols || proposed.rows !== term.rows)) {
-              fitAddon.fit();
-            } else {
-              // Same dimensions, but container might be un-hidden (e.g. view switch).
-              // Force webgl/canvas to repaint to avoid blank terminal glitch.
-              term.refresh(0, term.rows - 1);
-            }
-          } catch (e) {
-            console.warn("xterm fit error", e);
-          }
-        });
-      }, 250);
-    });
-    resizeObserver.observe(terminalRef.current);
-
-    term.onResize((size) => {
-      // Guard: skip if dimensions unchanged or absurdly small
-      if (size.cols === lastCols && size.rows === lastRows) return;
-      if (size.cols < MIN_COLS || size.rows < MIN_ROWS) return;
-      lastCols = size.cols;
-      lastRows = size.rows;
-      invoke("resize_agent_terminal", {
-        sessionId,
-        cols: size.cols,
-        rows: size.rows
-      }).catch(e => console.error(e));
-    });
-
-    return () => {
-      if (resizeTimeout) clearTimeout(resizeTimeout);
-      resizeObserver.disconnect();
-      terminalMap.delete(sessionId);
-      fitAddonMap.delete(sessionId);
-      term.dispose();
-    };
+    } catch { /* ignore */ }
   }, [sessionId]);
 
+  useEffect(() => {
+    if (!sessionId || !terminalRef.current) return;
+    
+    let isMounted = true;
+    let pollActive = true;
+    let resizeObserver: ResizeObserver | null = null;
+    let term: Terminal | null = null;
+    let fitAddon: FitAddon | null = null;
+
+    try {
+      term = new Terminal({
+        theme: { background: '#020402', foreground: '#EEF2EE', cursor: '#F1D382', selectionBackground: '#1E261E' },
+        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 1000,
+        allowProposedApi: true,
+      });
+      fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+      
+      const unicode11Addon = new Unicode11Addon();
+      term.loadAddon(unicode11Addon);
+      term.unicode.activeVersion = '11';
+
+      term.open(terminalRef.current);
+      xtermRef.current = term;
+      fitAddonRef.current = fitAddon;
+      terminalMap.set(sessionId, term);
+      fitAddonMap.set(sessionId, fitAddon);
+
+      async function pollPty() {
+        if (!pollActive || !isMounted || !pollStartedRef.current) return;
+        try {
+          const data = await invoke<string | null>("read_agent_pty", { sessionId });
+          if (data && pollActive && isMounted) {
+            await new Promise<void>(resolve => term?.write(data, resolve));
+            if (pollActive && isMounted) requestAnimationFrame(pollPty);
+          } else if (pollActive && isMounted) {
+            setTimeout(pollPty, 50);
+          }
+        } catch (e) {
+          if (!pollActive || !isMounted) return;
+          console.warn("read_agent_pty error:", e);
+          if (pollActive && isMounted) setTimeout(pollPty, 500);
+        }
+      }
+
+      const checkSizingAndStart = () => {
+        if (!isMounted || !fitAddon || !term || pollStartedRef.current) return;
+        const el = terminalRef.current;
+        if (!el || el.offsetParent === null || el.clientWidth < 10) return;
+        
+        try {
+          fitAddon.fit();
+          if (term.cols > 10 && term.rows > 3) {
+            pollStartedRef.current = true;
+            term.reset();
+            invoke("resize_agent_terminal", { sessionId, cols: term.cols, rows: term.rows })
+              .then(() => { if (isMounted) requestAnimationFrame(pollPty); })
+              .catch(() => { if (isMounted) requestAnimationFrame(pollPty); });
+            term.focus();
+          }
+        } catch { /* ignore */ }
+      };
+
+      // Near-instant initial check
+      requestAnimationFrame(checkSizingAndStart);
+      setTimeout(checkSizingAndStart, 50);
+      setTimeout(checkSizingAndStart, 200);
+
+      term.onData((data) => {
+        if (data === '\x1b[I' || data === '\x1b[O') return;
+        emit('terminal-input', { sessionId, input: data });
+      });
+
+      term.onTitleChange((title) => {
+        if (onTitleChangeRef.current) onTitleChangeRef.current(title);
+      });
+
+      let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+      
+      resizeObserver = new ResizeObserver(() => {
+        if (!isMounted) return;
+        
+        if (!pollStartedRef.current) {
+          checkSizingAndStart();
+        }
+
+        if (resizeTimeout) clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(() => {
+          if (!isMounted) return;
+          requestAnimationFrame(() => performFit());
+        }, 16);
+      });
+      resizeObserver.observe(terminalRef.current);
+
+      let ptyResizeTimeout: ReturnType<typeof setTimeout> | null = null;
+      let lastCols = term.cols;
+      let lastRows = term.rows;
+
+      term.onResize((size) => {
+        if (size.cols === lastCols && size.rows === lastRows) return;
+        if (size.cols < 10 || size.rows < 2) return;
+        lastCols = size.cols;
+        lastRows = size.rows;
+        if (ptyResizeTimeout) clearTimeout(ptyResizeTimeout);
+        ptyResizeTimeout = setTimeout(() => {
+          invoke("resize_agent_terminal", { sessionId, cols: size.cols, rows: size.rows }).catch(() => {});
+        }, 50);
+      });
+
+      return () => {
+        isMounted = false;
+        pollActive = false;
+        pollStartedRef.current = false;
+        if (resizeTimeout) clearTimeout(resizeTimeout);
+        if (ptyResizeTimeout) clearTimeout(ptyResizeTimeout);
+        resizeObserver?.disconnect();
+        terminalMap.delete(sessionId);
+        fitAddonMap.delete(sessionId);
+        term?.dispose();
+        xtermRef.current = null;
+        fitAddonRef.current = null;
+      };
+    } catch (e: any) {
+      console.error("AgentTerminal Init Error:", e);
+      setInitError(e.toString());
+      return () => { isMounted = false; pollActive = false; pollStartedRef.current = false; };
+    }
+  }, [sessionId, performFit]);
+
+  // Re-fit on maximization toggle
+  useEffect(() => {
+    let isMounted = true;
+    
+    // Staggered fits to catch layout settle, using the gated helper
+    const timers = [
+      setTimeout(() => isMounted && performFit(true), 50),
+      setTimeout(() => isMounted && performFit(true), 150),
+      setTimeout(() => isMounted && performFit(true), 400),
+    ];
+    
+    return () => {
+      isMounted = false;
+      timers.forEach(clearTimeout);
+    };
+  }, [sessionId, isMaximized, performFit]);
+
   return (
-    <div 
-      ref={terminalRef} 
-      onClick={() => xtermRef.current?.focus()} 
-      // onKeyDown={(e) => console.log(`[DIAG] keydown on terminal container ${sessionId}: key=${e.key}, xterm_focused=${xtermRef.current?.textarea?.matches(':focus')}`)}
-      className="w-full h-full overflow-hidden" 
-      style={{ willChange: 'transform' }} 
-    />
+    <div className="relative w-full h-full overflow-hidden">
+      {initError && (
+        <div className="absolute inset-0 z-50 bg-red-900 text-white p-4 overflow-auto rounded m-2">
+          <h3 className="font-bold mb-2">Terminal Initialization Fatal Error:</h3>
+          <pre className="text-xs whitespace-pre-wrap">{initError}</pre>
+        </div>
+      )}
+      <div 
+        ref={terminalRef} 
+        onClick={() => xtermRef.current?.focus()} 
+        className="w-full h-full overflow-hidden" 
+        style={{ willChange: 'transform' }} 
+      />
+    </div>
   );
 });
 
+class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: any }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: any) { return { hasError: true, error }; }
+  componentDidCatch(error: any, errorInfo: ErrorInfo) { console.error("ErrorBoundary caught an error", error, errorInfo); }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-20 bg-red-950 text-white h-screen overflow-auto">
+          <h1 className="text-2xl font-bold mb-4">Fatal UI Rendering Error</h1>
+          <pre className="whitespace-pre-wrap text-[10px] bg-black/30 p-4 rounded mb-4 font-mono">{this.state.error?.toString()}</pre>
+          <button onClick={() => window.location.reload()} className="px-4 py-2 bg-red-700 hover:bg-red-600 rounded font-bold transition-colors">Reload Wardian</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
+  return (
+    <ErrorBoundary>
+      <AppBody />
+    </ErrorBoundary>
+  );
+}
+
+function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
-  const [newSessionName, setNewSessionName] = useState("");
-  const [newAgentClass, setNewAgentClass] = useState("Coder");
-  const [newFolder, setNewFolder] = useState("");
-  const [resumeSession, setResumeSession] = useState("");
-  const [viewMode, setViewMode] = useState<"grid" | "dashboard">("grid");
-  const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
-  const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
-  const handleTitleChange = useCallback((agentId: string, title: string) => {
-    setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
-  }, []);
-  const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
-  const [notifications, setNotifications] = useState<{ id: string; session_id: string; message: string; type: string }[]>([]);
-  const [broadcastMessage, setBroadcastMessage] = useState("");
-  const [isSpawning, setIsSpawning] = useState(false);
+    const [newSessionName, setNewSessionName] = useState("");
+    const [newAgentClass, setNewAgentClass] = useState("Coder");
+    const [newFolder, setNewFolder] = useState("");
+    const [resumeSession, setResumeSession] = useState("");
+    const [viewMode, setViewMode] = useState<"grid" | "dashboard">("grid");
+    const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
+    const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
+    const handleTitleChange = useCallback((agentId: string, title: string) => {
+      setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
+    }, []);
+    const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
+    const [notifications, setNotifications] = useState<{ id: string; session_id: string; message: string; type: string }[]>([]);
+    const [broadcastMessage, setBroadcastMessage] = useState("");
+    const [isSpawning, setIsSpawning] = useState(false);
 
-  // New Sidebar & Selection States
-  const [activeTab, setActiveTab] = useState<"explorer" | "ssh" | "workflows" | "classes" | "settings">("explorer");
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
-  const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
-  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
-  const [tempName, setTempName] = useState("");
-  const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
+    // New Sidebar & Selection States
+    const [activeTab, setActiveTab] = useState<"explorer" | "ssh" | "workflows" | "classes" | "settings">("explorer");
+    const [leftCollapsed, setLeftCollapsed] = useState(false);
+    const [rightCollapsed, setRightCollapsed] = useState(false);
+    const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
+    const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
+    const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+    const [tempName, setTempName] = useState("");
+    const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
 
-  // Drag and Drop State
-  const [draggedAgentIndex, setDraggedAgentIndex] = useState<number | null>(null);
+    // Drag and Drop State
+    const [draggedAgentIndex, setDraggedAgentIndex] = useState<number | null>(null);
 
-  // Agent Classes State
-  const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
-  const [newClassName, setNewClassName] = useState("");
-  const [newClassDesc, setNewClassDesc] = useState("");
-  const [newClassGeminiMd, setNewClassGeminiMd] = useState("");
-  const [isCreatingClass, setIsCreatingClass] = useState(false);
+    // Agent Classes State
+    const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
+    const [newClassName, setNewClassName] = useState("");
+    const [newClassDesc, setNewClassDesc] = useState("");
+    const [newClassGeminiMd, setNewClassGeminiMd] = useState("");
+    const [isCreatingClass, setIsCreatingClass] = useState(false);
+
+
 
   const handleDragStart = (e: React.DragEvent, index: number) => {
     if (viewMode !== 'dashboard') return;
@@ -243,29 +316,59 @@ function App() {
     }
   };
 
+  const fetchAgents = async () => {
+    try {
+      const list = await invoke<AgentConfig[]>("list_agents");
+      setAgents(list);
+      const newOffIds = new Set<string>();
+      for (const agent of list) {
+        if (agent.is_off) newOffIds.add(agent.session_id);
+      }
+      setOffAgentIds(newOffIds);
+    } catch (e) {
+      console.error("Failed to fetch agents:", e);
+    }
+  };
+
+  const fetchAgentClasses = async () => {
+    try {
+      const list = await invoke<AgentClassDefinition[]>("list_agent_classes");
+      setAgentClasses(list);
+    } catch (e) {
+      console.error("Failed to fetch agent classes:", e);
+    }
+  };
+
+  const spawnAgent = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setIsSpawning(true);
+    try {
+      const config = await invoke<AgentConfig>("spawn_agent", {
+        sessionName: newSessionName,
+        agentClass: newAgentClass,
+        folder: newFolder,
+        resumeSession: resumeSession || null,
+        isOff: false,
+      });
+      setAgents(prev => [...prev, config]);
+      setNewSessionName("");
+      setNewAgentClass("Coder");
+      setNewFolder("");
+      setResumeSession("");
+    } catch (error) {
+      console.error("Failed to spawn agent:", error);
+      alert(`Failed to spawn agent: ${error}`);
+    } finally {
+      setIsSpawning(false);
+    }
+  };
+
   useEffect(() => {
     fetchAgents();
     fetchAgentClasses();
 
-    const unlistenOutput = listen<AgentOutputPayload>("agent-output", (event) => {
-      const term = terminalMap.get(event.payload.session_id);
-      if (term) {
-        // Smart auto-scroll: only scroll to bottom if user is already there.
-        // This lets users scroll up to read during heavy output without
-        // being yanked back to the bottom.
-        const isAtBottom = term.buffer.active.viewportY >= term.buffer.active.baseY - 2;
-        term.write(event.payload.text, () => {
-          if (isAtBottom) {
-            term.scrollToBottom();
-          }
-        });
-      }
-    });
-
     const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
       const { session_id, data } = event.payload;
-
-      // Intercept live agent thoughts natively from telemetry
       if (data.type === "progress") {
         const thought = data.content || data.message || "Working...";
         setCurrentThoughts(prev => ({ ...prev, [session_id]: thought }));
@@ -281,8 +384,6 @@ function App() {
           message: data.message || JSON.stringify(data),
           type: data.level || "info"
         }, ...prev]);
-
-        // Auto-clear notification after 10 seconds
         setTimeout(() => {
           setNotifications(prev => prev.filter(n => n.id !== id));
         }, 10000);
@@ -293,55 +394,13 @@ function App() {
       fetchAgents();
     });
 
-    // ── Window move/resize gating ──────────────────────────────────
-    // Suppress ALL terminal fitting while the window is being
-    // moved or resized, then re-fit every terminal once it settles.
-    const appWindow = getCurrentWindow();
-    let windowSettleTimer: number | null = null;
-
-    const refitAllTerminals = () => {
-      terminalMap.forEach((term, sessionId) => {
-        const addon = fitAddonMap.get(sessionId);
-        if (addon) {
-          try {
-            const proposed = addon.proposeDimensions();
-            if (proposed && (proposed.cols !== term.cols || proposed.rows !== term.rows)) {
-              addon.fit();
-            } else {
-              term.refresh(0, term.rows - 1);
-            }
-          } catch { /* ignore */ }
-        }
-      });
-    };
-
-    const onWindowOp = () => {
-      windowOpActive = true;
-      if (windowSettleTimer) clearTimeout(windowSettleTimer);
-      windowSettleTimer = window.setTimeout(() => {
-        windowOpActive = false;
-        // Re-fit all terminals now that the operation is done
-        requestAnimationFrame(refitAllTerminals);
-      }, 500);
-    };
-
-    const unlistenMoved = appWindow.onMoved(onWindowOp);
-    const unlistenResized = appWindow.onResized(onWindowOp);
-
     return () => {
-      unlistenOutput.then(fn => fn());
       unlistenJson.then(fn => fn());
       unlistenUpdate.then(fn => fn());
-      unlistenMoved.then(fn => fn());
-      unlistenResized.then(fn => fn());
-      if (windowSettleTimer) clearTimeout(windowSettleTimer);
-      windowOpActive = false;
     };
   }, []);
 
-  // Receive metrics via Tauri events (push model).
-  // The backend emits agent-metrics every 3 seconds. This completely eliminates
-  // invoke from the metrics hot path, preventing IPC channel saturation.
+  // Receive metrics via Tauri events
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
       const mapping: Record<string, AgentTelemetry> = {};
@@ -354,65 +413,7 @@ function App() {
     return () => {
       unlistenMetrics.then(fn => fn());
     };
-  }, [agents]);
-
-  const fetchAgents = async () => {
-    try {
-      console.log("Calling list_agents...");
-      const list = await invoke<AgentConfig[]>("list_agents");
-      console.log("list_agents returned:", list);
-      setAgents(list);
-      
-      const newOffIds = new Set<string>();
-      for (const agent of list) {
-        if (agent.is_off) {
-          newOffIds.add(agent.session_id);
-        }
-      }
-      setOffAgentIds(newOffIds);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const spawnAgent = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setIsSpawning(true);
-    try {
-      console.log("Calling spawn_agent...");
-      const config = await invoke<AgentConfig>("spawn_agent", {
-        sessionName: newSessionName,
-        agentClass: newAgentClass,
-        folder: newFolder,
-        resumeSession: resumeSession || null,
-        isOff: false,
-      });
-      console.log("spawn_agent returned:", config);
-      setAgents([...agents, config]);
-      setNewSessionName("");
-      setNewAgentClass("Coder");
-      setNewFolder("");
-      setResumeSession("");
-    } catch (error) {
-      console.error("Failed to spawn agent:", error);
-      alert(`Failed to spawn agent: ${error}`);
-    } finally {
-      setIsSpawning(false);
-    }
-  };
-
-  const fetchAgentClasses = async () => {
-    try {
-      const list = await invoke<AgentClassDefinition[]>("list_agent_classes");
-      setAgentClasses(list);
-      // If current selection isn't in the list, reset to first
-      if (list.length > 0 && !list.find(c => c.name === newAgentClass)) {
-        setNewAgentClass(list[0].name);
-      }
-    } catch (e) {
-      console.error("Failed to fetch agent classes:", e);
-    }
-  };
+  }, []);
 
   const createAgentClass = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -846,7 +847,7 @@ function App() {
                   onDragStart={(e) => handleDragStart(e, index)}
                   onDragOver={handleDragOver}
                   onDrop={(e) => handleDrop(e, index)}
-                  className={`bg-[var(--color-wardian-card)] transition-all overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none' : 'rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
+                  className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none transition-none' : 'transition-all rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
                     ? 'flex-col md:flex-row border border-gray-700/50 hover:border-gray-500 w-full cursor-move'
                     : !isMaximized ? 'flex-col border border-gray-700 h-[500px]' : 'flex-col'
                     } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
@@ -1004,9 +1005,13 @@ function App() {
                     </div>
                   </div>
 
-                  <div className={`bg-[#020402] p-4 overflow-hidden ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}>
+                  <div className={`terminal-container bg-[#020402] p-4 overflow-hidden min-h-0 ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}>
                     <div className="absolute inset-4">
-                      <AgentTerminal sessionId={agentId} onTitleChange={(title) => handleTitleChange(agentId, title)} />
+                      <AgentTerminal 
+                        sessionId={agentId} 
+                        isMaximized={isMaximized}
+                        onTitleChange={(title) => handleTitleChange(agentId, title)} 
+                      />
                     </div>
                   </div>
                 </div>

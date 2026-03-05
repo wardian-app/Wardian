@@ -93,9 +93,9 @@ describe("removeAgentFromList", () => {
 
 describe("filterAgents", () => {
   const agents: AgentConfig[] = [
-    { session_id: "1", session_name: "Alpha", agent_class: "Coder", folder: "" },
-    { session_id: "2", session_name: "Beta", agent_class: "Architect", folder: "" },
-    { session_id: "3", session_name: "Gamma", agent_class: "Coder", folder: "" },
+    { session_id: "1", session_name: "Alpha", agent_class: "Coder", folder: "", is_off: false },
+    { session_id: "2", session_name: "Beta", agent_class: "Architect", folder: "", is_off: false },
+    { session_id: "3", session_name: "Gamma", agent_class: "Coder", folder: "", is_off: false },
   ];
 
   it("returns all agents for empty search", () => {
@@ -120,9 +120,9 @@ describe("filterAgents", () => {
 
 describe("getAgentsForList", () => {
   const agents: AgentConfig[] = [
-    { session_id: "a", session_name: "Alpha", agent_class: "Coder", folder: "" },
-    { session_id: "b", session_name: "Beta", agent_class: "QA", folder: "" },
-    { session_id: "c", session_name: "Gamma", agent_class: "Coder", folder: "" },
+    { session_id: "a", session_name: "Alpha", agent_class: "Coder", folder: "", is_off: false },
+    { session_id: "b", session_name: "Beta", agent_class: "QA", folder: "", is_off: false },
+    { session_id: "c", session_name: "Gamma", agent_class: "Coder", folder: "", is_off: false },
   ];
 
   it("returns all agents when list is null", () => {
