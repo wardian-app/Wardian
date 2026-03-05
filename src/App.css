@@ -202,3 +202,43 @@
   left: auto;
   right: 100%;
 }
+
+/* ── Placeholder Views ────────────────────────────────── */
+.placeholder-view {
+  background: radial-gradient(
+    circle at center,
+    rgba(212, 175, 55, 0.03) 0%,
+    transparent 70%
+  );
+}
+
+.placeholder-icon-container {
+  position: relative;
+}
+
+.placeholder-icon-container::after {
+  content: "";
+  position: absolute;
+  inset: -20px;
+  background: var(--color-wardian-accent);
+  filter: blur(40px);
+  opacity: 0.1;
+  border-radius: 50%;
+  z-index: -1;
+}
+
+@keyframes float {
+  0% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+  100% {
+    transform: translateY(0px);
+  }
+}
+
+.animate-float {
+  animation: float 4s ease-in-out infinite;
+}

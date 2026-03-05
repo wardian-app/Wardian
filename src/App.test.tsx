@@ -44,6 +44,8 @@ const sampleAgents: AgentConfig[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Mock window.confirm
+  window.confirm = vi.fn(() => true);
 });
 
 // ── List Management Tests ──────────────────────────────────────────────
@@ -257,6 +259,7 @@ describe("Spawn Form", () => {
   it("renders Initialize button", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
+    // Initial tab is agent-config, which has the Initialize button
     await screen.findByText("No Active Instances");
     expect(screen.getByText("Initialize")).toBeInTheDocument();
   });
@@ -265,18 +268,28 @@ describe("Spawn Form", () => {
 // ── Broadcast Form Tests ───────────────────────────────────────────────
 
 describe("Broadcast", () => {
-  it("renders broadcast textarea", async () => {
+  it("renders broadcast textarea when Command Center tab is active", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByPlaceholderText("Broadcast to all agents...")).toBeInTheDocument();
+    
+    // Switch to Command Center tab
+    const commandTab = screen.getByTitle("Command Center");
+    fireEvent.click(commandTab);
+
+    expect(await screen.findByPlaceholderText("Broadcast to all agents...")).toBeInTheDocument();
   });
 
-  it("renders Execute Broadcast button", async () => {
+  it("renders Execute Broadcast button when Command Center tab is active", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByText("Execute Broadcast")).toBeInTheDocument();
+
+    // Switch to Command Center tab
+    const commandTab = screen.getByTitle("Command Center");
+    fireEvent.click(commandTab);
+
+    expect(await screen.getByText("Execute Broadcast")).toBeInTheDocument();
   });
 });
 
@@ -289,6 +302,7 @@ describe("Sidebar Navigation", () => {
     await screen.findByText("No Active Instances");
     const buttons = screen.getAllByRole("button");
     const titles = buttons.map(b => b.getAttribute("title")).filter(Boolean);
+    expect(titles).toContain("Agent Configuration");
     expect(titles).toContain("Command Center");
     expect(titles).toContain("Application Settings");
   });

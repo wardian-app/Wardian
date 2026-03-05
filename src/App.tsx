@@ -65,7 +65,9 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
       
       const unicode11Addon = new Unicode11Addon();
       term.loadAddon(unicode11Addon);
-      term.unicode.activeVersion = '11';
+      if (term.unicode) {
+        term.unicode.activeVersion = '11';
+      }
 
       term.open(terminalRef.current);
       xtermRef.current = term;
@@ -244,7 +246,7 @@ function AppBody() {
     const [newAgentClass, setNewAgentClass] = useState("Coder");
     const [newFolder, setNewFolder] = useState("");
     const [resumeSession, setResumeSession] = useState("");
-    const [viewMode, setViewMode] = useState<"grid" | "dashboard">("grid");
+    const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
     const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
     const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
     const handleTitleChange = useCallback((agentId: string, title: string) => {
@@ -256,7 +258,7 @@ function AppBody() {
     const [isSpawning, setIsSpawning] = useState(false);
 
     // New Sidebar & Selection States
-    const [activeTab, setActiveTab] = useState<"explorer" | "ssh" | "workflows" | "classes" | "settings">("explorer");
+    const [activeTab, setActiveTab] = useState<"agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings">("agent-config");
     const [leftCollapsed, setLeftCollapsed] = useState(false);
     const [rightCollapsed, setRightCollapsed] = useState(false);
     const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
@@ -494,11 +496,19 @@ function AppBody() {
         </div>
 
         <button
-          onClick={() => { setActiveTab("explorer"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "explorer" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          onClick={() => { setActiveTab("agent-config"); setLeftCollapsed(false); }}
+          className={`p-3 rounded-xl transition-all ${activeTab === "agent-config" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          title="Agent Configuration"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a1.998 1.998 0 00-2.83 2"></path></svg>
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("command"); setLeftCollapsed(false); }}
+          className={`p-3 rounded-xl transition-all ${activeTab === "command" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
           title="Command Center"
         >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
         </button>
 
         <button
@@ -506,15 +516,7 @@ function AppBody() {
           className={`p-3 rounded-xl transition-all ${activeTab === "classes" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
           title="Class Manager"
         >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /><circle cx="12" cy="16" r="1.5" fill="currentColor" /></svg>
-        </button>
-
-        <button
-          onClick={() => { setActiveTab("ssh"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "ssh" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
-          title="Remote Connections"
-        >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
         </button>
 
         <button
@@ -523,6 +525,14 @@ function AppBody() {
           title="Workflows"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("ssh"); setLeftCollapsed(false); }}
+          className={`p-3 rounded-xl transition-all ${activeTab === "ssh" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          title="Remote Connections"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
         </button>
 
         <div className="mt-auto">
@@ -539,10 +549,10 @@ function AppBody() {
       {/* --- CONTENT PANE (LEFT COLLAPSIBLE) --- */}
       <aside className={`h-full bg-gray-900/30 border-r border-gray-800 sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
         <div className="p-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
-          {activeTab === "explorer" && (
+          {activeTab === "agent-config" && (
             <>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">COMMAND</h2>
+                <h2 className="text-xl font-bold text-white tracking-tight">AGENT CONFIG</h2>
                 <button onClick={() => setLeftCollapsed(true)} className="text-gray-500 hover:text-white">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
@@ -619,6 +629,31 @@ function AppBody() {
                   </button>
                 </form>
               </div>
+            </>
+          )}
+
+          {activeTab === "command" && (
+            <>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-bold text-white tracking-tight">COMMAND</h2>
+                <button onClick={() => setLeftCollapsed(true)} className="text-gray-500 hover:text-white">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
+                </button>
+              </div>
+
+              <div className="mb-8">
+                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Quick Actions</h3>
+                <div className="grid grid-cols-1 gap-2">
+                   <button className="flex items-center gap-3 p-3 bg-gray-800/30 border border-gray-700/50 rounded-lg text-gray-400 hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group">
+                      <svg className="w-4 h-4 opacity-50 group-hover:opacity-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                      <span className="text-xs font-bold">Summarize Day</span>
+                   </button>
+                   <button className="flex items-center gap-3 p-3 bg-gray-800/30 border border-gray-700/50 rounded-lg text-gray-400 hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group">
+                      <svg className="w-4 h-4 opacity-50 group-hover:opacity-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+                      <span className="text-xs font-bold">Run Health Check</span>
+                   </button>
+                </div>
+              </div>
 
               <div className="mt-auto pt-6 border-t border-gray-800">
                 <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Broadcast</h3>
@@ -641,23 +676,32 @@ function AppBody() {
           )}
 
           {activeTab === "ssh" && (
-            <div className="flex flex-col items-center justify-center h-full text-gray-600 italic text-center p-4">
-              <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
-              <p className="text-sm">SSH Manager coming in Phase 4</p>
+            <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
+              </div>
+              <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Remote Nodes</h3>
+              <p className="text-xs text-gray-500 italic px-4">SSH Manager and remote execution capabilities are arriving in Phase 4.</p>
             </div>
           )}
 
           {activeTab === "workflows" && (
-            <div className="flex flex-col items-center justify-center h-full text-gray-600 italic text-center p-4">
-              <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
-              <p className="text-sm">Workflow Automation coming in Phase 3</p>
+            <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+              </div>
+              <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Automation</h3>
+              <p className="text-xs text-gray-500 italic px-4">Scheduled tasks and automated workflows are arriving in Phase 3.</p>
             </div>
           )}
 
           {activeTab === "settings" && (
-            <div className="flex flex-col items-center justify-center h-full text-gray-600 italic text-center p-4">
-              <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-              <p className="text-sm">App Settings coming soon</p>
+            <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+              </div>
+              <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Settings</h3>
+              <p className="text-xs text-gray-500 italic px-4">Global configuration and theme management coming soon.</p>
             </div>
           )}
 
@@ -777,18 +821,42 @@ function AppBody() {
               <p className="text-gray-400 text-sm font-medium tracking-wide">Multi-agent Terminal Manager</p>
             </div>
             <div className="flex flex-col items-end gap-2">
-              <div className="flex gap-1 bg-gray-900/50 p-1 rounded-lg border border-gray-800">
+              <div className="flex gap-1 bg-gray-900/50 p-1 rounded-lg border border-gray-800 overflow-x-auto no-scrollbar max-w-[500px]">
                 <button
                   onClick={() => setViewMode("grid")}
-                  className={`px-4 py-1.5 rounded-md text-[10px] font-bold transition-all ${viewMode === 'grid' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'grid' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
                 >
                   GRID
                 </button>
                 <button
                   onClick={() => setViewMode("dashboard")}
-                  className={`px-4 py-1.5 rounded-md text-[10px] font-bold transition-all ${viewMode === 'dashboard' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'dashboard' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
                 >
                   DASHBOARD
+                </button>
+                <button
+                  onClick={() => setViewMode("queue")}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'queue' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  QUEUE
+                </button>
+                <button
+                  onClick={() => setViewMode("workflow-builder")}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'workflow-builder' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  WORKFLOWS
+                </button>
+                <button
+                  onClick={() => setViewMode("graph")}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'graph' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  GRAPH
+                </button>
+                <button
+                  onClick={() => setViewMode("garden")}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'garden' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  GARDEN
                 </button>
               </div>
               <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-gray-600 uppercase tracking-widest">
@@ -819,7 +887,27 @@ function AppBody() {
             </div>
           )}
 
-          <div className={`grid gap-6 auto-rows-max ${viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 flex flex-col'}`}>
+          {["queue", "workflow-builder", "graph", "garden"].includes(viewMode) ? (
+             <div className="flex-1 flex flex-col items-center justify-center text-center p-12 border border-gray-800/50 rounded-2xl bg-gray-900/20 backdrop-blur-sm animate-in fade-in zoom-in duration-500 placeholder-view">
+                <div className="w-24 h-24 mb-6 text-gray-800/30 placeholder-icon-container animate-float block">
+                  {viewMode === "queue" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>}
+                  {viewMode === "workflow-builder" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>}
+                  {viewMode === "graph" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>}
+                  {viewMode === "garden" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>}
+                </div>
+                <h2 className="text-2xl font-bold text-white mb-2 uppercase tracking-widest">
+                  {viewMode.replace("-", " ")}
+                </h2>
+                <p className="text-gray-500 max-w-md mx-auto mb-8 font-medium italic">
+                  Advanced {viewMode === 'queue' ? 'human-in-the-loop' : viewMode} features coming in Phase {viewMode === 'queue' || viewMode === 'workflow-builder' ? '3' : '5'}.
+                </p>
+                <div className="flex gap-4">
+                   <div className="px-6 py-2 rounded-full border border-gray-800 text-[10px] font-bold text-gray-600 uppercase tracking-widest">Planned</div>
+                   <div className="px-6 py-2 rounded-full bg-[var(--color-wardian-accent)]/10 text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest border border-[var(--color-wardian-accent)]/20">Phase {viewMode === 'queue' || viewMode === 'workflow-builder' ? '3' : '5'}</div>
+                </div>
+             </div>
+          ) : (
+            <div className={`grid gap-6 auto-rows-max ${viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 flex flex-col'}`}>
             {agents.map((agent, index) => {
               const agentId = agent.session_id.toString();
               const isMaximized = maximizedAgentId === agentId;
@@ -1025,6 +1113,7 @@ function AppBody() {
               </div>
             )}
           </div>
+          )}
         </div>
       </main>
 
