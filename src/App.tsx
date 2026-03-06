@@ -37,8 +37,9 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
 
     try {
       fitAddon.fit();
+      console.log(`[DEBUG] performFit for ${sessionId}: cols=${term.cols}, rows=${term.rows}`);
       if (term.cols > 10 && term.rows > 3) {
-        if (forceInvoke || pollStartedRef.current) {
+        if (forceInvoke) {
           invoke("resize_agent_terminal", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
         }
       }
@@ -57,9 +58,13 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
     try {
       term = new Terminal({
         theme: { background: '#020402', foreground: '#EEF2EE', cursor: '#F1D382', selectionBackground: '#1E261E' },
-        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 1000,
+        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 5000,
         allowProposedApi: true,
+        convertEol: true,
+        disableStdin: false
       });
+      // xterm.js ignores scrollOnUserInput in options constructor, must be set via options object
+      term.options.scrollOnUserInput = false;
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       
@@ -79,8 +84,9 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
         if (!pollActive || !isMounted || !pollStartedRef.current) return;
         try {
           const data = await invoke<string | null>("read_agent_pty", { sessionId });
-          if (data && pollActive && isMounted) {
-            await new Promise<void>(resolve => term?.write(data, resolve));
+          if (data && pollActive && isMounted && term) {
+            console.log(`[PTY-READ] Received ${data.length} characters`);
+            await new Promise<void>(resolve => term!.write(data, resolve));
             if (pollActive && isMounted) requestAnimationFrame(pollPty);
           } else if (pollActive && isMounted) {
             setTimeout(pollPty, 50);
@@ -126,9 +132,12 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
 
       let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
       
-      resizeObserver = new ResizeObserver(() => {
+      resizeObserver = new ResizeObserver((entries) => {
         if (!isMounted) return;
         
+        const entry = entries[0];
+        console.log(`[DEBUG] ResizeObserver triggered for ${sessionId}: ${entry.contentRect.width}x${entry.contentRect.height}px`);
+
         if (!pollStartedRef.current) {
           checkSizingAndStart();
         }
@@ -146,6 +155,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
       let lastRows = term.rows;
 
       term.onResize((size) => {
+        console.log(`[DEBUG] xterm.onResize for ${sessionId}: cols=${size.cols}, rows=${size.rows}`);
         if (size.cols === lastCols && size.rows === lastRows) return;
         if (size.cols < 10 || size.rows < 2) return;
         lastCols = size.cols;
@@ -814,8 +824,8 @@ function AppBody() {
           </button>
         )}
 
-        <div className="flex-1 overflow-y-auto p-8 no-scrollbar">
-          <header className="mb-8 border-b border-gray-700/50 pb-4 flex justify-between items-end">
+        <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
+          <header className="mb-6 border-b border-gray-700/50 pb-4 flex justify-between items-end">
             <div>
               <h1 className="text-4xl font-bold tracking-tight text-white mb-2">Wardian</h1>
               <p className="text-gray-400 text-sm font-medium tracking-wide">Multi-agent Terminal Manager</p>
@@ -907,7 +917,7 @@ function AppBody() {
                 </div>
              </div>
           ) : (
-            <div className={`grid gap-6 auto-rows-max ${viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 flex flex-col'}`}>
+            <div className={`flex gap-2 ${viewMode === 'grid' ? 'flex-row flex-wrap' : 'flex-col'}`}>
             {agents.map((agent, index) => {
               const agentId = agent.session_id.toString();
               const isMaximized = maximizedAgentId === agentId;
@@ -937,7 +947,7 @@ function AppBody() {
                   onDrop={(e) => handleDrop(e, index)}
                   className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none transition-none' : 'transition-all rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
                     ? 'flex-col md:flex-row border border-gray-700/50 hover:border-gray-500 w-full cursor-move'
-                    : !isMaximized ? 'flex-col border border-gray-700 h-[500px]' : 'flex-col'
+                    : !isMaximized ? 'flex-col border border-gray-700 h-[500px] flex-1 min-w-[650px] max-w-full' : 'flex-col'
                     } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
                 >
                   <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>

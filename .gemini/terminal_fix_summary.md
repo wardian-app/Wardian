@@ -58,6 +58,12 @@ The solution involved a coordinated effort between the frontend and backend to s
 - **Job Objects (Windows)**: Confirmed that child processes are assigned to Windows Job Objects for reliable "Kill Tree" behavior.
 - **Explicit Job Drop**: We now use `job_object.take().unwrap()` during session removal to ensure the Windows Job Object is explicitly dropped, cascading the kill signal to the entire ConPTY/Conhost process tree and preventing zombies.
 
+### 5. Viewport Thrashing & TUI Word-Wrap Defense
+
+- **Node Native SIGWINCH Bypass**: Wardian spawns the CLI by resolving the absolute path to `gemini-cli/dist/index.js` and executing it directly with `node.exe`. This bypasses the default `gemini.cmd` batch script on Windows, which previously swallowed `SIGWINCH` resize events. Consequently, the TUI React Ink engine now receives accurate `resize` events natively from ConPTY, preventing the engine from rendering massive, stale-height views that cause "Viewport Thrashing" against the scrollback.
+- **TUI Line Wrap Prevention (The 650px Rule)**: The `gemini-cli` hardcodes specific box-drawing UI elements. If the terminal width (`cols`) shrinks below the width of these strings, Windows ConPTY natively word-wraps the output. However, the internal TUI rendering engine remains unaware of the wrap, causing it to miscalculate its own height by 1 line. Since it redraws multiple times per second, this single mathematical desync pushes the entire scrollback history downwards in an infinite loop.
+- **Strict Minimum Layout Metrics**: To mathematically eradicate the horizontal bug, the application requires exactly `1325px` of center stage real-estate on a 1080p display (achieved by shrinking sidebars). This allows both outer flex cards and inner `xterm.js` containers to strictly enforce `min-w-[650px]`, guaranteeing the PTY width never drops below the CLI's hardcoded word-wrap limit. **Note**: These strict 650px bounds can be relaxed in the future if/when the `gemini-cli` ceases to utilize hardcoded fixed-width UI boxes.
+
 ---
 
 ## 🏗️ Core Architecture (The Foundation)

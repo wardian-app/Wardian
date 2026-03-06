@@ -148,7 +148,22 @@ pub async fn spawn_gemini_cli(
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
     let mut cmd = if cfg!(target_os = "windows") {
-        CommandBuilder::new("gemini.cmd")
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let target = std::path::Path::new(&appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("@google")
+            .join("gemini-cli")
+            .join("dist")
+            .join("index.js");
+
+        if target.exists() {
+            let mut c = CommandBuilder::new("node");
+            c.arg(target.to_string_lossy().to_string());
+            c
+        } else {
+            CommandBuilder::new("gemini.cmd")
+        }
     } else {
         CommandBuilder::new("gemini")
     };
