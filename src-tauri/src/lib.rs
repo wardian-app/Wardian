@@ -387,7 +387,7 @@ async fn create_agent_class(
 
     // Read existing custom classes, append, save
     let mut custom: Vec<AgentClassDefinition> = Vec::new();
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = manager::get_wardian_home() {
         let custom_path = app_dir.join("custom_classes.json");
         if let Ok(data) = std::fs::read_to_string(&custom_path) {
             if let Ok(parsed) = serde_json::from_str::<Vec<AgentClassDefinition>>(&data) {
@@ -407,7 +407,7 @@ async fn create_agent_class(
     manager::save_custom_classes(&app, &custom)?;
 
     // Scaffold the new class directory
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = manager::get_wardian_home() {
         let role_dir = app_dir.join("classes").join(&trimmed_name);
         let _ = std::fs::create_dir_all(&role_dir);
         let gemini_md_path = role_dir.join("GEMINI.md");
@@ -445,7 +445,7 @@ async fn delete_agent_class(
 
     // Read existing custom classes, remove, save
     let mut custom: Vec<AgentClassDefinition> = Vec::new();
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = manager::get_wardian_home() {
         let custom_path = app_dir.join("custom_classes.json");
         if let Ok(data) = std::fs::read_to_string(&custom_path) {
             if let Ok(parsed) = serde_json::from_str::<Vec<AgentClassDefinition>>(&data) {
@@ -458,7 +458,7 @@ async fn delete_agent_class(
     manager::save_custom_classes(&app, &custom)?;
 
     // Optionally remove the class directory
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = manager::get_wardian_home() {
         let role_dir = app_dir.join("classes").join(&name);
         if role_dir.exists() {
             let _ = std::fs::remove_dir_all(&role_dir);
@@ -469,9 +469,8 @@ async fn delete_agent_class(
 }
 
 #[tauri::command]
-async fn load_watchlists(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    use tauri::Manager;
-    if let Ok(app_dir) = app.path().app_data_dir() {
+async fn load_watchlists(_app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    if let Some(app_dir) = manager::get_wardian_home() {
         let path = app_dir.join("watchlists.json");
         if let Ok(data) = std::fs::read_to_string(&path) {
             let parsed: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
@@ -482,9 +481,12 @@ async fn load_watchlists(app: AppHandle) -> Result<Vec<serde_json::Value>, Strin
 }
 
 #[tauri::command]
-async fn save_watchlists(watchlists: Vec<serde_json::Value>, app: AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+async fn save_watchlists(
+    watchlists: Vec<serde_json::Value>,
+    _app: AppHandle,
+) -> Result<(), String> {
+    let app_dir =
+        manager::get_wardian_home().ok_or_else(|| "Could not find home directory".to_string())?;
     let _ = std::fs::create_dir_all(&app_dir);
     let path = app_dir.join("watchlists.json");
     let json = serde_json::to_string_pretty(&watchlists).map_err(|e| e.to_string())?;
@@ -567,7 +569,7 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
-                if let Ok(app_dir) = app_handle.path().app_data_dir() {
+                if let Some(app_dir) = manager::get_wardian_home() {
                     let state_path = app_dir.join("wardian_state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {

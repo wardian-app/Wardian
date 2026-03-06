@@ -20,7 +20,11 @@ pub fn log_debug(msg: &str) {
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
-pub fn save_state(app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
+pub fn get_wardian_home() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".wardian"))
+}
+
+pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
     let mut configs: Vec<AgentConfig> = Vec::new();
     for id in order {
         if let Some(agent) = agents.get(id) {
@@ -29,8 +33,7 @@ pub fn save_state(app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order:
     }
 
     if let Ok(json) = serde_json::to_string_pretty(&configs) {
-        use tauri::Manager;
-        if let Ok(app_dir) = app.path().app_data_dir() {
+        if let Some(app_dir) = get_wardian_home() {
             let _ = std::fs::create_dir_all(&app_dir);
             let state_path = app_dir.join("wardian_state.json");
             let _ = std::fs::write(state_path, json);
@@ -152,12 +155,22 @@ pub async fn spawn_gemini_cli(
     cmd.cwd(&expected_folder);
 
     // Apply strict classes constraints organically if the context map natively exists
-    use tauri::Manager;
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = get_wardian_home() {
         let class_path = app_dir.join("classes").join(&config.agent_class);
+        let common_path = app_dir.join("common");
+
+        let mut include_dirs = Vec::new();
+
         if class_path.exists() {
+            include_dirs.push(class_path.to_string_lossy().to_string());
+        }
+        if common_path.exists() {
+            include_dirs.push(common_path.to_string_lossy().to_string());
+        }
+
+        if !include_dirs.is_empty() {
             cmd.arg("--include-directories");
-            cmd.arg(class_path.to_string_lossy().to_string());
+            cmd.arg(include_dirs.join(","));
         }
     }
 
@@ -744,8 +757,7 @@ pub struct AgentClassDefinition {
 }
 
 /// Returns all agent classes (defaults + custom) with `is_default` flag set.
-pub fn get_all_agent_classes(app: &AppHandle) -> Vec<AgentClassDefinition> {
-    use tauri::Manager;
+pub fn get_all_agent_classes(_app: &AppHandle) -> Vec<AgentClassDefinition> {
     let default_classes_json = include_str!("default_classes.json");
     let mut defaults: Vec<AgentClassDefinition> =
         serde_json::from_str(default_classes_json).unwrap_or_default();
@@ -754,7 +766,7 @@ pub fn get_all_agent_classes(app: &AppHandle) -> Vec<AgentClassDefinition> {
     }
 
     let mut custom: Vec<AgentClassDefinition> = Vec::new();
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = get_wardian_home() {
         let custom_path = app_dir.join("custom_classes.json");
         if let Ok(data) = std::fs::read_to_string(&custom_path) {
             if let Ok(parsed) = serde_json::from_str::<Vec<AgentClassDefinition>>(&data) {
@@ -772,11 +784,10 @@ pub fn get_all_agent_classes(app: &AppHandle) -> Vec<AgentClassDefinition> {
 
 /// Saves the custom classes list to `<AppData>/custom_classes.json`.
 pub fn save_custom_classes(
-    app: &AppHandle,
+    _app: &AppHandle,
     classes: &[AgentClassDefinition],
 ) -> Result<(), String> {
-    use tauri::Manager;
-    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = get_wardian_home().ok_or_else(|| "Could not find home directory".to_string())?;
     let _ = std::fs::create_dir_all(&app_dir);
     let custom_path = app_dir.join("custom_classes.json");
     let json = serde_json::to_string_pretty(classes).map_err(|e| e.to_string())?;
@@ -787,7 +798,7 @@ pub fn save_custom_classes(
 /// Scaffolds filesystem directories for a single agent class.
 fn scaffold_class_dir(app: &AppHandle, class: &AgentClassDefinition) {
     use tauri::Manager;
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = get_wardian_home() {
         let classes_dir = app_dir.join("classes");
         let role_dir = classes_dir.join(&class.name);
         if !role_dir.exists() {
@@ -816,12 +827,17 @@ fn scaffold_class_dir(app: &AppHandle, class: &AgentClassDefinition) {
 }
 
 pub fn init_agent_classes(app: &AppHandle) {
-    use tauri::Manager;
-    if let Ok(app_dir) = app.path().app_data_dir() {
+    if let Some(app_dir) = get_wardian_home() {
         let classes_dir = app_dir.join("classes");
         if !classes_dir.exists() {
             let _ = std::fs::create_dir_all(&classes_dir);
         }
+
+        // Also ensure foundational OS-agnostic CLI directories exist
+        let desk_dir = app_dir.join("common").join("desk");
+        let lineages_dir = app_dir.join("common").join("lineages");
+        let _ = std::fs::create_dir_all(&desk_dir);
+        let _ = std::fs::create_dir_all(&lineages_dir);
 
         let all_classes = get_all_agent_classes(app);
 

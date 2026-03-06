@@ -30,6 +30,7 @@ win32job = "2.0.3"
 sysinfo = "0.38.2"
 winapi = { version = "0.3.9", features = ["processthreadsapi", "winnt", "handleapi"] }
 chrono = "0.4.38"
+dirs = "5.0.1"
 
 [dev-dependencies]
 tempfile = "3.26.0"
