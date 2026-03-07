@@ -430,7 +430,7 @@ export default function AgentWatchlist({
                       onMouseDown={e => e.stopPropagation()}
                     />
                   ) : (
-                    <p className={`text-xs font-bold truncate ${isSelected ? "text-white" : "text-muted-neutral"}`}>
+                    <p className="text-xs font-bold truncate text-bright-neutral">
                       {agent.session_name}
                     </p>
                   )}

@@ -21,9 +21,10 @@ All agents contributing to the Wardian codebase must adhere to the following arc
   - **Action Required**: Amber (`#f59e0b`)
   - **Off**: Gray (`#4b5563`)
   - **Critical/Error**: Red (`#EF4444`)
-- **Semantic Theming**: ALWAYS use theme variables (e.g., `var(--color-wardian-text-muted)`, `var(--color-wardian-accent)`) or themed classes (e.g., `.text-muted`, `.text-muted-neutral`) instead of hardcoded Tailwind colors (e.g., `text-gray-400`, `bg-gray-800`).
+- **Semantic Theming**: ALWAYS use theme variables (e.g., `var(--color-wardian-text-muted)`, `var(--color-wardian-accent)`) or themed classes (e.g., `.text-muted`, `.text-muted-neutral`, `.text-bright-neutral`) instead of hardcoded Tailwind colors (e.g., `text-gray-400`, `bg-gray-800`).
 - **Thematic Split**: Adhere to the labeling hierarchy:
   - **Muted Green** (`.text-muted`): Reserved for section headers, major toggles, and brand-aligned navigation elements.
+  - **Bright Neutral** (`.text-bright-neutral`): Used for primary identifiers (e.g., agent names in lists) where solid white is too intense but muted grey is too low-contrast.
   - **Neutral Grey** (`.text-muted-neutral`): Used for regular field labels, secondary menu items, and dense telemetry data to minimize visual noise.
 
 ### 🛠️ Workflow Rules

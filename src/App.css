@@ -6,6 +6,7 @@
   --color-wardian-text: #e8f2e8;
   --color-wardian-text-muted: #88a088;
   --color-wardian-text-muted-neutral: #9ca3af;
+  --color-wardian-text-bright: #d1d5db;
   --color-wardian-accent: #d4af37;
   --color-wardian-accent-hover: #b8860b;
   --color-wardian-border: #1b261b;
@@ -43,6 +44,10 @@
 
 .text-muted-neutral {
   color: var(--color-wardian-text-muted-neutral);
+}
+
+.text-bright-neutral {
+  color: var(--color-wardian-text-bright);
 }
 
 /* Status Utilities */
