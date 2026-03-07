@@ -85,7 +85,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                     console.error("Failed to copy", e);
                   }
                 }}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedId ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-white hover:bg-wardian-light border border-transparent'}`}
+                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedId ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-primary hover:bg-wardian-light border border-transparent'}`}
               >
                 {copiedId ? "Copied!" : "Copy"}
               </button>
@@ -113,7 +113,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                     console.error("Failed to copy", e);
                   }
                 }}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedLog ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-white hover:bg-wardian-light border border-transparent disabled:opacity-30 disabled:cursor-not-allowed'}`}
+                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedLog ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-primary hover:bg-wardian-light border border-transparent disabled:opacity-30 disabled:cursor-not-allowed'}`}
               >
                 {copiedLog ? "Copied!" : "Copy"}
               </button>
@@ -127,7 +127,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           <div>
             <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Agent Name</label>
             <input
-              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               value={config.session_name}
               onChange={(e) => updateField("session_name", e.target.value)}
             />
@@ -135,7 +135,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           <div>
             <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Agent Class</label>
             <select
-              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               value={config.agent_class}
               onChange={async (e) => {
                 const newClass = e.target.value;
@@ -164,7 +164,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
         <button
           type="submit"
           disabled={isSaving}
-          className="w-full mt-2 bg-[var(--color-wardian-accent)] hover:opacity-90 disabled:opacity-50 text-white py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest transition-all shadow-lg shadow-[var(--color-wardian-accent)]/20"
+          className="w-full mt-2 bg-[var(--color-wardian-accent)] hover:opacity-90 disabled:opacity-50 text-[var(--color-wardian-bg)] py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest transition-all shadow-lg shadow-[var(--color-wardian-accent)]/20"
         >
           {isSaving ? "Saving..." : "Save Changes"}
         </button>

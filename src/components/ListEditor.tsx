@@ -26,7 +26,7 @@ export const ValidatedInput: React.FC<ValidatedInputProps> = ({
   return (
     <div className="flex items-center gap-1 w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1 transition-all focus-within:border-[var(--color-wardian-accent)]">
       <input
-        className={`flex-1 bg-transparent text-xs ${readOnly ? 'text-muted-neutral/80 cursor-default' : 'text-white'} focus:outline-none min-w-0`}
+        className={`flex-1 bg-transparent text-xs ${readOnly ? 'text-muted-neutral/80 cursor-default' : 'text-primary'} focus:outline-none min-w-0`}
         value={value}
         placeholder={placeholder}
         onChange={(e) => !readOnly && onChange?.(e.target.value)}
@@ -119,7 +119,7 @@ export const ListEditor: React.FC<ListEditorProps> = ({
         <button
           type="button"
           onClick={() => onChange([...safeValues, ""])}
-          className="text-[10px] text-[var(--color-wardian-accent)] hover:text-white transition-colors flex items-center gap-1 mt-0.5 w-fit"
+          className="text-[10px] text-[var(--color-wardian-accent)] hover:text-primary transition-colors flex items-center gap-1 mt-0.5 w-fit"
         >
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />

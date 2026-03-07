@@ -13,16 +13,50 @@ import { ConfigureAgentPanel } from "./ConfigureAgentPanel";
 import { SpawnAgentPanel } from "./SpawnAgentPanel";
 import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
 
+const DARK_TERM_THEME = {
+  background: '#020402',
+  foreground: '#EEF2EE',
+  cursor: '#F1D382',
+  selectionBackground: '#1E261E'
+};
+
+const LIGHT_TERM_THEME = {
+  background: '#fcfaf5',
+  foreground: '#111827',
+  cursor: '#b8860b',
+  selectionBackground: '#e5e7eb'
+};
+
 const terminalMap = new Map<string, Terminal>();
 const fitAddonMap = new Map<string, FitAddon>();
 
-const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTitleChange }: { sessionId: string; isMaximized?: boolean; onTitleChange?: (title: string) => void }) {
+const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, theme, onTitleChange }: { sessionId: string; isMaximized?: boolean; theme: 'dark' | 'light' | 'system'; onTitleChange?: (title: string) => void }) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pollStartedRef = useRef(false);
   const onTitleChangeRef = useRef(onTitleChange);
   const [initError, setInitError] = useState<string | null>(null);
+
+  // Robust theme tracking
+  const [effectiveTheme, setEffectiveTheme] = useState<'dark' | 'light'>(() => {
+    if (theme === 'system') return window.matchMedia("(prefers-color-scheme: light)").matches ? 'light' : 'dark';
+    return theme;
+  });
+
+  useEffect(() => {
+    if (theme !== 'system') {
+      setEffectiveTheme(theme);
+      return;
+    }
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
+    const handler = () => setEffectiveTheme(mediaQuery.matches ? 'light' : 'dark');
+    handler();
+    mediaQuery.addEventListener("change", handler);
+    return () => mediaQuery.removeEventListener("change", handler);
+  }, [theme]);
+
+  const termTheme = effectiveTheme === 'light' ? LIGHT_TERM_THEME : DARK_TERM_THEME;
 
   // Sync ref with latest prop
   useEffect(() => {
@@ -59,7 +93,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
 
     try {
       term = new Terminal({
-        theme: { background: '#020402', foreground: '#EEF2EE', cursor: '#F1D382', selectionBackground: '#1E261E' },
+        theme: termTheme,
         fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 1000,
         allowProposedApi: true,
         convertEol: true,
@@ -169,7 +203,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
         }, 50);
       });
 
-      return () => {
+      const cleanup = () => {
         isMounted = false;
         pollActive = false;
         pollStartedRef.current = false;
@@ -182,12 +216,20 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
         xtermRef.current = null;
         fitAddonRef.current = null;
       };
+      return cleanup;
     } catch (e: any) {
       console.error("AgentTerminal Init Error:", e);
-      setInitError(e.toString());
-      return () => { isMounted = false; pollActive = false; pollStartedRef.current = false; };
+      setInitError(String(e));
     }
-  }, [sessionId, performFit]);
+  }, [sessionId]);
+
+  // Handle theme changes
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (term) {
+      term.options.theme = termTheme;
+    }
+  }, [termTheme]);
 
   // Re-fit on maximization toggle
   useEffect(() => {
@@ -209,7 +251,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
   return (
     <div className="relative w-full h-full overflow-hidden">
       {initError && (
-        <div className="absolute inset-0 z-50 bg-red-900 text-white p-4 overflow-auto rounded m-2">
+        <div className="absolute inset-0 z-50 bg-red-900 text-primary p-4 overflow-auto rounded m-2">
           <h3 className="font-bold mb-2">Terminal Initialization Fatal Error:</h3>
           <pre className="text-xs whitespace-pre-wrap">{initError}</pre>
         </div>
@@ -234,7 +276,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
   render() {
     if (this.state.hasError) {
       return (
-        <div className="p-20 bg-red-950 text-white h-screen overflow-auto">
+        <div className="p-20 bg-red-950 text-primary h-screen overflow-auto">
           <h1 className="text-2xl font-bold mb-4">Fatal UI Rendering Error</h1>
           <pre className="whitespace-pre-wrap text-[10px] bg-black/30 p-4 rounded mb-4 font-mono">{this.state.error?.toString()}</pre>
           <button onClick={() => window.location.reload()} className="px-4 py-2 bg-red-700 hover:bg-red-600 rounded font-bold transition-colors">Reload Wardian</button>
@@ -274,6 +316,27 @@ function AppBody() {
     const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
     const [tempName, setTempName] = useState("");
     const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
+    const [theme, setTheme] = useState<"dark" | "light" | "system">(() => {
+      return (localStorage.getItem("theme") as "dark" | "light" | "system") || "system";
+    });
+
+    useEffect(() => {
+      const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
+      
+      const applyTheme = () => {
+        let effectiveTheme = theme;
+        if (theme === "system") {
+          effectiveTheme = mediaQuery.matches ? "light" : "dark";
+        }
+        document.documentElement.setAttribute("data-theme", effectiveTheme);
+      };
+
+      applyTheme();
+      localStorage.setItem("theme", theme);
+
+      mediaQuery.addEventListener("change", applyTheme);
+      return () => mediaQuery.removeEventListener("change", applyTheme);
+    }, [theme]);
 
     // Drag and Drop State
     const [draggedAgentIndex, setDraggedAgentIndex] = useState<number | null>(null);
@@ -476,7 +539,7 @@ function AppBody() {
       {/* --- PRIMARY SIDEBAR (ICON RAIL) --- */}
       <aside className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
         <div className="w-10 h-10 flex items-center justify-center mb-4">
-          <img src="/icon.png" alt="Wardian" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(241,211,130,0.3)]" />
+          <img src="/icon-transparent.png" alt="Wardian" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(241,211,130,0.3)]" />
         </div>
 
         <button
@@ -519,7 +582,7 @@ function AppBody() {
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
         </button>
 
-        <div className="mt-auto">
+        <div className="mt-auto flex flex-col gap-4">
           <button
             onClick={() => { setActiveTab("settings"); setLeftCollapsed(false); }}
             className={`p-3 rounded-xl transition-all ${activeTab === "settings" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
@@ -536,8 +599,8 @@ function AppBody() {
           {activeTab === "agent-config" && (
             <>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">AGENT CONFIG</h2>
-                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-white transition-colors">
+                <h2 className="text-xl font-bold text-primary tracking-tight">AGENT CONFIG</h2>
+                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-primary transition-colors">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
               </div>
@@ -562,8 +625,8 @@ function AppBody() {
           {activeTab === "command" && (
             <>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">COMMAND</h2>
-                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-white transition-colors">
+                <h2 className="text-xl font-bold text-primary tracking-tight">COMMAND</h2>
+                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-primary transition-colors">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
               </div>
@@ -586,7 +649,7 @@ function AppBody() {
                 <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-4">Broadcast</h3>
                 <form onSubmit={broadcastInput} className="flex flex-col gap-2">
                   <textarea
-                    className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-white text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
+                    className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-primary text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
                     placeholder={selectedAgentIds.size > 0 ? `Message ${selectedAgentIds.size} selected...` : "Broadcast to all agents..."}
                     value={broadcastMessage}
                     onChange={(e) => setBroadcastMessage(e.currentTarget.value)}
@@ -607,7 +670,7 @@ function AppBody() {
               <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
               </div>
-              <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Remote Nodes</h3>
+              <h3 className="text-sm font-bold text-primary mb-2 uppercase tracking-widest">Remote Nodes</h3>
               <p className="text-xs text-muted italic px-4">SSH Manager and remote execution capabilities are arriving in Phase 4.</p>
             </div>
           )}
@@ -617,26 +680,88 @@ function AppBody() {
               <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
               </div>
-              <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Automation</h3>
+              <h3 className="text-sm font-bold text-primary mb-2 uppercase tracking-widest">Automation</h3>
               <p className="text-xs text-muted italic px-4">Scheduled tasks and automated workflows are arriving in Phase 3.</p>
             </div>
           )}
 
           {activeTab === "settings" && (
-            <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+            <>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-bold text-primary tracking-tight">SETTINGS</h2>
+                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-primary transition-colors">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
+                </button>
               </div>
-              <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Settings</h3>
-              <p className="text-xs text-muted italic px-4">Global configuration and theme management coming soon.</p>
-            </div>
+              
+              <div className="flex flex-col gap-6">
+                <div className="bg-transparent mb-2">
+                  <h3 className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest mb-4">Theme</h3>
+                  <div className="grid grid-cols-3 gap-3">
+                    {/* System Theme Card */}
+                    <button
+                      type="button"
+                      onClick={() => setTheme("system")}
+                      className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${theme === 'system' ? 'border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]/5 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border bg-wardian-card-bg-muted hover:border-wardian-border-heavy'}`}
+                    >
+                      <div className="w-full aspect-[4/3] rounded-md border border-wardian-border overflow-hidden flex shadow-inner">
+                        <div className="flex-1 bg-gray-900 border-r border-wardian-border"></div>
+                        <div className="flex-1 bg-gray-100"></div>
+                      </div>
+                      <span className={`text-[11px] font-bold uppercase tracking-tight ${theme === 'system' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>System</span>
+                    </button>
+
+                    {/* Dark Theme Card */}
+                    <button
+                      type="button"
+                      onClick={() => setTheme("dark")}
+                      className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${theme === 'dark' ? 'border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]/5 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border bg-wardian-card-bg-muted hover:border-wardian-border-heavy'}`}
+                    >
+                      <div className="w-full aspect-[4/3] rounded-md border border-wardian-border overflow-hidden flex bg-gray-900 shadow-inner p-1 gap-1">
+                        <div className="w-1.5 h-full rounded-sm bg-gray-800"></div>
+                        <div className="flex-1 flex flex-col gap-1">
+                          <div className="w-full h-1.5 rounded-sm bg-gray-800"></div>
+                          <div className="w-full h-full rounded-sm bg-gray-800/50"></div>
+                        </div>
+                      </div>
+                      <span className={`text-[11px] font-bold uppercase tracking-tight ${theme === 'dark' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Dark</span>
+                    </button>
+
+                    {/* Light Theme Card */}
+                    <button
+                      type="button"
+                      onClick={() => setTheme("light")}
+                      className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${theme === 'light' ? 'border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]/5 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border bg-wardian-card-bg-muted hover:border-wardian-border-heavy'}`}
+                    >
+                      <div className="w-full aspect-[4/3] rounded-md border border-wardian-border overflow-hidden flex bg-[#fdfbf7] shadow-inner p-1 gap-1">
+                        <div className="w-1.5 h-full rounded-sm bg-gray-200"></div>
+                        <div className="flex-1 flex flex-col gap-1">
+                          <div className="w-full h-1.5 rounded-sm bg-gray-200"></div>
+                          <div className="w-full h-full rounded-sm bg-gray-100/50"></div>
+                        </div>
+                      </div>
+                      <span className={`text-[11px] font-bold uppercase tracking-tight ${theme === 'light' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Light</span>
+                    </button>
+                  </div>
+                  <div className="mt-3 px-1">
+                    <p className="text-[10px] text-muted-neutral leading-relaxed">
+                      <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> For complete terminal synchronization, update the gemini CLI theme as well, and then restart the application.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="text-center p-4">
+                  <p className="text-[10px] text-muted-neutral italic">More settings coming in Phase 3.</p>
+                </div>
+              </div>
+            </>
           )}
 
           {activeTab === "classes" && (
             <>
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">CLASSES</h2>
-                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-white transition-colors">
+                <h2 className="text-xl font-bold text-primary tracking-tight">CLASSES</h2>
+                <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-primary transition-colors">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
               </div>
@@ -647,7 +772,7 @@ function AppBody() {
                   <div>
                     <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Name</label>
                     <input
-                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
                       placeholder="e.g. DevOps"
                       value={newClassName}
                       onChange={(e) => setNewClassName(e.currentTarget.value)}
@@ -656,7 +781,7 @@ function AppBody() {
                   <div>
                     <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Description</label>
                     <textarea
-                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-20 resize-none"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-20 resize-none"
                       placeholder="Manages CI/CD pipelines and infrastructure..."
                       value={newClassDesc}
                       onChange={(e) => setNewClassDesc(e.currentTarget.value)}
@@ -665,7 +790,7 @@ function AppBody() {
                   <div>
                     <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">GEMINI.md</label>
                     <textarea
-                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-40 resize-none font-mono"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-40 resize-none font-mono"
                       placeholder={"# Role: " + (newClassName || "Agent") + "\n\nDefine the agent's system prompt..."}
                       value={newClassGeminiMd}
                       onChange={(e) => setNewClassGeminiMd(e.currentTarget.value)}
@@ -692,7 +817,7 @@ function AppBody() {
                   {agentClasses.filter(c => c.is_default).map(cls => (
                     <div key={cls.name} className="p-3 bg-wardian-card-bg-muted border border-wardian-border rounded-lg">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-bold text-white">{cls.name}</span>
+                        <span className="text-sm font-bold text-primary">{cls.name}</span>
                         <span className="text-[9px] font-bold text-muted-neutral uppercase tracking-widest bg-wardian-card-bg-muted px-2 py-0.5 rounded">Default</span>
                       </div>
                       <p className="text-[11px] text-muted-neutral">{cls.description}</p>
@@ -708,7 +833,7 @@ function AppBody() {
                       {agentClasses.filter(c => !c.is_default).map(cls => (
                         <div key={cls.name} className="p-3 bg-wardian-card-bg-muted border border-[var(--color-wardian-accent)]/20 rounded-lg group">
                           <div className="flex items-center justify-between mb-1">
-                            <span className="text-sm font-bold text-white">{cls.name}</span>
+                            <span className="text-sm font-bold text-primary">{cls.name}</span>
                             <button
                               onClick={() => deleteAgentClass(cls.name)}
                               className="text-muted hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-0.5"
@@ -735,7 +860,7 @@ function AppBody() {
         {leftCollapsed && (
           <button
             onClick={() => setLeftCollapsed(false)}
-            className="absolute top-6 left-6 z-20 p-2 bg-wardian-sidebar-primary border border-wardian-border rounded-lg text-white hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
+            className="absolute top-6 left-6 z-20 p-2 bg-wardian-sidebar-primary border border-wardian-border rounded-lg text-primary hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
           </button>
@@ -744,44 +869,44 @@ function AppBody() {
         <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
           <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-end">
             <div>
-              <h1 className="text-4xl font-bold tracking-tight text-white mb-2">Wardian</h1>
+              <h1 className="text-4xl font-bold tracking-tight text-primary mb-2">Wardian</h1>
               <p className="text-muted text-sm font-medium tracking-wide">Integrated Agent Environment</p>
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex gap-1 bg-[var(--color-wardian-sidebar-primary)]/50 p-1 rounded-lg border border-wardian-border overflow-x-auto no-scrollbar max-w-[500px]">
                 <button
                   onClick={() => setViewMode("grid")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'grid' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'grid' ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
                 >
                   GRID
                 </button>
                 <button
                   onClick={() => setViewMode("dashboard")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'dashboard' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'dashboard' ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
                 >
                   DASHBOARD
                 </button>
                 <button
                   onClick={() => setViewMode("queue")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'queue' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'queue' ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
                 >
                   QUEUE
                 </button>
                 <button
                   onClick={() => setViewMode("workflow-builder")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'workflow-builder' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'workflow-builder' ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
                 >
                   WORKFLOWS
                 </button>
                 <button
                   onClick={() => setViewMode("graph")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'graph' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'graph' ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
                 >
                   GRAPH
                 </button>
                 <button
                   onClick={() => setViewMode("garden")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'garden' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'garden' ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
                 >
                   GARDEN
                 </button>
@@ -803,9 +928,9 @@ function AppBody() {
                       <p className="text-xs font-bold text-blue-400 mb-1">
                         {agents.find(a => a.session_id === n.session_id)?.session_name || "Unknown Agent"}
                       </p>
-                      <p className="text-sm text-white">{n.message}</p>
+                      <p className="text-sm text-primary">{n.message}</p>
                     </div>
-                    <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-white">
+                    <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-primary">
                       &times;
                     </button>
                   </div>
@@ -822,7 +947,7 @@ function AppBody() {
                   {viewMode === "graph" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>}
                   {viewMode === "garden" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>}
                 </div>
-                <h2 className="text-2xl font-bold text-white mb-2 uppercase tracking-widest">
+                <h2 className="text-2xl font-bold text-primary mb-2 uppercase tracking-widest">
                   {viewMode.replace("-", " ")}
                 </h2>
                 <p className="text-muted max-w-md mx-auto mb-8 font-medium italic">
@@ -863,15 +988,15 @@ function AppBody() {
                   onDragOver={handleDragOver}
                   onDrop={(e) => handleDrop(e, index)}
                   className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none transition-none' : 'transition-all rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
-                    ? 'flex-col md:flex-row border border-gray-700/50 hover:border-gray-500 w-full cursor-move'
-                    : !isMaximized ? 'flex-col border border-gray-700 h-[500px] w-[calc(50%-0.5rem)] min-w-[650px]' : 'flex-col'
+                    ? 'flex-col md:flex-row border border-wardian-border/50 hover:border-wardian-border-heavy w-full cursor-move'
+                    : !isMaximized ? 'flex-col border border-wardian-border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px]' : 'flex-col'
                     } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
                 >
                   <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
                     <div className="flex flex-col justify-center p-4 bg-[var(--color-wardian-input-bg)] min-w-[200px] max-w-[280px] border-r border-wardian-light/50">
                       <div className="flex items-center gap-3 mb-1">
                         <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
-                        <h3 className="font-bold text-lg text-white truncate">{agent.session_name}</h3>
+                        <h3 className="font-bold text-lg text-primary truncate">{agent.session_name}</h3>
                       </div>
                       <span className="text-[10px] font-mono text-muted-neutral truncate">{agent.agent_class} • {agentId}</span>
                     </div>
@@ -879,7 +1004,7 @@ function AppBody() {
                     <div className="flex flex-1 items-center justify-start p-4 gap-8 overflow-x-auto no-scrollbar">
                       <div className="flex flex-col min-w-[120px]">
                         <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Hardware</span>
-                        <div className="flex items-center gap-2 text-sm font-mono text-white">
+                        <div className="flex items-center gap-2 text-sm font-mono text-primary">
                           <span className="text-wardian-processing bg-wardian-processing/10 px-1.5 py-0.5 rounded border border-wardian-processing/30">{metrics?.cpu_usage?.toFixed(1) || "0.0"}% CPU</span>
                           <span className="text-wardian-processing bg-wardian-processing/10 px-1.5 py-0.5 rounded border border-wardian-processing/30">{metrics?.memory_mb?.toFixed(0) || "0"} MB</span>
                         </div>
@@ -902,7 +1027,7 @@ function AppBody() {
                       </div>
                       <div className="flex flex-col flex-2 min-w-[200px]">
                         <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Current Status</span>
-                        <span className={`text-sm truncate ${effectiveStatus !== 'Idle' ? 'text-white italic' : 'text-muted-neutral'}`}>{currentThought}</span>
+                        <span className={`text-sm truncate ${effectiveStatus !== 'Idle' ? 'text-primary italic' : 'text-muted-neutral'}`}>{currentThought}</span>
                       </div>
                     </div>
 
@@ -985,7 +1110,7 @@ function AppBody() {
                         />
                       ) : (
                         <h3 
-                          className="font-bold text-lg text-white cursor-pointer hover:text-[var(--color-wardian-accent)] transition-colors"
+                          className="font-bold text-lg text-primary cursor-pointer hover:text-[var(--color-wardian-accent)] transition-colors"
                           onDoubleClick={() => { setEditingAgentId(agentId); setTempName(agent.session_name); }}
                         >
                           {agent.session_name} <span className="text-sm text-muted-neutral font-normal">({agent.agent_class})</span>
@@ -996,13 +1121,13 @@ function AppBody() {
                        {isMaximized ? (
                          <button 
                            onClick={() => setMaximizedAgentId(null)}
-                           className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-white px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
+                           className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                          >
                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                            MINIMIZE
                          </button>
                        ) : (
-                         <button onClick={() => setMaximizedAgentId(agentId)} className="text-bright-neutral hover:text-white transition-colors opacity-0 group-hover:opacity-100 p-1">
+                         <button onClick={() => setMaximizedAgentId(agentId)} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 p-1">
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                          </button>
                        )}
@@ -1020,11 +1145,12 @@ function AppBody() {
                     </div>
                   </div>
 
-                  <div className={`terminal-container bg-[#020402] p-4 overflow-hidden min-h-0 ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}>
+                  <div className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}>
                     <div className="absolute inset-4">
                       <AgentTerminal 
                         sessionId={agentId} 
                         isMaximized={isMaximized}
+                        theme={theme}
                         onTitleChange={(title) => handleTitleChange(agentId, title)} 
                       />
                     </div>
@@ -1114,7 +1240,7 @@ function AppBody() {
       {rightCollapsed && (
         <button
           onClick={() => setRightCollapsed(false)}
-          className="absolute top-6 right-6 z-20 p-2 bg-[var(--color-wardian-sidebar-primary)] border border-wardian-light rounded-lg text-white hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
+          className="absolute top-6 right-6 z-20 p-2 bg-[var(--color-wardian-sidebar-primary)] border border-wardian-light rounded-lg text-primary hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
         </button>

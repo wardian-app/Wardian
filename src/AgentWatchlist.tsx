@@ -279,19 +279,19 @@ export default function AgentWatchlist({
       <div className="p-4 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
         {/* ── Header ─────────────────────────────────────── */}
         <div className="flex justify-between items-center mb-3">
-          <h2 className="text-sm font-bold text-white uppercase tracking-widest truncate">
+          <h2 className="text-sm font-bold text-primary uppercase tracking-widest truncate">
             {activeList ? activeList.name : "All Agents"}
           </h2>
           <div className="flex items-center gap-1">
             <button
               onClick={handleCreateList}
-              className="p-1 text-white hover:text-[var(--color-wardian-accent)] transition-colors"
+              className="p-1 text-primary hover:text-[var(--color-wardian-accent)] transition-colors"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
               </svg>
             </button>
-            <button onClick={onCollapse} className="p-1 text-white hover:text-[var(--color-wardian-accent)]">
+            <button onClick={onCollapse} className="p-1 text-primary hover:text-[var(--color-wardian-accent)]">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
               </svg>
@@ -311,7 +311,7 @@ export default function AgentWatchlist({
             editingListId === list.id ? (
               <input
                 key={list.id}
-                className="watchlist-tab active w-16 text-center bg-transparent outline-none border-b border-[var(--color-wardian-accent)] text-white"
+                className="watchlist-tab active w-16 text-center bg-transparent outline-none border-b border-[var(--color-wardian-accent)] text-primary"
                 autoFocus
                 value={editingListName}
                 onChange={(e) => setEditingListName(e.target.value)}
@@ -337,7 +337,7 @@ export default function AgentWatchlist({
         {/* ── Search ─────────────────────────────────────── */}
         <div className="mb-3">
           <input
-            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded-lg px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="Search agents..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.currentTarget.value)}
@@ -410,7 +410,7 @@ export default function AgentWatchlist({
                 <div className="flex-1 min-w-0">
                   {editingAgentId === agentId ? (
                     <input
-                      className="text-xs font-bold text-white bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none w-full"
+                      className="text-xs font-bold text-primary bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none w-full"
                       autoFocus
                       value={editingAgentName}
                       onChange={(e) => setEditingAgentName(e.target.value)}
@@ -463,13 +463,13 @@ export default function AgentWatchlist({
           <div className="flex gap-2">
             <button
               onClick={() => onSelectionChange(new Set(displayedAgents.map((a) => a.session_id)))}
-              className="text-[10px] font-bold text-muted-neutral hover:text-white uppercase tracking-tighter"
+              className="text-[10px] font-bold text-muted-neutral hover:text-primary uppercase tracking-tighter"
             >
               Select All
             </button>
             <button
               onClick={() => onSelectionChange(new Set())}
-              className="text-[10px] font-bold text-muted-neutral hover:text-white uppercase tracking-tighter"
+              className="text-[10px] font-bold text-muted-neutral hover:text-primary uppercase tracking-tighter"
             >
               Clear
             </button>
