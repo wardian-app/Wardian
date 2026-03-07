@@ -1,9 +1,9 @@
 {
   "name": "wardian",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
-  "description": "Multi-agent Terminal Manager",
+  "description": "Integrated Agent Environment",
   "scripts": {
     "start": "tauri dev",
     "dev": "tauri dev",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-opener": "^2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-unicode11": "^0.9.0",

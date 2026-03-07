@@ -1,6 +1,6 @@
 # Wardian
 
-**Multi-agent Terminal Manager** — A desktop application for spawning, orchestrating, and monitoring multiple autonomous AI agents through a unified, high-performance interface.
+**Integrated Agent Environment** — A desktop application for spawning, orchestrating, and monitoring multiple autonomous AI agents through a unified, high-performance interface.
 
 Named after the [Wardian case](https://en.wikipedia.org/wiki/Wardian_case), a sealed glass terrarium that allowed delicate plants to thrive during long voyages — Wardian provides a controlled environment where AI agents can operate, collaborate, and grow.
 

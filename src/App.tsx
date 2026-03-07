@@ -9,6 +9,8 @@ import '@xterm/xterm/css/xterm.css';
 import "./App.css";
 
 import AgentWatchlist from "./AgentWatchlist";
+import { ConfigureAgentPanel } from "./ConfigureAgentPanel";
+import { SpawnAgentPanel } from "./SpawnAgentPanel";
 import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
 
 const terminalMap = new Map<string, Terminal>();
@@ -64,7 +66,9 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
         disableStdin: false
       });
       // xterm.js ignores scrollOnUserInput in options constructor, must be set via options object
-      term.options.scrollOnUserInput = false;
+      if (term.options) {
+        term.options.scrollOnUserInput = false;
+      }
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       
@@ -251,10 +255,6 @@ function App() {
 
 function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
-    const [newSessionName, setNewSessionName] = useState("");
-    const [newAgentClass, setNewAgentClass] = useState("Coder");
-    const [newFolder, setNewFolder] = useState("");
-    const [resumeSession, setResumeSession] = useState("");
     const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
     const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
     const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
@@ -264,7 +264,6 @@ function AppBody() {
     const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
     const [notifications, setNotifications] = useState<{ id: string; session_id: string; message: string; type: string }[]>([]);
     const [broadcastMessage, setBroadcastMessage] = useState("");
-    const [isSpawning, setIsSpawning] = useState(false);
 
     // New Sidebar & Selection States
     const [activeTab, setActiveTab] = useState<"agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings">("agent-config");
@@ -347,30 +346,6 @@ function AppBody() {
       setAgentClasses(list);
     } catch (e) {
       console.error("Failed to fetch agent classes:", e);
-    }
-  };
-
-  const spawnAgent = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setIsSpawning(true);
-    try {
-      const config = await invoke<AgentConfig>("spawn_agent", {
-        sessionName: newSessionName,
-        agentClass: newAgentClass,
-        folder: newFolder,
-        resumeSession: resumeSession || null,
-        isOff: false,
-      });
-      setAgents(prev => [...prev, config]);
-      setNewSessionName("");
-      setNewAgentClass("Coder");
-      setNewFolder("");
-      setResumeSession("");
-    } catch (error) {
-      console.error("Failed to spawn agent:", error);
-      alert(`Failed to spawn agent: ${error}`);
-    } finally {
-      setIsSpawning(false);
     }
   };
 
@@ -557,7 +532,7 @@ function AppBody() {
 
       {/* --- CONTENT PANE (LEFT COLLAPSIBLE) --- */}
       <aside className={`h-full bg-gray-900/30 border-r border-gray-800 sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
-        <div className="p-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
+        <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
           {activeTab === "agent-config" && (
             <>
               <div className="flex justify-between items-center mb-6">
@@ -567,77 +542,20 @@ function AppBody() {
                 </button>
               </div>
 
-              <div className="mb-8">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Spawn Instance</h3>
-                <form className="flex flex-col gap-4" onSubmit={spawnAgent}>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Session Name</label>
-                    <input
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                      placeholder="e.g. Coder_Alpha"
-                      value={newSessionName}
-                      onChange={(e) => setNewSessionName(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Agent Class</label>
-                    <select
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                      value={newAgentClass}
-                      onChange={(e) => setNewAgentClass(e.currentTarget.value)}
-                    >
-                      {agentClasses.length > 0 ? (
-                        <>
-                          <optgroup label="Default Classes">
-                            {agentClasses.filter(c => c.is_default).map(c => (
-                              <option key={c.name} value={c.name}>{c.name}</option>
-                            ))}
-                          </optgroup>
-                          {agentClasses.filter(c => !c.is_default).length > 0 && (
-                            <optgroup label="Custom Classes">
-                              {agentClasses.filter(c => !c.is_default).map(c => (
-                                <option key={c.name} value={c.name}>{c.name}</option>
-                              ))}
-                            </optgroup>
-                          )}
-                        </>
-                      ) : (
-                        <option value="Coder">Coder</option>
-                      )}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Workspace Path</label>
-                    <input
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                      placeholder="C:/projects/my-app"
-                      value={newFolder}
-                      onChange={(e) => setNewFolder(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Resume ID (Optional)</label>
-                    <input
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                      placeholder="e.g. 1a2b3c..."
-                      value={resumeSession}
-                      onChange={(e) => setResumeSession(e.currentTarget.value)}
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isSpawning}
-                    className="w-full mt-2 bg-emerald-800 hover:bg-emerald-700 disabled:bg-emerald-900 disabled:cursor-not-allowed text-white py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20"
-                  >
-                    {isSpawning ? (
-                      <div className="animate-spin w-4 h-4 border-2 border-white/30 border-t-white rounded-full"></div>
-                    ) : (
-                      "Initialize"
-                    )}
-                  </button>
-                </form>
-              </div>
+              {selectedAgentIds.size === 1 ? (
+                 <ConfigureAgentPanel 
+                    agentId={Array.from(selectedAgentIds)[0]} 
+                    agents={agents} 
+                    agentClasses={agentClasses} 
+                    telemetry={telemetry}
+                    onSaved={fetchAgents}
+                 />
+              ) : (
+                <SpawnAgentPanel 
+                  agentClasses={agentClasses} 
+                  onSpawned={fetchAgents} 
+                />
+              )}
             </>
           )}
 
@@ -827,7 +745,7 @@ function AppBody() {
           <header className="mb-6 border-b border-gray-700/50 pb-4 flex justify-between items-end">
             <div>
               <h1 className="text-4xl font-bold tracking-tight text-white mb-2">Wardian</h1>
-              <p className="text-gray-400 text-sm font-medium tracking-wide">Multi-agent Terminal Manager</p>
+              <p className="text-gray-400 text-sm font-medium tracking-wide">Integrated Agent Environment</p>
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex gap-1 bg-gray-900/50 p-1 rounded-lg border border-gray-800 overflow-x-auto no-scrollbar max-w-[500px]">
@@ -1179,6 +1097,12 @@ function AppBody() {
               next.delete(id);
               return next;
             });
+            setSelectedAgentIds(prev => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            if (editingAgentId === id) setEditingAgentId(null);
             fetchAgents(); 
           } 
         }}

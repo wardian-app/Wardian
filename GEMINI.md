@@ -1,6 +1,6 @@
 # Project Guidelines: Wardian
 
-## Multi-agent Terminal Manager
+## Integrated Agent Environment
 
 All agents contributing to the Wardian codebase must adhere to the following architectural and stylistic standards.
 

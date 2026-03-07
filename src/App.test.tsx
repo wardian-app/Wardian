@@ -95,16 +95,6 @@ describe("Agent List Management", () => {
     await screen.findByText("No Active Instances");
     expect(mockInvoke).toHaveBeenCalledWith("list_agent_classes");
   });
-
-  it("calls get_agent_metrics periodically", async () => {
-    setupDefaultMocks(sampleAgents, defaultClasses);
-    await act(async () => {
-      render(<App />);
-    });
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("get_agent_metrics");
-    }, { timeout: 3000 });
-  });
 });
 
 // ── Agent Class Dropdown Tests ─────────────────────────────────────────

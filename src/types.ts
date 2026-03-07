@@ -5,6 +5,20 @@ export interface AgentConfig {
     folder: string;
     resume_session?: string;
     is_off: boolean;
+    debug?: boolean;
+    model?: string;
+    sandbox?: boolean;
+    yolo?: boolean;
+    approval_mode?: "default" | "auto_edit" | "yolo" | "plan";
+    policy?: string[];
+    experimental_acp?: boolean;
+    allowed_mcp_server_names?: string[];
+    extensions?: string[];
+    include_directories?: string[];
+    system_include_directories?: string[];
+    screen_reader?: boolean;
+    output_format?: "text" | "json" | "stream-json";
+    custom_args?: string;
 }
 
 export interface AgentOutputPayload {
@@ -26,6 +40,7 @@ export interface AgentTelemetry {
     query_count: number;
     init_timestamp: string | null;
     current_status: string;
+    log_path: string | null;
 }
 
 export interface AgentClassDefinition {

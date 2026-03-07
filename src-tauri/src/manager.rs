@@ -24,6 +24,27 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
 
+pub fn resolve_system_include_directories(class_name: &str) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(app_dir) = get_wardian_home() {
+        let class_path = app_dir.join("classes").join(class_name);
+        let common_path = app_dir.join("common");
+
+        if common_path.exists() {
+            dirs.push(common_path.to_string_lossy().to_string());
+        }
+        if class_path.exists() {
+            dirs.push(class_path.to_string_lossy().to_string());
+        }
+    }
+    dirs
+}
+
+pub fn validate_directory_path(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    p.exists() && p.is_dir()
+}
+
 pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
     let mut configs: Vec<AgentConfig> = Vec::new();
     for id in order {
@@ -41,15 +62,47 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
+    #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
     pub session_name: String,
+    #[serde(default)]
     pub agent_class: String,
+    #[serde(default)]
     pub folder: String,
     pub resume_session: Option<String>,
     #[serde(default)]
     pub is_off: bool,
+    #[serde(default)]
+    pub debug: Option<bool>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub sandbox: Option<bool>,
+    #[serde(default)]
+    pub yolo: Option<bool>,
+    #[serde(default)]
+    pub approval_mode: Option<String>,
+    #[serde(default)]
+    pub policy: Option<Vec<String>>,
+    #[serde(default)]
+    pub experimental_acp: Option<bool>,
+    #[serde(default)]
+    pub allowed_mcp_server_names: Option<Vec<String>>,
+    #[serde(default)]
+    pub extensions: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_directories: Option<Vec<String>>,
+    #[serde(default)]
+    pub system_include_directories: Option<Vec<String>>,
+    #[serde(default)]
+    pub screen_reader: Option<bool>,
+    #[serde(default)]
+    pub output_format: Option<String>,
+    #[serde(default)]
+    pub custom_args: Option<String>,
 }
 
 pub struct ActiveAgent {
@@ -169,23 +222,81 @@ pub async fn spawn_gemini_cli(
     };
     cmd.cwd(&expected_folder);
 
-    // Apply strict classes constraints organically if the context map natively exists
-    if let Some(app_dir) = get_wardian_home() {
-        let class_path = app_dir.join("classes").join(&config.agent_class);
-        let common_path = app_dir.join("common");
-
-        let mut include_dirs = Vec::new();
-
-        if class_path.exists() {
-            include_dirs.push(class_path.to_string_lossy().to_string());
+    // Construct final include directories list for CLI
+    let mut final_includes = config
+        .system_include_directories
+        .clone()
+        .unwrap_or_default();
+    if let Some(ref user_dirs) = config.include_directories {
+        for dir in user_dirs {
+            if !final_includes.contains(dir) {
+                final_includes.push(dir.clone());
+            }
         }
-        if common_path.exists() {
-            include_dirs.push(common_path.to_string_lossy().to_string());
-        }
+    }
 
-        if !include_dirs.is_empty() {
-            cmd.arg("--include-directories");
-            cmd.arg(include_dirs.join(","));
+    if !final_includes.is_empty() {
+        cmd.arg("--include-directories");
+        cmd.arg(final_includes.join(","));
+    }
+
+    // Process new CLI optional fields
+    if config.debug.unwrap_or(false) {
+        cmd.arg("--debug");
+    }
+    if let Some(ref model) = config.model {
+        cmd.arg("--model");
+        cmd.arg(model);
+    }
+    if config.sandbox.unwrap_or(false) {
+        cmd.arg("--sandbox");
+    }
+    if config.yolo.unwrap_or(false) {
+        cmd.arg("--yolo");
+    }
+    if let Some(ref approval) = config.approval_mode {
+        if !approval.trim().is_empty() {
+            cmd.arg("--approval-mode");
+            cmd.arg(approval);
+        }
+    }
+    if let Some(ref policy) = config.policy {
+        if !policy.is_empty() {
+            cmd.arg("--policy");
+            cmd.arg(policy.join(","));
+        }
+    }
+    if config.experimental_acp.unwrap_or(false) {
+        cmd.arg("--experimental-acp");
+    }
+    if let Some(ref servers) = config.allowed_mcp_server_names {
+        if !servers.is_empty() {
+            for s in servers {
+                cmd.arg("--allowed-mcp-server-names");
+                cmd.arg(s);
+            }
+        }
+    }
+    if let Some(ref extensions) = config.extensions {
+        if !extensions.is_empty() {
+            cmd.arg("--extensions");
+            cmd.arg(extensions.join(","));
+        }
+    }
+    if config.screen_reader.unwrap_or(false) {
+        cmd.arg("--screen-reader");
+    }
+    if let Some(ref format) = config.output_format {
+        cmd.arg("--output-format");
+        cmd.arg(format);
+    }
+
+    // Parse custom arguments safely
+    if let Some(ref custom) = config.custom_args {
+        if let Some(args) = shlex::split(custom) {
+            for arg in args {
+                cmd.arg(arg);
+            }
         }
     }
 
@@ -528,7 +639,7 @@ pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<Stri
     None
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentTelemetry {
     pub session_id: String,
     pub cpu_usage: f32,
@@ -537,6 +648,7 @@ pub struct AgentTelemetry {
     pub query_count: usize,
     pub init_timestamp: Option<String>,
     pub current_status: String,
+    pub log_path: Option<String>,
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
@@ -745,6 +857,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let log_path_str = log_path_lock
+                .clone()
+                .map(|p| p.to_string_lossy().to_string());
 
             results.push(AgentTelemetry {
                 session_id: sid.clone(),
@@ -754,6 +869,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 query_count,
                 init_timestamp,
                 current_status,
+                log_path: log_path_str,
             });
         }
 
@@ -1140,6 +1256,7 @@ mod tests {
             folder: "C:/project".into(),
             resume_session: Some("def-456".into()),
             is_off: true,
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
@@ -1160,6 +1277,7 @@ mod tests {
             folder: "".into(),
             resume_session: None,
             is_off: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
@@ -1197,6 +1315,7 @@ mod tests {
             query_count: 42,
             init_timestamp: Some("2026-01-01T00:00:00Z".into()),
             current_status: "Idle".into(),
+            log_path: None,
         };
         let json = serde_json::to_string(&telemetry).unwrap();
         assert!(json.contains("\"session_id\":\"abc\""));
@@ -1214,6 +1333,7 @@ mod tests {
             folder: "".into(),
             resume_session: Some("ui-override-id".into()),
             is_off: false,
+            ..Default::default()
         };
         assert_eq!(determine_resume_id(&config, false), "ui-override-id");
         assert_eq!(determine_resume_id(&config, true), "ui-override-id");
@@ -1228,6 +1348,7 @@ mod tests {
             folder: "".into(),
             resume_session: None,
             is_off: false,
+            ..Default::default()
         };
         assert_eq!(determine_resume_id(&config, true), "restored-id");
     }
@@ -1241,6 +1362,7 @@ mod tests {
             folder: "".into(),
             resume_session: None,
             is_off: false,
+            ..Default::default()
         };
         assert_eq!(determine_resume_id(&config, false), "");
     }
@@ -1254,6 +1376,7 @@ mod tests {
             folder: "".into(),
             resume_session: Some("".into()),
             is_off: false,
+            ..Default::default()
         };
         // Empty override falls through to is_restored check
         assert_eq!(determine_resume_id(&config, false), "");

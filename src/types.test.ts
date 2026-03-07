@@ -49,6 +49,7 @@ describe("TypeScript Interface Shape Tests", () => {
         query_count: 42,
         init_timestamp: "2026-02-27T12:00:00Z",
         current_status: "Idle",
+        log_path: null,
       };
       expect(telemetry.cpu_usage).toBe(15.5);
       expect(telemetry.query_count).toBe(42);
@@ -63,6 +64,7 @@ describe("TypeScript Interface Shape Tests", () => {
         query_count: 0,
         init_timestamp: null,
         current_status: "Pending...",
+        log_path: null,
       };
       expect(telemetry.init_timestamp).toBeNull();
     });

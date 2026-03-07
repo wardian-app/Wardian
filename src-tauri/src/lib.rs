@@ -17,6 +17,7 @@ async fn spawn_agent(
     folder: String,
     resume_session: Option<String>,
     is_off: Option<bool>,
+    config_override: Option<AgentConfig>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AgentConfig, String> {
@@ -56,14 +57,15 @@ async fn spawn_agent(
         }
     }
 
-    let config = AgentConfig {
-        session_id: session_id.clone(),
-        session_name,
-        agent_class,
-        folder,
-        resume_session: actual_resume_config,
-        is_off: is_off.unwrap_or(false),
-    };
+    let mut config = config_override.unwrap_or_default();
+    config.session_id = session_id.clone();
+    config.session_name = session_name;
+    config.agent_class = agent_class.clone();
+    config.folder = folder;
+    config.resume_session = actual_resume_config;
+    config.is_off = is_off.unwrap_or(false);
+    config.system_include_directories =
+        Some(manager::resolve_system_include_directories(&agent_class));
 
     let active_agent = manager::spawn_gemini_cli(app.clone(), config.clone(), false).await?;
 
@@ -301,6 +303,49 @@ async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<()
 }
 
 #[tauri::command]
+async fn update_agent_config(
+    mut new_config: AgentConfig,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    manager::log_debug(&format!(
+        "[WARDIAN] update_agent_config called for session: {}",
+        new_config.session_id
+    ));
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+
+    if let Some(agent) = agents.get_mut(&new_config.session_id) {
+        // If class has changed, auto-update the system_include_directories
+        if agent.config.agent_class != new_config.agent_class {
+            manager::log_debug(&format!(
+                "[WARDIAN] Agent class changed from {} to {}. Updating system include directories.",
+                agent.config.agent_class, new_config.agent_class
+            ));
+            new_config.system_include_directories = Some(
+                manager::resolve_system_include_directories(&new_config.agent_class),
+            );
+        }
+
+        agent.config = new_config.clone();
+        manager::save_state(&app, &agents, &order);
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", new_config.session_id))
+    }
+}
+
+#[tauri::command]
+fn resolve_system_include_directories(class_name: String) -> Vec<String> {
+    manager::resolve_system_include_directories(&class_name)
+}
+
+#[tauri::command]
+fn validate_directory_path(path: String) -> bool {
+    manager::validate_directory_path(&path)
+}
+
+#[tauri::command]
 async fn resize_agent_terminal(
     session_id: String,
     cols: u16,
@@ -498,6 +543,7 @@ async fn save_watchlists(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -617,7 +663,10 @@ pub fn run() {
             create_agent_class,
             delete_agent_class,
             load_watchlists,
-            save_watchlists
+            save_watchlists,
+            update_agent_config,
+            resolve_system_include_directories,
+            validate_directory_path
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

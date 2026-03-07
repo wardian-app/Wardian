@@ -74,6 +74,7 @@ export default function AgentWatchlist({
   const [isRenaming, setIsRenaming] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const wasDragging = useRef(false);
+  const lastSelectedIdRef = useRef<string | null>(null);
 
   // ── Load watchlists from backend on mount ──────────────────────────
   useEffect(() => {
@@ -369,12 +370,37 @@ export default function AgentWatchlist({
                 onMouseDown={() => handleMouseDown(agentId)}
                 onMouseEnter={() => handleMouseEnterRow(agentId)}
                 onMouseUp={(e) => { e.stopPropagation(); handleMouseUp(); }}
-                onClick={() => {
+                onClick={(e) => {
                   if (wasDragging.current) { wasDragging.current = false; return; }
-                  const next = new Set(selectedAgentIds);
-                  if (next.has(agentId)) next.delete(agentId);
-                  else next.add(agentId);
-                  onSelectionChange(next);
+
+                  if (e.shiftKey && lastSelectedIdRef.current) {
+                    const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
+                    const lastIndex = displayedAgents.findIndex(a => a.session_id === lastSelectedIdRef.current);
+                    
+                    if (currentIndex !== -1 && lastIndex !== -1) {
+                      const start = Math.min(currentIndex, lastIndex);
+                      const end = Math.max(currentIndex, lastIndex);
+                      const rangeIds = displayedAgents.slice(start, end + 1).map(a => a.session_id);
+                      
+                      const next = (e.ctrlKey || e.metaKey) 
+                        ? new Set([...selectedAgentIds, ...rangeIds]) 
+                        : new Set(rangeIds);
+                        
+                      onSelectionChange(next);
+                      return;
+                    }
+                  }
+
+                  if (e.ctrlKey || e.metaKey) {
+                    const next = new Set(selectedAgentIds);
+                    if (next.has(agentId)) next.delete(agentId);
+                    else next.add(agentId);
+                    onSelectionChange(next);
+                    lastSelectedIdRef.current = agentId;
+                  } else {
+                    onSelectionChange(new Set([agentId]));
+                    lastSelectedIdRef.current = agentId;
+                  }
                 }}
                 onDoubleClick={() => onAgentClick(agentId)}
                 onContextMenu={(e) => handleContextMenu(e, agentId)}

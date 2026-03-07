@@ -103,6 +103,7 @@ describe("deriveCurrentThought", () => {
     query_count: 0,
     init_timestamp: null,
     current_status: "Idle",
+    log_path: null,
   };
 
   it("uses live thought when present", () => {
