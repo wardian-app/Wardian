@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-agent Terminal Manager"
 authors = ["Tan Gemicioglu"]
 edition = "2021"

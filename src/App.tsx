@@ -58,7 +58,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
     try {
       term = new Terminal({
         theme: { background: '#020402', foreground: '#EEF2EE', cursor: '#F1D382', selectionBackground: '#1E261E' },
-        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 5000,
+        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 1000,
         allowProposedApi: true,
         convertEol: true,
         disableStdin: false
@@ -85,7 +85,6 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
         try {
           const data = await invoke<string | null>("read_agent_pty", { sessionId });
           if (data && pollActive && isMounted && term) {
-            console.log(`[PTY-READ] Received ${data.length} characters`);
             await new Promise<void>(resolve => term!.write(data, resolve));
             if (pollActive && isMounted) requestAnimationFrame(pollPty);
           } else if (pollActive && isMounted) {
@@ -123,6 +122,7 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
 
       term.onData((data) => {
         if (data === '\x1b[I' || data === '\x1b[O') return;
+        term!.scrollToBottom();
         emit('terminal-input', { sessionId, input: data });
       });
 
@@ -155,7 +155,6 @@ const AgentTerminal = memo(function AgentTerminal({ sessionId, isMaximized, onTi
       let lastRows = term.rows;
 
       term.onResize((size) => {
-        console.log(`[DEBUG] xterm.onResize for ${sessionId}: cols=${size.cols}, rows=${size.rows}`);
         if (size.cols === lastCols && size.rows === lastRows) return;
         if (size.cols < 10 || size.rows < 2) return;
         lastCols = size.cols;
@@ -947,7 +946,7 @@ function AppBody() {
                   onDrop={(e) => handleDrop(e, index)}
                   className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none transition-none' : 'transition-all rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
                     ? 'flex-col md:flex-row border border-gray-700/50 hover:border-gray-500 w-full cursor-move'
-                    : !isMaximized ? 'flex-col border border-gray-700 h-[500px] flex-1 min-w-[650px] max-w-full' : 'flex-col'
+                    : !isMaximized ? 'flex-col border border-gray-700 h-[500px] w-[calc(50%-0.5rem)] min-w-[650px]' : 'flex-col'
                     } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
                 >
                   <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
