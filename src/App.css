@@ -4,10 +4,26 @@
   --color-wardian-bg: #040804;
   --color-wardian-card: #0a120a;
   --color-wardian-text: #e8f2e8;
+  --color-wardian-text-muted: #88a088;
+  --color-wardian-text-muted-neutral: #9ca3af;
   --color-wardian-accent: #d4af37;
   --color-wardian-accent-hover: #b8860b;
   --color-wardian-border: #1b261b;
-  --color-wardian-success: #2e7d32;
+  --color-wardian-border-heavy: #2d2d44;
+  --color-wardian-border-light: #374151;
+  
+  /* Semantic Statuses */
+  --color-wardian-success: #10b981;
+  --color-wardian-processing: #22d3ee;
+  --color-wardian-warning: #f59e0b;
+  --color-wardian-error: #ef4444;
+  --color-wardian-off: #4b5563;
+
+  /* Structural Components */
+  --color-wardian-sidebar-primary: #111827;
+  --color-wardian-sidebar-secondary: #0f172a;
+  --color-wardian-input-bg: rgba(31, 41, 55, 0.5);
+  --color-wardian-card-bg-muted: rgba(31, 41, 55, 0.3);
 
   /* Sidebar Widths */
   --sidebar-primary-width: 64px;
@@ -20,6 +36,25 @@
   color: var(--color-wardian-text);
   overflow: hidden;
 }
+
+.text-muted {
+  color: var(--color-wardian-text-muted);
+}
+
+.text-muted-neutral {
+  color: var(--color-wardian-text-muted-neutral);
+}
+
+/* Status Utilities */
+.bg-wardian-success { background-color: var(--color-wardian-success); }
+.bg-wardian-processing { background-color: var(--color-wardian-processing); }
+.bg-wardian-warning { background-color: var(--color-wardian-warning); }
+.bg-wardian-error { background-color: var(--color-wardian-error); }
+.bg-wardian-off { background-color: var(--color-wardian-off); }
+
+.border-wardian-accent { border-color: var(--color-wardian-accent); }
+.border-wardian-border { border-color: var(--color-wardian-border); }
+.border-wardian-light { border-color: var(--color-wardian-border-light); }
 
 /* Master Layout Transitions */
 .sidebar-transition {
@@ -95,16 +130,16 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #6b7280;
+  color: var(--color-wardian-text-muted-neutral);
   background: transparent;
-  border: 1px solid #374151;
+  border: 1px solid var(--color-wardian-border-light);
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 .watchlist-tab:hover {
   color: white;
-  border-color: #6b7280;
+  border-color: var(--color-wardian-text-muted-neutral);
 }
 .watchlist-tab.active {
   color: var(--color-wardian-accent);
@@ -125,8 +160,8 @@
   transition: all 0.15s ease;
 }
 .watchlist-row:hover {
-  background: rgba(55, 65, 81, 0.3);
-  border-color: rgba(75, 85, 99, 0.5);
+  background: var(--color-wardian-card-bg-muted);
+  border-color: var(--color-wardian-border-light);
 }
 .watchlist-row.selected {
   background: rgba(16, 185, 129, 0.08);
@@ -141,8 +176,8 @@
   position: fixed;
   z-index: 200;
   min-width: 180px;
-  background: #1a1a2e;
-  border: 1px solid #2d2d44;
+  background: #0f172a; /* sidebar-secondary style */
+  border: 1px solid var(--color-wardian-border-heavy);
   border-radius: 8px;
   padding: 4px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
@@ -175,12 +210,12 @@
   text-align: left;
 }
 .context-menu-item:hover {
-  background: rgba(75, 85, 99, 0.4);
+  background: var(--color-wardian-card-bg-muted);
   color: white;
 }
 .context-menu-divider {
   height: 1px;
-  background: #2d2d44;
+  background: var(--color-wardian-border-heavy);
   margin: 4px 0;
 }
 .context-menu-submenu {
@@ -191,8 +226,8 @@
   left: 100%;
   top: 0;
   min-width: 140px;
-  background: #1a1a2e;
-  border: 1px solid #2d2d44;
+  background: #0f172a;
+  border: 1px solid var(--color-wardian-border-heavy);
   border-radius: 8px;
   padding: 4px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);

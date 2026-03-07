@@ -107,20 +107,16 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
  */
 export function getStatusColorClass(effectiveStatus: string): string {
   if (effectiveStatus === "Processing...") {
-    // Distinct cyan/blue for active processing
-    return "bg-cyan-400 shadow-[0_0_8px_var(--color-wardian-accent)] animate-pulse";
+    return "bg-wardian-processing shadow-[0_0_8px_var(--color-wardian-processing)] animate-pulse";
   }
   if (effectiveStatus === "Action Needed") {
-    // Distinct vibrant yellow/amber
-    return "bg-amber-500 shadow-[0_0_10px_#f59e0b] animate-bounce";
+    return "bg-wardian-warning shadow-[0_0_10px_var(--color-wardian-warning)] animate-bounce";
   }
   if (effectiveStatus === "Idle") {
-    // Distinct emerald green for ready/idle
-    return "bg-emerald-500 shadow-[0_0_8px_#10b981]";
+    return "bg-wardian-success shadow-[0_0_8px_var(--color-wardian-success)]";
   }
   if (effectiveStatus === "Off") {
-    // Gray for off/paused state (was previously the default for idle too)
-    return "bg-gray-600 shadow-none";
+    return "bg-wardian-off shadow-none";
   }
-  return "bg-gray-500 flex-shrink-0";
+  return "bg-wardian-off flex-shrink-0";
 }

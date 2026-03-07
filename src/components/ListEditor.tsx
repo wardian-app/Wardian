@@ -24,9 +24,9 @@ export const ValidatedInput: React.FC<ValidatedInputProps> = ({
   }, [value, validate]);
 
   return (
-    <div className="flex items-center gap-1 w-full bg-gray-800/50 border border-gray-700 rounded px-2 py-1 transition-all focus-within:border-[var(--color-wardian-accent)]">
+    <div className="flex items-center gap-1 w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1 transition-all focus-within:border-[var(--color-wardian-accent)]">
       <input
-        className={`flex-1 bg-transparent text-xs ${readOnly ? 'text-gray-500/80 cursor-default' : 'text-white'} focus:outline-none min-w-0`}
+        className={`flex-1 bg-transparent text-xs ${readOnly ? 'text-muted-neutral/80 cursor-default' : 'text-white'} focus:outline-none min-w-0`}
         value={value}
         placeholder={placeholder}
         onChange={(e) => !readOnly && onChange?.(e.target.value)}
@@ -65,7 +65,7 @@ export const ListEditor: React.FC<ListEditorProps> = ({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="block text-[10px] font-bold text-gray-500 uppercase">{label}</label>
+      <label className="block text-[10px] font-bold text-muted-neutral uppercase">{label}</label>
       <div className="flex flex-col gap-1">
         {/* System Values (Locked) */}
         {safeSystemValues.map((val, idx) => (
@@ -82,7 +82,7 @@ export const ListEditor: React.FC<ListEditorProps> = ({
                   onSystemValueDelete?.(idx);
                 }
               }}
-              className="text-gray-600 hover:text-red-400 p-0.5 transition-colors shrink-0"
+              className="text-muted-neutral hover:text-wardian-error p-0.5 transition-colors shrink-0"
               title="Remove system directory"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -108,7 +108,7 @@ export const ListEditor: React.FC<ListEditorProps> = ({
             <button
               type="button"
               onClick={() => onChange(safeValues.filter((_, i) => i !== idx))}
-              className="text-gray-600 hover:text-red-400 p-0.5 transition-colors shrink-0"
+              className="text-muted-neutral hover:text-red-400 p-0.5 transition-colors shrink-0"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />

@@ -274,25 +274,24 @@ export default function AgentWatchlist({
   // ── Render ─────────────────────────────────────────────────────────
   return (
     <aside
-      className={`h-full bg-gray-900/50 border-l border-gray-800 sidebar-transition flex flex-col z-10 ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
+      className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-l border-wardian-border sidebar-transition flex flex-col z-10 ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
     >
       <div className="p-4 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
         {/* ── Header ─────────────────────────────────────── */}
         <div className="flex justify-between items-center mb-3">
-          <h2 className="text-sm font-bold text-gray-400 uppercase tracking-widest truncate">
+          <h2 className="text-sm font-bold text-white uppercase tracking-widest truncate">
             {activeList ? activeList.name : "All Agents"}
           </h2>
           <div className="flex items-center gap-1">
             <button
               onClick={handleCreateList}
-              className="p-1 text-gray-500 hover:text-white transition-colors"
-              title="New Watchlist"
+              className="p-1 text-white hover:text-[var(--color-wardian-accent)] transition-colors"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
               </svg>
             </button>
-            <button onClick={onCollapse} className="p-1 text-gray-500 hover:text-white">
+            <button onClick={onCollapse} className="p-1 text-white hover:text-[var(--color-wardian-accent)]">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
               </svg>
@@ -338,7 +337,7 @@ export default function AgentWatchlist({
         {/* ── Search ─────────────────────────────────────── */}
         <div className="mb-3">
           <input
-            className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="Search agents..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.currentTarget.value)}
@@ -346,7 +345,7 @@ export default function AgentWatchlist({
         </div>
 
         {/* ── Column Headers ─────────────────────────────── */}
-        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 text-[9px] font-bold text-gray-600 uppercase tracking-wider border-b border-gray-800 mb-1">
+        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 text-[9px] font-bold text-muted-neutral uppercase tracking-wider border-b border-wardian-border mb-1">
           <span></span>
           <span>Agent</span>
           <span>Status</span>
@@ -431,18 +430,18 @@ export default function AgentWatchlist({
                       onMouseDown={e => e.stopPropagation()}
                     />
                   ) : (
-                    <p className={`text-xs font-bold truncate ${isSelected ? "text-white" : "text-gray-300"}`}>
+                    <p className={`text-xs font-bold truncate ${isSelected ? "text-white" : "text-muted-neutral"}`}>
                       {agent.session_name}
                     </p>
                   )}
-                  <p className="text-[9px] text-gray-500 font-mono truncate uppercase">
+                  <p className="text-[9px] text-muted-neutral font-mono truncate uppercase">
                     {agent.agent_class}
                   </p>
                 </div>
-                <span className={`text-[9px] truncate max-w-[60px] ${status === "Processing..." ? "text-[var(--color-wardian-accent)]" : status === "Action Needed" ? "text-yellow-500" : "text-gray-500"}`}>
+                <span className={`text-[9px] truncate max-w-[60px] ${status === "Processing..." ? "text-[var(--color-wardian-accent)]" : status === "Action Needed" ? "text-wardian-warning" : "text-muted-neutral"}`}>
                   {status === "Processing..." ? thought.substring(0, 12) : status === "Action Needed" ? "Action" : status === "Off" ? "Off" : "Idle"}
                 </span>
-                <span className="text-[9px] text-gray-500 tabular-nums w-4 text-right">
+                <span className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
                   {metrics?.query_count ?? "–"}
                 </span>
               </div>
@@ -450,27 +449,27 @@ export default function AgentWatchlist({
           })}
 
           {displayedAgents.length === 0 && (
-            <div className="py-8 text-center text-gray-600 text-xs">
+            <div className="py-8 text-center text-muted-neutral text-xs">
               {agents.length === 0 ? "No agents spawned" : "No matches"}
             </div>
           )}
         </div>
 
         {/* ── Footer ─────────────────────────────────────── */}
-        <div className="mt-3 pt-3 border-t border-gray-800 flex justify-between items-center">
-          <span className="text-[9px] text-gray-600 uppercase tracking-wider">
+        <div className="mt-3 pt-3 border-t border-wardian-border flex justify-between items-center">
+          <span className="text-[9px] text-muted-neutral uppercase tracking-wider">
             {displayedAgents.length} agent{displayedAgents.length !== 1 ? "s" : ""}
           </span>
           <div className="flex gap-2">
             <button
               onClick={() => onSelectionChange(new Set(displayedAgents.map((a) => a.session_id)))}
-              className="text-[10px] font-bold text-gray-500 hover:text-white uppercase tracking-tighter"
+              className="text-[10px] font-bold text-muted-neutral hover:text-white uppercase tracking-tighter"
             >
               Select All
             </button>
             <button
               onClick={() => onSelectionChange(new Set())}
-              className="text-[10px] font-bold text-gray-500 hover:text-white uppercase tracking-tighter"
+              className="text-[10px] font-bold text-muted-neutral hover:text-white uppercase tracking-tighter"
             >
               Clear
             </button>
@@ -567,7 +566,7 @@ export default function AgentWatchlist({
           {getListsContainingAgent(watchlists, contextMenu.agentId).length > 0 && (
             <div className="context-menu-submenu">
               <button
-                className="context-menu-item text-red-400"
+                className="context-menu-item text-wardian-error"
                 onMouseEnter={() => setSubMenuListId("remove")}
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 12H4" /></svg>
@@ -593,7 +592,7 @@ export default function AgentWatchlist({
           <div className="context-menu-divider" />
 
           <button
-            className="context-menu-item text-red-400 hover:!bg-red-900/30"
+            className="context-menu-item text-wardian-error hover:!bg-wardian-error/20"
             onClick={() => {
               onDelete(contextMenu.agentId!);
               setContextMenu((p) => ({ ...p, visible: false }));
@@ -613,20 +612,20 @@ export default function AgentWatchlist({
           onClick={(e) => e.stopPropagation()}
         >
           <button
-            className="context-menu-item"
             onClick={() => {
               setEditingListId(tabContextMenu.listId!);
               const list = watchlists.find((l) => l.id === tabContextMenu.listId);
               if (list) setEditingListName(list.name);
               setTabContextMenu((p) => ({ ...p, visible: false }));
             }}
+            className="context-menu-item"
           >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
             Rename
           </button>
           <div className="context-menu-divider" />
           <button
-            className="context-menu-item text-red-400 hover:!bg-red-900/30"
+            className="context-menu-item text-wardian-error hover:!bg-wardian-error/20"
             onClick={() => {
               handleDeleteList(tabContextMenu.listId!);
               setTabContextMenu((p) => ({ ...p, visible: false }));

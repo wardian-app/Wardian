@@ -64,13 +64,16 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
 
   return (
     <div className="flex flex-col h-full">
+      <h3 className="text-xs font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest mb-4">
+        Configure Agent
+      </h3>
       <form className="flex flex-col gap-4 select-text" onSubmit={handleSave}>
         
         {/* Basic Fields */}
         <div className="flex flex-col gap-4">
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-[10px] font-bold text-gray-500 uppercase">Session ID</label>
+              <label className="block text-[10px] font-bold text-muted-neutral uppercase">Session ID</label>
               <button 
                 type="button"
                 onClick={async () => {
@@ -82,20 +85,20 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                     console.error("Failed to copy", e);
                   }
                 }}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedId ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-gray-700/50 text-gray-300 hover:text-white hover:bg-gray-600 border border-transparent'}`}
+                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedId ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-white hover:bg-wardian-light border border-transparent'}`}
               >
                 {copiedId ? "Copied!" : "Copy"}
               </button>
             </div>
             <input
               readOnly
-              className="w-full bg-black/50 border border-gray-700/50 rounded px-3 py-2 text-xs text-gray-400 font-mono focus:outline-none select-text cursor-text"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded px-3 py-2 text-xs text-muted-neutral font-mono focus:outline-none select-text cursor-text"
               value={config.session_id}
             />
           </div>
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-[10px] font-bold text-gray-500 uppercase">Log Path</label>
+              <label className="block text-[10px] font-bold text-muted-neutral uppercase">Log Path</label>
               <button 
                 type="button"
                 disabled={!telemetry[agentId]?.log_path}
@@ -110,29 +113,29 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                     console.error("Failed to copy", e);
                   }
                 }}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedLog ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-gray-700/50 text-gray-300 hover:text-white hover:bg-gray-600 border border-transparent disabled:opacity-30 disabled:cursor-not-allowed'}`}
+                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedLog ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-white hover:bg-wardian-light border border-transparent disabled:opacity-30 disabled:cursor-not-allowed'}`}
               >
                 {copiedLog ? "Copied!" : "Copy"}
               </button>
             </div>
             <input
               readOnly
-              className="w-full bg-black/50 border border-gray-700/50 rounded px-3 py-2 text-xs text-gray-400 font-mono focus:outline-none select-text cursor-text"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded px-3 py-2 text-xs text-muted-neutral font-mono focus:outline-none select-text cursor-text"
               value={telemetry[agentId]?.log_path || "Not available (Agent is offline or generating logs)"}
             />
           </div>
           <div>
-            <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Agent Name</label>
+            <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Agent Name</label>
             <input
-              className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               value={config.session_name}
               onChange={(e) => updateField("session_name", e.target.value)}
             />
           </div>
           <div>
-            <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Agent Class</label>
+            <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Agent Class</label>
             <select
-              className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               value={config.agent_class}
               onChange={async (e) => {
                 const newClass = e.target.value;

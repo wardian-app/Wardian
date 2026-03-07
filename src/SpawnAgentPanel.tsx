@@ -55,27 +55,27 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
 
   return (
     <div className="mb-8">
-      <h3 className="text-xs font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest mb-4">
+      <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-4">
         Spawn Agent
       </h3>
       <form className="flex flex-col gap-4" onSubmit={spawnAgent}>
         <div>
-          <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">
+          <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">
             Agent Name
           </label>
           <input
-            className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="e.g. Coder_Alpha"
             value={newSessionName}
             onChange={(e) => setNewSessionName(e.currentTarget.value)}
           />
         </div>
         <div>
-          <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">
+          <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">
             Agent Class
           </label>
           <select
-            className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             value={newAgentClass}
             onChange={(e) => setNewAgentClass(e.currentTarget.value)}
           >
@@ -108,12 +108,12 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
           </select>
         </div>
         <div>
-          <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">
+          <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">
             Workspace Path
           </label>
           <div className="relative flex items-center">
             <input
-              className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors pr-10"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors pr-10"
               placeholder="C:/projects/my-app"
               value={newFolder}
               onChange={(e) => setNewFolder(e.currentTarget.value)}
@@ -129,11 +129,11 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
           </div>
         </div>
         <div>
-          <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">
+          <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">
             Resume ID (Optional)
           </label>
           <input
-            className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="e.g. 1a2b3c..."
             value={resumeSession}
             onChange={(e) => setResumeSession(e.currentTarget.value)}
@@ -150,7 +150,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
         <button
           type="submit"
           disabled={isSpawning}
-          className="w-full mt-2 bg-emerald-800 hover:bg-emerald-700 disabled:bg-emerald-900 disabled:cursor-not-allowed text-white py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20"
+          className="w-full mt-2 bg-wardian-success/80 hover:bg-wardian-success/60 disabled:bg-wardian-off/30 disabled:cursor-not-allowed text-white py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-wardian-success/10"
         >
           {isSpawning ? (
             <div className="animate-spin w-4 h-4 border-2 border-white/30 border-t-white rounded-full"></div>

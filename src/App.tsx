@@ -474,14 +474,14 @@ function AppBody() {
   return (
     <div className="flex h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
       {/* --- PRIMARY SIDEBAR (ICON RAIL) --- */}
-      <aside className="w-[64px] h-full bg-gray-900/80 border-r border-gray-800 flex flex-col items-center py-4 gap-4 z-30">
+      <aside className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
         <div className="w-10 h-10 flex items-center justify-center mb-4">
           <img src="/icon.png" alt="Wardian" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(241,211,130,0.3)]" />
         </div>
 
         <button
           onClick={() => { setActiveTab("agent-config"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "agent-config" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          className={`p-3 rounded-xl transition-all ${activeTab === "agent-config" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted hover:text-white"}`}
           title="Agent Configuration"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a1.998 1.998 0 00-2.83 2"></path></svg>
@@ -489,7 +489,7 @@ function AppBody() {
 
         <button
           onClick={() => { setActiveTab("command"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "command" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          className={`p-3 rounded-xl transition-all ${activeTab === "command" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted hover:text-white"}`}
           title="Command Center"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
@@ -497,7 +497,7 @@ function AppBody() {
 
         <button
           onClick={() => { setActiveTab("classes"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "classes" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          className={`p-3 rounded-xl transition-all ${activeTab === "classes" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted hover:text-white"}`}
           title="Class Manager"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
@@ -505,7 +505,7 @@ function AppBody() {
 
         <button
           onClick={() => { setActiveTab("workflows"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "workflows" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          className={`p-3 rounded-xl transition-all ${activeTab === "workflows" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted hover:text-white"}`}
           title="Workflows"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
@@ -513,7 +513,7 @@ function AppBody() {
 
         <button
           onClick={() => { setActiveTab("ssh"); setLeftCollapsed(false); }}
-          className={`p-3 rounded-xl transition-all ${activeTab === "ssh" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+          className={`p-3 rounded-xl transition-all ${activeTab === "ssh" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted hover:text-white"}`}
           title="Remote Connections"
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
@@ -522,7 +522,7 @@ function AppBody() {
         <div className="mt-auto">
           <button
             onClick={() => { setActiveTab("settings"); setLeftCollapsed(false); }}
-            className={`p-3 rounded-xl transition-all ${activeTab === "settings" ? "bg-gray-800 text-[var(--color-wardian-accent)]" : "text-gray-500 hover:text-white"}`}
+            className={`p-3 rounded-xl transition-all ${activeTab === "settings" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted hover:text-white"}`}
             title="Application Settings"
           >
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
@@ -531,13 +531,13 @@ function AppBody() {
       </aside>
 
       {/* --- CONTENT PANE (LEFT COLLAPSIBLE) --- */}
-      <aside className={`h-full bg-gray-900/30 border-r border-gray-800 sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
+      <aside className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
         <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
           {activeTab === "agent-config" && (
             <>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-bold text-white tracking-tight">AGENT CONFIG</h2>
-                <button onClick={() => setLeftCollapsed(true)} className="text-gray-500 hover:text-white">
+                <button onClick={() => setLeftCollapsed(true)} className="text-white">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
               </div>
@@ -563,37 +563,37 @@ function AppBody() {
             <>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-bold text-white tracking-tight">COMMAND</h2>
-                <button onClick={() => setLeftCollapsed(true)} className="text-gray-500 hover:text-white">
+                <button onClick={() => setLeftCollapsed(true)} className="text-white">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
               </div>
 
               <div className="mb-8">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Quick Actions</h3>
+                <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-4">Quick Actions</h3>
                 <div className="grid grid-cols-1 gap-2">
-                   <button className="flex items-center gap-3 p-3 bg-gray-800/30 border border-gray-700/50 rounded-lg text-gray-400 hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group">
+                   <button className="flex items-center gap-3 p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-muted-neutral hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group">
                       <svg className="w-4 h-4 opacity-50 group-hover:opacity-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                       <span className="text-xs font-bold">Summarize Day</span>
                    </button>
-                   <button className="flex items-center gap-3 p-3 bg-gray-800/30 border border-gray-700/50 rounded-lg text-gray-400 hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group">
+                   <button className="flex items-center gap-3 p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-muted-neutral hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group">
                       <svg className="w-4 h-4 opacity-50 group-hover:opacity-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
                       <span className="text-xs font-bold">Run Health Check</span>
                    </button>
                 </div>
               </div>
 
-              <div className="mt-auto pt-6 border-t border-gray-800">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Broadcast</h3>
+              <div className="mt-auto pt-6 border-t border-wardian-border">
+                <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-4">Broadcast</h3>
                 <form onSubmit={broadcastInput} className="flex flex-col gap-2">
                   <textarea
-                    className="w-full bg-gray-800/30 border border-gray-700 rounded px-3 py-2 text-white text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
+                    className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-white text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
                     placeholder={selectedAgentIds.size > 0 ? `Message ${selectedAgentIds.size} selected...` : "Broadcast to all agents..."}
                     value={broadcastMessage}
                     onChange={(e) => setBroadcastMessage(e.currentTarget.value)}
                   />
                   <button
                     type="submit"
-                    className="bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/30 text-emerald-400 font-bold py-2 rounded text-[10px] uppercase tracking-wider transition-colors"
+                    className="bg-wardian-success/20 hover:bg-wardian-success/40 border border-wardian-success/30 text-wardian-success font-bold py-2 rounded text-[10px] uppercase tracking-wider transition-colors"
                   >
                     Execute Broadcast
                   </button>
@@ -608,7 +608,7 @@ function AppBody() {
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
               </div>
               <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Remote Nodes</h3>
-              <p className="text-xs text-gray-500 italic px-4">SSH Manager and remote execution capabilities are arriving in Phase 4.</p>
+              <p className="text-xs text-muted italic px-4">SSH Manager and remote execution capabilities are arriving in Phase 4.</p>
             </div>
           )}
 
@@ -618,7 +618,7 @@ function AppBody() {
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
               </div>
               <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Automation</h3>
-              <p className="text-xs text-gray-500 italic px-4">Scheduled tasks and automated workflows are arriving in Phase 3.</p>
+              <p className="text-xs text-muted italic px-4">Scheduled tasks and automated workflows are arriving in Phase 3.</p>
             </div>
           )}
 
@@ -628,7 +628,7 @@ function AppBody() {
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
               </div>
               <h3 className="text-sm font-bold text-white mb-2 uppercase tracking-widest">Settings</h3>
-              <p className="text-xs text-gray-500 italic px-4">Global configuration and theme management coming soon.</p>
+              <p className="text-xs text-muted italic px-4">Global configuration and theme management coming soon.</p>
             </div>
           )}
 
@@ -636,36 +636,36 @@ function AppBody() {
             <>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-bold text-white tracking-tight">CLASSES</h2>
-                <button onClick={() => setLeftCollapsed(true)} className="text-gray-500 hover:text-white">
+                <button onClick={() => setLeftCollapsed(true)} className="text-muted hover:text-white">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
                 </button>
               </div>
 
               <div className="mb-6">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Create Class</h3>
+                <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-4">Create Class</h3>
                 <form className="flex flex-col gap-3" onSubmit={createAgentClass}>
                   <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Name</label>
+                    <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Name</label>
                     <input
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
                       placeholder="e.g. DevOps"
                       value={newClassName}
                       onChange={(e) => setNewClassName(e.currentTarget.value)}
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Description</label>
+                    <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Description</label>
                     <textarea
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-20 resize-none"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-20 resize-none"
                       placeholder="Manages CI/CD pipelines and infrastructure..."
                       value={newClassDesc}
                       onChange={(e) => setNewClassDesc(e.currentTarget.value)}
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">GEMINI.md</label>
+                    <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">GEMINI.md</label>
                     <textarea
-                      className="w-full bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-40 resize-none font-mono"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-40 resize-none font-mono"
                       placeholder={"# Role: " + (newClassName || "Agent") + "\n\nDefine the agent's system prompt..."}
                       value={newClassGeminiMd}
                       onChange={(e) => setNewClassGeminiMd(e.currentTarget.value)}
@@ -674,7 +674,7 @@ function AppBody() {
                   <button
                     type="submit"
                     disabled={isCreatingClass || !newClassName.trim()}
-                    className="w-full bg-emerald-800 hover:bg-emerald-700 disabled:bg-emerald-900 disabled:cursor-not-allowed text-white py-2 rounded-lg font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20"
+                    className="w-full bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-muted-neutral hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 py-2 font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2"
                   >
                     {isCreatingClass ? (
                       <div className="animate-spin w-4 h-4 border-2 border-white/30 border-t-white rounded-full"></div>
@@ -685,17 +685,17 @@ function AppBody() {
                 </form>
               </div>
 
-              <div className="border-t border-gray-800 pt-4">
+              <div className="border-t border-wardian-border pt-4">
                 {/* Default Classes */}
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3">Default Classes</h3>
+                <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-3">Default Classes</h3>
                 <div className="space-y-2 mb-6">
                   {agentClasses.filter(c => c.is_default).map(cls => (
-                    <div key={cls.name} className="p-3 bg-gray-800/30 border border-gray-700/50 rounded-lg">
+                    <div key={cls.name} className="p-3 bg-wardian-card-bg-muted border border-wardian-border rounded-lg">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-sm font-bold text-white">{cls.name}</span>
-                        <span className="text-[9px] font-bold text-gray-600 uppercase tracking-widest bg-gray-800 px-2 py-0.5 rounded">Default</span>
+                        <span className="text-[9px] font-bold text-muted-neutral uppercase tracking-widest bg-wardian-card-bg-muted px-2 py-0.5 rounded">Default</span>
                       </div>
-                      <p className="text-[11px] text-gray-400 leading-relaxed">{cls.description}</p>
+                      <p className="text-[11px] text-muted-neutral">{cls.description}</p>
                     </div>
                   ))}
                 </div>
@@ -706,18 +706,18 @@ function AppBody() {
                     <h3 className="text-xs font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest mb-3">Custom Classes</h3>
                     <div className="space-y-2">
                       {agentClasses.filter(c => !c.is_default).map(cls => (
-                        <div key={cls.name} className="p-3 bg-gray-800/30 border border-[var(--color-wardian-accent)]/20 rounded-lg group">
+                        <div key={cls.name} className="p-3 bg-wardian-card-bg-muted border border-[var(--color-wardian-accent)]/20 rounded-lg group">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-sm font-bold text-white">{cls.name}</span>
                             <button
                               onClick={() => deleteAgentClass(cls.name)}
-                              className="text-gray-600 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-0.5"
+                              className="text-muted hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-0.5"
                               title="Delete class"
                             >
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                             </button>
                           </div>
-                          <p className="text-[11px] text-gray-400 leading-relaxed">{cls.description}</p>
+                          <p className="text-[11px] text-muted-neutral">{cls.description}</p>
                         </div>
                       ))}
                     </div>
@@ -735,58 +735,58 @@ function AppBody() {
         {leftCollapsed && (
           <button
             onClick={() => setLeftCollapsed(false)}
-            className="absolute top-6 left-6 z-20 p-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white transition-all shadow-xl"
+            className="absolute top-6 left-6 z-20 p-2 bg-wardian-sidebar-primary border border-wardian-border rounded-lg text-white hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
           </button>
         )}
 
         <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
-          <header className="mb-6 border-b border-gray-700/50 pb-4 flex justify-between items-end">
+          <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-end">
             <div>
               <h1 className="text-4xl font-bold tracking-tight text-white mb-2">Wardian</h1>
-              <p className="text-gray-400 text-sm font-medium tracking-wide">Integrated Agent Environment</p>
+              <p className="text-muted text-sm font-medium tracking-wide">Integrated Agent Environment</p>
             </div>
             <div className="flex flex-col items-end gap-2">
-              <div className="flex gap-1 bg-gray-900/50 p-1 rounded-lg border border-gray-800 overflow-x-auto no-scrollbar max-w-[500px]">
+              <div className="flex gap-1 bg-[var(--color-wardian-sidebar-primary)]/50 p-1 rounded-lg border border-wardian-border overflow-x-auto no-scrollbar max-w-[500px]">
                 <button
                   onClick={() => setViewMode("grid")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'grid' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'grid' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
                 >
                   GRID
                 </button>
                 <button
                   onClick={() => setViewMode("dashboard")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'dashboard' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'dashboard' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
                 >
                   DASHBOARD
                 </button>
                 <button
                   onClick={() => setViewMode("queue")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'queue' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'queue' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
                 >
                   QUEUE
                 </button>
                 <button
                   onClick={() => setViewMode("workflow-builder")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'workflow-builder' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'workflow-builder' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
                 >
                   WORKFLOWS
                 </button>
                 <button
                   onClick={() => setViewMode("graph")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'graph' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'graph' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
                 >
                   GRAPH
                 </button>
                 <button
                   onClick={() => setViewMode("garden")}
-                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'garden' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-gray-500 hover:text-gray-300'}`}
+                  className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === 'garden' ? 'bg-[var(--color-wardian-accent)] text-gray-900 shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-white'}`}
                 >
                   GARDEN
                 </button>
               </div>
-              <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-gray-600 uppercase tracking-widest">
+              <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-muted-neutral uppercase tracking-widest">
                 <span>CPU: {Object.values(telemetry).reduce((acc, curr) => acc + curr.cpu_usage, 0).toFixed(1)}%</span>
                 <span>MEM: {Object.values(telemetry).reduce((acc, curr) => acc + curr.memory_mb, 0).toFixed(0)} MB</span>
                 <span className="text-[var(--color-wardian-accent)]">Active: {agents.filter(a => !offAgentIds.has(a.session_id)).length}</span>
@@ -805,7 +805,7 @@ function AppBody() {
                       </p>
                       <p className="text-sm text-white">{n.message}</p>
                     </div>
-                    <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-gray-500 hover:text-white">
+                    <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-white">
                       &times;
                     </button>
                   </div>
@@ -825,11 +825,11 @@ function AppBody() {
                 <h2 className="text-2xl font-bold text-white mb-2 uppercase tracking-widest">
                   {viewMode.replace("-", " ")}
                 </h2>
-                <p className="text-gray-500 max-w-md mx-auto mb-8 font-medium italic">
+                <p className="text-muted max-w-md mx-auto mb-8 font-medium italic">
                   Advanced {viewMode === 'queue' ? 'human-in-the-loop' : viewMode} features coming in Phase {viewMode === 'queue' || viewMode === 'workflow-builder' ? '3' : '5'}.
                 </p>
                 <div className="flex gap-4">
-                   <div className="px-6 py-2 rounded-full border border-gray-800 text-[10px] font-bold text-gray-600 uppercase tracking-widest">Planned</div>
+                   <div className="px-6 py-2 rounded-full border border-gray-800 text-[10px] font-bold text-muted-neutral uppercase tracking-widest">Planned</div>
                    <div className="px-6 py-2 rounded-full bg-[var(--color-wardian-accent)]/10 text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest border border-[var(--color-wardian-accent)]/20">Phase {viewMode === 'queue' || viewMode === 'workflow-builder' ? '3' : '5'}</div>
                 </div>
              </div>
@@ -868,45 +868,45 @@ function AppBody() {
                     } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
                 >
                   <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
-                    <div className="flex flex-col justify-center p-4 bg-gray-800/50 min-w-[200px] max-w-[280px] border-r border-gray-700/50">
+                    <div className="flex flex-col justify-center p-4 bg-[var(--color-wardian-input-bg)] min-w-[200px] max-w-[280px] border-r border-wardian-light/50">
                       <div className="flex items-center gap-3 mb-1">
                         <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
                         <h3 className="font-bold text-lg text-white truncate">{agent.session_name}</h3>
                       </div>
-                      <span className="text-[10px] font-mono text-gray-500 truncate">{agent.agent_class} • {agentId}</span>
+                      <span className="text-[10px] font-mono text-muted-neutral truncate">{agent.agent_class} • {agentId}</span>
                     </div>
 
                     <div className="flex flex-1 items-center justify-start p-4 gap-8 overflow-x-auto no-scrollbar">
                       <div className="flex flex-col min-w-[120px]">
-                        <span className="text-[10px] font-bold text-gray-500 uppercase mb-1">Hardware</span>
-                        <div className="flex items-center gap-2 text-sm font-mono text-gray-300">
-                          <span className="text-blue-300 bg-blue-900/30 px-1.5 py-0.5 rounded border border-blue-800/50">{metrics?.cpu_usage?.toFixed(1) || "0.0"}% CPU</span>
-                          <span className="text-cyan-300 bg-cyan-900/30 px-1.5 py-0.5 rounded border border-cyan-800/50">{metrics?.memory_mb?.toFixed(0) || "0"} MB</span>
+                        <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Hardware</span>
+                        <div className="flex items-center gap-2 text-sm font-mono text-white">
+                          <span className="text-wardian-processing bg-wardian-processing/10 px-1.5 py-0.5 rounded border border-wardian-processing/30">{metrics?.cpu_usage?.toFixed(1) || "0.0"}% CPU</span>
+                          <span className="text-wardian-processing bg-wardian-processing/10 px-1.5 py-0.5 rounded border border-wardian-processing/30">{metrics?.memory_mb?.toFixed(0) || "0"} MB</span>
                         </div>
                       </div>
                       <div className="flex flex-col flex-1 min-w-[150px] max-w-[200px]">
-                        <span className="text-[10px] font-bold text-gray-500 uppercase mb-1">Workspace</span>
-                        <span className="text-sm font-mono text-gray-400 truncate" title={agent.folder}>{agent.folder}</span>
+                        <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Workspace</span>
+                        <span className="text-sm font-mono text-muted-neutral truncate" title={agent.folder}>{agent.folder}</span>
                       </div>
                       <div className="flex flex-col min-w-[110px]">
-                        <span className="text-[10px] font-bold text-gray-500 uppercase mb-1">Born</span>
-                        <span className="text-[11px] font-mono text-gray-400">
+                        <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Born</span>
+                        <span className="text-[11px] font-mono text-muted-neutral">
                           {metrics?.init_timestamp 
                             ? new Date(metrics.init_timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) 
                             : "—"}
                         </span>
                       </div>
                       <div className="flex flex-col min-w-[60px]">
-                        <span className="text-[10px] font-bold text-gray-500 uppercase mb-1">Queries</span>
+                        <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Queries</span>
                         <span className="text-sm font-bold text-[var(--color-wardian-accent)]">{metrics?.query_count || 0}</span>
                       </div>
                       <div className="flex flex-col flex-2 min-w-[200px]">
-                        <span className="text-[10px] font-bold text-gray-500 uppercase mb-1">Current Status</span>
-                        <span className={`text-sm truncate ${effectiveStatus !== 'Idle' ? 'text-white italic' : 'text-gray-500'}`}>{currentThought}</span>
+                        <span className="text-[10px] font-bold text-muted-neutral uppercase mb-1">Current Status</span>
+                        <span className={`text-sm truncate ${effectiveStatus !== 'Idle' ? 'text-white italic' : 'text-muted-neutral'}`}>{currentThought}</span>
                       </div>
                     </div>
 
-                    <div className="flex flex-col justify-center p-3 w-[260px] bg-gray-800/30 border-l border-gray-700/50">
+                    <div className="flex flex-col justify-center p-3 w-[260px] bg-wardian-card-bg-muted border-l border-wardian-light/50">
                       <div className="grid grid-cols-2 gap-2 w-full">
                         <button 
                           onClick={() => {
@@ -916,8 +916,8 @@ function AppBody() {
                           disabled={isOff}
                           className={`h-8 flex items-center justify-center border text-[10px] rounded transition-colors ${
                             isOff 
-                              ? 'bg-gray-900/20 text-gray-600 border-gray-800/30 cursor-not-allowed'
-                              : 'bg-yellow-900/20 text-yellow-400 border-yellow-800/30 hover:bg-yellow-900/40'
+                              ? 'bg-wardian-card-bg-muted/50 text-muted border-wardian-border/30 cursor-not-allowed'
+                              : 'bg-wardian-warning/10 text-wardian-warning border-wardian-warning/30 hover:bg-wardian-warning/20'
                           }`}
                         >Pause</button>
                         <button 
@@ -934,7 +934,7 @@ function AppBody() {
                             
                             fetchAgents();
                           }} 
-                          className="h-8 flex items-center justify-center bg-green-900/20 text-green-400 border border-green-800/30 text-[10px] rounded hover:bg-green-900/40 transition-colors"
+                          className="h-8 flex items-center justify-center bg-wardian-success/10 text-wardian-success border border-wardian-success/30 text-[10px] rounded hover:bg-wardian-success/20 transition-colors"
                         >{isOff ? "Start" : "Restart"}</button>
                         <button 
                           onClick={async () => {
@@ -949,11 +949,11 @@ function AppBody() {
                             
                             fetchAgents();
                           }} 
-                          className="h-8 flex items-center justify-center bg-red-900/20 text-red-500 border border-red-800/30 text-[10px] rounded hover:bg-red-900/50 transition-colors"
+                          className="h-8 flex items-center justify-center bg-wardian-error/10 text-wardian-error border border-wardian-error/30 text-[10px] rounded hover:bg-wardian-error/20 transition-colors"
                         >Delete</button>
                         <div className="relative h-8">
                           <select
-                            className="w-full h-full appearance-none bg-blue-900/30 hover:bg-blue-900/50 border border-blue-800/50 text-[10px] text-blue-300 rounded transition-colors cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500 text-center"
+                            className="w-full h-full appearance-none bg-wardian-processing/10 hover:bg-wardian-processing/20 border border-wardian-processing/30 text-[10px] text-wardian-processing rounded transition-colors cursor-pointer focus:outline-none focus:ring-1 focus:ring-wardian-processing text-center"
                             style={{ textAlignLast: 'center' }}
                             defaultValue=""
                             onChange={(e) => { if (e.target.value) { sendCommand(agentId, e.target.value); e.target.value = ""; } }}
@@ -971,7 +971,7 @@ function AppBody() {
                     </div>
                   </div>
 
-                  <div className={`bg-gray-800 p-4 border-b border-gray-700 justify-between items-center group ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'}`}>
+                  <div className={`bg-[var(--color-wardian-sidebar-primary)] p-4 border-b border-wardian-light justify-between items-center group ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'}`}>
                     <div className="flex items-center gap-3">
                       <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
                       {editingAgentId === agentId ? (
@@ -988,7 +988,7 @@ function AppBody() {
                           className="font-bold text-lg text-white cursor-pointer hover:text-[var(--color-wardian-accent)] transition-colors"
                           onDoubleClick={() => { setEditingAgentId(agentId); setTempName(agent.session_name); }}
                         >
-                          {agent.session_name} <span className="text-sm text-gray-400 font-normal">({agent.agent_class})</span>
+                          {agent.session_name} <span className="text-sm text-muted-neutral font-normal">({agent.agent_class})</span>
                         </h3>
                       )}
                     </div>
@@ -996,13 +996,13 @@ function AppBody() {
                        {isMaximized ? (
                          <button 
                            onClick={() => setMaximizedAgentId(null)}
-                           className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
+                           className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-white px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                          >
                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                            MINIMIZE
                          </button>
                        ) : (
-                         <button onClick={() => setMaximizedAgentId(agentId)} className="text-gray-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 p-1">
+                         <button onClick={() => setMaximizedAgentId(agentId)} className="text-muted hover:text-white transition-colors opacity-0 group-hover:opacity-100 p-1">
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                          </button>
                        )}
@@ -1016,7 +1016,7 @@ function AppBody() {
                            });
                            fetchAgents(); 
                          } 
-                       }} className="text-gray-500 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                       }} className="text-muted hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                     </div>
                   </div>
 
@@ -1034,7 +1034,7 @@ function AppBody() {
             })}
 
             {agents.length === 0 && (
-              <div className="col-span-full h-64 flex flex-col items-center justify-center text-gray-600 border-2 border-dashed border-gray-800 rounded-xl">
+              <div className="col-span-full h-64 flex flex-col items-center justify-center text-muted border-2 border-dashed border-wardian-border rounded-xl">
                 <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
                 <p className="text-sm font-bold uppercase tracking-widest">No Active Instances</p>
               </div>
@@ -1114,7 +1114,7 @@ function AppBody() {
       {rightCollapsed && (
         <button
           onClick={() => setRightCollapsed(false)}
-          className="absolute top-6 right-6 z-20 p-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white transition-all shadow-xl"
+          className="absolute top-6 right-6 z-20 p-2 bg-[var(--color-wardian-sidebar-primary)] border border-wardian-light rounded-lg text-white hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
         </button>
