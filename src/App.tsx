@@ -612,6 +612,7 @@ function AppBody() {
                     agentClasses={agentClasses} 
                     telemetry={telemetry}
                     onSaved={fetchAgents}
+                    onBackToSpawn={() => setSelectedAgentIds(new Set())}
                  />
               ) : (
                 <SpawnAgentPanel 
