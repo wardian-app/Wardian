@@ -229,7 +229,7 @@ describe("Spawn Form", () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByPlaceholderText("e.g. Coder_Alpha")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g. Coder 3")).toBeInTheDocument();
   });
 
   it("renders workspace path placeholder", async () => {

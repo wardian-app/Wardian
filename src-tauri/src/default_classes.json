@@ -1,5 +1,9 @@
 [
     {
+        "name":  "Generalist",
+        "description":  "A versatile agent without specialized role instructions, capable of handling a wide range of tasks."
+    },
+    {
         "name":  "Coder",
         "description":  "Writes clean, efficient, and well-documented code based on provided specifications."
     },
@@ -34,9 +38,5 @@
     {
         "name":  "Personal Assistant",
         "description":  "Helps organize schedules, draft emails, manage daily tasks, and provide general administrative support."
-    },
-    {
-        "name":  "Designer",
-        "description":  "Crafts intuitive UI/UX designs, wireframes, and visual layouts with a focus on aesthetics, accessibility, and user experience."
     }
 ]

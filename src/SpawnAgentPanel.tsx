@@ -10,7 +10,7 @@ interface Props {
 
 export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) => {
   const [newSessionName, setNewSessionName] = useState("");
-  const [newAgentClass, setNewAgentClass] = useState("Coder");
+  const [newAgentClass, setNewAgentClass] = useState("Generalist");
   const [newFolder, setNewFolder] = useState("");
   const [resumeSession, setResumeSession] = useState("");
   const [spawnAdvancedConfig, setSpawnAdvancedConfig] = useState<Partial<AgentConfig>>({});
@@ -40,7 +40,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
         configOverride: spawnAdvancedConfig,
       });
       setNewSessionName("");
-      setNewAgentClass("Coder");
+      setNewAgentClass("Generalist");
       setNewFolder("");
       setResumeSession("");
       setSpawnAdvancedConfig({});
