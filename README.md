@@ -75,19 +75,32 @@ Wardian is a **governance layer for AI orchestration**. It centralizes PTY manag
 
 ## 🛠️ Getting Started
 
-### Prerequisites
+### 1. Dev Environment Setup
 
-1.  **Rust**: [rustup.rs](https://rustup.rs/) (latest stable).
-2.  **Node.js**: (v18+).
+1.  **Rust**: Install [rustup.rs](https://rustup.rs/) (latest stable).
+2.  **Node.js**: Ensure Node.js (v18+) is installed.
 3.  **Gemini CLI**: `npm install -g @google/gemini-cli` (Authenticated).
+4.  **Clone & Install**:
+    ```bash
+    git clone https://github.com/tangemicioglu/Wardian.git
+    cd Wardian
+    npm install
+    ```
 
-### Installation
+### 2. Development Workflow
+
+To run the application in development mode with live reloading:
 
 ```bash
-git clone https://github.com/tangemicioglu/Wardian.git
-cd Wardian
-npm install
 npm run dev
+```
+
+### 3. Production Build
+
+To generate a production-ready release executable for your platform:
+
+```bash
+npm run tauri build
 ```
 
 ---
