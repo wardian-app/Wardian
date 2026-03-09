@@ -23,3 +23,34 @@ dist-ssr
 *.sln
 *.sw?
 .gemini/*
+
+# Backup and test files
+*.bak
+*.prior
+*_backup.*
+
+# Environment
+.env
+.env.*.local
+
+# Build & Tooling
+.eslintcache
+.stylelintcache
+
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Tauri/Rust specifics
+src-tauri/*.log
+src-tauri/target/
+src-tauri/gen/
