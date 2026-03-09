@@ -377,6 +377,65 @@ function AppBody() {
     const [newClassGeminiMd, setNewClassGeminiMd] = useState("");
     const [isCreatingClass, setIsCreatingClass] = useState(false);
 
+    // Selection/Click Refs for sync
+    const lastSelectedIdRef = useRef<string | null>(null);
+    const lastClickRef = useRef<{ id: string; time: number } | null>(null);
+
+    const handleAgentCardClick = useCallback((e: React.MouseEvent, agentId: string) => {
+        const now = Date.now();
+        const DOUBLE_CLICK_TOLERANCE = 450;
+        
+        // Handle double click -> maximize
+        if (lastClickRef.current && 
+            lastClickRef.current.id === agentId && 
+            (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE) {
+          setMaximizedAgentId(prev => (prev === agentId ? null : agentId));
+          setSelectedAgentIds(new Set([agentId]));
+          lastClickRef.current = null;
+          return;
+        }
+        
+        lastClickRef.current = { id: agentId, time: now };
+
+        // Support standard multi-select matching the sidebar logic
+        if (e.shiftKey && lastSelectedIdRef.current) {
+          const currentIndex = filteredAgents.findIndex(a => a.session_id === agentId);
+          const lastIndex = filteredAgents.findIndex(a => a.session_id === lastSelectedIdRef.current);
+          
+          if (currentIndex !== -1 && lastIndex !== -1) {
+            const start = Math.min(currentIndex, lastIndex);
+            const end = Math.max(currentIndex, lastIndex);
+            const rangeIds = filteredAgents.slice(start, end + 1).map(a => a.session_id);
+            
+            const next = (e.ctrlKey || e.metaKey) 
+              ? new Set([...selectedAgentIds, ...rangeIds]) 
+              : new Set(rangeIds);
+              
+            setSelectedAgentIds(next);
+            return;
+          }
+        }
+
+        if (e.ctrlKey || e.metaKey) {
+          setSelectedAgentIds(prev => {
+            const next = new Set(prev);
+            if (next.has(agentId)) next.delete(agentId);
+            else next.add(agentId);
+            return next;
+          });
+          lastSelectedIdRef.current = agentId;
+        } else {
+          // Toggle selection if single-selected
+          if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
+            setSelectedAgentIds(new Set());
+            lastSelectedIdRef.current = null;
+          } else {
+            setSelectedAgentIds(new Set([agentId]));
+            lastSelectedIdRef.current = agentId;
+          }
+        }
+    }, [filteredAgents, selectedAgentIds]);
+
 
 
   const handleDragStart = (e: React.DragEvent, index: number) => {
@@ -994,6 +1053,7 @@ function AppBody() {
               const agentId = agent.session_id.toString();
               const isMaximized = maximizedAgentId === agentId;
               const isOff = offAgentIds.has(agentId);
+              const isSelected = selectedAgentIds.has(agentId);
               
               if (isOff && !isMaximized) return null;
               
@@ -1017,9 +1077,10 @@ function AppBody() {
                   onDragStart={(e) => handleDragStart(e, index)}
                   onDragOver={handleDragOver}
                   onDrop={(e) => handleDrop(e, index)}
+                  onClick={(e) => !isMaximized && handleAgentCardClick(e, agentId)}
                   className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none transition-none' : 'transition-all rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
-                    ? 'flex-col md:flex-row border border-wardian-border/50 hover:border-wardian-border-heavy w-full cursor-move'
-                    : !isMaximized ? 'flex-col border border-wardian-border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px]' : 'flex-col'
+                    ? 'flex-col md:flex-row border w-full cursor-move ' + (isSelected ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border/50 hover:border-wardian-border-heavy')
+                    : !isMaximized ? 'flex-col border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border') : 'flex-col'
                     } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
                 >
                   <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
@@ -1064,7 +1125,8 @@ function AppBody() {
                     <div className="flex flex-col justify-center p-3 w-[260px] bg-wardian-card-bg-muted border-l border-wardian-light/50">
                       <div className="grid grid-cols-2 gap-2 w-full">
                         <button 
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation();
                             sendCommand(agentId, "\x13");
                             setOffAgentIds(prev => new Set(prev).add(agentId));
                           }} 
@@ -1076,7 +1138,8 @@ function AppBody() {
                           }`}
                         >Pause</button>
                         <button 
-                          onClick={async () => {
+                          onClick={async (e) => {
+                            e.stopPropagation();
                             if (!confirm(isOff ? "Start?" : "Restart?")) return;
                             await invoke("kill_agent", { sessionId: agentId });
                             await invoke("spawn_agent", { sessionName: agent.session_name, agentClass: agent.agent_class, folder: agent.folder, resumeSession: agentId });
@@ -1092,7 +1155,8 @@ function AppBody() {
                           className="h-8 flex items-center justify-center bg-wardian-success/10 text-wardian-success border border-wardian-success/30 text-[10px] rounded hover:bg-wardian-success/20 transition-colors"
                         >{isOff ? "Start" : "Restart"}</button>
                         <button 
-                          onClick={async () => {
+                          onClick={async (e) => {
+                            e.stopPropagation();
                             if (!confirm("Delete?")) return;
                             await invoke("kill_agent", { sessionId: agentId });
                             
@@ -1106,7 +1170,7 @@ function AppBody() {
                           }} 
                           className="h-8 flex items-center justify-center bg-wardian-error/10 text-wardian-error border border-wardian-error/30 text-[10px] rounded hover:bg-wardian-error/20 transition-colors"
                         >Delete</button>
-                        <div className="relative h-8">
+                        <div className="relative h-8" onClick={(e) => e.stopPropagation()}>
                           <select
                             className="w-full h-full appearance-none bg-wardian-processing/10 hover:bg-wardian-processing/20 border border-wardian-processing/30 text-[10px] text-wardian-processing rounded transition-colors cursor-pointer focus:outline-none focus:ring-1 focus:ring-wardian-processing text-center"
                             style={{ textAlignLast: 'center' }}
@@ -1126,7 +1190,7 @@ function AppBody() {
                     </div>
                   </div>
 
-                  <div className={`bg-[var(--color-wardian-sidebar-primary)] p-4 border-b border-wardian-light justify-between items-center group ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'}`}>
+                  <div className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'} ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}>
                     <div className="flex items-center gap-3">
                       <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
                       {editingAgentId === agentId ? (
@@ -1137,11 +1201,12 @@ function AppBody() {
                           onChange={(e) => setTempName(e.target.value)}
                           onBlur={() => renameAgent(agentId, tempName)}
                           onKeyDown={(e) => e.key === 'Enter' && renameAgent(agentId, tempName)}
+                          onClick={(e) => e.stopPropagation()}
                         />
                       ) : (
                         <h3 
                           className="font-bold text-lg text-primary cursor-pointer hover:text-[var(--color-wardian-accent)] transition-colors"
-                          onDoubleClick={() => { setEditingAgentId(agentId); setTempName(agent.session_name); }}
+                          onDoubleClick={(e) => { e.stopPropagation(); setEditingAgentId(agentId); setTempName(agent.session_name); }}
                         >
                           {agent.session_name} <span className="text-sm text-muted-neutral font-normal">({agent.agent_class})</span>
                         </h3>
@@ -1150,18 +1215,19 @@ function AppBody() {
                     <div className="flex items-center gap-2">
                        {isMaximized ? (
                          <button 
-                           onClick={() => setMaximizedAgentId(null)}
+                           onClick={(e) => { e.stopPropagation(); setMaximizedAgentId(null); }}
                            className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                          >
                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                            MINIMIZE
                          </button>
                        ) : (
-                         <button onClick={() => setMaximizedAgentId(agentId)} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 p-1">
+                         <button onClick={(e) => { e.stopPropagation(); setMaximizedAgentId(agentId); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 p-1">
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                          </button>
                        )}
-                       <button onClick={async () => { 
+                       <button onClick={async (e) => { 
+                         e.stopPropagation();
                          if (confirm("Delete?")) { 
                            await invoke("kill_agent", { sessionId: agentId }); 
                            setOffAgentIds(prev => {
