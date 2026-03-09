@@ -367,8 +367,10 @@ function AppBody() {
       return () => mediaQuery.removeEventListener("change", applyTheme);
     }, [theme]);
 
-    // Drag and Drop State
-    const [draggedAgentIndex, setDraggedAgentIndex] = useState<number | null>(null);
+    // Drag and Drop State (Mouse-based)
+    const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
+    const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
+    const wasDraggingRef = useRef(false);
 
     // Agent Classes State
     const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
@@ -382,21 +384,6 @@ function AppBody() {
     const lastClickRef = useRef<{ id: string; time: number } | null>(null);
 
     const handleAgentCardClick = useCallback((e: React.MouseEvent, agentId: string) => {
-        const now = Date.now();
-        const DOUBLE_CLICK_TOLERANCE = 450;
-        
-        // Handle double click -> maximize
-        if (lastClickRef.current && 
-            lastClickRef.current.id === agentId && 
-            (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE) {
-          setMaximizedAgentId(prev => (prev === agentId ? null : agentId));
-          setSelectedAgentIds(new Set([agentId]));
-          lastClickRef.current = null;
-          return;
-        }
-        
-        lastClickRef.current = { id: agentId, time: now };
-
         // Support standard multi-select matching the sidebar logic
         if (e.shiftKey && lastSelectedIdRef.current) {
           const currentIndex = filteredAgents.findIndex(a => a.session_id === agentId);
@@ -425,10 +412,24 @@ function AppBody() {
           });
           lastSelectedIdRef.current = agentId;
         } else {
-          // Toggle selection if single-selected
+          // Double click check to prevent toggle unselect
+          const now = Date.now();
+          const DOUBLE_CLICK_TOLERANCE = 450;
+          const isDoubleClick = lastClickRef.current && 
+                               lastClickRef.current.id === agentId && 
+                               (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
+          
+          lastClickRef.current = { id: agentId, time: now };
+
+          // Toggle selection if single-selected (but not if double-clicked)
           if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-            setSelectedAgentIds(new Set());
-            lastSelectedIdRef.current = null;
+            if (!isDoubleClick) {
+              setSelectedAgentIds(new Set());
+              lastSelectedIdRef.current = null;
+            } else {
+              // Ensure it stays selected on double click
+              lastSelectedIdRef.current = agentId;
+            }
           } else {
             setSelectedAgentIds(new Set([agentId]));
             lastSelectedIdRef.current = agentId;
@@ -436,45 +437,66 @@ function AppBody() {
         }
     }, [filteredAgents, selectedAgentIds]);
 
+  // --- Mouse-based Drag & Drop Logic ---
+  const handleMouseDown = (agentId: string) => {
+    setDraggedAgentId(agentId);
+  };
 
-
-  const handleDragStart = (e: React.DragEvent, index: number) => {
-    if (viewMode !== 'dashboard') return;
-    setDraggedAgentIndex(index);
-    if (e.target instanceof HTMLElement) {
-      e.dataTransfer.effectAllowed = "move";
+  const handleMouseEnterCard = (agentId: string) => {
+    if (draggedAgentId && draggedAgentId !== agentId) {
+      setDragOverAgentId(agentId);
     }
   };
 
+  const handleMouseUp = async () => {
+    if (draggedAgentId && dragOverAgentId && draggedAgentId !== dragOverAgentId) {
+      const newDisplayList = [...filteredAgents];
+      const fromIndex = newDisplayList.findIndex(a => a.session_id === draggedAgentId);
+      const toIndex = newDisplayList.findIndex(a => a.session_id === dragOverAgentId);
+      
+      if (fromIndex !== -1 && toIndex !== -1) {
+        const [draggedItem] = newDisplayList.splice(fromIndex, 1);
+        newDisplayList.splice(toIndex, 0, draggedItem);
+        
+        const newOrder = newDisplayList.map(a => a.session_id);
+
+        if (activeListId !== 'all') {
+          const updatedWatchlists = watchlists.map(l => 
+            l.id === activeListId ? { ...l, agentIds: newOrder } : l
+          );
+          await persistWatchlists(updatedWatchlists);
+        } else {
+          setAgents(newDisplayList);
+          try {
+            await invoke("reorder_agents", { sessionIds: newOrder });
+          } catch (err) {
+            console.error("Failed to reorder global agents:", err);
+          }
+        }
+        wasDraggingRef.current = true;
+      }
+    }
+    setDraggedAgentId(null);
+    setDragOverAgentId(null);
+  };
+
+  // Global mouseup to cancel drag
+  useEffect(() => {
+    const cancelDrag = () => {
+      if (draggedAgentId) {
+        setDraggedAgentId(null);
+        setDragOverAgentId(null);
+      }
+    };
+    window.addEventListener("mouseup", cancelDrag);
+    return () => window.removeEventListener("mouseup", cancelDrag);
+  }, [draggedAgentId]);
+
+  /** Scroll to an agent's terminal card in the main view */
   /** Scroll to an agent's terminal card in the main view */
   const scrollToAgent = (agentId: string) => {
     const el = document.getElementById(`agent-card-${agentId}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-  };
-
-  const handleDrop = async (e: React.DragEvent, targetIndex: number) => {
-    e.preventDefault();
-    if (viewMode !== 'dashboard') return;
-    if (draggedAgentIndex === null || draggedAgentIndex === targetIndex) return;
-
-    const newAgents = [...agents];
-    const draggedItem = newAgents[draggedAgentIndex];
-    newAgents.splice(draggedAgentIndex, 1);
-    newAgents.splice(targetIndex, 0, draggedItem);
-    
-    setAgents(newAgents);
-    setDraggedAgentIndex(null);
-
-    try {
-      await invoke("reorder_agents", { sessionIds: newAgents.map(a => a.session_id) });
-    } catch (e) {
-      console.error("Failed to reorder agents:", e);
-    }
   };
 
   const fetchAgents = async () => {
@@ -955,8 +977,16 @@ function AppBody() {
           </button>
         )}
 
-        <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
-          <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-end">
+        <div 
+          className="flex-1 overflow-y-auto p-2 no-scrollbar flex flex-col"
+          onClick={() => {
+            setSelectedAgentIds(new Set());
+            lastSelectedIdRef.current = null;
+          }}
+        >
+          <header 
+            className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-end"
+          >
             <div>
               <h1 className="text-4xl font-bold tracking-tight text-primary mb-2">Wardian</h1>
               <p className="text-muted text-sm font-medium tracking-wide">Integrated Agent Environment</p>
@@ -1048,8 +1078,10 @@ function AppBody() {
                 </div>
              </div>
           ) : (
-            <div className={`flex gap-2 ${viewMode === 'grid' ? 'flex-row flex-wrap' : 'flex-col'}`}>
-            {filteredAgents.map((agent, index) => {
+            <div 
+              className={`flex-1 flex gap-2 min-h-full ${viewMode === 'grid' ? 'flex-row flex-wrap content-start pb-[200px]' : 'flex-col pb-[100px]'}`}
+            >
+            {filteredAgents.map((agent) => {
               const agentId = agent.session_id.toString();
               const isMaximized = maximizedAgentId === agentId;
               const isOff = offAgentIds.has(agentId);
@@ -1073,17 +1105,29 @@ function AppBody() {
                 <div
                   id={`agent-card-${agentId}`}
                   key={agentId}
-                  draggable={!isMaximized && viewMode === 'dashboard'}
-                  onDragStart={(e) => handleDragStart(e, index)}
-                  onDragOver={handleDragOver}
-                  onDrop={(e) => handleDrop(e, index)}
-                  onClick={(e) => !isMaximized && handleAgentCardClick(e, agentId)}
-                  className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-50 rounded-none m-0 border-none transition-none' : 'transition-all rounded-xl'} ${!isMaximized && viewMode === 'dashboard'
-                    ? 'flex-col md:flex-row border w-full cursor-move ' + (isSelected ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border/50 hover:border-wardian-border-heavy')
-                    : !isMaximized ? 'flex-col border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border') : 'flex-col'
-                    } ${draggedAgentIndex === index && !isMaximized ? 'opacity-50 ring-2 ring-blue-500' : ''}`}
+                  onMouseEnter={() => handleMouseEnterCard(agentId)}
+                  onDragStart={(e) => e.preventDefault()}
+                  onMouseUp={() => handleMouseUp()}
+                  className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg ${isMaximized ? 'fixed inset-0 z-[100] h-screen w-screen rounded-none m-0 border-none transition-none flex-col' : 'relative transition-all rounded-xl ' + (
+                    !isMaximized && viewMode === 'dashboard'
+                      ? 'flex-col md:flex-row border w-full ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border/50 hover:border-wardian-border-heavy')
+                      : !isMaximized ? 'flex-col border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border') : 'flex-col'
+                    )} ${draggedAgentId === agentId && !isMaximized ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId && !isMaximized ? 'translate-y-[-2px]' : ''}`}
                 >
-                  <div className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full' : 'hidden'}`}>
+                  <div 
+                    className={`${!isMaximized && viewMode === 'dashboard' ? 'flex flex-col md:flex-row w-full h-full cursor-grab active:cursor-grabbing select-none' : 'hidden'}`}
+                    onMouseDown={(e) => {
+                      if (e.button === 0) handleMouseDown(agentId);
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (wasDraggingRef.current) {
+                        wasDraggingRef.current = false;
+                        return;
+                      }
+                      if (!isMaximized) handleAgentCardClick(e, agentId);
+                    }}
+                  >
                     <div className="flex flex-col justify-center p-4 bg-[var(--color-wardian-input-bg)] min-w-[200px] max-w-[280px] border-r border-wardian-light/50">
                       <div className="flex items-center gap-3 mb-1">
                         <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
@@ -1190,7 +1234,21 @@ function AppBody() {
                     </div>
                   </div>
 
-                  <div className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'} ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}>
+                  <div 
+                    onMouseEnter={() => handleMouseEnterCard(agentId)}
+                    onMouseDown={(e) => {
+                      if (e.button === 0) handleMouseDown(agentId);
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (wasDraggingRef.current) {
+                        wasDraggingRef.current = false;
+                        return;
+                      }
+                      if (!isMaximized) handleAgentCardClick(e, agentId);
+                    }}
+                    className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none ${isMaximized || viewMode === 'grid' ? 'flex' : 'hidden'} ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
+                  >
                     <div className="flex items-center gap-3">
                       <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
                       {editingAgentId === agentId ? (
@@ -1241,8 +1299,13 @@ function AppBody() {
                     </div>
                   </div>
 
-                  <div className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}>
-                    <div className="absolute inset-4">
+                  <div 
+                    className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text ${isMaximized || viewMode === 'grid' ? 'flex-1 relative min-h-[300px] block' : 'absolute opacity-0 pointer-events-none w-px h-px -m-px'}`}
+                  >
+                    <div 
+                      className="absolute inset-4 select-text"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <AgentTerminal 
                         sessionId={agentId} 
                         isMaximized={isMaximized}

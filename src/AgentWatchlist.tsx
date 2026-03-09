@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import type { AgentConfig, AgentTelemetry } from "./types";
 import type { Watchlist, ContextMenuState } from "./watchlistTypes";
 import {
@@ -266,7 +265,7 @@ export default function AgentWatchlist({
   // ── Render ─────────────────────────────────────────────────────────
   return (
     <aside
-      className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-l border-wardian-border sidebar-transition flex flex-col z-10 ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
+      className={`h-full bg-[var(--color-wardian-sidebar-secondary)] border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col z-10 select-none ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
     >
       <div className="p-4 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
         {/* ── Header ─────────────────────────────────────── */}
@@ -345,7 +344,10 @@ export default function AgentWatchlist({
         </div>
 
         {/* ── Agent Rows ─────────────────────────────────── */}
-        <div className="flex-1 overflow-y-auto no-scrollbar">
+        <div 
+          className="flex-1 overflow-y-auto no-scrollbar"
+          onClick={() => onSelectionChange(new Set())}
+        >
           {displayedAgents.map((agent) => {
             const agentId = agent.session_id;
             const isSelected = selectedAgentIds.has(agentId);
@@ -362,22 +364,16 @@ export default function AgentWatchlist({
                 onMouseEnter={() => handleMouseEnterRow(agentId)}
                 onMouseUp={(e) => { e.stopPropagation(); handleMouseUp(); }}
                 onClick={(e) => {
+                  e.stopPropagation();
+                  if (wasDragging.current) { wasDragging.current = false; return; }
+
                   const now = Date.now();
-                  const DOUBLE_CLICK_TOLERANCE = 450; // ms
-                  
-                  if (lastClickRef.current && 
-                      lastClickRef.current.id === agentId && 
-                      (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE) {
-                    onAgentClick(agentId);
-                    // Ensure it stays selected if it was a double click, preventing accidental unselect from the first click
-                    onSelectionChange(new Set([agentId]));
-                    lastClickRef.current = null;
-                    return;
-                  }
+                  const DOUBLE_CLICK_TOLERANCE = 450;
+                  const isDoubleClick = lastClickRef.current && 
+                                       lastClickRef.current.id === agentId && 
+                                       (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
                   
                   lastClickRef.current = { id: agentId, time: now };
-
-                  if (wasDragging.current) { wasDragging.current = false; return; }
 
                   if (e.shiftKey && lastSelectedIdRef.current) {
                     const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
@@ -404,10 +400,17 @@ export default function AgentWatchlist({
                     onSelectionChange(next);
                     lastSelectedIdRef.current = agentId;
                   } else {
-                    // Toggle selection if already selected and it's the only one
+                    // Selection logic
                     if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-                      onSelectionChange(new Set());
-                      lastSelectedIdRef.current = null;
+                      if (!isDoubleClick) {
+                        onSelectionChange(new Set());
+                        lastSelectedIdRef.current = null;
+                      } else {
+                        // Double click -> Ensure it stays selected and scroll
+                        onAgentClick(agentId);
+                        onSelectionChange(new Set([agentId])); // Safety re-assert
+                        lastSelectedIdRef.current = agentId;
+                      }
                     } else {
                       onSelectionChange(new Set([agentId]));
                       lastSelectedIdRef.current = agentId;
@@ -415,7 +418,7 @@ export default function AgentWatchlist({
                   }
                 }}
                 onContextMenu={(e) => handleContextMenu(e, agentId)}
-                className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? "drag-over" : ""} ${isBeingDragged ? "opacity-50" : ""}`}
+                className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? "drag-over" : ""} ${isBeingDragged ? "opacity-50" : ""} select-none`}
                 style={{ cursor: activeListId !== "all" ? "grab" : "pointer" }}
               >
                 <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
