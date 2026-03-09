@@ -12,6 +12,8 @@ import AgentWatchlist from "./AgentWatchlist";
 import { ConfigureAgentPanel } from "./ConfigureAgentPanel";
 import { SpawnAgentPanel } from "./SpawnAgentPanel";
 import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
+import { getAgentsForList } from "./watchlistUtils";
+import type { Watchlist } from "./watchlistTypes";
 
 const DARK_TERM_THEME = {
   background: '#020402',
@@ -319,6 +321,33 @@ function AppBody() {
     const [theme, setTheme] = useState<"dark" | "light" | "system">(() => {
       return (localStorage.getItem("theme") as "dark" | "light" | "system") || "system";
     });
+
+    // Watchlist State (lifted from AgentWatchlist)
+    const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
+    const [activeListId, setActiveListId] = useState<string>("all");
+
+    useEffect(() => {
+      (async () => {
+        try {
+          const data = await invoke<Watchlist[]>("load_watchlists");
+          if (data && data.length > 0) setWatchlists(data);
+        } catch {
+          /* first run — no file yet */
+        }
+      })();
+    }, []);
+
+    const persistWatchlists = useCallback(async (lists: Watchlist[]) => {
+      setWatchlists(lists);
+      try {
+        await invoke("save_watchlists", { watchlists: lists });
+      } catch {
+        /* non-critical */
+      }
+    }, []);
+
+    const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
+    const filteredAgents = getAgentsForList(agents, activeList);
 
     useEffect(() => {
       const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
@@ -961,7 +990,7 @@ function AppBody() {
              </div>
           ) : (
             <div className={`flex gap-2 ${viewMode === 'grid' ? 'flex-row flex-wrap' : 'flex-col'}`}>
-            {agents.map((agent, index) => {
+            {filteredAgents.map((agent, index) => {
               const agentId = agent.session_id.toString();
               const isMaximized = maximizedAgentId === agentId;
               const isOff = offAgentIds.has(agentId);
@@ -1235,6 +1264,10 @@ function AppBody() {
         }}
         collapsed={rightCollapsed}
         onCollapse={() => setRightCollapsed(true)}
+        watchlists={watchlists}
+        activeListId={activeListId}
+        onActiveListChange={setActiveListId}
+        onWatchlistsChange={persistWatchlists}
       />
 
       {/* Right Sidebar Toggle (when collapsed) */}

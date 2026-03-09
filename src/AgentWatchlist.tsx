@@ -31,6 +31,10 @@ interface AgentWatchlistProps {
   onDelete: (agentId: string) => void;
   collapsed: boolean;
   onCollapse: () => void;
+  watchlists: Watchlist[];
+  activeListId: string;
+  onActiveListChange: (id: string) => void;
+  onWatchlistsChange: (lists: Watchlist[]) => Promise<void>;
 }
 
 export default function AgentWatchlist({
@@ -50,10 +54,12 @@ export default function AgentWatchlist({
   onDelete,
   collapsed,
   onCollapse,
+  watchlists,
+  activeListId,
+  onActiveListChange,
+  onWatchlistsChange,
 }: AgentWatchlistProps) {
-  // ── Watchlist State ────────────────────────────────────────────────
-  const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
-  const [activeListId, setActiveListId] = useState<string>("all");
+  // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
   const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
@@ -77,29 +83,14 @@ export default function AgentWatchlist({
   const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
 
-  // ── Load watchlists from backend on mount ──────────────────────────
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await invoke<Watchlist[]>("load_watchlists");
-        if (data && data.length > 0) setWatchlists(data);
-      } catch {
-        /* first run — no file yet */
-      }
-    })();
-  }, []);
+  // ── Load watchlists is now handled in App.tsx ──────────────────────────
 
   // ── Persist watchlists on change ───────────────────────────────────
   const persistWatchlists = useCallback(
     async (lists: Watchlist[]) => {
-      setWatchlists(lists);
-      try {
-        await invoke("save_watchlists", { watchlists: lists });
-      } catch {
-        /* non-critical */
-      }
+      await onWatchlistsChange(lists);
     },
-    [],
+    [onWatchlistsChange],
   );
 
   // ── Prune stale agent IDs from watchlists when agents change ───────
@@ -143,13 +134,13 @@ export default function AgentWatchlist({
     const id = crypto.randomUUID();
     const newList = createWatchlist(watchlists, id);
     await persistWatchlists([...watchlists, newList]);
-    setActiveListId(id);
+    onActiveListChange(id);
   };
 
   const handleDeleteList = async (listId: string) => {
     const updated = watchlists.filter((l) => l.id !== listId);
     await persistWatchlists(updated);
-    if (activeListId === listId) setActiveListId("all");
+    if (activeListId === listId) onActiveListChange("all");
   };
 
   const handleRenameList = async (listId: string, newName: string) => {
@@ -303,7 +294,7 @@ export default function AgentWatchlist({
         {/* ── Tab Pills ──────────────────────────────────── */}
         <div className="flex items-center gap-1 mb-3 flex-wrap">
           <button
-            onClick={() => setActiveListId("all")}
+            onClick={() => onActiveListChange("all")}
             className={`watchlist-tab ${activeListId === "all" ? "active" : ""}`}
           >
             All
@@ -322,7 +313,7 @@ export default function AgentWatchlist({
             ) : (
               <button
                 key={list.id}
-                onClick={() => setActiveListId(list.id)}
+                onClick={() => onActiveListChange(list.id)}
                 onDoubleClick={() => { setEditingListId(list.id); setEditingListName(list.name); }}
                 onContextMenu={(e) => handleTabContextMenu(e, list.id)}
                 className={`watchlist-tab ${activeListId === list.id ? "active" : ""}`}
