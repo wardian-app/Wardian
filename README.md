@@ -69,7 +69,35 @@ Wardian is a **governance layer for AI orchestration**. It centralizes PTY manag
 | Frontend    | React 19, TypeScript 5.8, Vite 6             |
 | Terminal    | xterm.js 6 + FitAddon                        |
 | Styling     | Tailwind CSS v4                              |
-| Persistence | `serde_json`                                 |
+| Persistence | `serde_json` (AppData local storage)        |
+
+---
+
+## 🏛️ Architecture
+
+Wardian is built with a focus on modularity, thread safety, and separation of concerns.
+
+### Backend (Rust / Tauri v2)
+- **Modular Domain Design**: Specialized modules for `commands`, `models`, `state`, and `utils`.
+- **PTY Management**: Leveraging `portable-pty` with native **ConPTY** support for robust terminal emulation on Windows.
+- **State Sovereignty**: A centralized `AppState` using async-aware locking (`tokio`) to coordinate metrics and IPC.
+
+### Frontend (React 19 / TypeScript)
+- **Infrastructure vs. Feature Split**:
+    - **Layout**: Persistent structural components (e.g., Sidebars, Roster).
+    - **Features**: Domain-driven logic (e.g., Agent lifecycle, Terminal implementation).
+    - **Views**: Page-level containers for different display modes (Dashboard, Grid).
+- **Type Safety**: Strictly typed interfaces for agent telemetry and configurations located in `src/types/`.
+
+### 📂 Data Persistence Strategy
+
+Wardian maintains a modular state architecture to ensure performance and portability:
+
+- `wardian_state.json`: Active session lifecycle and PTY telemetry.
+- `watchlists.json`: Sidebar organization and custom agent groups.
+- `custom_classes.json`: User-defined persona prompts and configurations.
+- `workflows.json`: The central registry for all saved automation graphs and flows.
+
 
 ---
 

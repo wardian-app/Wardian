@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AgentConfig, AgentTelemetry } from "./types";
-import type { Watchlist, ContextMenuState } from "./watchlistTypes";
+import type { AgentConfig, AgentTelemetry } from "../../types";
+import type { Watchlist, ContextMenuState } from "./types";
 import {
   reorderWithinList,
   addAgentToList,
@@ -11,7 +11,7 @@ import {
   getListsContainingAgent,
   getListsNotContainingAgent,
 } from "./watchlistUtils";
-import { deriveCurrentThought, getStatusColorClass } from "./statusUtils";
+import { deriveCurrentThought, getStatusColorClass } from "../../utils/statusUtils";
 
 interface AgentWatchlistProps {
   agents: AgentConfig[];

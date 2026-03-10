@@ -1,0 +1,40 @@
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex;
+use crate::state::active_agent::ActiveAgent;
+
+pub struct AppState {
+    // Map of session_id to ActiveAgent
+    pub agents: Mutex<HashMap<String, ActiveAgent>>,
+    pub system_metrics: Arc<Mutex<sysinfo::System>>,
+    pub agent_order: Mutex<Vec<String>>,
+    // Separate, lightweight map for stdin senders — completely independent from the
+    // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
+    pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        let mut sys = sysinfo::System::new_all();
+        sys.refresh_all();
+        Self {
+            agents: Mutex::new(HashMap::new()),
+            system_metrics: Arc::new(Mutex::new(sys)),
+            agent_order: Mutex::new(Vec::new()),
+            input_senders: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_state_constructs_without_panic() {
+        let state = AppState::new();
+        // If we get here, construction succeeded
+        assert!(true, "AppState::new() succeeded");
+        drop(state);
+    }
+}

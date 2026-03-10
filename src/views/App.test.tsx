@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
-import type { AgentConfig, AgentClassDefinition } from "./types";
+import type { AgentConfig, AgentClassDefinition } from "../types";
 
 // Cast invoke to mock for test control
 const mockInvoke = vi.mocked(invoke);

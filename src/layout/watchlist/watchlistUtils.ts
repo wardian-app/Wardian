@@ -1,5 +1,5 @@
-import type { Watchlist } from "./watchlistTypes";
-import type { AgentConfig } from "./types";
+import type { Watchlist } from "./types";
+import type { AgentConfig } from "../../types";
 
 /**
  * Reorders items within a list by moving an item from one index to another.

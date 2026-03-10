@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AgentConfig, AgentClassDefinition } from "./types";
-import { AdvancedSettings } from "./components/AdvancedSettings";
+import { AgentConfig, AgentClassDefinition } from "../../types";
+import { AdvancedSettings } from "../../components/AdvancedSettings";
 
 interface Props {
   agentClasses: AgentClassDefinition[];

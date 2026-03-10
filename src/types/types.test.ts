@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { AgentConfig, AgentTelemetry, AgentClassDefinition, AgentOutputPayload, AgentJsonEvent } from "./types";
+import type { AgentConfig, AgentTelemetry, AgentClassDefinition, AgentOutputPayload, AgentJsonEvent } from "./index";
 
 describe("TypeScript Interface Shape Tests", () => {
   describe("AgentConfig", () => {

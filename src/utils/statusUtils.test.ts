@@ -6,7 +6,7 @@ import {
   classifyJsonEvent,
   getStatusColorClass,
 } from "./statusUtils";
-import type { AgentTelemetry } from "./types";
+import type { AgentTelemetry } from "../types";
 
 // ── deriveEffectiveStatus ──────────────────────────────────────────────
 

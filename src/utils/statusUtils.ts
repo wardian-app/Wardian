@@ -1,4 +1,4 @@
-import { AgentTelemetry } from "./types";
+import { AgentTelemetry } from "../types";
 
 /**
  * Derives the effective display status from terminal title, thoughts, and metrics.

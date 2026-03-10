@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { requiresRestart } from "./configUtils";
-import { AgentConfig } from "./types";
+import { AgentConfig } from "../../types";
 
 describe("requiresRestart", () => {
     const baseConfig: AgentConfig = {

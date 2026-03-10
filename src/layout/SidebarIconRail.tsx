@@ -1,0 +1,78 @@
+import React from "react";
+
+export type SidebarTab = "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
+
+interface SidebarIconRailProps {
+  activeTab: SidebarTab;
+  setActiveTab: (tab: SidebarTab) => void;
+  setCollapsed: (collapsed: boolean) => void;
+}
+
+export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
+  activeTab,
+  setActiveTab,
+  setCollapsed,
+}) => {
+  const handleTabClick = (tab: SidebarTab) => {
+    setActiveTab(tab);
+    setCollapsed(false);
+  };
+
+  return (
+    <aside className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
+      <div className="w-10 h-10 flex items-center justify-center mb-4">
+        <img src="/icon-transparent.png" alt="Wardian" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(241,211,130,0.3)]" />
+      </div>
+
+      <button
+        onClick={() => handleTabClick("agent-config")}
+        className={`p-3 rounded-xl transition-all ${activeTab === "agent-config" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="Agent Configuration"
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a1.998 1.998 0 00-2.83 2"></path></svg>
+      </button>
+
+      <button
+        onClick={() => handleTabClick("command")}
+        className={`p-3 rounded-xl transition-all ${activeTab === "command" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="Command Center"
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+      </button>
+
+      <button
+        onClick={() => handleTabClick("classes")}
+        className={`p-3 rounded-xl transition-all ${activeTab === "classes" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="Class Manager"
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
+      </button>
+
+      <button
+        onClick={() => handleTabClick("workflows")}
+        className={`p-3 rounded-xl transition-all ${activeTab === "workflows" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="Workflows"
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+      </button>
+
+      <button
+        onClick={() => handleTabClick("ssh")}
+        className={`p-3 rounded-xl transition-all ${activeTab === "ssh" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="Remote Connections"
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
+      </button>
+
+      <div className="mt-auto flex flex-col gap-4">
+        <button
+          onClick={() => handleTabClick("settings")}
+          className={`p-3 rounded-xl transition-all ${activeTab === "settings" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+          title="Application Settings"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+        </button>
+      </div>
+    </aside>
+  );
+};

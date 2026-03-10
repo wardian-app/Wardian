@@ -1,0 +1,92 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub session_name: String,
+    #[serde(default)]
+    pub agent_class: String,
+    #[serde(default)]
+    pub folder: String,
+    pub resume_session: Option<String>,
+    #[serde(default)]
+    pub is_off: bool,
+    #[serde(default)]
+    pub debug: Option<bool>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub sandbox: Option<bool>,
+    #[serde(default)]
+    pub yolo: Option<bool>,
+    #[serde(default)]
+    pub approval_mode: Option<String>,
+    #[serde(default)]
+    pub policy: Option<Vec<String>>,
+    #[serde(default)]
+    pub experimental_acp: Option<bool>,
+    #[serde(default)]
+    pub allowed_mcp_server_names: Option<Vec<String>>,
+    #[serde(default)]
+    pub extensions: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_directories: Option<Vec<String>>,
+    #[serde(default)]
+    pub system_include_directories: Option<Vec<String>>,
+    #[serde(default)]
+    pub screen_reader: Option<bool>,
+    #[serde(default)]
+    pub output_format: Option<String>,
+    #[serde(default)]
+    pub custom_args: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentClassDefinition {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_config_serde_roundtrip() {
+        let config = AgentConfig {
+            session_id: "abc-123".into(),
+            session_name: "TestAgent".into(),
+            agent_class: "Coder".into(),
+            folder: "C:/project".into(),
+            resume_session: Some("def-456".into()),
+            is_off: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config.session_id, deserialized.session_id);
+        assert_eq!(config.session_name, deserialized.session_name);
+        assert_eq!(config.agent_class, deserialized.agent_class);
+        assert_eq!(config.folder, deserialized.folder);
+        assert_eq!(config.resume_session, deserialized.resume_session);
+        assert_eq!(config.is_off, deserialized.is_off);
+    }
+
+    #[test]
+    fn agent_class_definition_serde_roundtrip() {
+        let cls = AgentClassDefinition {
+            name: "DevOps".into(),
+            description: "Manages CI/CD".into(),
+            is_default: false,
+        };
+        let json = serde_json::to_string(&cls).unwrap();
+        let deserialized: AgentClassDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(cls.name, deserialized.name);
+        assert_eq!(cls.description, deserialized.description);
+        assert_eq!(cls.is_default, deserialized.is_default);
+    }
+}

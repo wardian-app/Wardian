@@ -1,4 +1,4 @@
-import { AgentConfig } from "./types";
+import { AgentConfig } from "../../types";
 
 /**
  * Checks if the changes between two AgentConfigs require an agent restart.

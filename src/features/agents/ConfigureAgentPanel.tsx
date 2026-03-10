@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "./types";
+import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "../../types";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { requiresRestart } from "./configUtils";
-import { AdvancedSettings } from './components/AdvancedSettings';
+import { AdvancedSettings } from '../../components/AdvancedSettings';
 
 interface Props {
   agentId: string;
