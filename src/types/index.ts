@@ -21,6 +21,8 @@ export interface AgentConfig {
     custom_args?: string;
 }
 
+export * from "./workflow";
+
 export interface AgentOutputPayload {
     session_id: string;
     text: string;

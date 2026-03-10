@@ -3,8 +3,11 @@ pub mod models;
 pub mod state;
 pub mod utils;
 pub mod commands;
+pub mod workflow_engine;
 
 use tauri::{Emitter, Listener, Manager};
+// ... rest of imports
+
 use crate::models::AgentConfig;
 use crate::state::AppState;
 
@@ -99,7 +102,10 @@ pub fn run() {
             commands::watchlist::load_watchlists,
             commands::watchlist::save_watchlists,
             commands::fs::resolve_system_include_directories,
-            commands::fs::validate_directory_path
+            commands::fs::validate_directory_path,
+            commands::workflow::list_workflows,
+            commands::workflow::save_workflow,
+            commands::workflow::run_workflow
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

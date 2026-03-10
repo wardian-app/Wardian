@@ -20,6 +20,13 @@
   --color-wardian-error: #ef4444;
   --color-wardian-off: #4b5563;
 
+  /* Workflow Node Semantics */
+  --color-workflow-agent: #3b82f6;
+  --color-workflow-command: #10b981;
+  --color-workflow-logic: #f59e0b;
+  --color-workflow-comm: #8b5cf6;
+  --color-workflow-critical: #ef4444;
+
   /* Structural Components */
   --color-wardian-sidebar-primary: #111827;
   --color-wardian-sidebar-secondary: #0f172a;

@@ -1,0 +1,18 @@
+use crate::models::WorkflowDefinition;
+use crate::workflow_engine;
+use tauri::AppHandle;
+
+#[tauri::command]
+pub async fn list_workflows() -> Result<Vec<WorkflowDefinition>, String> {
+    workflow_engine::list_workflows()
+}
+
+#[tauri::command]
+pub async fn save_workflow(workflow: WorkflowDefinition) -> Result<(), String> {
+    workflow_engine::save_workflow(workflow)
+}
+
+#[tauri::command]
+pub async fn run_workflow(app: AppHandle, id: String) -> Result<(), String> {
+    workflow_engine::run_workflow(app, id).await
+}

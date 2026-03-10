@@ -15,6 +15,9 @@ import { SidebarContentPane } from "../layout/SidebarContentPane";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
+import { WorkflowBuilderView } from "./WorkflowBuilderView";
+import { useWorkflowStore } from "../store/useWorkflowStore";
+import { WorkflowTelemetryEvent } from "../types";
 
 function App() {
   return (
@@ -27,6 +30,15 @@ function App() {
 function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
+  const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
+
+  useEffect(() => {
+    const unlistenWorkflow = listen<WorkflowTelemetryEvent>("workflow-telemetry", (event) => {
+      handleWorkflowTelemetry(event.payload);
+    });
+    return () => { unlistenWorkflow.then(fn => fn()); };
+  }, [handleWorkflowTelemetry]);
+
   const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
   const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
   const handleTitleChange = useCallback((agentId: string, title: string) => {
@@ -336,7 +348,9 @@ function AppBody() {
             </div>
           )}
 
-          {["queue", "workflow-builder", "graph", "garden"].includes(viewMode) ? (
+          {viewMode === "workflow-builder" ? (
+            <WorkflowBuilderView theme={theme} />
+          ) : ["queue", "graph", "garden"].includes(viewMode) ? (
              <PlaceholderView viewMode={viewMode} />
           ) : viewMode === "grid" ? (
             <GridView 
