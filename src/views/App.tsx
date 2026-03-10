@@ -348,11 +348,17 @@ function AppBody() {
             </div>
           )}
 
-          {viewMode === "workflow-builder" ? (
+          <div className={viewMode === "workflow-builder" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
             <WorkflowBuilderView theme={theme} />
-          ) : ["queue", "graph", "garden"].includes(viewMode) ? (
-             <PlaceholderView viewMode={viewMode} />
-          ) : viewMode === "grid" ? (
+          </div>
+
+          {["queue", "graph", "garden"].map(mode => (
+            <div key={mode} className={viewMode === mode ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+              <PlaceholderView viewMode={mode as any} />
+            </div>
+          ))}
+
+          <div className={viewMode === "grid" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
             <GridView 
               filteredAgents={filteredAgents}
               telemetry={telemetry}
@@ -379,7 +385,9 @@ function AppBody() {
               deriveCurrentThought={deriveCurrentThought}
               getStatusColorClass={getStatusColorClass}
             />
-          ) : (
+          </div>
+
+          <div className={viewMode === "dashboard" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
             <DashboardView 
               filteredAgents={filteredAgents}
               telemetry={telemetry}
@@ -400,7 +408,7 @@ function AppBody() {
               deriveCurrentThought={deriveCurrentThought}
               getStatusColorClass={getStatusColorClass}
             />
-          )}
+          </div>
         </div>
       </main>
 

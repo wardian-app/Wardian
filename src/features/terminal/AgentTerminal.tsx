@@ -141,7 +141,7 @@ export const AgentTerminal = memo(function AgentTerminal({
           fitAddon.fit();
           if (term.cols > 10 && term.rows > 3) {
             pollStartedRef.current = true;
-            term.reset();
+            // Removed term.reset() to avoid clearing history on remount
             invoke("resize_agent_terminal", { sessionId, cols: term.cols, rows: term.rows })
               .then(() => { if (isMounted) requestAnimationFrame(pollPty); })
               .catch(() => { if (isMounted) requestAnimationFrame(pollPty); });
