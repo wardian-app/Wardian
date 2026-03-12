@@ -9,6 +9,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useWorkflowStore } from '../store/useWorkflowStore';
 import { WorkflowNode } from '../features/workflows/WorkflowNode';
+import { BLOCK_LIBRARY, BlockDefinition } from '../features/workflows/blockLibrary';
 
 const nodeTypes = {
   trigger: WorkflowNode,
@@ -40,11 +41,59 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     nodeStatuses,
     availableWorkflows,
     activeWorkflowId,
+    agents,
+    agentClasses,
     fetchWorkflows,
     loadWorkflow,
     runActiveWorkflow,
-    setNodes
+    setNodes,
+    setEdges,
+    saveWorkflow,
+    deleteWorkflow,
+    updateActiveWorkflowName,
+    duplicateNode,
+    isSaving
   } = useWorkflowStore();
+
+  const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
+  const [isLibraryOpen, setIsBlockLibraryOpen] = React.useState(false);
+  const [activeCategory, setActiveCategory] = React.useState("ALL");
+  const [searchQuery, setSearchQuery] = React.useState("");
+  
+  const [isRenamingWf, setIsRenamingWf] = React.useState(false);
+  const [tempWfName, setTempWfName] = React.useState("");
+
+  const [contextMenu, setContextMenu] = React.useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    type: 'node' | 'edge';
+    targetId: string;
+  } | null>(null);
+
+  useEffect(() => {
+    fetchWorkflows();
+  }, [fetchWorkflows]);
+
+  // Auto-load first workflow if none active
+  useEffect(() => {
+    if (!activeWorkflowId && availableWorkflows.length > 0) {
+      loadWorkflow(availableWorkflows[0]);
+    }
+  }, [activeWorkflowId, availableWorkflows, loadWorkflow]);
+
+  const activeWorkflow = useMemo(() => availableWorkflows.find(w => w.id === activeWorkflowId), [availableWorkflows, activeWorkflowId]);
+
+  useEffect(() => {
+    if (activeWorkflow) setTempWfName(activeWorkflow.name);
+  }, [activeWorkflow]);
+
+  const commitRename = () => {
+    if (tempWfName.trim()) {
+      updateActiveWorkflowName(tempWfName);
+    }
+    setIsRenamingWf(false);
+  };
 
   const flowColorMode = useMemo(() => {
     if (theme === "system") {
@@ -53,34 +102,85 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     return theme;
   }, [theme]);
 
-  const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
-  const [isLibraryOpen, setIsBlockLibraryOpen] = React.useState(false);
-  const [libraryPos, setLibraryPos] = React.useState({ x: 0, y: 0 });
-  const [searchQuery, setSearchQuery] = React.useState("");
-
-  useEffect(() => {
-    fetchWorkflows();
-  }, [fetchWorkflows]);
-
   const onNodeClick = (_: any, node: any) => setSelectedNodeId(node.id);
   const onPaneClick = () => {
     setSelectedNodeId(null);
-    setIsBlockLibraryOpen(false);
+    setContextMenu(null);
   };
 
-  const onPaneContextMenu = (event: React.MouseEvent) => {
+  const onPaneContextMenu = (event: React.MouseEvent | MouseEvent) => {
     event.preventDefault();
-    setLibraryPos({ x: event.clientX, y: event.clientY });
     setIsBlockLibraryOpen(true);
+    setContextMenu(null);
   };
 
-  const addNode = (type: NodeType) => {
-    const id = `${type}-${Date.now()}`;
+  const onNodeContextMenu = (event: React.MouseEvent, node: any) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      visible: true,
+      x: event.clientX,
+      y: event.clientY,
+      type: 'node',
+      targetId: node.id
+    });
+  };
+
+  const onEdgeContextMenu = (event: React.MouseEvent, edge: any) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      visible: true,
+      x: event.clientX,
+      y: event.clientY,
+      type: 'edge',
+      targetId: edge.id
+    });
+  };
+
+  const deleteNode = (id: string) => {
+    setNodes(nodes.filter(n => n.id !== id));
+    setEdges(edges.filter(e => e.source !== id && e.target !== id));
+    setContextMenu(null);
+  };
+
+  const deleteEdge = (id: string) => {
+    setEdges(edges.filter(e => e.id !== id));
+    setContextMenu(null);
+  };
+
+  const copyNodeId = (id: string) => {
+    navigator.clipboard.writeText(id);
+    setContextMenu(null);
+  };
+
+  const addNode = (block: BlockDefinition) => {
+    const id = `${block.type}-${Date.now()}`;
+    
+    // Initialize config with defaults
+    const config: Record<string, any> = {};
+    if (block.type === 'agent') {
+      config.session_type = 'persistent';
+      config.output_format = 'text';
+    }
+    if (block.name === 'Cron Schedule') {
+      config.schedule_type = 'Minutes';
+      config.interval = '5';
+      config.cron = '0 */5 * * * *';
+    }
+
     const newNode = {
       id,
-      type,
-      position: { x: libraryPos.x - 400, y: libraryPos.y - 200 }, // Rough offset
-      data: { label: `New ${type}`, type },
+      type: block.type,
+      position: { x: 400, y: 300 }, // Centralized for large modal
+      data: { 
+        label: block.name, 
+        type: block.type,
+        blockName: block.name,
+        inputs: block.inputs,
+        outputs: block.outputs,
+        config
+      },
     };
     setNodes([...nodes, newNode]);
     setIsBlockLibraryOpen(false);
@@ -89,7 +189,6 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
   const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
 
-  // Enhance nodes with status from store
   const styledNodes = useMemo(() => 
     nodes.map(node => ({
       ...node,
@@ -101,48 +200,156 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     [nodes, nodeStatuses]
   );
 
-  const blockTypes: NodeType[] = ['agent', 'command', 'script', 'tool', 'logic', 'loop', 'wait', 'parallel', 'subflow', 'governance', 'memory', 'communication'];
-  const filteredBlocks = blockTypes.filter(b => b.includes(searchQuery.toLowerCase()));
+  const categories = ["ALL", ...Array.from(new Set(BLOCK_LIBRARY.map(b => b.category)))];
+  const filteredBlocks = BLOCK_LIBRARY.filter(b => 
+    (activeCategory === "ALL" || b.category === activeCategory) &&
+    (b.name.toLowerCase().includes(searchQuery.toLowerCase()) || b.description.toLowerCase().includes(searchQuery.toLowerCase()))
+  );
 
   return (
     <div className="flex-1 h-full w-full bg-[var(--color-wardian-bg)] relative overflow-hidden rounded-2xl border border-wardian-border shadow-2xl flex flex-col">
       {/* Action Bar */}
-      <div className="h-14 border-b border-wardian-border bg-[var(--color-wardian-card)] flex items-center justify-between px-6 z-10">
-        <div className="flex items-center gap-4">
+      <div className="h-14 border-b border-wardian-border bg-[var(--color-wardian-card)] grid grid-cols-3 items-center px-6 z-10">
+        
+        {/* Left: Registry Management */}
+        <div className="flex items-center gap-2">
           <select 
-            className="bg-[var(--color-wardian-bg)] border border-wardian-border text-[var(--color-wardian-text)] text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-md focus:ring-1 focus:ring-[var(--color-wardian-accent)] outline-none"
+            className="bg-[var(--color-wardian-bg)] border border-wardian-border text-[var(--color-wardian-text)] text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-md focus:ring-1 focus:ring-[var(--color-wardian-accent)] outline-none cursor-pointer"
             value={activeWorkflowId || ''}
             onChange={(e) => {
               const wf = availableWorkflows.find(w => w.id === e.target.value);
-              if (wf) loadWorkflow(wf);
+              if (wf) {
+                loadWorkflow(wf);
+                setIsRenamingWf(false);
+              }
             }}
           >
-            <option value="" disabled>Select Workflow</option>
             {availableWorkflows.map(wf => (
               <option key={wf.id} value={wf.id}>{wf.name}</option>
             ))}
           </select>
-          
+
+          <button 
+            onClick={() => {
+              const id = `wf-${Date.now()}`;
+              const newWf = { id, name: "New Workflow", settings: { max_iterations: 10, on_limit_reached: "terminate" }, nodes: [] };
+              saveWorkflow(newWf as any);
+            }}
+            className="p-1.5 text-muted-neutral hover:text-[var(--color-wardian-accent)] transition-colors cursor-pointer"
+            title="New Workflow"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+          </button>
+
           <button 
             onClick={() => fetchWorkflows()}
-            className="p-1.5 text-muted-neutral hover:text-primary transition-colors"
-            title="Refresh List"
+            className="p-1.5 text-muted-neutral hover:text-primary transition-colors cursor-pointer"
+            title="Refresh Registry"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* Center: Active Context (Hero) */}
+        <div className="flex items-center justify-center gap-3">
+          {activeWorkflow ? (
+            <>
+              <div className={`flex items-center gap-2 px-4 py-1 bg-[var(--color-wardian-bg)] border border-wardian-border rounded-lg shadow-inner ${activeWorkflowId !== 'heartbeat' ? 'cursor-pointer hover:border-[var(--color-wardian-accent)]' : ''}`}>
+                {isRenamingWf && activeWorkflowId !== 'heartbeat' ? (
+                  <input
+                    autoFocus
+                    className="bg-transparent text-[var(--color-wardian-text)] text-sm font-bold outline-none text-center min-w-[120px]"
+                    value={tempWfName}
+                    onChange={(e) => setTempWfName(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => e.key === 'Enter' && commitRename()}
+                  />
+                ) : (
+                  <h3 
+                    onClick={() => activeWorkflowId !== 'heartbeat' && setIsRenamingWf(true)}
+                    className={`text-sm font-bold text-[var(--color-wardian-text)] transition-colors tracking-tight ${activeWorkflowId !== 'heartbeat' ? 'hover:text-[var(--color-wardian-accent)]' : 'cursor-default'}`}
+                  >
+                    {tempWfName || activeWorkflow.name}
+                  </h3>
+                )}
+              </div>
+              
+              <div className="flex items-center gap-1">
+                <button 
+                  onClick={() => {
+                    if (activeWorkflow) {
+                      const id = `wf-${Date.now()}`;
+                      const clonedWf = { 
+                        ...activeWorkflow, 
+                        id, 
+                        name: `Copy of ${activeWorkflow.name}`,
+                        nodes: nodes.map(n => ({
+                          id: n.id,
+                          type: n.type,
+                          name: n.data.label,
+                          config: n.data.config || {},
+                          position: n.position,
+                          depends_on: edges.filter(e => e.target === n.id).map(e => e.source)
+                        }))
+                      };
+                      saveWorkflow(clonedWf as any);
+                    }
+                  }}
+                  className="p-1.5 text-muted-neutral hover:text-[var(--color-wardian-accent)] transition-colors cursor-pointer"
+                  title="Clone Workflow"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path></svg>
+                </button>
+
+                <button 
+                  disabled={activeWorkflowId === 'heartbeat'}
+                  onClick={() => {
+                    if (activeWorkflowId && confirm("Delete this workflow?")) {
+                      deleteWorkflow(activeWorkflowId);
+                    }
+                  }}
+                  className={`p-1.5 transition-colors ${activeWorkflowId !== 'heartbeat' ? 'text-muted-neutral hover:text-red-500 cursor-pointer' : 'text-gray-800 cursor-not-allowed opacity-30'}`}
+                  title={activeWorkflowId === 'heartbeat' ? "Protected System Workflow" : "Delete This Workflow"}
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                </button>
+              </div>
+            </>
+          ) : (
+            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em] opacity-30 select-none">No Workflow Active</span>
+          )}
+        </div>
+
+        {/* Right: Execution Actions */}
+        <div className="flex items-center justify-end gap-3">
           <button 
-            onClick={() => { setLibraryPos({ x: window.innerWidth/2, y: window.innerHeight/2 }); setIsBlockLibraryOpen(true); }}
-            className="p-2 bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_90%)] text-[var(--color-wardian-accent)] rounded-lg hover:bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_80%)] transition-all border border-[color-mix(in_srgb,var(--color-wardian-accent),transparent_80%)]"
+            disabled={!activeWorkflowId}
+            onClick={() => {
+              if (activeWorkflowId && activeWorkflow) {
+                const updatedNodes = nodes.map(n => ({
+                  id: n.id,
+                  type: n.type,
+                  name: n.data.label,
+                  config: n.data.config || {},
+                  position: n.position,
+                  dependencies: edges
+                    .filter(e => e.target === n.id)
+                    .map(e => ({
+                      node_id: e.source,
+                      port: e.sourceHandle || 'default'
+                    }))
+                }));
+                saveWorkflow({ ...activeWorkflow, name: tempWfName, nodes: updatedNodes as any });
+              }
+            }}
+            className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed hidden'}`}
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+            {isSaving ? 'SAVING...' : 'SAVE CHANGES'}
           </button>
           <button 
             onClick={() => runActiveWorkflow()}
             disabled={!activeWorkflowId}
-            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed border border-wardian-border'}`}
+            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed border border-wardian-border'}`}
           >
             RUN WORKFLOW
           </button>
@@ -150,6 +357,19 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       </div>
 
       <div className="flex-1 relative bg-[var(--color-wardian-bg)]">
+        {/* Floating Add Block Button */}
+        <div className="absolute top-6 left-6 z-20">
+          <button 
+            onClick={() => { setIsBlockLibraryOpen(true); }}
+            className="group flex items-center gap-3 bg-[var(--color-wardian-card)] border border-wardian-border-heavy p-2 pr-4 rounded-xl hover:border-[var(--color-wardian-accent)] transition-all shadow-2xl cursor-pointer"
+          >
+            <div className="p-2 bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_90%)] text-[var(--color-wardian-accent)] rounded-lg group-hover:bg-[var(--color-wardian-accent)] transition-all group-hover:text-[var(--color-wardian-bg)]">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+            </div>
+            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest group-hover:text-[var(--color-wardian-text)]">Add Block</span>
+          </button>
+        </div>
+
         <ReactFlow
           nodes={styledNodes}
           edges={edges}
@@ -159,6 +379,10 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
           onPaneContextMenu={onPaneContextMenu}
+          onNodeContextMenu={onNodeContextMenu}
+          onEdgeContextMenu={onEdgeContextMenu}
+          onNodesDelete={(deleted) => deleted.forEach(n => deleteNode(n.id))}
+          onEdgesDelete={(deleted) => deleted.forEach(e => deleteEdge(e.id))}
           nodeTypes={nodeTypes}
           fitView
           colorMode={flowColorMode}
@@ -173,81 +397,321 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
           />
         </ReactFlow>
 
-        {/* Block Library Popup */}
-        {isLibraryOpen && (
+        {/* --- Context Menu --- */}
+        {contextMenu && (
           <div 
-            className="absolute bg-[var(--color-wardian-card)] border border-wardian-border-heavy rounded-xl shadow-2xl z-50 w-64 overflow-hidden animate-in fade-in zoom-in duration-200"
-            style={{ left: Math.min(libraryPos.x - 300, window.innerWidth - 700), top: Math.min(libraryPos.y - 100, window.innerHeight - 400) }}
+            className="fixed z-[100] min-w-[160px] bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_10%)] backdrop-blur-xl border border-wardian-border shadow-2xl rounded-xl p-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="p-3 border-b border-wardian-border">
-              <input 
-                autoFocus
-                placeholder="Search blocks..."
-                className="w-full bg-[var(--color-wardian-bg)] border border-wardian-border rounded px-2 py-1 text-xs text-primary outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
-            <div className="max-h-64 overflow-y-auto p-1">
-              {filteredBlocks.map(type => (
-                <button
-                  key={type}
-                  onClick={() => addNode(type)}
-                  className="w-full text-left px-3 py-2 text-xs font-bold uppercase tracking-widest text-muted-neutral hover:bg-[var(--color-wardian-accent)]/10 hover:text-[var(--color-wardian-accent)] rounded transition-colors"
+            {contextMenu.type === 'node' ? (
+              <>
+                <button 
+                  onClick={() => { duplicateNode(contextMenu.targetId); setContextMenu(null); }}
+                  className="w-full text-left px-3 py-2 text-xs font-bold text-[var(--color-wardian-text)] hover:bg-[var(--color-wardian-accent)]/10 hover:text-[var(--color-wardian-accent)] rounded-lg transition-colors flex items-center gap-2"
                 >
-                  {type}
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path></svg>
+                  Duplicate Node
                 </button>
-              ))}
+                <button 
+                  onClick={() => copyNodeId(contextMenu.targetId)}
+                  className="w-full text-left px-3 py-2 text-xs font-bold text-[var(--color-wardian-text)] hover:bg-[var(--color-wardian-accent)]/10 hover:text-[var(--color-wardian-accent)] rounded-lg transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
+                  Copy Node ID
+                </button>
+                <button 
+                  onClick={() => { useWorkflowStore.getState().updateNodeStatus(contextMenu.targetId, 'idle'); setContextMenu(null); }}
+                  className="w-full text-left px-3 py-2 text-xs font-bold text-[var(--color-wardian-text)] hover:bg-[var(--color-wardian-accent)]/10 hover:text-[var(--color-wardian-accent)] rounded-lg transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                  Reset Status
+                </button>
+                <div className="h-px bg-wardian-border my-1 mx-1" />
+                <button 
+                  onClick={() => deleteNode(contextMenu.targetId)}
+                  className="w-full text-left px-3 py-2 text-xs font-bold text-red-500 hover:bg-red-500/10 rounded-lg transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                  Delete Node
+                </button>
+              </>
+            ) : (
+              <button 
+                onClick={() => deleteEdge(contextMenu.targetId)}
+                className="w-full text-left px-3 py-2 text-xs font-bold text-red-500 hover:bg-red-500/10 rounded-lg transition-colors flex items-center gap-2"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                Delete Connection
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* --- Block Library Modal --- */}
+        {isLibraryOpen && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center p-8 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-[var(--color-wardian-card)] border border-wardian-border-heavy w-full max-w-5xl h-[80vh] rounded-3xl shadow-[0_32px_64px_rgba(0,0,0,0.5)] flex overflow-hidden animate-in zoom-in-95 duration-300">
+              
+              {/* Sidebar */}
+              <div className="w-64 border-r border-wardian-border flex flex-col bg-[color-mix(in_srgb,var(--color-wardian-card),black_10%)]">
+                <div className="p-8">
+                  <h2 className="text-2xl font-bold text-[var(--color-wardian-text)] tracking-tighter mb-6">Block Library</h2>
+                  <div className="relative">
+                    <input 
+                      autoFocus
+                      placeholder="Search..."
+                      className="w-full bg-[var(--color-wardian-bg)] border border-wardian-border rounded-xl px-4 py-2.5 text-sm text-primary outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] transition-all"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                  </div>
+                </div>
+                
+                <nav className="flex-1 overflow-y-auto px-4 pb-8 space-y-1">
+                  {categories.map(cat => (
+                    <button
+                      key={cat}
+                      onClick={() => setActiveCategory(cat)}
+                      className={`w-full text-left px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer ${activeCategory === cat ? 'bg-[var(--color-wardian-accent)]/10 text-[var(--color-wardian-accent)] shadow-sm' : 'text-muted-neutral hover:bg-[var(--color-wardian-card-bg-muted)] hover:text-[var(--color-wardian-text)]'}`}
+                    >
+                      {cat === "ALL" ? "✦ All Blocks" : cat}
+                    </button>
+                  ))}
+                </nav>
+              </div>
+
+              {/* Main Content */}
+              <div className="flex-1 flex flex-col min-w-0">
+                <div className="h-16 border-b border-wardian-border flex items-center justify-between px-8 bg-[var(--color-wardian-card)]">
+                  <span className="text-sm font-mono font-bold text-muted-neutral uppercase tracking-[0.2em]">{activeCategory} Blocks ({filteredBlocks.length})</span>
+                  <button 
+                    onClick={() => setIsBlockLibraryOpen(false)}
+                    className="p-2 hover:bg-[var(--color-wardian-card-bg-muted)] rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
+                  >
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-6 no-scrollbar">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {filteredBlocks.map(block => (
+                      <button
+                        key={block.name}
+                        onClick={() => addNode(block)}
+                        className="group flex flex-col text-left p-5 rounded-2xl bg-[var(--color-wardian-bg)] border border-wardian-border hover:border-[var(--color-wardian-accent)]/50 hover:shadow-2xl hover:shadow-[var(--color-wardian-accent)]/5 transition-all duration-300 relative overflow-hidden cursor-pointer h-full"
+                      >
+                        <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <svg className="w-4 h-4 text-[var(--color-wardian-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>
+                        </div>
+                        <h3 className="text-lg font-bold text-[var(--color-wardian-text)] mb-1 group-hover:text-[var(--color-wardian-accent)] transition-colors">{block.name}</h3>
+                        <p className="text-sm text-muted-neutral leading-snug mb-1">{block.description}</p>
+                        
+                        <div className="space-y-3 mt-auto pt-2 border-t border-white/5">
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[var(--color-wardian-text-muted)] opacity-80">Input</span>
+                            <span className="text-sm font-mono text-[var(--color-wardian-text)]/80 break-all leading-tight">{block.inputs}</span>
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[var(--color-wardian-text-muted)] opacity-80">Output</span>
+                            <span className="text-sm font-mono text-[var(--color-wardian-processing)] break-all leading-tight">{block.outputs}</span>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
             </div>
           </div>
         )}
       </div>
       
       {/* Side Drawer Editor */}
-      <div className={`absolute top-20 right-4 bottom-4 w-80 bg-[color-mix(in_srgb,var(--color-wardian-sidebar-primary),transparent_10%)] backdrop-blur-md border border-wardian-border rounded-xl p-6 shadow-2xl z-10 transition-transform duration-300 ${selectedNodeId ? 'translate-x-0' : 'translate-x-[calc(100%+2rem)]'}`}>
-        <div className="flex justify-between items-center mb-6">
-          <h3 className="text-lg font-bold text-[var(--color-wardian-text)] uppercase tracking-tighter">Node Editor</h3>
-          <button onClick={() => setSelectedNodeId(null)} className="text-muted-neutral hover:text-white">&times;</button>
+      <div className={`absolute top-20 right-4 bottom-4 w-[400px] bg-[color-mix(in_srgb,var(--color-wardian-sidebar-primary),transparent_5%)] backdrop-blur-xl border border-wardian-border rounded-2xl p-0 shadow-[0_32px_64px_rgba(0,0,0,0.5)] z-10 transition-transform duration-300 flex flex-col overflow-hidden ${selectedNodeId ? 'translate-x-0' : 'translate-x-[calc(100%+2rem)]'}`}>
+        <div className="flex justify-between items-center p-6 border-b border-wardian-border bg-white/5">
+          <div className="flex flex-col">
+            <h3 className="text-lg font-bold text-[var(--color-wardian-text)] uppercase tracking-tighter">Node Settings</h3>
+            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">{selectedNode?.type}</span>
+          </div>
+          <button onClick={() => setSelectedNodeId(null)} className="p-2 hover:bg-white/10 rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] cursor-pointer transition-all">&times;</button>
         </div>
         
-        <div className="flex flex-col gap-6">
-            <div className="flex flex-col gap-2">
-              <label className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">Name</label>
-              <input 
-                className="bg-[var(--color-wardian-bg)] border border-wardian-border rounded px-3 py-2 text-sm text-primary outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
-                value={selectedNode?.data.label || ""}
-                onChange={(e) => {
-                  const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, label: e.target.value } } : n);
-                  setNodes(newNodes);
-                }}
-              />
+        <div className="flex-1 overflow-y-auto p-6 space-y-8 no-scrollbar">
+            {/* Core Fields (Shared with Canvas) */}
+            <div className="space-y-6">
+              <div className="flex flex-col gap-2">
+                <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">Display Name</label>
+                <input 
+                  className="bg-[var(--color-wardian-bg)] border border-wardian-border rounded-xl px-4 py-3 text-sm text-[var(--color-wardian-text)] outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] transition-all"
+                  value={(selectedNode?.data.label as string) || ""}
+                  onChange={(e) => {
+                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, label: e.target.value } } : n);
+                    setNodes(newNodes);
+                  }}
+                />
+              </div>
+              {/* Friendly Cron Sync Logic */}
+              {(() => {
+                if (selectedNode?.data.blockName === 'Cron Schedule') {
+                  const config = (selectedNode.data.config || {}) as any;
+                  const calculateCronPrefix = (cfg: any) => {
+                    const { schedule_type, interval, time, days } = cfg;
+                    const sec = "0";
+                    
+                    if (schedule_type === 'Minutes') {
+                      const min = interval ? `*/${interval}` : "*";
+                      return `${sec} ${min} * * * *`;
+                    }
+                    if (schedule_type === 'Hours') {
+                      const hr = interval ? `*/${interval}` : "*";
+                      return `${sec} 0 ${hr} * * *`;
+                    }
+                    if (schedule_type === 'Daily') {
+                      const [h, m] = (time || "00:00").split(":");
+                      return `${sec} ${parseInt(m || "0")} ${parseInt(h || "0")} * * *`;
+                    }
+                    if (schedule_type === 'Weekly') {
+                      const [h, m] = (time || "00:00").split(":");
+                      const dayMap: any = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+                      const dayList = (days || "Mon").split(",").map((d: string) => dayMap[d.toLowerCase().trim()] ?? d).join(",");
+                      return `${sec} ${parseInt(m || "0")} ${parseInt(h || "0")} * * ${dayList}`;
+                    }
+                    return cfg.cron || "0 * * * * *";
+                  };
+
+                  const currentCron = calculateCronPrefix(config);
+                  if (config.schedule_type && config.schedule_type !== 'Custom' && config.cron !== currentCron) {
+                    // Sync to store immediately
+                    setTimeout(() => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, 'cron', currentCron), 0);
+                  }
+                }
+                return null;
+              })()}
+
+
+              {(() => {
+                const blockDef = BLOCK_LIBRARY.find(b => b.type === selectedNode?.type && (selectedNode?.data.blockName ? b.name === selectedNode.data.blockName : true));
+                if (!blockDef) return null;
+
+                const renderField = (field: any, isAdvanced: boolean = false) => {
+                  const val = (selectedNode?.data.config as any)?.[field.name] || '';
+                  const sessionType = (selectedNode?.data.config as any)?.session_type || 'persistent';
+
+                  // Conditional visibility for Agent fields
+                  if (selectedNode?.type === 'agent') {
+                    if (field.name === 'agent_id' && sessionType === 'temporary') return null;
+                    if (field.name === 'agent_class' && sessionType === 'persistent') return null;
+
+                    const outputFormat = (selectedNode?.data.config as any)?.output_format || 'text';
+                    if (field.name === 'json_schema' && outputFormat !== 'json') return null;
+                  }
+
+                  // Conditional visibility for Cron fields
+                  if (selectedNode?.data.blockName === 'Cron Schedule') {
+                    const st = (selectedNode?.data.config as any)?.schedule_type || 'Custom';
+                    if (st === 'Custom' && ['interval', 'time', 'days'].includes(field.name)) return null;
+                    if (st === 'Minutes' && ['time', 'days'].includes(field.name)) return null;
+                    if (st === 'Hours' && ['time', 'days'].includes(field.name)) return null;
+                    if (st === 'Daily' && ['interval', 'days'].includes(field.name)) return null;
+                    if (st === 'Weekly' && ['interval'].includes(field.name)) return null;
+                    if (field.name === 'cron' && !isAdvanced) return null; // Only show cron in advanced
+                  }
+
+                  // Dynamic Options Override
+                  let dynamicOptions = field.options;
+                  if (field.name === 'agent_id') {
+                    return (
+                      <div key={field.name} className="flex flex-col gap-2">
+                        <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{field.label}</label>
+                        <select
+                          className="p-3 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] cursor-pointer"
+                          value={val}
+                          onChange={(e) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, e.target.value)}
+                        >
+                          {val === '' && <option value="" disabled>Select {field.label}</option>}
+                          {(agents || []).map(a => <option key={a.session_id} value={a.session_id}>{a.session_name}</option>)}
+                        </select>
+                      </div>
+                    );
+                  }
+                  if (field.name === 'agent_class') dynamicOptions = (agentClasses || []).map(c => c.name);
+                  if (field.name === 'workflow_id') dynamicOptions = (availableWorkflows || []).map(w => w.id);
+
+                  return (
+                    <div key={field.name} className="flex flex-col gap-2">
+                      <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{field.label}</label>
+                      {field.type === 'textarea' || field.type === 'code' ? (
+                        <textarea 
+                          className={`p-4 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] resize-y min-h-[120px] ${field.type === 'code' ? 'font-mono' : ''}`}
+                          placeholder={field.placeholder}
+                          value={val}
+                          onChange={(e) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, e.target.value)}
+                        />
+                      ) : field.type === 'select' || dynamicOptions ? (
+                        <select
+                          className="p-3 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] cursor-pointer"
+                          value={val}
+                          onChange={(e) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, e.target.value)}
+                        >
+                          {val === '' && <option value="" disabled>Select {field.label}</option>}
+                          {dynamicOptions?.map((opt: string) => <option key={opt} value={opt}>{opt}</option>)}
+                        </select>
+                      ) : (
+                        <input 
+                          className="p-3 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)]"
+                          placeholder={field.placeholder}
+                          value={val}
+                          onChange={(e) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, e.target.value)}
+                        />
+                      )}
+                    </div>
+                  );
+                };
+
+                return (
+                  <>
+                    {blockDef.fields?.map(f => renderField(f, false))}
+                    
+                    {blockDef.advancedFields && blockDef.advancedFields.length > 0 && (
+                      <div className="pt-8 border-t border-wardian-border space-y-6">
+                        <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em]">Advanced Configuration</h4>
+                        {blockDef.advancedFields.map(f => renderField(f, true))}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
-            <div className="p-4 bg-[var(--color-wardian-card-bg-muted)] rounded-xl border border-wardian-border-heavy">
-                <span className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase mb-3 block tracking-widest">Variable Assistant</span>
-                <p className="text-[10px] text-muted-neutral italic mb-4">Click to insert at cursor:</p>
-                <div className="flex flex-wrap gap-2">
-                  {nodes.filter(n => n.id !== selectedNodeId).map(n => (
-                    <button
-                      key={n.id}
-                      onClick={() => {
-                        const activeEl = document.activeElement as HTMLTextAreaElement | HTMLInputElement;
-                        if (activeEl && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
-                          const start = activeEl.selectionStart || 0;
-                          const end = activeEl.selectionEnd || 0;
-                          const val = activeEl.value;
-                          const tag = `{{nodes.${n.id}.output}}`;
-                          activeEl.value = val.substring(0, start) + tag + val.substring(end);
-                          activeEl.dispatchEvent(new Event('input', { bubbles: true }));
-                        }
-                      }}
-                      className="px-2 py-1 bg-[var(--color-wardian-bg)] border border-wardian-border rounded text-[9px] font-mono text-[var(--color-wardian-processing)] hover:border-[var(--color-wardian-processing)] transition-colors"
-                    >
-                      {n.id}
-                    </button>
-                  ))}
-                </div>
-            </div>
+            {/* Variable Reference (Collapsed) */}
+            <details className="group border border-wardian-border rounded-xl bg-white/5 overflow-hidden transition-all">
+              <summary className="p-4 cursor-pointer select-none text-[10px] font-bold text-muted-neutral uppercase tracking-widest hover:text-[var(--color-wardian-accent)] transition-colors list-none flex justify-between items-center">
+                <span>Variable Reference</span>
+                <svg className="w-3 h-3 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7"></path></svg>
+              </summary>
+              <div className="p-4 pt-0 flex flex-wrap gap-2 max-h-48 overflow-y-auto no-scrollbar">
+                {nodes.filter(n => n.id !== selectedNodeId).map(n => (
+                  <button
+                    key={n.id}
+                    onClick={() => {
+                      const activeEl = document.activeElement as HTMLTextAreaElement | HTMLInputElement;
+                      if (activeEl && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
+                        const start = activeEl.selectionStart || 0;
+                        const end = activeEl.selectionEnd || 0;
+                        const val = activeEl.value;
+                        const tag = `{{nodes.${n.id}.output}}`;
+                        activeEl.value = val.substring(0, start) + tag + val.substring(end);
+                        activeEl.dispatchEvent(new Event('input', { bubbles: true }));
+                      }
+                    }}
+                    className="px-2 py-1 bg-[var(--color-wardian-bg)] border border-wardian-border rounded text-[9px] font-mono text-[var(--color-wardian-processing)] hover:border-[var(--color-wardian-processing)] transition-colors cursor-pointer"
+                  >
+                    {n.id}
+                  </button>
+                ))}
+              </div>
+            </details>
         </div>
       </div>
     </div>

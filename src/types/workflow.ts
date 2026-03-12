@@ -13,14 +13,19 @@ export type NodeType =
   | 'memory' 
   | 'communication';
 
-export type NodeStatus = 'idle' | 'processing' | 'completed' | 'failed';
+export type NodeStatus = 'idle' | 'processing' | 'completed' | 'failed' | 'blocked';
+
+export interface NodeDependency {
+  node_id: string;
+  port: string;
+}
 
 export interface WorkflowNode {
   id: string;
   type: NodeType;
   name?: string;
   config: Record<string, any>;
-  depends_on?: string[];
+  dependencies?: NodeDependency[];
   // For UI state tracking
   position?: { x: number; y: number };
 }

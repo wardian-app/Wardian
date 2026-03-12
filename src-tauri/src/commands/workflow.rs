@@ -8,8 +8,13 @@ pub async fn list_workflows() -> Result<Vec<WorkflowDefinition>, String> {
 }
 
 #[tauri::command]
-pub async fn save_workflow(workflow: WorkflowDefinition) -> Result<(), String> {
-    workflow_engine::save_workflow(workflow)
+pub async fn save_workflow(app: AppHandle, workflow: WorkflowDefinition) -> Result<(), String> {
+    workflow_engine::save_workflow(app, workflow).await
+}
+
+#[tauri::command]
+pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
+    workflow_engine::delete_workflow(app, id).await
 }
 
 #[tauri::command]

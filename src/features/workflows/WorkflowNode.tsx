@@ -1,21 +1,15 @@
 import { memo } from 'react';
 import { Handle, Position, NodeProps, Node } from '@xyflow/react';
 import { NodeType, NodeStatus } from '../../types/workflow';
+import { BLOCK_LIBRARY } from './blockLibrary';
+import { useWorkflowStore } from '../../store/useWorkflowStore';
 
-const NODE_COLORS: Record<NodeType, string> = {
-  trigger: 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
-  agent: 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
-  command: 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
-  script: 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
-  tool: 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
-  logic: 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
-  loop: 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
-  wait: 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
-  parallel: 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
-  subflow: 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
-  governance: 'border-[var(--color-workflow-critical)] bg-[color-mix(in_srgb,var(--color-workflow-critical),transparent_95%)]',
-  memory: 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
-  communication: 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
+const CATEGORY_COLORS: Record<string, string> = {
+  'TRIGGER': 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
+  'EXECUTION': 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
+  'FLOW CONTROL': 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
+  'PERSISTENCE': 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
+  'COMMUNICATION': 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
 };
 
 const STATUS_COLORS: Record<NodeStatus, string> = {
@@ -23,27 +17,197 @@ const STATUS_COLORS: Record<NodeStatus, string> = {
   processing: 'bg-[var(--color-wardian-processing)] animate-pulse shadow-[0_0_10px_var(--color-wardian-processing)]',
   completed: 'bg-[var(--color-wardian-success)] shadow-[0_0_10px_var(--color-wardian-success)]',
   failed: 'bg-[var(--color-wardian-error)] shadow-[0_0_10px_var(--color-wardian-error)]',
+  blocked: 'bg-[var(--color-wardian-warning)] shadow-[0_0_10px_var(--color-wardian-warning)] animate-pulse',
 };
 
-export const WorkflowNode = memo(({ data, selected }: NodeProps<Node<{ label: string; type: NodeType; status?: NodeStatus }>>) => {
+export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label: string; type: NodeType; blockName?: string; status?: NodeStatus; inputs?: string; outputs?: string; config?: Record<string, any> }>>) => {
   const type = data.type || 'agent';
   const status = data.status || 'idle';
-  const colorClass = NODE_COLORS[type] || NODE_COLORS.agent;
+  
+  // Lookup block definition by type and name to get category
+  const blockDef = BLOCK_LIBRARY.find(b => b.type === type && (data.blockName ? b.name === data.blockName : true));
+  const category = blockDef?.category || 'EXECUTION';
+  const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS['EXECUTION'];
   const statusColorClass = STATUS_COLORS[status];
+  
+  const { 
+    updateNodeConfig, 
+    edges, 
+    agents, 
+    agentClasses, 
+    availableWorkflows 
+  } = useWorkflowStore();
+
+  const incomingEdges = edges.filter(e => e.target === id);
+  const isWaitNode = type === 'wait';
+
+  // Hard Sync Check (Amber Warning)
+  const targetAgent = agents?.find(a => a.session_id === data.config?.agent_id);
+  const isPersistent = data.config?.session_type === 'persistent';
+  
+  // A Hard Sync (Restart) is required if the agent is already online but parameters differ
+  const needsRestart = targetAgent && !targetAgent.is_off && (
+    (data.config?.model && data.config.model !== targetAgent.model) ||
+    (data.config?.output_format && data.config.output_format !== (targetAgent.output_format || 'text'))
+  );
+
+  const triggersHardSync = status === 'idle' && type === 'agent' && isPersistent && needsRestart;
 
   return (
-    <div className={`px-4 py-3 rounded-lg border-2 transition-all duration-300 ${colorClass} ${selected ? 'ring-2 ring-[var(--color-wardian-accent)]/50 shadow-lg scale-105' : 'shadow-md'} min-w-[150px]`}>
-      <Handle type="target" position={Position.Left} className="w-2 h-2 !bg-[var(--color-wardian-border-heavy)] border-none" />
+    <div className={`px-4 py-3 rounded-lg border-2 transition-all duration-300 ${colorClass} ${selected ? 'ring-2 ring-[var(--color-wardian-accent)]/50 shadow-lg scale-105' : 'shadow-md'} min-w-[220px]`}>
       
-      <div className="flex flex-col gap-1">
+      {/* Input Handles */}
+      {blockDef?.ports?.inputs === 1 && (
+        <Handle type="target" position={Position.Left} className="w-2 h-2 !bg-[var(--color-wardian-border-heavy)] border-none" />
+      )}
+      
+      <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-wardian-text-muted)]">{type}</span>
-          <div className={`w-2 h-2 rounded-full ${statusColorClass}`} />
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-[var(--color-wardian-text-muted)]">{blockDef?.name || type}</span>
+            {triggersHardSync && (
+              <span title="Hard Sync Triggered (Agent Resume Cycle)" className="text-[var(--color-wardian-warning)] animate-pulse">
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {isWaitNode && incomingEdges.length > 0 && (
+              <span className="text-[8px] font-mono text-muted-neutral bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+                0/{incomingEdges.length}
+              </span>
+            )}
+            <div className={`w-2 h-2 rounded-full ${statusColorClass}`} />
+          </div>
         </div>
+        
         <div className="text-sm font-bold text-[var(--color-wardian-text)] truncate">{data.label}</div>
+
+
+        {/* Dynamic Fields */}
+        {blockDef?.fields && blockDef.fields.length > 0 && (
+          <div className="flex flex-col gap-2 pt-2 border-t border-[var(--color-wardian-border)]">
+            {blockDef.fields.map(field => {
+              const val = data.config?.[field.name] || '';
+              const sessionType = data.config?.session_type || 'persistent';
+
+              // Conditional visibility for Agent fields
+              if (type === 'agent') {
+                if (field.name === 'agent_id' && sessionType === 'temporary') return null;
+                if (field.name === 'agent_class' && sessionType === 'persistent') return null;
+                
+                const outputFormat = data.config?.output_format || 'text';
+                if (field.name === 'json_schema' && outputFormat !== 'json') return null;
+              }
+
+              // Conditional visibility for Cron fields
+              if (blockDef?.name === 'Cron Schedule') {
+                const st = data.config?.schedule_type || 'Custom';
+                if (st === 'Custom' && ['interval', 'time', 'days'].includes(field.name)) return null;
+                if (st === 'Minutes' && ['time', 'days'].includes(field.name)) return null;
+                if (st === 'Hours' && ['time', 'days'].includes(field.name)) return null;
+                if (st === 'Daily' && ['interval', 'days'].includes(field.name)) return null;
+                if (st === 'Weekly' && ['interval'].includes(field.name)) return null;
+                if (field.name === 'cron') return null;
+              }
+
+              // Dynamic Options Override
+              if (field.name === 'agent_id') {
+                return (
+                  <div key={field.name} className="flex flex-col gap-1">
+                    <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-text-muted)]">{field.label}</span>
+                    <select
+                      className="nodrag nowheel p-1.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)] cursor-pointer"
+                      value={val}
+                      onChange={(e) => updateNodeConfig(id, field.name, e.target.value)}
+                    >
+                      {val === '' && <option value="" disabled>Select {field.label}</option>}
+                      {(agents || []).map(a => <option key={a.session_id} value={a.session_id}>{a.session_name}</option>)}
+                    </select>
+                  </div>
+                );
+              }
+
+              let dynamicOptions = field.options;
+              if (field.name === 'agent_class') dynamicOptions = (agentClasses || []).map(c => c.name);
+              if (field.name === 'workflow_id') dynamicOptions = (availableWorkflows || []).map(w => w.id);
+
+              return (
+                <div key={field.name} className="flex flex-col gap-1">
+                  <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-text-muted)]">{field.label}</span>
+                  
+                  {field.type === 'textarea' || field.type === 'code' ? (
+                    <textarea 
+                      className={`nodrag nowheel p-2 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)] resize-none ${field.type === 'code' ? 'font-mono' : ''}`}
+                      rows={3}
+                      placeholder={field.placeholder}
+                      value={val}
+                      onChange={(e) => updateNodeConfig(id, field.name, e.target.value)}
+                    />
+                  ) : field.type === 'select' || dynamicOptions ? (
+                    <select
+                      className="nodrag nowheel p-1.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)] cursor-pointer"
+                      value={val}
+                      onChange={(e) => updateNodeConfig(id, field.name, e.target.value)}
+                    >
+                      {val === '' && <option value="" disabled>Select {field.label}</option>}
+                      {dynamicOptions?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+                  ) : (
+                    <input 
+                      className="nodrag nowheel p-1.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)]"
+                      placeholder={field.placeholder}
+                      value={val}
+                      onChange={(e) => updateNodeConfig(id, field.name, e.target.value)}
+                    />
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Cron Summary */}
+            {blockDef?.name === 'Cron Schedule' && (
+              <div className="flex flex-col gap-1 p-2 bg-[var(--color-wardian-accent)]/5 rounded border border-[var(--color-wardian-accent)]/10">
+                <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-accent)] font-bold">Schedule</span>
+                <span className="text-xs text-[var(--color-wardian-text)] font-medium">
+                  {(() => {
+                    const cfg = data.config || {};
+                    if (cfg.schedule_type === 'Minutes') return `Every ${cfg.interval || 0}m`;
+                    if (cfg.schedule_type === 'Hours') return `Every ${cfg.interval || 0}h`;
+                    if (cfg.schedule_type === 'Daily') return `Daily at ${cfg.time || '00:00'}`;
+                    if (cfg.schedule_type === 'Weekly') return `${cfg.days || 'Mon'} at ${cfg.time || '00:00'}`;
+                    if (cfg.schedule_type === 'Custom') return cfg.cron || 'Not set';
+                    return 'Select Frequency';
+                  })()}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-2 pt-2 border-t border-[var(--color-wardian-border)]">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Input</span>
+            <span className="text-[9px] font-mono text-[var(--color-wardian-text)]/70 break-all leading-tight">{data.inputs || 'None'}</span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Output</span>
+            <span className="text-[9px] font-mono text-[var(--color-wardian-processing)] break-all leading-tight">{data.outputs || 'JSON'}</span>
+          </div>
+        </div>
       </div>
 
-      <Handle type="source" position={Position.Right} className="w-2 h-2 !bg-[var(--color-wardian-border-heavy)] border-none" />
+      {/* Output Handles */}
+      {blockDef?.ports?.outputs.map((port, index) => (
+        <Handle 
+          key={port}
+          id={port}
+          type="source" 
+          position={Position.Right} 
+          className="w-2 h-2 !bg-[var(--color-wardian-border-heavy)] border-none"
+          style={{ top: `${(index + 1) * (100 / (blockDef.ports!.outputs.length + 1))}%` }}
+        />
+      ))}
     </div>
   );
 });

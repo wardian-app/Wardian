@@ -25,6 +25,27 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
     }
 }
 
+pub fn resolve_gemini_binary() -> (String, Vec<String>) {
+    if cfg!(target_os = "windows") {
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let target = std::path::Path::new(&appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("@google")
+            .join("gemini-cli")
+            .join("dist")
+            .join("index.js");
+
+        if target.exists() {
+            ("node".to_string(), vec![target.to_string_lossy().to_string()])
+        } else {
+            ("gemini.cmd".to_string(), vec![])
+        }
+    } else {
+        ("gemini".to_string(), vec![])
+    }
+}
+
 pub async fn spawn_gemini_cli(
     app: AppHandle,
     config: AgentConfig,
@@ -78,26 +99,11 @@ pub async fn spawn_gemini_cli(
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let target = std::path::Path::new(&appdata)
-            .join("npm")
-            .join("node_modules")
-            .join("@google")
-            .join("gemini-cli")
-            .join("dist")
-            .join("index.js");
-
-        if target.exists() {
-            let mut c = CommandBuilder::new("node");
-            c.arg(target.to_string_lossy().to_string());
-            c
-        } else {
-            CommandBuilder::new("gemini.cmd")
-        }
-    } else {
-        CommandBuilder::new("gemini")
-    };
+    let (bin, args) = resolve_gemini_binary();
+    let mut cmd = CommandBuilder::new(bin);
+    for arg in args {
+        cmd.arg(arg);
+    }
     cmd.cwd(&expected_folder);
 
     let mut final_includes = config
@@ -306,6 +312,40 @@ pub async fn resize_pty(
         }
     });
     Ok(())
+}
+
+pub async fn run_gemini_headless(cwd: &std::path::PathBuf, prompt: &str, session_id: &str, output_format: &str) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (bin, args) = resolve_gemini_binary();
+    let mut cmd = tokio::process::Command::new(bin);
+    for arg in args { cmd.arg(arg); }
+    cmd.arg("-p").arg(prompt)
+       .arg("--output-format").arg(output_format)
+       .arg("--resume").arg(session_id)
+       .current_dir(cwd)
+       .stdout(std::process::Stdio::piped())
+       .stderr(std::process::Stdio::null());
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut output = String::new();
+
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        while let Ok(n) = reader.read_line(&mut line).await {
+            if n == 0 { break; }
+            output.push_str(&line);
+            line.clear();
+        }
+    }
+
+    let _ = child.wait().await;
+    
+    if output_format == "json" {
+        serde_json::from_str(&output).map_err(|e| format!("Failed to parse JSON output: {}. Raw: {}", e, output))
+    } else {
+        Ok(serde_json::json!({ "text": output }))
+    }
 }
 
 pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<String> {

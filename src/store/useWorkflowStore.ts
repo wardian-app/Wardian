@@ -11,6 +11,8 @@ import {
 } from '@xyflow/react';
 import { invoke } from '@tauri-apps/api/core';
 import { WorkflowDefinition, NodeStatus, WorkflowTelemetryEvent } from '../types/workflow';
+import { AgentConfig, AgentClassDefinition } from '../types';
+import { BLOCK_LIBRARY } from '../features/workflows/blockLibrary';
 
 interface WorkflowState {
   nodes: Node[];
@@ -18,6 +20,9 @@ interface WorkflowState {
   activeWorkflowId: string | null;
   nodeStatuses: Record<string, NodeStatus>;
   availableWorkflows: WorkflowDefinition[];
+  agents: AgentConfig[];
+  agentClasses: AgentClassDefinition[];
+  isSaving: boolean;
   
   // Actions
   onNodesChange: OnNodesChange;
@@ -25,10 +30,17 @@ interface WorkflowState {
   onConnect: (connection: Connection) => void;
   setNodes: (nodes: Node[]) => void;
   setEdges: (edges: Edge[]) => void;
+  setAgents: (agents: AgentConfig[]) => void;
+  setAgentClasses: (classes: AgentClassDefinition[]) => void;
   
   fetchWorkflows: () => Promise<void>;
   loadWorkflow: (workflow: WorkflowDefinition) => void;
-  updateNodeStatus: (nodeId: string, status: NodeStatus) => void;
+  saveWorkflow: (workflow: WorkflowDefinition) => Promise<void>;
+  deleteWorkflow: (id: string) => Promise<void>;
+  updateNodeStatus: (nodeId: string, status: NodeStatus, firedPorts?: string[]) => void;
+  updateNodeConfig: (nodeId: string, key: string, value: any) => void;
+  updateActiveWorkflowName: (name: string) => void;
+  duplicateNode: (nodeId: string) => void;
   handleTelemetry: (event: WorkflowTelemetryEvent) => void;
   runActiveWorkflow: () => Promise<void>;
   clearActiveWorkflow: () => void;
@@ -40,6 +52,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   activeWorkflowId: null,
   nodeStatuses: {},
   availableWorkflows: [],
+  agents: [],
+  agentClasses: [],
+  isSaving: false,
 
   onNodesChange: (changes) => {
     set({
@@ -53,11 +68,17 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
   onConnect: (connection) => {
     set({
-      edges: addEdge(connection, get().edges),
+      edges: addEdge({ 
+        ...connection, 
+        style: { stroke: '#4b5563', strokeWidth: 2 },
+        animated: false 
+      }, get().edges),
     });
   },
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
+  setAgents: (agents) => set({ agents }),
+  setAgentClasses: (agentClasses) => set({ agentClasses }),
 
   fetchWorkflows: async () => {
     try {
@@ -69,26 +90,49 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   loadWorkflow: (workflow) => {
-    const nodes: Node[] = workflow.nodes.map((node) => ({
-      id: node.id,
-      type: node.type,
-      position: node.position || { x: Math.random() * 400, y: Math.random() * 400 },
-      data: { 
-        label: node.name || node.id, 
-        config: node.config,
-        type: node.type
-      },
-    }));
+    const nodes: Node[] = workflow.nodes.map((node, index) => {
+      const blockDef = BLOCK_LIBRARY.find(b => b.type === node.type && (node.name ? b.name === node.name : true));
+      return {
+        id: node.id,
+        type: node.type,
+        position: node.position || { x: 100 + (index * 250), y: 100 + (index % 2 * 50) },
+        data: { 
+          label: node.name || node.id, 
+          config: node.config,
+          type: node.type,
+          blockName: blockDef?.name,
+          inputs: blockDef?.inputs || 'None',
+          outputs: blockDef?.outputs || 'JSON'
+        },
+      };
+    });
 
     const edges: Edge[] = [];
     workflow.nodes.forEach((node) => {
-      if (node.depends_on) {
-        node.depends_on.forEach((sourceId) => {
+      // Support new dependencies structure
+      if (node.dependencies) {
+        node.dependencies.forEach((dep) => {
           edges.push({
-            id: `e-${sourceId}-${node.id}`,
-            source: sourceId,
+            id: `e-${dep.node_id}-${node.id}-${dep.port}`,
+            source: dep.node_id,
+            sourceHandle: dep.port,
             target: node.id,
-            type: 'default',
+            style: { stroke: '#4b5563', strokeWidth: 2 },
+            animated: false,
+          });
+        });
+      }
+      
+      // Fallback for any legacy files that might still have depends_on
+      const legacyDeps = (node as any).depends_on;
+      if (legacyDeps && Array.isArray(legacyDeps)) {
+        legacyDeps.forEach((sourceId) => {
+          edges.push({
+            id: `e-${sourceId}-${node.id}-default`,
+            source: sourceId,
+            sourceHandle: 'default',
+            target: node.id,
+            style: { stroke: '#4b5563', strokeWidth: 2 },
             animated: false,
           });
         });
@@ -103,19 +147,60 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     });
   },
 
-  updateNodeStatus: (nodeId, status) => {
+  saveWorkflow: async (workflow) => {
+    set({ isSaving: true });
+    try {
+      await invoke("save_workflow", { workflow });
+      await get().fetchWorkflows();
+      // Optional: show success state for a moment
+      setTimeout(() => set({ isSaving: false }), 500);
+    } catch (err) {
+      console.error("Failed to save workflow:", err);
+      set({ isSaving: false });
+    }
+  },
+
+  deleteWorkflow: async (id) => {
+    try {
+      await invoke("delete_workflow", { id }); 
+      if (get().activeWorkflowId === id) {
+        get().clearActiveWorkflow();
+      }
+      await get().fetchWorkflows();
+    } catch (err) {
+      console.error("Failed to delete workflow:", err);
+    }
+  },
+
+  updateNodeStatus: (nodeId, status, firedPorts) => {
     set((state) => {
       const newNodeStatuses = {
         ...state.nodeStatuses,
         [nodeId]: status
       };
 
-      // Update edge animations based on status
+      // Update edges:
+      // 1. If a node is 'processing', its INCOMING edges should be animated.
+      // 2. If a node is 'completed', its OUTGOING edges (if in firedPorts) should be colored and animated.
       const newEdges = state.edges.map(edge => {
+        let updated = { ...edge };
+        
+        // Incoming to processing node
         if (edge.target === nodeId) {
-          return { ...edge, animated: status === 'processing' };
+          updated.animated = status === 'processing';
         }
-        return edge;
+
+        // Outgoing from completed node
+        if (edge.source === nodeId && status === 'completed' && firedPorts) {
+          if (firedPorts.includes(edge.sourceHandle || 'default')) {
+            const color = edge.sourceHandle === 'on_true' ? '#10b981' : 
+                          edge.sourceHandle === 'on_false' ? '#EF4444' : '#22d3ee';
+            updated.style = { ...edge.style, stroke: color, strokeWidth: 3 };
+            updated.animated = true;
+          }
+        }
+
+        return updated;
       });
 
       return {
@@ -125,9 +210,44 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     });
   },
 
+  updateNodeConfig: (nodeId, key, value) => {
+    set((state) => ({
+      nodes: state.nodes.map(n => 
+        n.id === nodeId 
+          ? { ...n, data: { ...n.data, config: { ...(typeof n.data.config === 'object' && n.data.config !== null ? n.data.config : {}), [key]: value } } }
+          : n
+      )
+    }));
+  },
+
+  updateActiveWorkflowName: (name) => {
+    set((state) => ({
+      availableWorkflows: state.availableWorkflows.map(w => 
+        w.id === state.activeWorkflowId ? { ...w, name } : w
+      )
+    }));
+  },
+
+  duplicateNode: (nodeId) => {
+    const { nodes } = get();
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    const id = `${node.type}-${Date.now()}`;
+    const newNode: Node = {
+      ...node,
+      id,
+      position: { x: node.position.x + 40, y: node.position.y + 40 },
+      selected: false,
+    };
+
+    set({ nodes: [...nodes, newNode] });
+  },
+
   handleTelemetry: (event) => {
-    const { node_id, status } = event;
-    get().updateNodeStatus(node_id, status);
+    const { node_id, status, output } = event;
+    const firedPorts = output?.fired_ports;
+    get().updateNodeStatus(node_id, status, firedPorts);
   },
 
   runActiveWorkflow: async () => {

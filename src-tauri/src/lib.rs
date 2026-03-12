@@ -6,8 +6,6 @@ pub mod commands;
 pub mod workflow_engine;
 
 use tauri::{Emitter, Listener, Manager};
-// ... rest of imports
-
 use crate::models::AgentConfig;
 use crate::state::AppState;
 
@@ -22,9 +20,23 @@ struct TerminalInputPayload {
 /// Initializes plugins, state, and registers command handlers.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        use windows::core::PCWSTR;
+        let aumid: Vec<u16> = "org.wardian.app"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR::from_raw(aumid.as_ptr()));
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::new())
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -59,6 +71,10 @@ pub fn run() {
             // Restore agents from state
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+                
+                // Initialize Workflow Triggers
+                workflow_engine::init_triggers(app_handle.clone()).await;
+
                 if let Some(app_dir) = manager::get_wardian_home() {
                     let state_path = app_dir.join("wardian_state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
@@ -105,8 +121,10 @@ pub fn run() {
             commands::fs::validate_directory_path,
             commands::workflow::list_workflows,
             commands::workflow::save_workflow,
+            commands::workflow::delete_workflow,
             commands::workflow::run_workflow
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

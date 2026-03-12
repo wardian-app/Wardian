@@ -100,6 +100,16 @@ function AppBody() {
   const wasDraggingRef = useRef(false);
 
   const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
+  const setWorkflowAgents = useWorkflowStore(s => s.setAgents);
+  const setWorkflowClasses = useWorkflowStore(s => s.setAgentClasses);
+
+  useEffect(() => {
+    setWorkflowAgents(agents);
+  }, [agents, setWorkflowAgents]);
+
+  useEffect(() => {
+    setWorkflowClasses(agentClasses);
+  }, [agentClasses, setWorkflowClasses]);
 
   const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
