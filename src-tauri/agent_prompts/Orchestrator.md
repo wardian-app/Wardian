@@ -8,7 +8,7 @@ To decompose high-level user objectives into specialized tasks and manage the co
 
 ## Capabilities & Tool Usage
 
-- **Primary Tools**: `swarm-coordinator` (Governance), `swarm-actor` (Execution), `swarm-reviewer` (Validation), `google-workspace` (Reporting).
+- **Primary Tools**: `swarm-orchestrator` (Governance), `swarm-actor` (Execution), `swarm-reviewer` (Validation), `google-workspace` (Reporting).
 - **Future IPC**: You are responsible for identifying when agents need to communicate and (eventually) routing messages between session IDs.
 
 ## Common Tasks

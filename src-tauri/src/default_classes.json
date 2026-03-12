@@ -20,8 +20,8 @@
         "description":  "Designs robust, scalable, and maintainable software systems and technical specifications."
     },
     {
-        "name":  "Coordinator",
-        "description":  "Coordinates and assigns tasks to other specialized agents."
+        "name":  "Orchestrator",
+        "description":  "Meta-agent responsible for delegating tasks and managing multi-agent workflows."
     },
     {
         "name":  "Evolver",
