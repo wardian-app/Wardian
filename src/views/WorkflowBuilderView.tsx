@@ -4,7 +4,9 @@ import {
   Background, 
   Controls, 
   MiniMap, 
-  BackgroundVariant 
+  BackgroundVariant,
+  ReactFlowProvider,
+  useReactFlow
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useWorkflowStore } from '../store/useWorkflowStore';
@@ -25,6 +27,16 @@ const nodeTypes = {
   governance: WorkflowNode,
   memory: WorkflowNode,
   communication: WorkflowNode,
+};
+
+const FitViewHandler = ({ activeWorkflowId }: { activeWorkflowId: string | null }) => {
+  const { fitView } = useReactFlow();
+  useEffect(() => {
+    if (activeWorkflowId) {
+      setTimeout(() => fitView({ padding: 0.2 }), 50);
+    }
+  }, [activeWorkflowId, fitView]);
+  return null;
 };
 
 interface WorkflowBuilderViewProps {
@@ -136,6 +148,34 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       type: 'edge',
       targetId: edge.id
     });
+  };
+
+
+
+  const handleSave = () => {
+    if (activeWorkflowId && activeWorkflow) {
+      const updatedNodes = nodes.map(n => ({
+        id: n.id,
+        type: n.type,
+        name: n.data.label,
+        config: n.data.config || {},
+        position: n.position,
+        dependencies: edges
+          .filter(e => e.target === n.id)
+          .map(e => ({
+            node_id: e.source,
+            port: e.sourceHandle || 'default'
+          }))
+      }));
+      saveWorkflow({ ...activeWorkflow, name: tempWfName, nodes: updatedNodes as any });
+      return true;
+    }
+    return false;
+  };
+
+  const handleRun = async () => {
+    handleSave();
+    runActiveWorkflow();
   };
 
   const deleteNode = (id: string) => {
@@ -338,29 +378,26 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
           <button 
             disabled={!activeWorkflowId}
             onClick={() => {
-              if (activeWorkflowId && activeWorkflow) {
-                const updatedNodes = nodes.map(n => ({
-                  id: n.id,
-                  type: n.type,
-                  name: n.data.label,
-                  config: n.data.config || {},
-                  position: n.position,
-                  dependencies: edges
-                    .filter(e => e.target === n.id)
-                    .map(e => ({
-                      node_id: e.source,
-                      port: e.sourceHandle || 'default'
-                    }))
-                }));
-                saveWorkflow({ ...activeWorkflow, name: tempWfName, nodes: updatedNodes as any });
+              if (activeWorkflowId) {
+                const savedVersion = availableWorkflows.find(w => w.id === activeWorkflowId);
+                if (savedVersion) {
+                  loadWorkflow(savedVersion);
+                }
               }
             }}
+            className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'hidden'}`}
+          >
+            RESET
+          </button>
+          <button 
+            disabled={!activeWorkflowId}
+            onClick={handleSave}
             className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed hidden'}`}
           >
             {isSaving ? 'SAVING...' : 'SAVE CHANGES'}
           </button>
           <button 
-            onClick={() => runActiveWorkflow()}
+            onClick={handleRun}
             disabled={!activeWorkflowId || hasGraphErrors}
             className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer' : 'bg-red-500/10 text-red-500/50 cursor-not-allowed border border-red-500/20 shadow-none scale-100'}`}
             title={hasGraphErrors ? "Cannot run: Fix node errors first" : undefined}
@@ -384,32 +421,35 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
           </button>
         </div>
 
-        <ReactFlow
-          nodes={styledNodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onNodeClick={onNodeClick}
-          onPaneClick={onPaneClick}
-          onPaneContextMenu={onPaneContextMenu}
-          onNodeContextMenu={onNodeContextMenu}
-          onEdgeContextMenu={onEdgeContextMenu}
-          onNodesDelete={(deleted) => deleted.forEach(n => deleteNode(n.id))}
-          onEdgesDelete={(deleted) => deleted.forEach(e => deleteEdge(e.id))}
-          nodeTypes={nodeTypes}
-          fitView
-          colorMode={flowColorMode}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--color-wardian-border-heavy)" />
-          <Controls className="!bg-[var(--color-wardian-card)] !border-wardian-border !fill-[var(--color-wardian-text)]" />
-          <MiniMap 
-            className="!bg-[var(--color-wardian-card)] !border-wardian-border" 
-            maskColor="color-mix(in srgb, var(--color-wardian-bg), transparent 50%)"
-            nodeStrokeWidth={3}
-          />
-        </ReactFlow>
+        <ReactFlowProvider>
+          <ReactFlow
+            nodes={styledNodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={onNodeClick}
+            onPaneClick={onPaneClick}
+            onPaneContextMenu={onPaneContextMenu}
+            onNodeContextMenu={onNodeContextMenu}
+            onEdgeContextMenu={onEdgeContextMenu}
+            onNodesDelete={(deleted) => deleted.forEach(n => deleteNode(n.id))}
+            onEdgesDelete={(deleted) => deleted.forEach(e => deleteEdge(e.id))}
+            nodeTypes={nodeTypes}
+            fitView
+            colorMode={flowColorMode}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--color-wardian-border-heavy)" />
+            <Controls className="!bg-[var(--color-wardian-card)] !border-wardian-border !fill-[var(--color-wardian-text)]" />
+            <MiniMap 
+              className="!bg-[var(--color-wardian-card)] !border-wardian-border" 
+              maskColor="color-mix(in srgb, var(--color-wardian-bg), transparent 50%)"
+              nodeStrokeWidth={3}
+            />
+            <FitViewHandler activeWorkflowId={activeWorkflowId} />
+          </ReactFlow>
+        </ReactFlowProvider>
 
         {/* --- Context Menu --- */}
         {contextMenu && (
@@ -432,13 +472,6 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                 >
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
                   Copy Node ID
-                </button>
-                <button 
-                  onClick={() => { useWorkflowStore.getState().updateNodeStatus(contextMenu.targetId, 'idle'); setContextMenu(null); }}
-                  className="w-full text-left px-3 py-2 text-xs font-bold text-[var(--color-wardian-text)] hover:bg-[var(--color-wardian-accent)]/10 hover:text-[var(--color-wardian-accent)] rounded-lg transition-colors flex items-center gap-2"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                  Reset Status
                 </button>
                 <div className="h-px bg-wardian-border my-1 mx-1" />
                 <button 
