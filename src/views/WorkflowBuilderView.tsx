@@ -163,6 +163,11 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       config.session_type = 'persistent';
       config.output_format = 'text';
     }
+    if (block.type === 'loop') {
+      config.mode = 'count';
+      config.max_iterations = '10';
+      config.iterator_name = 'i';
+    }
     if (block.name === 'Cron Schedule') {
       config.schedule_type = 'Minutes';
       config.interval = '5';
@@ -205,6 +210,14 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     (activeCategory === "ALL" || b.category === activeCategory) &&
     (b.name.toLowerCase().includes(searchQuery.toLowerCase()) || b.description.toLowerCase().includes(searchQuery.toLowerCase()))
   );
+
+  const hasGraphErrors = useMemo(() => {
+    return nodes.some(n => {
+      const incoming = edges.filter(e => e.target === n.id);
+      if (n.type === 'loop') return incoming.length < 2;
+      return false;
+    });
+  }, [nodes, edges]);
 
   return (
     <div className="flex-1 h-full w-full bg-[var(--color-wardian-bg)] relative overflow-hidden rounded-2xl border border-wardian-border shadow-2xl flex flex-col">
@@ -348,10 +361,11 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
           </button>
           <button 
             onClick={() => runActiveWorkflow()}
-            disabled={!activeWorkflowId}
-            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed border border-wardian-border'}`}
+            disabled={!activeWorkflowId || hasGraphErrors}
+            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer' : 'bg-red-500/10 text-red-500/50 cursor-not-allowed border border-red-500/20 shadow-none scale-100'}`}
+            title={hasGraphErrors ? "Cannot run: Fix node errors first" : undefined}
           >
-            RUN WORKFLOW
+            {hasGraphErrors ? 'GRAPH ERROR' : 'RUN WORKFLOW'}
           </button>
         </div>
       </div>
@@ -616,6 +630,13 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     if (st === 'Daily' && ['interval', 'days'].includes(field.name)) return null;
                     if (st === 'Weekly' && ['interval'].includes(field.name)) return null;
                     if (field.name === 'cron' && !isAdvanced) return null; // Only show cron in advanced
+                  }
+
+                  // Conditional visibility for Loop fields
+                  if (selectedNode?.type === 'loop') {
+                    const loopMode = (selectedNode?.data.config as any)?.mode || 'count';
+                    if (field.name === 'condition' && loopMode === 'count') return null;
+                    if (field.name === 'max_iterations' && loopMode === 'conditional') return null;
                   }
 
                   // Dynamic Options Override

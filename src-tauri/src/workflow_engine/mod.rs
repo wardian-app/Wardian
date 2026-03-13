@@ -1,7 +1,7 @@
 use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 use crate::utils::fs::{get_wardian_home, validate_workspace_path};
 use crate::manager::log_debug;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -182,25 +182,41 @@ fn evaluate_logic(condition: &str, registry: &HashMap<String, Value>) -> bool {
     let trimmed = condition.trim();
     if trimmed.is_empty() { return true; }
 
-    // Regex for basic equality: nodes.gatekeeper.output.decision === 'ACTION_REQUIRED'
-    // Supports ===, ==, !==, !=
-    let re = Regex::new(r#"^(nodes\.[^\s!>=<]+)\s*(===|==|!==|!=)\s*['"]([^'"]*)['"]$"#).unwrap();
+    // Regex for basic comparisons: nodes.gatekeeper.output.decision === 'ACTION_REQUIRED' or nodes.loop.output.i < 5
+    // Supports ===, ==, !==, !=, <, >, <=, >=
+    let re = Regex::new(r#"^(nodes\.[^\s!>=<]+)\s*(===|==|!==|!=|<=|>=|<|>)\s*(['"]?)([^'"]*)(['"]?)$"#).unwrap();
     
     if let Some(caps) = re.captures(trimmed) {
         let path = caps.get(1).unwrap().as_str();
         let op = caps.get(2).unwrap().as_str();
-        let target = caps.get(3).unwrap().as_str();
+        let target_val_str = caps.get(4).unwrap().as_str();
         
         let actual = get_registry_value(path, registry);
-        let actual_str = match &actual {
-            Value::String(s) => s.clone(),
-            Value::Null => "null".to_string(),
-            _ => actual.to_string().replace("\"", ""), // fallback for numbers/bools
-        };
         
         match op {
-            "==" | "===" => actual_str == target,
-            "!=" | "!==" => actual_str != target,
+            "==" | "===" | "!=" | "!==" => {
+                let actual_str = match &actual {
+                    Value::String(s) => s.clone(),
+                    Value::Null => "null".to_string(),
+                    _ => actual.to_string().replace("\"", ""), // fallback for numbers/bools
+                };
+                if op == "==" || op == "===" { actual_str == target_val_str }
+                else { actual_str != target_val_str }
+            },
+            "<" | ">" | "<=" | ">=" => {
+                // Numeric comparison
+                if let (Some(actual_num), Ok(target_num)) = (actual.as_f64(), target_val_str.parse::<f64>()) {
+                    match op {
+                        "<" => actual_num < target_num,
+                        ">" => actual_num > target_num,
+                        "<=" => actual_num <= target_num,
+                        ">=" => actual_num >= target_num,
+                        _ => false
+                    }
+                } else {
+                    false
+                }
+            }
             _ => false
         }
     } else {
@@ -378,10 +394,12 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
 
     tauri::async_runtime::spawn(async move {
         let mut trace = Vec::new();
-        let mut pulsed_ports = HashSet::new(); // Set of (node_id, port_id)
-        let mut executed_nodes = HashSet::new();
+        let mut pulsed_ports: HashMap<(String, String), u32> = HashMap::new(); // (node_id, port_id) -> count
+        let mut consumed_pulses: HashMap<String, HashMap<(String, String), u32>> = HashMap::new(); // node_id -> dependency -> count
         let mut queue = VecDeque::new();
         let mut registry: HashMap<String, Value> = HashMap::new();
+        let mut global_step_count = 0;
+        let hard_limit = wf.settings.max_iterations.max(100);
 
         // 1. Identify Entry Points (nodes with no dependencies)
         for node in &wf.nodes {
@@ -392,27 +410,62 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
 
         // 2. Execution Loop
         while let Some(current_node_id) = queue.pop_front() {
-            if executed_nodes.contains(&current_node_id) { continue; }
-            
+            global_step_count += 1;
+            if global_step_count > hard_limit {
+                log_debug(&format!("[Wardian] Workflow {} aborted: Global step limit ({}) reached", wf.id, hard_limit));
+                break;
+            }
+
             let node = match wf.nodes.iter().find(|n| n.id == current_node_id) {
                 Some(n) => n,
                 None => continue,
             };
 
-            // Check if dependencies are satisfied
+            // --- 2A. Transactional Consumption Logic ---
+            let mut triggered_by_dep = None;
             if let Some(deps) = &node.dependencies {
                 if !deps.is_empty() {
-                    let satisfied = if node.r#type == "wait" {
-                        deps.iter().all(|d| pulsed_ports.contains(&(d.node_id.clone(), d.port.clone())))
+                    // Check if there is AT LEAST ONE unconsumed pulse
+                    let mut is_satisfied = false;
+                    let node_consumed = consumed_pulses.entry(node.id.clone()).or_insert_with(HashMap::new);
+
+                    if node.r#type == "wait" {
+                        // Wait nodes: ALL dependent ports must have pulsed_count > consumed_count
+                        is_satisfied = deps.iter().all(|d| {
+                            let key = (d.node_id.clone(), d.port.clone());
+                            let p_count = pulsed_ports.get(&key).cloned().unwrap_or(0);
+                            let c_count = node_consumed.get(&key).cloned().unwrap_or(0);
+                            p_count > c_count
+                        });
+                        if is_satisfied {
+                            // Atomically consume ONE pulse from EVERY dependency
+                            for d in deps {
+                                let key = (d.node_id.clone(), d.port.clone());
+                                *node_consumed.entry(key).or_insert(0) += 1;
+                            }
+                        }
                     } else {
-                        deps.iter().any(|d| pulsed_ports.contains(&(d.node_id.clone(), d.port.clone())))
-                    };
-                    if !satisfied { continue; }
+                        // Standard nodes: ANY dependent port with pulsed_count > consumed_count triggers it
+                        for d in deps {
+                            let key = (d.node_id.clone(), d.port.clone());
+                            let p_count = pulsed_ports.get(&key).cloned().unwrap_or(0);
+                            let c_count = node_consumed.get(&key).cloned().unwrap_or(0);
+                            if p_count > c_count {
+                                triggered_by_dep = Some(key.clone());
+                                is_satisfied = true;
+                                break;
+                            }
+                        }
+                        if is_satisfied {
+                            // Atomically consume ONE pulse from the triggering dependency
+                            if let Some(key) = triggered_by_dep {
+                                *node_consumed.entry(key).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    if !is_satisfied { continue; }
                 }
             }
-
-            // --- Execute Node ---
-            executed_nodes.insert(current_node_id.clone());
             
             let _ = app.emit("workflow-telemetry", &WorkflowTelemetryEvent {
                 workflow_id: wf.id.clone(),
@@ -428,6 +481,10 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
             let mut node_error = None;
 
             match node.r#type.as_str() {
+                "trigger" => {
+                    log_debug(&format!("[Wardian] Trigger node {} pulsing", node.id));
+                    output_payload = node.config.clone(); // Pass through trigger config/data
+                },
                 "agent" => {
                     let agent_id = node.config.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
                     let mut prompt = node.config.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -721,6 +778,35 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                         }
                     }
                 },
+                "loop" => {
+                    let mode = node.config.get("mode").and_then(|v| v.as_str()).unwrap_or("count");
+                    let max_local = node.config.get("max_iterations").and_then(|v| v.as_str())
+                        .and_then(|v| v.parse::<u32>().ok()).unwrap_or(10);
+                    
+                    let iterator_key = node.config.get("iterator_name").and_then(|v| v.as_str()).unwrap_or("i");
+                    
+                    // State Namespace: nodes.[id].output.[iterator_key]
+                    let current_i = registry.get(&node.id)
+                        .and_then(|v| v.get(iterator_key))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+
+                    let should_continue = if mode == "count" {
+                        current_i < max_local
+                    } else {
+                        let condition = node.config.get("condition").and_then(|v| v.as_str()).unwrap_or("false");
+                        evaluate_logic(condition, &registry)
+                    };
+
+                    if should_continue {
+                        result_ports = vec!["body".to_string()];
+                        output_payload = serde_json::json!({ iterator_key: current_i + 1, "status": "pulsing_body" });
+                    } else {
+                        result_ports = vec!["done".to_string()];
+                        output_payload = serde_json::json!({ iterator_key: 0, "status": "pulsing_done" });
+                    }
+                    log_debug(&format!("[Wardian] Loop node {}: i={} -> continue={}", node.id, current_i, should_continue));
+                }
                 _ => {
                     log_debug(&format!("[Wardian] Unknown node type: {}", node.r#type));
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -770,9 +856,9 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                 break;
             }
 
-            // Record pulsed ports
+            // Record pulsed ports: Increment counter in pulse map
             for port in &result_ports {
-                pulsed_ports.insert((current_node_id.clone(), port.clone()));
+                *pulsed_ports.entry((current_node_id.clone(), port.clone())).or_insert(0) += 1;
             }
 
             // Queue downstream nodes

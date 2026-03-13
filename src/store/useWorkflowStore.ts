@@ -191,12 +191,26 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         }
 
         // Outgoing from completed node
-        if (edge.source === nodeId && status === 'completed' && firedPorts) {
-          if (firedPorts.includes(edge.sourceHandle || 'default')) {
+        if (edge.source === nodeId && status === 'completed') {
+          if (firedPorts && firedPorts.includes(edge.sourceHandle || 'default')) {
+            const isLoopBody = edge.sourceHandle === 'body';
+            const isLoopDone = edge.sourceHandle === 'done';
+            
             const color = edge.sourceHandle === 'on_true' ? '#10b981' : 
-                          edge.sourceHandle === 'on_false' ? '#EF4444' : '#22d3ee';
-            updated.style = { ...edge.style, stroke: color, strokeWidth: 3 };
+                          edge.sourceHandle === 'on_false' ? '#EF4444' : 
+                          isLoopBody ? '#10b981' :
+                          isLoopDone ? '#EF4444' : '#22d3ee';
+            
+            updated.style = { ...edge.style, stroke: color, strokeWidth: isLoopBody ? 4 : 3 };
             updated.animated = true;
+            
+            // Apply strobe effect to the loop backlink (body port)
+            updated.className = isLoopBody ? 'edge-strobe' : '';
+          } else {
+            // Port not fired: Reset animation and style
+            updated.animated = false;
+            updated.className = '';
+            updated.style = { ...edge.style, stroke: '#4b5563', strokeWidth: 2 };
           }
         }
 

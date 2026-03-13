@@ -70,6 +70,14 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
               </span>
             )}
+            {type === 'loop' && incomingEdges.length < 2 && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-red-500/20 border border-red-500/40 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.2)]">
+                <svg className="w-3 h-3 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <span className="text-[8px] font-bold text-red-500 uppercase tracking-wider">Missing Backlink</span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {isWaitNode && incomingEdges.length > 0 && (
@@ -109,6 +117,13 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 if (st === 'Daily' && ['interval', 'days'].includes(field.name)) return null;
                 if (st === 'Weekly' && ['interval'].includes(field.name)) return null;
                 if (field.name === 'cron') return null;
+              }
+
+              // Loop conditional visibility (Hardened)
+              if (blockDef?.type === 'loop') {
+                const effectiveMode = data.config?.mode || 'count';
+                if (field.name === 'condition' && effectiveMode !== 'conditional') return null;
+                if (field.name === 'max_iterations' && effectiveMode !== 'count') return null;
               }
 
               // Dynamic Options Override
@@ -190,24 +205,54 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
             <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Input</span>
             <span className="text-[9px] font-mono text-[var(--color-wardian-text)]/70 break-all leading-tight">{data.inputs || 'None'}</span>
           </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Output</span>
-            <span className="text-[9px] font-mono text-[var(--color-wardian-processing)] break-all leading-tight">{data.outputs || 'JSON'}</span>
-          </div>
+          {(!blockDef?.ports || blockDef.ports.outputs.length === 1) && (
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Output</span>
+              <span className="text-[9px] font-mono text-[var(--color-wardian-processing)] break-all leading-tight">{data.outputs || 'JSON'}</span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Output Handles */}
-      {blockDef?.ports?.outputs.map((port, index) => (
-        <Handle 
-          key={port}
-          id={port}
-          type="source" 
-          position={Position.Right} 
-          className="w-2 h-2 !bg-[var(--color-wardian-border-heavy)] border-none"
-          style={{ top: `${(index + 1) * (100 / (blockDef.ports!.outputs.length + 1))}%` }}
-        />
-      ))}
+      {/* Output Handles & Labels */}
+      {blockDef?.ports?.outputs.map((port, index) => {
+        const isTrue = port === 'on_true';
+        const isFalse = port === 'on_false';
+        const isBody = port === 'body';
+        const isDone = port === 'done';
+
+        const colorClass = isTrue || isBody ? '!bg-[var(--color-wardian-success)]' :
+                          isFalse || isDone ? '!bg-[var(--color-wardian-error)]' :
+                          '!bg-[var(--color-wardian-border-heavy)]';
+        
+        const labelText = port === 'on_true' ? 'TRUE' : 
+                         port === 'on_false' ? 'FALSE' : 
+                         port === 'body' ? 'ITERATE' : 
+                         port === 'done' ? 'EXIT' : '';
+
+        return (
+          <div key={port} className="absolute" style={{ top: `${(index + 1) * (100 / (blockDef.ports!.outputs.length + 1))}%`, right: '-4px' }}>
+            <Handle 
+              id={port}
+              type="source" 
+              position={Position.Right} 
+              className={`w-2 h-2 border-none transition-all duration-300 relative ${colorClass}`}
+              style={{ top: '0', transform: 'translateY(-50%)' }}
+            />
+            {labelText && (
+              <div className="absolute left-6 top-0 -translate-y-1/2 flex items-center h-4 px-2 py-0 border border-wardian-border bg-[var(--color-wardian-bg)] rounded-full shadow-[0_0_10px_rgba(0,0,0,0.5)] z-20 pointer-events-none">
+                <span className={`text-[8px] font-black uppercase tracking-widest whitespace-nowrap leading-none ${
+                    isTrue || isBody ? 'text-[var(--color-wardian-success)]' : 
+                    isFalse || isDone ? 'text-[var(--color-wardian-error)]' : 
+                    'text-[var(--color-wardian-text-muted)]'
+                  }`}>
+                  {labelText}
+                </span>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 });

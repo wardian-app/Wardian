@@ -42,7 +42,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     outputs: 'Trigger Context', 
     ports: { inputs: 0, outputs: ['default'] },
     fields: [
-      { name: 'input_schema', label: 'Input Schema (JSON)', type: 'code', placeholder: '{ "type": "object" }' }
+      { name: 'input_schema', label: 'Input Schema', type: 'code', placeholder: '{ "type": "object" }' }
     ]
   },
   { 
@@ -56,7 +56,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     fields: [
       { name: 'pattern', label: 'Glob Pattern', type: 'text', placeholder: 'src/**/*.rs' },
       { name: 'events', label: 'Events', type: 'select', options: ['create', 'modify', 'delete', 'all'] },
-      { name: 'debounce_ms', label: 'Debounce (ms)', type: 'text', placeholder: '500' }
+      { name: 'debounce_ms', label: 'Debounce', type: 'text', placeholder: '500' }
     ]
   },
   { 
@@ -70,8 +70,8 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     fields: [
       { name: 'schedule_type', label: 'Frequency', type: 'select', options: ['Minutes', 'Hours', 'Daily', 'Weekly', 'Custom'] },
       { name: 'interval', label: 'Interval Value', type: 'text', placeholder: '5' },
-      { name: 'time', label: 'Time (HH:mm)', type: 'text', placeholder: '09:00' },
-      { name: 'days', label: 'Days (Optional)', type: 'text', placeholder: 'Mon,Tue,Wed' }
+      { name: 'time', label: 'Time', type: 'text', placeholder: '09:00' },
+      { name: 'days', label: 'Days', type: 'text', placeholder: 'Mon,Tue,Wed' }
     ],
     advancedFields: [
       { name: 'cron', label: 'Raw Cron Expression', type: 'text', placeholder: '0 * * * * *' }
@@ -94,7 +94,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
       { name: 'session_type', label: 'Session Type', type: 'select', options: ['persistent', 'temporary'] },
       { name: 'folder', label: 'Workspace Folder', type: 'text', placeholder: 'C:\\path\\to\\project' },
       { name: 'output_format', label: 'Output Format', type: 'select', options: ['text', 'json'] },
-      { name: 'json_schema', label: 'JSON Schema (Constraint)', type: 'code', placeholder: '{ "type": "object" }' }
+      { name: 'json_schema', label: 'JSON Schema', type: 'code', placeholder: '{ "type": "object" }' }
     ],
     advancedFields: EXECUTION_ADVANCED
   },
@@ -102,18 +102,18 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     type: 'command', 
     name: 'Shell Command', 
     category: 'EXECUTION', 
-    description: 'Native PTY execution (Headless).', 
+    description: 'Native PTY execution.', 
     inputs: 'Registry Context', 
     outputs: 'Cmd Result', 
     ports: DEFAULT_PORTS,
     fields: [
-      { name: 'cmd', label: 'Command String (Required)', type: 'code', placeholder: 'npm run build' },
+      { name: 'cmd', label: 'Command String', type: 'code', placeholder: 'npm run build' },
       { name: 'folder', label: 'Execution Directory', type: 'text', placeholder: 'C:\\path\\to\\project' },
-      { name: 'env', label: 'Environment Variables (JSON)', type: 'code', placeholder: '{ "NODE_ENV": "production" }' }
+      { name: 'env', label: 'Environment Variables', type: 'code', placeholder: '{ "NODE_ENV": "production" }' }
     ],
     advancedFields: [
       ...EXECUTION_ADVANCED,
-      { name: 'timeout_ms', label: 'Timeout (ms)', type: 'text', placeholder: '30000' }
+      { name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }
     ]
   },
   { 
@@ -126,14 +126,14 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     ports: DEFAULT_PORTS,
     fields: [
       { name: 'runtime', label: 'Runtime', type: 'select', options: ['python', 'node', 'sh'] },
-      { name: 'file_path', label: 'File Path (Required)', type: 'text', placeholder: './scripts/test.py' },
+      { name: 'file_path', label: 'File Path', type: 'text', placeholder: './scripts/test.py' },
       { name: 'args', label: 'Arguments', type: 'text', placeholder: '--verbose' },
       { name: 'folder', label: 'Execution Directory', type: 'text', placeholder: 'C:\\path\\to\\project' },
-      { name: 'env', label: 'Environment Variables (JSON)', type: 'code', placeholder: '{ "DEBUG": "*" }' }
+      { name: 'env', label: 'Environment Variables', type: 'code', placeholder: '{ "DEBUG": "*" }' }
     ],
     advancedFields: [
       ...EXECUTION_ADVANCED,
-      { name: 'timeout_ms', label: 'Timeout (ms)', type: 'text', placeholder: '30000' }
+      { name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }
     ]
   },
   { 
@@ -162,11 +162,16 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     type: 'loop', 
     name: 'Loop', 
     category: 'FLOW CONTROL', 
-    description: 'Iterative execution with exit check.', 
+    description: 'Iterative execution pulse.', 
     inputs: 'Registry Context', 
-    outputs: 'Cycle Index', 
-    ports: DEFAULT_PORTS,
-    fields: [{ name: 'max_iterations', label: 'Max Iterations', type: 'text', placeholder: '5' }]
+    outputs: 'Body / Done', 
+    ports: { inputs: 1, outputs: ['body', 'done'] },
+    fields: [
+      { name: 'mode', label: 'Loop Mode', type: 'select', options: ['count', 'conditional'] },
+      { name: 'max_iterations', label: 'Max Iterations', type: 'text', placeholder: '10' },
+      { name: 'condition', label: 'Condition', type: 'text', placeholder: 'nodes.step.output.i < 5' },
+      { name: 'iterator_name', label: 'Iterator Name', type: 'text', placeholder: 'i' }
+    ]
   },
   { 
     type: 'wait', 
@@ -176,7 +181,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     inputs: 'Multiple Temporal signals', 
     outputs: 'Sync Stamp', 
     ports: { inputs: 1, outputs: ['default'] }, // Input is implicitly multi-wired
-    fields: [{ name: 'timeout_ms', label: 'Timeout (ms)', type: 'text', placeholder: '30000' }]
+    fields: [{ name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }]
   },
   { 
     type: 'subflow', 
@@ -188,7 +193,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     ports: DEFAULT_PORTS,
     fields: [
       { name: 'workflow_id', label: 'Workflow ID', type: 'select', placeholder: 'Select Workflow' },
-      { name: 'args', label: 'Arguments (JSON Mapping)', type: 'code', placeholder: '{ "key": "{{nodes.id.output.key}}" }' }
+      { name: 'args', label: 'Arguments', type: 'code', placeholder: '{ "key": "{{nodes.id.output.key}}" }' }
     ]
   },
 
@@ -204,7 +209,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     fields: [
       { name: 'operation', label: 'Operation', type: 'select', options: ['get', 'set', 'delete'] },
       { name: 'key', label: 'Key Path', type: 'text' },
-      { name: 'value', label: 'Value (for Set)', type: 'textarea', placeholder: '{{nodes.id.output}}' },
+      { name: 'value', label: 'Value', type: 'textarea', placeholder: '{{nodes.id.output}}' },
       { name: 'scope', label: 'Scope', type: 'select', options: ['workspace', 'run'] }
     ]
   },

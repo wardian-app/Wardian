@@ -325,3 +325,24 @@
 .animate-float {
   animation: float 4s ease-in-out infinite;
 }
+
+/* ── Workflow Edge Animations ─────────────────────────── */
+@keyframes edge-strobe {
+  0% { stroke-width: 2; opacity: 1; }
+  50% { stroke-width: 6; opacity: 0.7; stroke: #fff; }
+  100% { stroke-width: 2; opacity: 1; }
+}
+
+.edge-strobe path.react-flow__edge-path {
+  animation: edge-strobe 0.15s infinite;
+}
+
+.edge-pulse-body path.react-flow__edge-path {
+  stroke: var(--color-wardian-success) !important;
+  stroke-width: 3;
+}
+
+.edge-pulse-done path.react-flow__edge-path {
+  stroke: var(--color-wardian-error) !important; 
+  stroke-width: 3;
+}
