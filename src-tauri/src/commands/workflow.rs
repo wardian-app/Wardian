@@ -1,6 +1,7 @@
 use crate::models::WorkflowDefinition;
 use crate::workflow_engine;
 use tauri::AppHandle;
+use serde_json::Value;
 
 #[tauri::command]
 pub async fn list_workflows() -> Result<Vec<WorkflowDefinition>, String> {
@@ -18,6 +19,6 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn run_workflow(app: AppHandle, id: String) -> Result<(), String> {
-    workflow_engine::run_workflow(app, id).await
+pub async fn run_workflow(app: AppHandle, id: String, payload: Option<Value>) -> Result<(), String> {
+    workflow_engine::run_workflow(app, id, payload).await
 }

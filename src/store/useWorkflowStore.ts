@@ -42,7 +42,7 @@ interface WorkflowState {
   updateActiveWorkflowName: (name: string) => void;
   duplicateNode: (nodeId: string) => void;
   handleTelemetry: (event: WorkflowTelemetryEvent) => void;
-  runActiveWorkflow: () => Promise<void>;
+  runActiveWorkflow: (payload?: any) => Promise<void>;
   clearActiveWorkflow: () => void;
 }
 
@@ -264,7 +264,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     get().updateNodeStatus(node_id, status, firedPorts);
   },
 
-  runActiveWorkflow: async () => {
+  runActiveWorkflow: async (payload?: any) => {
     const workflowId = get().activeWorkflowId;
     if (!workflowId) return;
 
@@ -272,7 +272,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({ nodeStatuses: {} });
 
     try {
-      await invoke("run_workflow", { id: workflowId });
+      await invoke("run_workflow", { id: workflowId, payload: payload || null });
     } catch (err) {
       console.error("Failed to run workflow:", err);
     }

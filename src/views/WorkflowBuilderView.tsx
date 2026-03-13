@@ -6,12 +6,16 @@ import {
   MiniMap, 
   BackgroundVariant,
   ReactFlowProvider,
-  useReactFlow
+  useReactFlow,
+  useNodesInitialized
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useWorkflowStore } from '../store/useWorkflowStore';
 import { WorkflowNode } from '../features/workflows/WorkflowNode';
 import { BLOCK_LIBRARY, BlockDefinition } from '../features/workflows/blockLibrary';
+import { SchemaEditor } from '../components/SchemaEditor';
+import { RenderableInput } from '../components/RenderableInput';
+import { VariableAssistant } from '../features/workflows/VariableAssistant';
 
 const nodeTypes = {
   trigger: WorkflowNode,
@@ -31,11 +35,20 @@ const nodeTypes = {
 
 const FitViewHandler = ({ activeWorkflowId }: { activeWorkflowId: string | null }) => {
   const { fitView } = useReactFlow();
+  const nodes = useWorkflowStore(s => s.nodes);
+  const nodesInitialized = useNodesInitialized();
+
   useEffect(() => {
-    if (activeWorkflowId) {
-      setTimeout(() => fitView({ padding: 0.2 }), 50);
+    if (activeWorkflowId && nodes.length > 0 && nodesInitialized) {
+      // Multiple attempts to ensure the canvas is stable, especially on first launch
+      const timer1 = setTimeout(() => fitView({ padding: 0.2 }), 50);
+      const timer2 = setTimeout(() => fitView({ padding: 0.2 }), 400);
+      return () => {
+        clearTimeout(timer1);
+        clearTimeout(timer2);
+      };
     }
-  }, [activeWorkflowId, fitView]);
+  }, [activeWorkflowId, nodes.length, nodesInitialized, fitView]);
   return null;
 };
 
@@ -74,6 +87,13 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   
   const [isRenamingWf, setIsRenamingWf] = React.useState(false);
   const [tempWfName, setTempWfName] = React.useState("");
+
+  const [runPayloadModal, setRunPayloadModal] = React.useState<{
+    isOpen: boolean;
+    nodeId: string;
+    values: Record<string, any>;
+    schema: any;
+  }>({ isOpen: false, nodeId: '', values: {}, schema: null });
 
   const [contextMenu, setContextMenu] = React.useState<{
     visible: boolean;
@@ -175,6 +195,34 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
   const handleRun = async () => {
     handleSave();
+    
+    const manualTrigger = nodes.find(n => n.data.blockName === 'Manual Trigger');
+    if (manualTrigger) {
+      const schemaStr = (manualTrigger.data.config as any)?.input_schema;
+      if (schemaStr) {
+        try {
+          const schema = JSON.parse(schemaStr);
+          const properties = schema.properties || (schema.type === 'object' ? {} : null);
+          
+          if (properties && Object.keys(properties).length > 0) {
+            // Initialize default values
+            const initialValues: Record<string, any> = {};
+            Object.keys(properties).forEach(key => {
+              initialValues[key] = properties[key].default !== undefined ? properties[key].default : '';
+            });
+
+            setRunPayloadModal({
+              isOpen: true,
+              nodeId: manualTrigger.id,
+              values: initialValues,
+              schema: schema
+            });
+            return;
+          }
+        } catch (e) {}
+      }
+    }
+    
     runActiveWorkflow();
   };
 
@@ -194,8 +242,21 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     setContextMenu(null);
   };
 
+  const getNextNodeId = (type: string) => {
+    const sameTypeNodes = nodes.filter(n => n.type === type);
+    if (sameTypeNodes.length === 0) return `${type}-1`;
+    
+    const ids = sameTypeNodes.map(n => {
+      const parts = n.id.split('-');
+      return parseInt(parts[parts.length - 1]);
+    }).filter(n => !isNaN(n));
+    
+    const maxId = ids.length > 0 ? Math.max(...ids) : 0;
+    return `${type}-${maxId + 1}`;
+  };
+
   const addNode = (block: BlockDefinition) => {
-    const id = `${block.type}-${Date.now()}`;
+    const id = getNextNodeId(block.type);
     
     // Initialize config with defaults
     const config: Record<string, any> = {};
@@ -252,6 +313,10 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   );
 
   const hasGraphErrors = useMemo(() => {
+    // Check for multiple triggers
+    const triggerCount = nodes.filter(n => n.type === 'trigger').length;
+    if (triggerCount > 1) return true;
+
     return nodes.some(n => {
       const incoming = edges.filter(e => e.target === n.id);
       if (n.type === 'loop') return incoming.length < 2;
@@ -307,8 +372,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         <div className="flex items-center justify-center gap-3">
           {activeWorkflow ? (
             <>
-              <div className={`flex items-center gap-2 px-4 py-1 bg-[var(--color-wardian-bg)] border border-wardian-border rounded-lg shadow-inner ${activeWorkflowId !== 'heartbeat' ? 'cursor-pointer hover:border-[var(--color-wardian-accent)]' : ''}`}>
-                {isRenamingWf && activeWorkflowId !== 'heartbeat' ? (
+              <div className={`flex items-center gap-2 px-4 py-1 bg-[var(--color-wardian-bg)] border border-wardian-border rounded-lg shadow-inner cursor-pointer hover:border-[var(--color-wardian-accent)]`}>
+                {isRenamingWf ? (
                   <input
                     autoFocus
                     className="bg-transparent text-[var(--color-wardian-text)] text-sm font-bold outline-none text-center min-w-[120px]"
@@ -319,8 +384,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   />
                 ) : (
                   <h3 
-                    onClick={() => activeWorkflowId !== 'heartbeat' && setIsRenamingWf(true)}
-                    className={`text-sm font-bold text-[var(--color-wardian-text)] transition-colors tracking-tight ${activeWorkflowId !== 'heartbeat' ? 'hover:text-[var(--color-wardian-accent)]' : 'cursor-default'}`}
+                    onClick={() => setIsRenamingWf(true)}
+                    className={`text-sm font-bold text-[var(--color-wardian-text)] transition-colors tracking-tight hover:text-[var(--color-wardian-accent)]`}
                   >
                     {tempWfName || activeWorkflow.name}
                   </h3>
@@ -355,14 +420,13 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                 </button>
 
                 <button 
-                  disabled={activeWorkflowId === 'heartbeat'}
                   onClick={() => {
                     if (activeWorkflowId && confirm("Delete this workflow?")) {
                       deleteWorkflow(activeWorkflowId);
                     }
                   }}
-                  className={`p-1.5 transition-colors ${activeWorkflowId !== 'heartbeat' ? 'text-muted-neutral hover:text-red-500 cursor-pointer' : 'text-gray-800 cursor-not-allowed opacity-30'}`}
-                  title={activeWorkflowId === 'heartbeat' ? "Protected System Workflow" : "Delete This Workflow"}
+                  className={`p-1.5 transition-colors text-muted-neutral hover:text-red-500 cursor-pointer`}
+                  title={"Delete This Workflow"}
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                 </button>
@@ -575,11 +639,16 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       </div>
       
       {/* Side Drawer Editor */}
-      <div className={`absolute top-20 right-4 bottom-4 w-[400px] bg-[color-mix(in_srgb,var(--color-wardian-sidebar-primary),transparent_5%)] backdrop-blur-xl border border-wardian-border rounded-2xl p-0 shadow-[0_32px_64px_rgba(0,0,0,0.5)] z-10 transition-transform duration-300 flex flex-col overflow-hidden ${selectedNodeId ? 'translate-x-0' : 'translate-x-[calc(100%+2rem)]'}`}>
+      <div 
+        onContextMenu={(e) => e.preventDefault()}
+        className={`absolute top-20 right-4 bottom-4 w-[400px] bg-[color-mix(in_srgb,var(--color-wardian-sidebar-primary),transparent_5%)] backdrop-blur-xl border border-wardian-border rounded-2xl p-0 shadow-[0_32px_64px_rgba(0,0,0,0.5)] z-10 transition-transform duration-300 flex flex-col overflow-hidden ${selectedNodeId ? 'translate-x-0' : 'translate-x-[calc(100%+2rem)]'}`}
+      >
         <div className="flex justify-between items-center p-6 border-b border-wardian-border bg-white/5">
           <div className="flex flex-col">
             <h3 className="text-lg font-bold text-[var(--color-wardian-text)] uppercase tracking-tighter">Node Settings</h3>
-            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">{selectedNode?.type}</span>
+            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">
+              {BLOCK_LIBRARY.find(b => b.type === selectedNode?.type && (selectedNode?.data.blockName ? b.name === selectedNode.data.blockName : true))?.name || selectedNode?.type}
+            </span>
           </div>
           <button onClick={() => setSelectedNodeId(null)} className="p-2 hover:bg-white/10 rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] cursor-pointer transition-all">&times;</button>
         </div>
@@ -589,11 +658,12 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             <div className="space-y-6">
               <div className="flex flex-col gap-2">
                 <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">Display Name</label>
-                <input 
-                  className="bg-[var(--color-wardian-bg)] border border-wardian-border rounded-xl px-4 py-3 text-sm text-[var(--color-wardian-text)] outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] transition-all"
+                <RenderableInput 
+                  className="!rounded-xl"
                   value={(selectedNode?.data.label as string) || ""}
-                  onChange={(e) => {
-                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, label: e.target.value } } : n);
+                  nodeId={selectedNodeId!}
+                  onChange={(newVal) => {
+                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, label: newVal } } : n);
                     setNodes(newNodes);
                   }}
                 />
@@ -649,6 +719,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   if (selectedNode?.type === 'agent') {
                     if (field.name === 'agent_id' && sessionType === 'temporary') return null;
                     if (field.name === 'agent_class' && sessionType === 'persistent') return null;
+                    if (field.name === 'folder' && sessionType === 'persistent') return null;
 
                     const outputFormat = (selectedNode?.data.config as any)?.output_format || 'text';
                     if (field.name === 'json_schema' && outputFormat !== 'json') return null;
@@ -690,19 +761,18 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     );
                   }
                   if (field.name === 'agent_class') dynamicOptions = (agentClasses || []).map(c => c.name);
-                  if (field.name === 'workflow_id') dynamicOptions = (availableWorkflows || []).map(w => w.id);
+                  const isSelect = field.type === 'select' || (dynamicOptions && dynamicOptions.length > 0);
 
                   return (
                     <div key={field.name} className="flex flex-col gap-2">
                       <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{field.label}</label>
-                      {field.type === 'textarea' || field.type === 'code' ? (
-                        <textarea 
-                          className={`p-4 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] resize-y min-h-[120px] ${field.type === 'code' ? 'font-mono' : ''}`}
-                          placeholder={field.placeholder}
+                      {field.type === 'schema' ? (
+                        <SchemaEditor 
                           value={val}
-                          onChange={(e) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, e.target.value)}
+                          nodeId={selectedNodeId!}
+                          onChange={(newVal) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, newVal)}
                         />
-                      ) : field.type === 'select' || dynamicOptions ? (
+                      ) : isSelect ? (
                         <select
                           className="p-3 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] cursor-pointer"
                           value={val}
@@ -712,11 +782,12 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                           {dynamicOptions?.map((opt: string) => <option key={opt} value={opt}>{opt}</option>)}
                         </select>
                       ) : (
-                        <input 
-                          className="p-3 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)]"
+                        <RenderableInput
+                          multiline={true}
                           placeholder={field.placeholder}
                           value={val}
-                          onChange={(e) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, e.target.value)}
+                          nodeId={selectedNodeId!}
+                          onChange={(newVal) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, newVal)}
                         />
                       )}
                     </div>
@@ -738,36 +809,106 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
               })()}
             </div>
 
-            {/* Variable Reference (Collapsed) */}
-            <details className="group border border-wardian-border rounded-xl bg-white/5 overflow-hidden transition-all">
-              <summary className="p-4 cursor-pointer select-none text-[10px] font-bold text-muted-neutral uppercase tracking-widest hover:text-[var(--color-wardian-accent)] transition-colors list-none flex justify-between items-center">
-                <span>Variable Reference</span>
-                <svg className="w-3 h-3 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7"></path></svg>
-              </summary>
-              <div className="p-4 pt-0 flex flex-wrap gap-2 max-h-48 overflow-y-auto no-scrollbar">
-                {nodes.filter(n => n.id !== selectedNodeId).map(n => (
-                  <button
-                    key={n.id}
-                    onClick={() => {
-                      const activeEl = document.activeElement as HTMLTextAreaElement | HTMLInputElement;
-                      if (activeEl && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
-                        const start = activeEl.selectionStart || 0;
-                        const end = activeEl.selectionEnd || 0;
-                        const val = activeEl.value;
-                        const tag = `{{nodes.${n.id}.output}}`;
-                        activeEl.value = val.substring(0, start) + tag + val.substring(end);
-                        activeEl.dispatchEvent(new Event('input', { bubbles: true }));
-                      }
-                    }}
-                    className="px-2 py-1 bg-[var(--color-wardian-bg)] border border-wardian-border rounded text-[9px] font-mono text-[var(--color-wardian-processing)] hover:border-[var(--color-wardian-processing)] transition-colors cursor-pointer"
-                  >
-                    {n.id}
-                  </button>
-                ))}
-              </div>
-            </details>
+            {/* Variable Assistant */}
+            <div className="pt-2">
+              <VariableAssistant selectedNodeId={selectedNodeId!} />
+            </div>
         </div>
       </div>
+      {/* --- Run Payload Modal --- */}
+      {runPayloadModal.isOpen && (
+        <div className="absolute inset-0 z-[110] flex items-center justify-center p-8 bg-black/60 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-[var(--color-wardian-card)] border border-wardian-border-heavy w-full max-w-lg rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
+            <div className="p-6 border-b border-wardian-border flex items-center justify-between">
+              <div className="flex flex-col">
+                <h3 className="text-xl font-bold text-[var(--color-wardian-text)] tracking-tight">Manual Trigger</h3>
+                <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">Provide Input Parameters</span>
+              </div>
+              <button 
+                onClick={() => setRunPayloadModal({ ...runPayloadModal, isOpen: false })}
+                className="p-2 hover:bg-white/10 rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6 max-h-[60vh] overflow-y-auto no-scrollbar">
+               {Object.entries((runPayloadModal.schema?.properties || {}) as Record<string, any>).map(([key, prop]) => (
+                 <div key={key} className="flex flex-col gap-2">
+                   <div className="flex items-center justify-between">
+                     <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
+                     <div className="flex items-center gap-1.5 opacity-60">
+                       <span className="text-[9px] font-mono text-muted-neutral bg-white/5 px-1.5 py-0.5 rounded border border-white/10">{prop.type || 'string'}</span>
+                       <button 
+                         title="Variables supported (right-click input to insert)"
+                         className="p-1 hover:bg-white/10 rounded-md text-muted-neutral hover:text-[var(--color-wardian-accent)] transition-all cursor-help"
+                       >
+                         <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+                       </button>
+                     </div>
+                   </div>
+                   <div className="bg-[var(--color-wardian-bg)] rounded-xl border border-wardian-border overflow-hidden">
+                     <RenderableInput 
+                        multiline={true}
+                        compact={true}
+                        value={String(runPayloadModal.values[key] || '')}
+                        nodeId={runPayloadModal.nodeId}
+                        placeholder={prop.description || `Enter ${key}...`}
+                        onChange={(val) => setRunPayloadModal(prev => ({ 
+                          ...prev, 
+                          values: { ...prev.values, [key]: val } 
+                        }))}
+                     />
+                   </div>
+                   {prop.description && <p className="text-[9px] text-muted-neutral/60 italic leading-snug">{prop.description}</p>}
+                 </div>
+               ))}
+            </div>
+
+            <div className="p-6 bg-[color-mix(in_srgb,var(--color-wardian-card),black_10%)] border-t border-wardian-border flex justify-end gap-3">
+               <button 
+                onClick={() => setRunPayloadModal({ ...runPayloadModal, isOpen: false })}
+                className="px-6 py-2 rounded-xl text-xs font-bold text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={() => {
+                  // Final conversion: try to parse values back to their intended types if possible
+                  const finalPayload: Record<string, any> = {};
+                  const properties = runPayloadModal.schema?.properties || {};
+                  
+                  Object.keys(runPayloadModal.values).forEach(key => {
+                    const val = runPayloadModal.values[key];
+                    const type = properties[key]?.type;
+                    
+                    if (type === 'number' || type === 'integer') {
+                      const num = Number(val);
+                      finalPayload[key] = isNaN(num) ? val : num;
+                    } else if (type === 'boolean') {
+                      finalPayload[key] = val === 'true' || val === true;
+                    } else if (type === 'object' || type === 'array') {
+                      try {
+                        finalPayload[key] = JSON.parse(val);
+                      } catch (e) {
+                        finalPayload[key] = val;
+                      }
+                    } else {
+                      finalPayload[key] = val;
+                    }
+                  });
+
+                  runActiveWorkflow(finalPayload);
+                  setRunPayloadModal({ ...runPayloadModal, isOpen: false });
+                }}
+                className="px-8 py-2 bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] rounded-xl text-[10px] font-bold uppercase tracking-widest hover:scale-105 active:scale-95 transition-all cursor-pointer"
+              >
+                Run Workflow
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

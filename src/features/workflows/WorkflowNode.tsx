@@ -1,8 +1,10 @@
-import { memo } from 'react';
+import { memo, ReactNode } from 'react';
 import { Handle, Position, NodeProps, Node } from '@xyflow/react';
 import { NodeType, NodeStatus } from '../../types/workflow';
 import { BLOCK_LIBRARY } from './blockLibrary';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
+import { VariablePill } from '../../components/VariablePill';
+import { RenderableInput } from '../../components/RenderableInput';
 
 const CATEGORY_COLORS: Record<string, string> = {
   'TRIGGER': 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
@@ -53,8 +55,28 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
 
   const triggersHardSync = status === 'idle' && type === 'agent' && isPersistent && needsRestart;
 
+  const HB_REGEX = /\{\{([^}]+)\}\}/g;
+  const resolveVariables = (text: string) => {
+    if (typeof text !== 'string') return text;
+    const elements: (string | ReactNode)[] = [];
+    let lastIndex = 0;
+    let match;
+    HB_REGEX.lastIndex = 0;
+    while ((match = HB_REGEX.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        elements.push(text.substring(lastIndex, match.index));
+      }
+      elements.push(<VariablePill key={`${match.index}-${match[1]}`} path={match[1]} />);
+      lastIndex = HB_REGEX.lastIndex;
+    }
+    if (lastIndex < text.length) {
+      elements.push(text.substring(lastIndex));
+    }
+    return elements;
+  };
+
   return (
-    <div className={`px-4 py-3 rounded-lg border-2 transition-all duration-300 ${colorClass} ${selected ? 'ring-2 ring-[var(--color-wardian-accent)]/50 shadow-lg scale-105' : 'shadow-md'} min-w-[220px]`}>
+    <div className={`px-4 py-3 rounded-lg border-2 transition-all duration-300 ${colorClass} ${selected ? 'ring-2 ring-[var(--color-wardian-accent)]/50 shadow-lg scale-105' : 'shadow-md'} w-[320px] max-w-[320px]`}>
       
       {/* Input Handles */}
       {blockDef?.ports?.inputs === 1 && (
@@ -78,6 +100,14 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 <span className="text-[8px] font-bold text-red-500 uppercase tracking-wider">Missing Backlink</span>
               </div>
             )}
+            {type === 'trigger' && useWorkflowStore.getState().nodes.filter(n => n.type === 'trigger').length > 1 && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-red-500/20 border border-red-500/40 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.2)]">
+                <svg className="w-3 h-3 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <span className="text-[8px] font-bold text-red-500 uppercase tracking-wider">Multiple Triggers</span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {isWaitNode && incomingEdges.length > 0 && (
@@ -89,7 +119,9 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
           </div>
         </div>
         
-        <div className="text-sm font-bold text-[var(--color-wardian-text)] truncate">{data.label}</div>
+        <div className="text-sm font-bold text-[var(--color-wardian-text)] truncate flex items-center gap-1 overflow-hidden">
+          {resolveVariables(data.label)}
+        </div>
 
 
         {/* Dynamic Fields */}
@@ -103,6 +135,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
               if (type === 'agent') {
                 if (field.name === 'agent_id' && sessionType === 'temporary') return null;
                 if (field.name === 'agent_class' && sessionType === 'persistent') return null;
+                if (field.name === 'folder' && sessionType === 'persistent') return null;
                 
                 const outputFormat = data.config?.output_format || 'text';
                 if (field.name === 'json_schema' && outputFormat !== 'json') return null;
@@ -151,14 +184,32 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 <div key={field.name} className="flex flex-col gap-1">
                   <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-text-muted)]">{field.label}</span>
                   
-                  {field.type === 'textarea' || field.type === 'code' ? (
-                    <textarea 
-                      className={`nodrag nowheel p-2 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)] resize-none ${field.type === 'code' ? 'font-mono' : ''}`}
-                      rows={3}
-                      placeholder={field.placeholder}
+                  {field.type === 'textarea' || field.type === 'code' || field.type === 'text' ? (
+                    <RenderableInput
                       value={val}
-                      onChange={(e) => updateNodeConfig(id, field.name, e.target.value)}
+                      onChange={(newVal) => updateNodeConfig(id, field.name, newVal)}
+                      placeholder={field.placeholder}
+                      multiline={true}
+                      compact={true}
+                      nodeId={id}
+                      className="nodrag nowheel !rounded-lg !border-[var(--color-wardian-border)] !bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)]"
                     />
+                  ) : field.type === 'schema' ? (
+                    <div className="flex flex-col gap-1 p-2 bg-[var(--color-wardian-bg)] border border-[var(--color-wardian-border)] rounded-lg">
+                      <span className="text-[9px] font-mono text-[var(--color-wardian-processing)] font-bold">
+                        {(() => {
+                          try {
+                            const schema = JSON.parse(val || '{}');
+                            const props = schema.properties || schema;
+                            const keys = Object.keys(props);
+                            if (keys.length === 0) return '{ }';
+                            return `{ ${keys.slice(0, 2).join(', ')}${keys.length > 2 ? '...' : ''} }`;
+                          } catch (e) {
+                            return '{ ... }';
+                          }
+                        })()}
+                      </span>
+                    </div>
                   ) : field.type === 'select' || dynamicOptions ? (
                     <select
                       className="nodrag nowheel p-1.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)] cursor-pointer"
@@ -168,14 +219,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                       {val === '' && <option value="" disabled>Select {field.label}</option>}
                       {dynamicOptions?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     </select>
-                  ) : (
-                    <input 
-                      className="nodrag nowheel p-1.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)]"
-                      placeholder={field.placeholder}
-                      value={val}
-                      onChange={(e) => updateNodeConfig(id, field.name, e.target.value)}
-                    />
-                  )}
+                  ) : null}
                 </div>
               );
             })}

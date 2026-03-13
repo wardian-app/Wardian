@@ -79,30 +79,24 @@ async fn run_command_headless(
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn process: {}", e))?;
-
+    let child = cmd.spawn().map_err(|e| format!("Failed to spawn process: {}", e))?;
     let timeout = std::time::Duration::from_millis(if timeout_ms > 0 { timeout_ms } else { 30000 });
-    
-    // We don't use wait_with_output because it consumes 'child', making kill() impossible on timeout.
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(format!("Command execution failed: {}", e)),
-        Err(_) => {
-            let _ = child.kill().await;
-            return Err(format!("Command timed out after {}ms", timeout.as_millis()));
+
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            Ok(serde_json::json!({
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr
+            }))
         }
-    };
-
-    let output = child.wait_with_output().await.map_err(|e| format!("Failed to collect output: {}", e))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = status.code().unwrap_or(-1);
-
-    Ok(serde_json::json!({
-        "exit_code": exit_code,
-        "stdout": stdout,
-        "stderr": stderr
-    }))
+        Ok(Err(e)) => Err(format!("Command execution failed: {}", e)),
+        Err(_) => Err(format!("Command timed out after {}ms", timeout.as_millis())),
+    }
 }
 
 pub fn get_workflows_dir() -> Option<PathBuf> {
@@ -113,58 +107,66 @@ pub fn get_logs_dir(workflow_id: &str) -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflow_logs").join(workflow_id))
 }
 
-/// Interpolates a string using the Shared Registry data.
-/// Syntax: {{nodes.[id].output.[path]}}
+pub fn load_shared_storage() -> Value {
+    if let Some(home) = get_wardian_home() {
+        let path = home.join("shared_storage.json");
+        if let Ok(content) = fs::read_to_string(path) {
+            return serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
+        }
+    }
+    serde_json::json!({})
+}
+
+pub fn save_shared_storage(storage: &Value) {
+    if let Some(home) = get_wardian_home() {
+        let path = home.join("shared_storage.json");
+        let content = serde_json::to_string_pretty(storage).unwrap_or("{}".to_string());
+        let _ = fs::write(path, content);
+    }
+}
+
 fn interpolate_string(input: &str, registry: &HashMap<String, Value>) -> String {
-    let re = Regex::new(r"\{\{nodes\.([^.]+)\.output\.?([^}]*)?\}\}").unwrap();
+    // Matches {{nodes.id.output.path}}, {{trigger.payload.path}}, or {{storage.path}}
+    let re = Regex::new(r"\{\{([^}]+)\}\}").unwrap();
     
     re.replace_all(input, |caps: &regex::Captures| {
-        let node_id = caps.get(1).map_or("", |m| m.as_str());
-        let path = caps.get(2).map_or("", |m| m.as_str());
-
-        if let Some(node_output) = registry.get(node_id) {
-            if path.is_empty() {
-                // If no path, return serialized JSON if object, or raw string if string
-                if let Some(s) = node_output.as_str() {
-                    s.to_string()
-                } else {
-                    node_output.to_string()
-                }
-            } else {
-                // Traverse the JSON path (e.g., "data.user.name")
-                let mut current = node_output;
-                for part in path.split('.') {
-                    if part.is_empty() { continue; }
-                    if let Some(next) = current.get(part) {
-                        current = next;
-                    } else {
-                        return format!("{{{{nodes.{}.output.{}}}}}", node_id, path);
-                    }
-                }
-                if let Some(s) = current.as_str() {
-                    s.to_string()
-                } else {
-                    current.to_string()
-                }
-            }
+        let full_path = caps.get(1).map_or("", |m| m.as_str());
+        let val = get_registry_value(full_path, registry);
+        
+        if val.is_null() {
+            format!("{{{{{}}}}}", full_path)
+        } else if let Some(s) = val.as_str() {
+            s.to_string()
         } else {
-            // Keep original if not found
-            format!("{{{{nodes.{}.output.{}}}}}", node_id, path)
+            val.to_string()
         }
     }).to_string()
 }
 
 /// Resolves a value from the registry given a dot-notated path.
-/// Format: nodes.[id].output.[optional.subpath]
+/// Supported Formats:
+/// 1. nodes.[id].output.[path]
+/// 2. trigger.payload.[path]
+/// 3. storage.[path]
 fn get_registry_value(path: &str, registry: &HashMap<String, Value>) -> Value {
     let parts: Vec<&str> = path.split('.').collect();
-    if parts.len() < 3 || parts[0] != "nodes" || parts[2] != "output" {
-        return Value::Null;
-    }
-    let node_id = parts[1];
-    if let Some(node_output) = registry.get(node_id) {
-        let mut current = node_output;
-        for part in &parts[3..] {
+    if parts.is_empty() { return Value::Null; }
+
+    let (root_key, sub_path_start) = if parts[0] == "nodes" && parts.len() >= 3 && parts[2] == "output" {
+        (parts[1], 3)
+    } else if parts[0] == "trigger" && parts.len() >= 2 && parts[1] == "payload" {
+        ("trigger", 2)
+    } else if parts[0] == "storage" {
+        ("storage", 1)
+    } else {
+        // Fallback: try direct lookup if it's just a single key
+        return registry.get(path).cloned().unwrap_or(Value::Null);
+    };
+
+    if let Some(root_data) = registry.get(root_key) {
+        let mut current = root_data;
+        for part in &parts[sub_path_start..] {
+            if part.is_empty() { continue; }
             if let Some(next) = current.get(*part) {
                 current = next;
             } else {
@@ -303,7 +305,11 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
                                 tokio::time::sleep(duration).await;
                                 
                                 log_debug(&format!("[Wardian] Triggering workflow {} via cron {}", wf_id_cron, cron_str));
-                                let _ = run_workflow(app_cron.clone(), wf_id_cron.clone()).await;
+                                let payload = serde_json::json!({
+                                    "timestamp": Utc::now().to_rfc3339(),
+                                    "id": wf_id_cron.clone()
+                                });
+                                let _ = run_workflow(app_cron.clone(), wf_id_cron.clone(), Some(payload)).await;
                             } else {
                                 break;
                             }
@@ -325,17 +331,24 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
                     // The watcher needs to stay alive
                     let handle = tokio::spawn(async move {
                         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-                            if let Ok(event) = res {
-                                if event.kind.is_modify() || event.kind.is_create() {
-                                    let _ = tx.try_send(());
+                            if let Ok(Event { paths, kind, .. }) = res {
+                                if !paths.is_empty() {
+                                    let path = paths[0].to_string_lossy().to_string();
+                                    let event_type = format!("{:?}", kind);
+                                    let payload = serde_json::json!({
+                                        "path": path,
+                                        "event": event_type,
+                                        "timestamp": Utc::now().to_rfc3339()
+                                    });
+                                    let _ = tx.try_send(Some(payload)); // Send payload through channel
                                 }
                             }
                         }).unwrap();
 
                         if let Ok(_) = watcher.watch(&path_clone, RecursiveMode::NonRecursive) {
-                            while let Some(_) = rx.recv().await {
+                            while let Some(payload) = rx.recv().await {
                                 log_debug(&format!("[Wardian] Triggering workflow {} via file watcher on {:?}", wf_id_file, path_clone));
-                                let _ = run_workflow(app_file.clone(), wf_id_file.clone()).await;
+                                let _ = run_workflow(app_file.clone(), wf_id_file.clone(), payload).await;
                                 // Debounce: wait a bit before being ready for next trigger
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             }
@@ -381,7 +394,7 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
+pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option<Value>) -> Result<(), String> {
     let workflows = list_workflows()?;
     let wf = workflows.into_iter().find(|w| w.id == wf_id)
         .ok_or_else(|| format!("Workflow {} not found", wf_id))?;
@@ -398,6 +411,12 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
         let mut consumed_pulses: HashMap<String, HashMap<(String, String), u32>> = HashMap::new(); // node_id -> dependency -> count
         let mut queue = VecDeque::new();
         let mut registry: HashMap<String, Value> = HashMap::new();
+        let initial_payload_captured = initial_payload.clone();
+        
+        // Initialize storage in registry
+        let mut storage = load_shared_storage();
+        registry.insert("storage".to_string(), storage.clone());
+
         let mut global_step_count = 0;
         let hard_limit = wf.settings.max_iterations.max(100);
 
@@ -483,7 +502,71 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
             match node.r#type.as_str() {
                 "trigger" => {
                     log_debug(&format!("[Wardian] Trigger node {} pulsing", node.id));
-                    output_payload = node.config.clone(); // Pass through trigger config/data
+                    
+                    let mut payload_map = match node.config.as_object() {
+                        Some(m) => m.clone(),
+                        None => serde_json::Map::new(),
+                    };
+                    
+                    if let Some(Value::Object(initial)) = initial_payload_captured.as_ref() {
+                        for (k, v) in initial {
+                            payload_map.insert(k.clone(), v.clone());
+                        }
+                    }
+
+                    // Clean up metadata that shouldn't be in the runtime payload
+                    payload_map.remove("input_schema");
+                    payload_map.remove("json_schema");
+
+                    output_payload = Value::Object(payload_map);
+                    
+                    // Alias this to the global 'trigger' key
+                    registry.insert("trigger".to_string(), output_payload.clone());
+                },
+                "memory" => {
+                    let op = node.config.get("operation").and_then(|v| v.as_str()).unwrap_or("get");
+                    let key_path = node.config.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let value_to_set = node.config.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    // Interpolate key and value
+                    let interpolated_key = interpolate_string(key_path, &registry);
+                    let interpolated_val = interpolate_string(value_to_set, &registry);
+
+                    match op {
+                        "set" => {
+                            // Deep set logic or flat key? For now, let's stick to flat or dot-notated objects
+                            if let Some(obj) = storage.as_object_mut() {
+                                // Simple dot notation support for set (key.subKey)
+                                let parts: Vec<&str> = interpolated_key.split('.').collect();
+                                if parts.len() == 1 {
+                                    obj.insert(interpolated_key.clone(), serde_json::Value::String(interpolated_val.clone()));
+                                } else {
+                                    // Complex nested set - keeping it simple for now
+                                    obj.insert(interpolated_key.clone(), serde_json::Value::String(interpolated_val.clone()));
+                                }
+                            }
+                            save_shared_storage(&storage);
+                            registry.insert("storage".to_string(), storage.clone());
+                            output_payload = serde_json::json!({ "status": "success", "op": "set", "key": interpolated_key, "value": interpolated_val });
+                        },
+                        "delete" => {
+                            if let Some(obj) = storage.as_object_mut() {
+                                obj.remove(&interpolated_key);
+                            }
+                            save_shared_storage(&storage);
+                            registry.insert("storage".to_string(), storage.clone());
+                            output_payload = serde_json::json!({ "status": "success", "op": "delete", "key": interpolated_key });
+                        },
+                        "get" | _ => {
+                            // Already in registry as 'storage', but we return the specific value as node output too
+                            let val = if let Some(obj) = storage.as_object() {
+                                obj.get(&interpolated_key).cloned().unwrap_or(Value::Null)
+                            } else {
+                                Value::Null
+                            };
+                            output_payload = serde_json::json!({ "status": "success", "op": "get", "key": interpolated_key, "value": val });
+                        }
+                    }
                 },
                 "agent" => {
                     let agent_id = node.config.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -508,6 +591,10 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                                 }
                             }
                         }
+
+                        let timeout_ms = node.config.get("timeout_ms")
+                            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                            .unwrap_or(60000);
 
                         log_debug(&format!("[Wardian] Agent node output_format: {}. Final Prompt Length: {}", output_format, prompt.len()));
                         
@@ -563,7 +650,15 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                                 }
                             }
 
-                            let run_result = crate::manager::run_gemini_headless(&cwd, &prompt, agent_id, output_format).await;
+                            let run_result = tokio::time::timeout(
+                                std::time::Duration::from_millis(timeout_ms),
+                                crate::manager::run_gemini_headless(&cwd, &prompt, agent_id, output_format)
+                            ).await;
+                            
+                            let run_result = match run_result {
+                                Ok(res) => res,
+                                Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
+                            };
                             
                             match run_result {
                                 Ok(mut data) => {
@@ -644,24 +739,34 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                                     }
                                 });
 
-                                match tokio::time::timeout(std::time::Duration::from_secs(60), completion_rx.recv()).await {
-                                    Ok(_) => {
-                                        let agents = state.agents.lock().await;
-                                        if let Some(agent) = agents.get(agent_id) {
-                                            if let Ok(buf) = agent.output_buffer.lock() {
-                                                output_payload = serde_json::json!({ "text": buf.clone() });
-                                            }
-                                        }
-                                    },
-                                    Err(_) => {
-                                        node_error = Some("Agent timeout (60s)".to_string());
-                                    }
-                                }
+                                 match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), completion_rx.recv()).await {
+                                     Ok(_) => {
+                                         let agents = state.agents.lock().await;
+                                         if let Some(agent) = agents.get(agent_id) {
+                                             if let Ok(buf) = agent.output_buffer.lock() {
+                                                 output_payload = serde_json::json!({ "text": buf.clone() });
+                                             }
+                                         }
+                                     },
+                                     Err(_) => {
+                                         node_error = Some(format!("Agent timeout ({}ms)", timeout_ms));
+                                     }
+                                 }
                                 app.unlisten(handler_id);
                             } else {
                                 // Agent is OFFLINE: Fallback to Headless Execution
                                 log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
-                                match crate::manager::run_gemini_headless(&cwd, &prompt, agent_id, output_format).await {
+                                let run_result = tokio::time::timeout(
+                                    std::time::Duration::from_millis(timeout_ms),
+                                    crate::manager::run_gemini_headless(&cwd, &prompt, agent_id, output_format)
+                                ).await;
+
+                                let run_result = match run_result {
+                                    Ok(res) => res,
+                                    Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
+                                };
+
+                                match run_result {
                                     Ok(mut data) => {
                                         // Flatten Gemini CLI structured response
                                         if let Some(resp_str) = data.get("response").and_then(|v| v.as_str()) {
@@ -724,7 +829,9 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                     let interpolated_cmd = interpolate_string(cmd_str, &registry);
                     let cwd = resolve_cwd(&node.config, "");
                     let env = node.config.get("env");
-                    let timeout = node.config.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(30000);
+                    let timeout_ms = node.config.get("timeout_ms")
+                        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                        .unwrap_or(30000);
 
                     if interpolated_cmd.is_empty() {
                         node_error = Some("Missing command string".to_string());
@@ -735,8 +842,14 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                         #[cfg(not(windows))]
                         let (executable, args) = ("sh", vec!["-c".to_string(), interpolated_cmd]);
 
-                        match run_command_headless(executable, args, &cwd, env, timeout).await {
-                            Ok(res) => output_payload = res,
+                        match run_command_headless(executable, args, &cwd, env, timeout_ms).await {
+                            Ok(res) => {
+                                let exit_code = res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if exit_code != 0 {
+                                    node_error = Some(format!("Exit code {}: {}", exit_code, res.get("stderr").and_then(|v| v.as_str()).unwrap_or("Unknown error")));
+                                }
+                                output_payload = res;
+                            },
                             Err(e) => node_error = Some(e),
                         }
                     }
@@ -748,7 +861,9 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
                     let args_str = node.config.get("args").and_then(|v| v.as_str()).unwrap_or("");
                     let interpolated_args = interpolate_string(args_str, &registry);
                     let env = node.config.get("env");
-                    let timeout = node.config.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(30000);
+                    let timeout_ms = node.config.get("timeout_ms")
+                        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                        .unwrap_or(30000);
                     let cwd = resolve_cwd(&node.config, "");
 
                     if file_path_str.is_empty() {
@@ -766,11 +881,22 @@ pub async fn run_workflow(app: AppHandle, wf_id: String) -> Result<(), String> {
 
                                 let mut args = vec![validated_path.to_string_lossy().to_string()];
                                 if !interpolated_args.is_empty() {
-                                    args.extend(interpolated_args.split_whitespace().map(|s| s.to_string()));
+                                    if let Some(parsed_args) = shlex::split(&interpolated_args) {
+                                        args.extend(parsed_args);
+                                    } else {
+                                        // Fallback to naive split if shlex fails (unlikely)
+                                        args.extend(interpolated_args.split_whitespace().map(|s| s.to_string()));
+                                    }
                                 }
 
-                                match run_command_headless(executable, args, &cwd, env, timeout).await {
-                                    Ok(res) => output_payload = res,
+                                 match run_command_headless(executable, args, &cwd, env, timeout_ms).await {
+                                    Ok(res) => {
+                                        let exit_code = res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        if exit_code != 0 {
+                                            node_error = Some(format!("Exit code {}: {}", exit_code, res.get("stderr").and_then(|v| v.as_str()).unwrap_or("Unknown error")));
+                                        }
+                                        output_payload = res;
+                                    },
                                     Err(e) => node_error = Some(e),
                                 }
                             },

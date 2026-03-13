@@ -3,7 +3,7 @@ import { NodeType } from '../../types/workflow';
 export interface BlockField {
   name: string;
   label: string;
-  type: 'text' | 'textarea' | 'select' | 'code';
+  type: 'text' | 'textarea' | 'select' | 'code' | 'schema';
   options?: string[];
   placeholder?: string;
 }
@@ -27,12 +27,16 @@ export interface BlockDefinition {
 
 const DEFAULT_PORTS: BlockPorts = { inputs: 1, outputs: ['default'] };
 const EXECUTION_ADVANCED: BlockField[] = [
-  { name: 'pre_hooks', label: 'Pre-Execution Hooks (JSON)', type: 'code', placeholder: '[]' },
-  { name: 'post_hooks', label: 'Post-Execution Hooks (JSON)', type: 'code', placeholder: '[]' }
+  { name: 'pre_hooks', label: 'Pre-Execution Hooks', type: 'schema', placeholder: '[]' },
+  { name: 'post_hooks', label: 'Post-Execution Hooks', type: 'schema', placeholder: '[]' }
+];
+
+const SIMPLE_ADVANCED: BlockField[] = [
+  { name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }
 ];
 
 export const BLOCK_LIBRARY: BlockDefinition[] = [
-  // TRIGGER
+  // ... (Triggers remain the same)
   { 
     type: 'trigger', 
     name: 'Manual Trigger', 
@@ -42,7 +46,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     outputs: 'Trigger Context', 
     ports: { inputs: 0, outputs: ['default'] },
     fields: [
-      { name: 'input_schema', label: 'Input Schema', type: 'code', placeholder: '{ "type": "object" }' }
+      { name: 'input_schema', label: 'Input Schema', type: 'schema', placeholder: '{ "type": "object" }' }
     ]
   },
   { 
@@ -94,9 +98,12 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
       { name: 'session_type', label: 'Session Type', type: 'select', options: ['persistent', 'temporary'] },
       { name: 'folder', label: 'Workspace Folder', type: 'text', placeholder: 'C:\\path\\to\\project' },
       { name: 'output_format', label: 'Output Format', type: 'select', options: ['text', 'json'] },
-      { name: 'json_schema', label: 'JSON Schema', type: 'code', placeholder: '{ "type": "object" }' }
+      { name: 'json_schema', label: 'JSON Schema', type: 'schema', placeholder: '{ "type": "object" }' }
     ],
-    advancedFields: EXECUTION_ADVANCED
+    advancedFields: [
+      ...EXECUTION_ADVANCED,
+      ...SIMPLE_ADVANCED
+    ]
   },
   { 
     type: 'command', 
@@ -109,11 +116,11 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     fields: [
       { name: 'cmd', label: 'Command String', type: 'code', placeholder: 'npm run build' },
       { name: 'folder', label: 'Execution Directory', type: 'text', placeholder: 'C:\\path\\to\\project' },
-      { name: 'env', label: 'Environment Variables', type: 'code', placeholder: '{ "NODE_ENV": "production" }' }
+      { name: 'env', label: 'Environment Variables', type: 'schema', placeholder: '{ "NODE_ENV": "production" }' }
     ],
     advancedFields: [
       ...EXECUTION_ADVANCED,
-      { name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }
+      ...SIMPLE_ADVANCED
     ]
   },
   { 
@@ -129,12 +136,9 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
       { name: 'file_path', label: 'File Path', type: 'text', placeholder: './scripts/test.py' },
       { name: 'args', label: 'Arguments', type: 'text', placeholder: '--verbose' },
       { name: 'folder', label: 'Execution Directory', type: 'text', placeholder: 'C:\\path\\to\\project' },
-      { name: 'env', label: 'Environment Variables', type: 'code', placeholder: '{ "DEBUG": "*" }' }
+      { name: 'env', label: 'Environment Variables', type: 'schema', placeholder: '{ "DEBUG": "*" }' }
     ],
-    advancedFields: [
-      ...EXECUTION_ADVANCED,
-      { name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }
-    ]
+    advancedFields: SIMPLE_ADVANCED
   },
   { 
     type: 'tool', 
@@ -144,7 +148,8 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     inputs: 'Registry Context', 
     outputs: 'Tool Result', 
     ports: DEFAULT_PORTS,
-    fields: [{ name: 'tool_name', label: 'Tool Name', type: 'text', placeholder: 'google_web_search' }]
+    fields: [{ name: 'tool_name', label: 'Tool Name', type: 'text', placeholder: 'google_web_search' }],
+    advancedFields: SIMPLE_ADVANCED
   },
 
   // FLOW CONTROL
@@ -169,8 +174,8 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     fields: [
       { name: 'mode', label: 'Loop Mode', type: 'select', options: ['count', 'conditional'] },
       { name: 'max_iterations', label: 'Max Iterations', type: 'text', placeholder: '10' },
-      { name: 'condition', label: 'Condition', type: 'text', placeholder: 'nodes.step.output.i < 5' },
-      { name: 'iterator_name', label: 'Iterator Name', type: 'text', placeholder: 'i' }
+      { name: 'condition', label: 'Condition', type: 'text', placeholder: 'nodes.step.output.iter < 5' },
+      { name: 'iterator_name', label: 'Iterator Name', type: 'text', placeholder: 'iter' }
     ]
   },
   { 
@@ -193,7 +198,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     ports: DEFAULT_PORTS,
     fields: [
       { name: 'workflow_id', label: 'Workflow ID', type: 'select', placeholder: 'Select Workflow' },
-      { name: 'args', label: 'Arguments', type: 'code', placeholder: '{ "key": "{{nodes.id.output.key}}" }' }
+      { name: 'args', label: 'Arguments', type: 'schema', placeholder: '{ "key": "{{nodes.id.output.key}}" }' }
     ]
   },
 
