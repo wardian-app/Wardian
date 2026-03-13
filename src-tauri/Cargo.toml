@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.1.2"
+version = "0.2.0"
 description = "Integrated Agent Environment"
 authors = ["Tan Gemicioglu"]
 edition = "2021"
