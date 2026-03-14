@@ -6,6 +6,7 @@ import { SpawnAgentPanel } from "../features/agents/SpawnAgentPanel";
 import { ClassManagerPanel } from "../features/agents/ClassManagerPanel";
 import { CommandPanel } from "../features/commands/CommandPanel";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
+import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
 
 interface SidebarContentPaneProps {
   activeTab: SidebarTab;
@@ -99,13 +100,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
         )}
 
         {activeTab === "workflows" && (
-          <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
-            </div>
-            <h3 className="text-sm font-bold text-primary mb-2 uppercase tracking-widest">Automation</h3>
-            <p className="text-xs text-muted italic px-4">Scheduled tasks and automated workflows are arriving in Phase 3.</p>
-          </div>
+          <WorkflowSidebar onCollapse={() => setLeftCollapsed(true)} />
         )}
 
         {activeTab === "settings" && (

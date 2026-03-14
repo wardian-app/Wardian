@@ -122,7 +122,8 @@ pub fn run() {
             commands::workflow::list_workflows,
             commands::workflow::save_workflow,
             commands::workflow::delete_workflow,
-            commands::workflow::run_workflow
+            commands::workflow::run_workflow,
+            commands::workflow::mute_all_triggers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

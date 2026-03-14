@@ -22,3 +22,8 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
 pub async fn run_workflow(app: AppHandle, id: String, payload: Option<Value>) -> Result<(), String> {
     workflow_engine::run_workflow(app, id, payload).await
 }
+#[tauri::command]
+pub async fn mute_all_triggers(app: AppHandle) -> Result<(), String> {
+    workflow_engine::mute_all_triggers(app).await;
+    Ok(())
+}

@@ -278,6 +278,16 @@ pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: &str) {
     }
 }
 
+pub async fn mute_all_triggers(app: AppHandle) {
+    let state = app.state::<crate::state::AppState>();
+    let mut triggers = state.workflow_triggers.lock().await;
+    for (_wf_id, handles) in triggers.drain() {
+        for handle in handles {
+            handle.abort();
+        }
+    }
+}
+
 pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
     // 1. Clean up existing triggers for this workflow
     stop_workflow_triggers(app.clone(), &wf.id).await;

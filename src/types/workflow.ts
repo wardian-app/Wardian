@@ -58,3 +58,31 @@ export interface WorkflowTelemetryEvent {
   output?: any;
   error?: string;
 }
+
+export type WorkflowTriggerStatus = 'active' | 'muted' | 'off';
+export type WorkflowTriggerType = 'cron' | 'webhook' | 'watcher' | 'manual';
+
+export interface WorkflowSummary {
+  id: string;
+  name: string;
+  trigger_type: WorkflowTriggerType;
+  trigger_status: WorkflowTriggerStatus;
+}
+
+export interface ScheduledRun {
+  id: string;
+  workflow_id: string;
+  workflow_name: string;
+  next_run_epoch_ms: number;
+  frequency: string;
+  is_paused: boolean;
+}
+
+export interface ActiveRunTracker {
+  run_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  current_step: number;
+  total_steps: number;
+  active_node_name: string;
+}
