@@ -21,10 +21,10 @@ pub async fn spawn_agent(
     ));
     let actual_resume = resume_session.clone().filter(|s| !s.is_empty());
 
-    let mut session_id = actual_resume.clone().unwrap_or_else(|| String::new());
-    let mut actual_resume_config = actual_resume.clone();
+    let mut session_id = actual_resume.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut final_resume = actual_resume;
 
-    if actual_resume.is_none() {
+    if final_resume.is_none() {
         let cwd = if folder.is_empty() {
             if cfg!(windows) {
                 std::env::var("USERPROFILE")
@@ -44,10 +44,10 @@ pub async fn spawn_agent(
                 "[WARDIAN] Intercepted stream-json session ID: {}",
                 real_sid
             ));
-            session_id = real_sid.clone();
-            actual_resume_config = Some(real_sid);
-        } else {
-            session_id = Uuid::new_v4().to_string();
+            session_id = real_sid;
+            // For new agents, we don't necessarily need to set resume_session here
+            // as it's a fresh start with the intercepted ID.
+            // But if we want future resumes to use this ID, we can keep it None and let resume_agent handle it.
         }
     }
 
@@ -56,7 +56,7 @@ pub async fn spawn_agent(
     config.session_name = session_name;
     config.agent_class = agent_class.clone();
     config.folder = folder;
-    config.resume_session = actual_resume_config;
+    config.resume_session = final_resume;
     config.is_off = is_off.unwrap_or(false);
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
         &agent_class,

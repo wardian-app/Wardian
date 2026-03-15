@@ -158,17 +158,11 @@ pub async fn spawn_gemini_cli(
         }
     }
 
-    let resume_id = if let Some(ref ui_override) = config.resume_session {
-        ui_override.clone()
-    } else if is_restored {
-        config.session_id.clone()
-    } else {
-        String::new()
-    };
+    let resume_id = config.resume_session.as_deref().unwrap_or("");
 
     if !resume_id.is_empty() {
         cmd.arg("--resume");
-        cmd.arg(&resume_id);
+        cmd.arg(resume_id);
     }
 
     log_debug(&format!(
@@ -350,16 +344,27 @@ pub async fn run_gemini_headless(cwd: &std::path::PathBuf, prompt: &str, session
 
 pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
-    let mut cmd = tokio::process::Command::new(if cfg!(windows) { "gemini.cmd" } else { "gemini" });
-    cmd.arg("-p").arg("Introduce yourself").arg("-o").arg("stream-json")
-       .current_dir(cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    let (bin, args) = resolve_gemini_binary();
+    let mut cmd = tokio::process::Command::new(bin);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.arg("-p")
+        .arg("Introduce yourself")
+        .arg("-o")
+        .arg("stream-json")
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
 
     if let Ok(mut child) = cmd.spawn() {
         if let Some(stdout) = child.stdout.take() {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
             while let Ok(n) = reader.read_line(&mut line).await {
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 if line.trim().starts_with('{') {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                         if parsed.get("type").and_then(|v| v.as_str()) == Some("init") {
