@@ -107,6 +107,35 @@ pub fn get_logs_dir(workflow_id: &str) -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflow_logs").join(workflow_id))
 }
 
+pub fn get_library_path() -> Option<PathBuf> {
+    get_wardian_home().map(|h| h.join("workflows.json"))
+}
+
+pub fn load_workflow_library() -> Value {
+    if let Some(path) = get_library_path() {
+        if let Ok(content) = fs::read_to_string(path) {
+            return serde_json::from_str(&content).unwrap_or(serde_json::json!({
+                "folders": [],
+                "rootWorkflowIds": []
+            }));
+        }
+    }
+    serde_json::json!({
+        "folders": [],
+        "rootWorkflowIds": []
+    })
+}
+
+pub fn save_workflow_library(state: &Value) -> Result<(), String> {
+    if let Some(path) = get_library_path() {
+        let content = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+        fs::write(path, content).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Could not find Wardian home".to_string())
+    }
+}
+
 pub fn load_shared_storage() -> Value {
     if let Some(home) = get_wardian_home() {
         let path = home.join("shared_storage.json");
@@ -278,7 +307,7 @@ pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: &str) {
     }
 }
 
-pub async fn mute_all_triggers(app: AppHandle) {
+pub async fn stop_all_triggers(app: AppHandle) {
     let state = app.state::<crate::state::AppState>();
     let mut triggers = state.workflow_triggers.lock().await;
     for (_wf_id, handles) in triggers.drain() {
@@ -286,6 +315,16 @@ pub async fn mute_all_triggers(app: AppHandle) {
             handle.abort();
         }
     }
+}
+
+pub fn pause_all_triggers(app: AppHandle) {
+    let state = app.state::<crate::state::AppState>();
+    state.triggers_paused.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn resume_all_triggers(app: AppHandle) {
+    let state = app.state::<crate::state::AppState>();
+    state.triggers_paused.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
@@ -312,8 +351,14 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
                             let now = Utc::now().with_timezone(&chrono::Local);
                             if let Some(next) = schedule.upcoming(chrono::Local).next() {
                                 let duration = (next - now).to_std().unwrap_or(std::time::Duration::from_secs(1));
-                                tokio::time::sleep(duration).await;
+                                 tokio::time::sleep(duration).await;
                                 
+                                let state = app_cron.state::<crate::state::AppState>();
+                                if state.triggers_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                                    log_debug(&format!("[Wardian] Trigger for {} skipped (Paused)", wf_id_cron));
+                                    continue;
+                                }
+
                                 log_debug(&format!("[Wardian] Triggering workflow {} via cron {}", wf_id_cron, cron_str));
                                 let payload = serde_json::json!({
                                     "timestamp": Utc::now().to_rfc3339(),
@@ -357,6 +402,12 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
 
                         if let Ok(_) = watcher.watch(&path_clone, RecursiveMode::NonRecursive) {
                             while let Some(payload) = rx.recv().await {
+                                let state = app_file.state::<crate::state::AppState>();
+                                if state.triggers_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                                    log_debug(&format!("[Wardian] File trigger for {} skipped (Paused)", wf_id_file));
+                                    continue;
+                                }
+
                                 log_debug(&format!("[Wardian] Triggering workflow {} via file watcher on {:?}", wf_id_file, path_clone));
                                 let _ = run_workflow(app_file.clone(), wf_id_file.clone(), payload).await;
                                 // Debounce: wait a bit before being ready for next trigger

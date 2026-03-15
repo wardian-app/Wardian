@@ -24,6 +24,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Dynamic Grid**: A responsive grid system for monitoring multiple terminal TUIs simultaneously.
 
 ## 📡 Communication (IPC)
+Wardian uses a bidirectional event system, detailed in [IPC and Event Governance](./ipc-events.md).
 - **Events (Push)**: Rust pushes telemetry (`agent-metrics`) and logs (`agent-json-event`) to the UI.
 - **Commands (Pull)**: The UI invokes Rust functions for high-level actions (`spawn_agent`, `run_workflow`).
 - **Terminal Input**: A dedicated `terminal-input` listener in Rust routes keystrokes directly to the corresponding PTY stdin.

@@ -228,24 +228,24 @@ describe("classifyJsonEvent", () => {
 describe("getStatusColorClass", () => {
   it("returns cyan pulse for Processing", () => {
     expect(getStatusColorClass("Processing...")).toContain("animate-pulse");
-    expect(getStatusColorClass("Processing...")).toContain("cyan-400");
+    expect(getStatusColorClass("Processing...")).toContain("bg-wardian-processing");
   });
 
   it("returns amber bounce for Action Needed", () => {
     expect(getStatusColorClass("Action Needed")).toContain("animate-bounce");
-    expect(getStatusColorClass("Action Needed")).toContain("amber-500");
+    expect(getStatusColorClass("Action Needed")).toContain("bg-wardian-warning");
   });
 
   it("returns emerald for Idle", () => {
-    expect(getStatusColorClass("Idle")).toContain("bg-emerald-500");
+    expect(getStatusColorClass("Idle")).toContain("bg-wardian-success");
     expect(getStatusColorClass("Idle")).not.toContain("animate-pulse");
   });
 
   it("returns gray for Off", () => {
-    expect(getStatusColorClass("Off")).toContain("bg-gray-600");
+    expect(getStatusColorClass("Off")).toContain("bg-wardian-off");
   });
 
   it("returns gray for unknown status", () => {
-    expect(getStatusColorClass("Something Else")).toContain("bg-gray-500");
+    expect(getStatusColorClass("Something Else")).toContain("bg-wardian-off");
   });
 });

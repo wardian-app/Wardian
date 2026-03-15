@@ -17,7 +17,6 @@ import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
 import { useWorkflowStore } from "../store/useWorkflowStore";
-import { WorkflowTelemetryEvent } from "../types";
 
 function App() {
   return (
@@ -31,13 +30,26 @@ function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
+  const handleWorkflowProgress = useWorkflowStore(s => s.handleProgress);
+  const handleWorkflowStatusUpdate = useWorkflowStore(s => s.handleStatusUpdate);
 
   useEffect(() => {
-    const unlistenWorkflow = listen<WorkflowTelemetryEvent>("workflow-telemetry", (event) => {
+    const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
       handleWorkflowTelemetry(event.payload);
     });
-    return () => { unlistenWorkflow.then(fn => fn()); };
-  }, [handleWorkflowTelemetry]);
+    const unlistenProgress = listen<any>("workflow-progress", (event) => {
+      handleWorkflowProgress(event.payload);
+    });
+    const unlistenStatus = listen<any>("workflow-status-updated", (event) => {
+      handleWorkflowStatusUpdate(event.payload);
+    });
+    
+    return () => { 
+      unlistenWorkflow.then(fn => fn()); 
+      unlistenProgress.then(fn => fn());
+      unlistenStatus.then(fn => fn());
+    };
+  }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate]);
 
   const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
   const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
@@ -279,6 +291,53 @@ function AppBody() {
     } catch (e) { console.error(e); }
   }
 
+  const onPause = async (id: string) => {
+    try {
+      await invoke('pause_agent', { sessionId: id });
+      setOffAgentIds(prev => new Set(prev).add(id));
+      fetchAgents();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const onRestart = async (id: string) => {
+    if (confirm(offAgentIds.has(id) ? 'Start?' : 'Restart?')) {
+      try {
+        await invoke('resume_agent', { sessionId: id });
+        setOffAgentIds(prev => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        fetchAgents();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const onDelete = async (id: string) => {
+    if (confirm('Delete?')) {
+      try {
+        await invoke('kill_agent', { sessionId: id });
+        setOffAgentIds(prev => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setSelectedAgentIds(prev => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        fetchAgents();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
   return (
     <div className="flex h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
       <SidebarIconRail activeTab={activeTab} setActiveTab={setActiveTab} setCollapsed={setLeftCollapsed} />
@@ -358,25 +417,27 @@ function AppBody() {
             </div>
           )}
 
-          <div className={viewMode === "workflow-builder" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
-            <WorkflowBuilderView theme={theme} />
-          </div>
+          {viewMode === "workflow-builder" && (
+            <div className="flex-1 flex flex-col min-h-0">
+              <WorkflowBuilderView theme={theme} />
+            </div>
+          )}
 
-          {["queue", "graph", "garden"].map(mode => (
-            <div key={mode} className={viewMode === mode ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+          {["queue", "graph", "garden"].map(mode => viewMode === mode && (
+            <div key={mode} className="flex-1 flex flex-col min-h-0">
               <PlaceholderView viewMode={mode as any} />
             </div>
           ))}
 
-          <div className={viewMode === "grid" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+          {viewMode === "grid" && (
             <GridView 
               filteredAgents={filteredAgents}
               telemetry={telemetry}
               terminalTitles={terminalTitles}
               currentThoughts={currentThoughts}
               selectedAgentIds={selectedAgentIds}
-              maximizedAgentId={maximizedAgentId}
               offAgentIds={offAgentIds}
+              maximizedAgentId={maximizedAgentId}
               draggedAgentId={draggedAgentId}
               dragOverAgentId={dragOverAgentId}
               editingAgentId={editingAgentId}
@@ -387,7 +448,7 @@ function AppBody() {
               onMouseDown={handleMouseDown}
               onCardClick={handleAgentCardClick}
               onMaximize={setMaximizedAgentId}
-              onDelete={async (id) => { if (confirm('Delete?')) { try { await invoke('kill_agent', { sessionId: id }); setOffAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); setSelectedAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); fetchAgents(); } catch(e) { console.error(e); } } }}
+              onDelete={onDelete}
               onRename={renameAgent}
               setEditingAgentId={setEditingAgentId}
               setTempName={setTempName}
@@ -395,9 +456,9 @@ function AppBody() {
               deriveCurrentThought={deriveCurrentThought}
               getStatusColorClass={getStatusColorClass}
             />
-          </div>
+          )}
 
-          <div className={viewMode === "dashboard" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+          {viewMode === "dashboard" && (
             <DashboardView 
               filteredAgents={filteredAgents}
               telemetry={telemetry}
@@ -411,14 +472,14 @@ function AppBody() {
               onMouseUp={handleMouseUp}
               onMouseDown={handleMouseDown}
               onCardClick={handleAgentCardClick}
-              onPause={async (id) => { try { await invoke('pause_agent', { sessionId: id }); setOffAgentIds(prev => new Set(prev).add(id)); fetchAgents(); } catch(e) { console.error(e); } }}
-              onRestart={async (id) => { if (confirm(offAgentIds.has(id) ? 'Start?' : 'Restart?')) { try { await invoke('resume_agent', { sessionId: id }); setOffAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); fetchAgents(); } catch(e) { console.error(e); } } }}
-              onDelete={async (id) => { if (confirm('Delete?')) { try { await invoke('kill_agent', { sessionId: id }); setOffAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); setSelectedAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); fetchAgents(); } catch(e) { console.error(e); } } }}
+              onPause={onPause}
+              onRestart={onRestart}
+              onDelete={onDelete}
               onQuery={sendCommand}
               deriveCurrentThought={deriveCurrentThought}
               getStatusColorClass={getStatusColorClass}
             />
-          </div>
+          )}
         </div>
       </main>
 
@@ -438,9 +499,9 @@ function AppBody() {
           try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (e) { console.error(e); }
         }}
         onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
-        onPause={async (id) => { try { await invoke('pause_agent', { sessionId: id }); setOffAgentIds(prev => new Set(prev).add(id)); fetchAgents(); } catch(e) { console.error(e); } }}
-        onRestart={async (id) => { if (confirm(offAgentIds.has(id) ? 'Start?' : 'Restart?')) { try { await invoke('resume_agent', { sessionId: id }); setOffAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); fetchAgents(); } catch(e) { console.error(e); } } }}
-        onDelete={async (id) => { if (confirm('Delete?')) { try { await invoke('kill_agent', { sessionId: id }); setOffAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); setSelectedAgentIds(prev => { const next = new Set(prev); next.delete(id); return next; }); fetchAgents(); } catch(e) { console.error(e); } } }}
+        onPause={onPause}
+        onRestart={onRestart}
+        onDelete={onDelete}
         collapsed={rightCollapsed}
         onCollapse={() => setRightCollapsed(true)}
         watchlists={watchlists}

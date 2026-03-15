@@ -23,6 +23,8 @@ interface WorkflowState {
   agents: AgentConfig[];
   agentClasses: AgentClassDefinition[];
   isSaving: boolean;
+  activeRuns: any[];
+  schedules: any[];
   
   // Actions
   onNodesChange: OnNodesChange;
@@ -43,7 +45,13 @@ interface WorkflowState {
   duplicateNode: (nodeId: string) => void;
   handleTelemetry: (event: WorkflowTelemetryEvent) => void;
   runActiveWorkflow: (payload?: any) => Promise<void>;
+  runWorkflowById: (id: string, payload?: any) => Promise<void>;
+  stopAllTriggers: () => Promise<void>;
+  pauseAllTriggers: () => Promise<void>;
+  resumeAllTriggers: () => Promise<void>;
   clearActiveWorkflow: () => void;
+  handleProgress: (event: any) => void;
+  handleStatusUpdate: (event: any) => void;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -55,6 +63,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   agents: [],
   agentClasses: [],
   isSaving: false,
+  activeRuns: [],
+  schedules: [],
 
   onNodesChange: (changes) => {
     set({
@@ -264,6 +274,38 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     get().updateNodeStatus(node_id, status, firedPorts);
   },
 
+  handleProgress: (event) => {
+    const { workflow_id, current_step, total_steps, active_node_name, workflow_name } = event;
+    set((state) => {
+      const existingIdx = state.activeRuns.findIndex(r => r.workflow_id === workflow_id);
+      const newRun = {
+        run_id: workflow_id, // Simple mapping for now
+        workflow_id,
+        workflow_name: workflow_name || state.availableWorkflows.find(w => w.id === workflow_id)?.name || 'Unknown',
+        current_step,
+        total_steps,
+        active_node_name
+      };
+
+      if (existingIdx !== -1) {
+        const nextRuns = [...state.activeRuns];
+        nextRuns[existingIdx] = newRun;
+        return { activeRuns: nextRuns };
+      } else {
+        return { activeRuns: [...state.activeRuns, newRun] };
+      }
+    });
+  },
+
+  handleStatusUpdate: (event) => {
+    const { workflow_id, status } = event;
+    if (status === 'completed' || status === 'failed') {
+      set((state) => ({
+        activeRuns: state.activeRuns.filter(r => r.workflow_id !== workflow_id)
+      }));
+    }
+  },
+
   runActiveWorkflow: async (payload?: any) => {
     const workflowId = get().activeWorkflowId;
     if (!workflowId) return;
@@ -275,6 +317,43 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       await invoke("run_workflow", { id: workflowId, payload: payload || null });
     } catch (err) {
       console.error("Failed to run workflow:", err);
+    }
+  },
+
+  runWorkflowById: async (id: string, payload?: any) => {
+    // Reset statuses if it's the active one, or just fire and let telemetry handle it
+    if (get().activeWorkflowId === id) {
+      set({ nodeStatuses: {} });
+    }
+
+    try {
+      await invoke("run_workflow", { id, payload: payload || null });
+    } catch (err) {
+      console.error("Failed to run workflow by id:", err);
+    }
+  },
+
+  stopAllTriggers: async () => {
+    try {
+      await invoke("stop_all_triggers");
+    } catch (err) {
+      console.error("Failed to stop all triggers:", err);
+    }
+  },
+
+  pauseAllTriggers: async () => {
+    try {
+      await invoke("pause_all_triggers");
+    } catch (err) {
+      console.error("Failed to pause all triggers:", err);
+    }
+  },
+
+  resumeAllTriggers: async () => {
+    try {
+      await invoke("resume_all_triggers");
+    } catch (err) {
+      console.error("Failed to resume all triggers:", err);
     }
   },
 

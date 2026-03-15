@@ -22,8 +22,31 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
 pub async fn run_workflow(app: AppHandle, id: String, payload: Option<Value>) -> Result<(), String> {
     workflow_engine::run_workflow(app, id, payload).await
 }
+
 #[tauri::command]
-pub async fn mute_all_triggers(app: AppHandle) -> Result<(), String> {
-    workflow_engine::mute_all_triggers(app).await;
+pub async fn stop_all_triggers(app: AppHandle) -> Result<(), String> {
+    workflow_engine::stop_all_triggers(app).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn pause_all_triggers(app: AppHandle) -> Result<(), String> {
+    workflow_engine::pause_all_triggers(app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_all_triggers(app: AppHandle) -> Result<(), String> {
+    workflow_engine::resume_all_triggers(app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn load_workflow_library() -> Result<Value, String> {
+    Ok(workflow_engine::load_workflow_library())
+}
+
+#[tauri::command]
+pub fn save_workflow_library(state: Value) -> Result<(), String> {
+    workflow_engine::save_workflow_library(&state)
 }

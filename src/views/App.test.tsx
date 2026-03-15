@@ -4,23 +4,62 @@ import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import type { AgentConfig, AgentClassDefinition } from "../types";
 
+// Mock window.matchMedia globally for tests
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: vi.fn().mockImplementation(query => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(), // deprecated
+    removeListener: vi.fn(), // deprecated
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })),
+});
+
+vi.mock("../features/terminal/AgentTerminal", () => ({
+  AgentTerminal: ({ sessionId }: { sessionId: string }) => <div data-testid={`terminal-${sessionId}`}>Terminal {sessionId}</div>
+}));
+
 // Cast invoke to mock for test control
 const mockInvoke = vi.mocked(invoke);
 
 // Helper to set up mock return values for the initial load
+let currentAgents: AgentConfig[] = [];
 function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefinition[] = []) {
-  mockInvoke.mockImplementation(async (cmd: string) => {
+  currentAgents = [...agents];
+  mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
     switch (cmd) {
       case "list_agents":
-        return agents;
+        return currentAgents;
       case "list_agent_classes":
         return classes;
+      case "pause_agent":
+        if (args?.sessionId) {
+          currentAgents = currentAgents.map(a => 
+            a.session_id === args.sessionId ? { ...a, is_off: true } : a
+          );
+        }
+        return null;
+      case "resume_agent":
+        if (args?.sessionId) {
+          currentAgents = currentAgents.map(a => 
+            a.session_id === args.sessionId ? { ...a, is_off: false } : a
+          );
+        }
+        return null;
       case "get_agent_metrics":
         return [];
       case "attach_agent_pty":
         return null;
       case "resize_agent_terminal":
         return null;
+      case "list_workflows":
+        return [];
+      case "load_workflow_library":
+        return { folders: [], rootWorkflowIds: [] };
       default:
         return null;
     }
@@ -229,7 +268,7 @@ describe("Spawn Form", () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByPlaceholderText("e.g. Coder 3")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g. Coder_Alpha")).toBeInTheDocument();
   });
 
   it("renders workspace path placeholder", async () => {
@@ -313,20 +352,30 @@ describe("Agent Off State Operations", () => {
       expect(screen.getAllByText("Alpha").length).toBeGreaterThan(0);
     });
     
-    // Find the Pause button for the first agent
-    const pauseButtons = screen.getAllByText("Pause");
-    expect(pauseButtons.length).toBeGreaterThan(0);
+    // Find the Watchlist row for Alpha and fire context menu to pause
+    const alphaWatchlistText = screen.getByText("Alpha", { selector: "p" });
+    const alphaWatchlistRow = alphaWatchlistText.closest("div.watchlist-row");
+    expect(alphaWatchlistRow).not.toBeNull();
     
-    // Click the first Pause button
     await act(async () => {
-      pauseButtons[0].click();
+      fireEvent.contextMenu(alphaWatchlistRow!);
+    });
+
+    const pauseButton = screen.getByText("Pause");
+    await act(async () => {
+      pauseButton.click();
     });
 
     // The agent should no longer be in the main grid (only 1 occurrence remains from Watchlist)
     await waitFor(() => {
       const alphaElements = screen.getAllByText("Alpha");
+      if (alphaElements.length !== 1) {
+        console.log(`DEBUG: Found ${alphaElements.length} Alpha elements:`, 
+          alphaElements.map(el => `${el.tagName} in ${el.parentElement?.tagName} (id: ${el.id}, class: ${el.className})`)
+        );
+      }
       expect(alphaElements.length).toBe(1);
-    });
+    }, { timeout: 3000 });
     
     // Find the Watchlist row and fire context menu
     const watchlistRowText = screen.getByText("Alpha");
@@ -349,9 +398,8 @@ describe("Agent Off State Operations", () => {
     });
     
     // The agent should reappear in the grid (2 occurrences again)
-    // Restart button should come back in the main grid
     await waitFor(() => {
-      expect(screen.getAllByText("Restart").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Alpha").length).toBe(2);
     });
   });
 });

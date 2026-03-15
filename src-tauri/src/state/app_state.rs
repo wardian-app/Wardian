@@ -13,6 +13,7 @@ pub struct AppState {
     pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>,
     // Map of workflow_id to a list of background trigger handles
     pub workflow_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
+    pub triggers_paused: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -25,6 +26,7 @@ impl AppState {
             agent_order: Mutex::new(Vec::new()),
             input_senders: RwLock::new(HashMap::new()),
             workflow_triggers: Mutex::new(HashMap::new()),
+            triggers_paused: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }

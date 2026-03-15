@@ -47,6 +47,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {filteredAgents.map((agent: AgentConfig) => {
         const agentId = agent.session_id.toString();
         const isOff = offAgentIds.has(agentId);
+        if (isOff) return null;
         const isSelected = selectedAgentIds.has(agentId);
         
         const metrics = telemetry[agentId];
