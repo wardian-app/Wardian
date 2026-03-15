@@ -22,7 +22,7 @@ Wardian is a **governance layer for AI orchestration**. It centralizes PTY manag
 
 ### 🎮 The Command Center (UI)
 
-- **Dual-Sidebar "TradingView" Experience**:
+- **Dual-Sidebar Command Center Experience**:
   - **Left Rail**: Fast-access icons for Agent Configuration, Workflow Builder, and Global Settings.
   - **Right Sidebar**: A searchable, collapsible agent roster with tabbed watchlists and drag-and-drop reordering for rapid selection.
 - **Context-Aware Dashboard**: High-level telemetry (CPU/Memory) alongside a 2x2 Action Matrix (Delete, Pause, Query, Restart) for surgical agent control.

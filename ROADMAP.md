@@ -4,14 +4,14 @@ Wardian is an advanced Agent Terminal Manager designed for managing multiple aut
 
 ## Phase 1: Layout & Terminal Management
 
-\_Goal: Provide a TradingView-like experience for agent orchestration.
+_Goal: Provide a professional-grade command center for agent orchestration.
 
 - [ ] **Dual-Sidebar "Command Center" Architecture**
   - **Left Sidebar (Primary)**:
     - A thin **Icon Bar** for switching between views (Explorer, Connections, Workflows, Settings).
     - A collapsible **Content Pane** that displays the menu for the active icon (e.g., Spawn Instance form, SSH hosts).
   - **Right Sidebar (Secondary)**:
-    - A **collapsible, searchable agent list** (TradingView-style) for rapid selection, status monitoring, and drag-drop reordering.
+    - A **collapsible, searchable agent list** for rapid selection, status monitoring, and drag-drop reordering.
   - Support for multi-select in the right sidebar and main grid views.
 - [ ] **Dynamic Grid Layouts**
   - Implement predefined grid templates (Single, 2x2, 1+2, etc.).

@@ -1,6 +1,30 @@
+---
 # Project Guidelines: Wardian
 
 All agents contributing to the Wardian codebase must adhere to the following architectural and stylistic standards.
+
+## ✅ Pre-Commit Checklist
+Before requesting a commit or finalizing a task, ensure the following steps are completed:
+
+1. **Code Quality (Frontend)**:
+   - [ ] Run `npm run lint` to ensure style consistency.
+   - [ ] Run `npm run test` (Vitest) to verify UI logic and utility functions.
+   - [ ] Run `npm run build` to ensure no production build breaks.
+
+2. **Code Quality (Backend)**:
+   - [ ] Run `cd src-tauri; cargo clippy` for idiomatic Rust linting.
+   - [ ] Run `cd src-tauri; cargo test` to verify backend logic and state management.
+   - [ ] Run `cd src-tauri; cargo check` to verify cross-platform build integrity.
+
+3. **Documentation**:
+   - [ ] If a strategic decision was made, document it in a new **ADR** in `docs/adrs/`.
+   - [ ] Update any relevant files in `docs/guide/` or `docs/developer/`.
+   - [ ] Ensure any new public APIs or complex logic have appropriate JSDoc/Docstrings.
+
+4. **Safety & Integrity**:
+   - [ ] **Secrets Check**: Verify no API keys, credentials, or `.env` files are being committed.
+   - [ ] **Git Status**: Run `git status` to ensure only intended files are staged.
+   - [ ] **Commit Message**: Use a clear, semantic commit message (e.g., `feat(kts): implement YAML parser`).
 
 ## 🏛️ Backend Architecture (Rust/Tauri)
 
