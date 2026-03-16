@@ -154,8 +154,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                                 return;
                             }
                             try {
+                                const flattenedPrompt = p.content.replace(/\r?\n/g, ' ');
                                 for (const id of selectedAgentIds) {
-                                    await invoke('send_input_to_agent', { sessionId: id, input: p.content });
+                                    await invoke('send_input_to_agent', { sessionId: id, input: flattenedPrompt });
                                 }
                             } catch (e) {
                                 console.error('Failed to run prompt', e);
