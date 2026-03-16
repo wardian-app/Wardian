@@ -43,7 +43,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   getStatusColorClass,
 }) => {
   return (
-    <div className="flex-1 flex gap-4 min-h-full flex-col pb-[100px] overflow-y-auto no-scrollbar">
+    <div className="flex-1 flex gap-4 min-h-full flex-col pb-[100px]">
       {filteredAgents.map((agent: AgentConfig) => {
         const agentId = agent.session_id.toString();
         const isOff = offAgentIds.has(agentId);

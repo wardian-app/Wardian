@@ -368,7 +368,7 @@ function AppBody() {
         )}
 
         <div 
-          className="flex-1 overflow-y-auto p-2 no-scrollbar flex flex-col"
+          className="flex-1 overflow-y-auto p-2 flex flex-col"
           onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
         >
           <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-end">

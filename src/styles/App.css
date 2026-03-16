@@ -111,6 +111,32 @@
     transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Global Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-wardian-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-wardian-border-heavy);
+  border-radius: 4px;
+  border: 2px solid var(--color-wardian-bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-wardian-accent);
+}
+
+/* For Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-wardian-border-heavy) var(--color-wardian-bg);
+}
+
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
