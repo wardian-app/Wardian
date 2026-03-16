@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import AgentWatchlist from './AgentWatchlist';
 import type { AgentConfig, AgentTelemetry } from '../../types';
 import type { Watchlist } from './types';
@@ -37,8 +37,8 @@ describe('AgentWatchlist', () => {
   ];
 
   const sampleTelemetry: Record<string, AgentTelemetry> = {
-    'agent-1': { status: 'idle', cpu: 0, memory: 0, uptime: 0, last_seen: '' },
-    'agent-2': { status: 'offline', cpu: 0, memory: 0, uptime: 0, last_seen: '' },
+    'agent-1': { session_id: 'agent-1', current_status: 'idle', cpu_usage: 0, memory_mb: 0, uptime_seconds: 0, query_count: 0, init_timestamp: null, log_path: null },
+    'agent-2': { session_id: 'agent-2', current_status: 'offline', cpu_usage: 0, memory_mb: 0, uptime_seconds: 0, query_count: 0, init_timestamp: null, log_path: null },
   };
 
   const sampleWatchlists: Watchlist[] = [

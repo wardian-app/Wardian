@@ -66,7 +66,7 @@ describe('WorkflowSidebar', () => {
 
   it('calls onCollapse when collapse button is clicked', () => {
     render(<WorkflowSidebar onCollapse={mockOnCollapse} />);
-    const collapseButton = screen.getByRole('button', { name: (n, el) => el?.querySelector('path')?.getAttribute('d')?.includes('M15 19l-7-7 7-7') || false });
+    screen.getByRole('button', { name: (_n, el) => el?.querySelector('path')?.getAttribute('d')?.includes('M15 19l-7-7 7-7') || false });
     // In WorkflowSidebar.tsx line 62, the button has the svg. Testing the button itself.
     fireEvent.click(screen.getByRole('button', { name: '' })); // The button with the svg icon has no text
     // Refined selector for the collapse button (it's the first button in the first row)

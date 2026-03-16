@@ -49,7 +49,7 @@ pub fn resolve_gemini_binary() -> (String, Vec<String>) {
 pub async fn spawn_gemini_cli(
     app: AppHandle,
     config: AgentConfig,
-    is_restored: bool,
+    _is_restored: bool,
 ) -> Result<ActiveAgent, String> {
     let cwd = if config.folder.is_empty() {
         if cfg!(windows) {
@@ -311,7 +311,13 @@ pub async fn resize_pty(
 pub async fn run_gemini_headless(cwd: &std::path::PathBuf, prompt: &str, session_id: &str, output_format: &str) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (bin, args) = resolve_gemini_binary();
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/c").arg(&bin);
+        c
+    } else {
+        tokio::process::Command::new(&bin)
+    };
     for arg in args { cmd.arg(arg); }
     cmd.arg("-p").arg(prompt)
        .arg("--output-format").arg(output_format)
@@ -345,7 +351,13 @@ pub async fn run_gemini_headless(cwd: &std::path::PathBuf, prompt: &str, session
 pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (bin, args) = resolve_gemini_binary();
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/c").arg(&bin);
+        c
+    } else {
+        tokio::process::Command::new(&bin)
+    };
     for arg in args {
         cmd.arg(arg);
     }
@@ -358,6 +370,7 @@ pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<Stri
         .stderr(std::process::Stdio::null());
 
     if let Ok(mut child) = cmd.spawn() {
+        let mut session_id_res = None;
         if let Some(stdout) = child.stdout.take() {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
@@ -365,13 +378,11 @@ pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<Stri
                 if n == 0 {
                     break;
                 }
-                if line.trim().starts_with('{') {
+                if session_id_res.is_none() && line.trim().starts_with('{') {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                         if parsed.get("type").and_then(|v| v.as_str()) == Some("init") {
                             if let Some(id) = parsed.get("session_id").and_then(|v| v.as_str()) {
-                                let res = id.to_string();
-                                let _ = child.kill().await;
-                                return Some(res);
+                                session_id_res = Some(id.to_string());
                             }
                         }
                     }
@@ -379,7 +390,8 @@ pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<Stri
                 line.clear();
             }
         }
-        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return session_id_res;
     }
     None
 }

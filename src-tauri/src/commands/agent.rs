@@ -2,7 +2,6 @@ use crate::manager;
 use crate::models::AgentConfig;
 use crate::state::AppState;
 use tauri::{AppHandle, State};
-use uuid::Uuid;
 
 #[tauri::command]
 pub async fn spawn_agent(
@@ -19,12 +18,11 @@ pub async fn spawn_agent(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
     ));
-    let actual_resume = resume_session.clone().filter(|s| !s.is_empty());
+    let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
 
-    let mut session_id = actual_resume.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
-    let mut final_resume = actual_resume;
+    let mut session_id = actual_resume.clone();
 
-    if final_resume.is_none() {
+    if actual_resume.is_none() {
         let cwd = if folder.is_empty() {
             if cfg!(windows) {
                 std::env::var("USERPROFILE")
@@ -44,19 +42,22 @@ pub async fn spawn_agent(
                 "[WARDIAN] Intercepted stream-json session ID: {}",
                 real_sid
             ));
-            session_id = real_sid;
-            // For new agents, we don't necessarily need to set resume_session here
-            // as it's a fresh start with the intercepted ID.
-            // But if we want future resumes to use this ID, we can keep it None and let resume_agent handle it.
+            // Properly set final_resume because manager::spawn_gemini_cli requires it to launch the persistent agent with --resume
+            session_id = Some(real_sid.clone());
+            actual_resume = Some(real_sid);
+        } else {
+            return Err("Failed to obtain session ID headlessly. Ensure the prompt \"Introduce yourself\" can execute.".to_string());
         }
     }
+
+    let session_id = session_id.ok_or_else(|| "Failed to determine session ID".to_string())?;
 
     let mut config = config_override.unwrap_or_default();
     config.session_id = session_id.clone();
     config.session_name = session_name;
     config.agent_class = agent_class.clone();
     config.folder = folder;
-    config.resume_session = final_resume;
+    config.resume_session = actual_resume;
     config.is_off = is_off.unwrap_or(false);
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
         &agent_class,
