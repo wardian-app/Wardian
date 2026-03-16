@@ -423,7 +423,7 @@ function AppBody() {
           )}
 
           {viewMode === "library" && (
-            <LibraryView />
+            <LibraryView selectedAgentIds={selectedAgentIds} />
           )}
 
           {["queue", "graph", "garden"].map(mode => viewMode === mode && (

@@ -128,3 +128,46 @@ pub async fn update_prompt_metadata(_app: AppHandle, path: String, metadata: Lib
 
     Ok(())
 }
+
+#[tauri::command]
+pub async fn open_library_folder(_app: AppHandle, path: Option<String>) -> Result<(), String> {
+    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let mut target_dir = wardian_home.join(LIBRARY_PROMPTS_DIR);
+    if let Some(p) = path {
+        if !p.is_empty() {
+            target_dir = target_dir.join(p);
+        }
+    }
+
+    if !target_dir.exists() {
+        let _ = fs::create_dir_all(&target_dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, use Canonicalize to get absolute path for explorer, otherwise it might open Documents
+        let abs_path = target_dir.canonicalize().unwrap_or(target_dir);
+        std::process::Command::new("explorer")
+            .arg(abs_path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(target_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(target_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}

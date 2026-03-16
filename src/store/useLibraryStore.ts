@@ -9,6 +9,7 @@ interface LibraryState {
   fetchLibraryTree: () => Promise<void>;
   savePrompt: (path: string, content: string, metadata: LibraryItemMetadata) => Promise<void>;
   updatePromptMetadata: (path: string, metadata: LibraryItemMetadata) => Promise<void>;
+  openLibraryFolder: (path?: string) => Promise<void>;
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
@@ -43,6 +44,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     } catch (e: any) {
       console.error("Failed to update metadata:", e);
       throw e;
+    }
+  },
+
+  openLibraryFolder: async (path?: string) => {
+    try {
+      await invoke('open_library_folder', { path });
+    } catch (e: any) {
+      console.error("Failed to open folder:", e);
     }
   }
 }));

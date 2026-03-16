@@ -58,13 +58,7 @@ pub async fn inject_session_input(
         }
     };
     if let Some(tx) = senders.get(&session_id) {
-        // Send the text followed by a newline (CRLF for PTY usually, or just LF depending on translation)
-        // We'll send standard LF and let ConPTY handle translation.
-        let mut input = text;
-        if !input.ends_with('\n') {
-            input.push('\n');
-        }
-        match tx.try_send(input) {
+        match tx.try_send(text) {
             Ok(()) => Ok(()),
             Err(e) => {
                 manager::log_debug(&format!(

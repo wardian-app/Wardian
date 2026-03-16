@@ -50,13 +50,10 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
     try {
       if (selectedAgentIds.size > 0) {
         for (const id of selectedAgentIds) {
-          await invoke("inject_session_input", { sessionId: id, text: promptContent });
+          await invoke("send_input_to_agent", { sessionId: id, input: promptContent });
         }
       } else {
-        // If no agents selected, default to broadcast behavior but we only have inject_session_input for a single ID.
-        // Wait, broadcast_input exists. But the plan said to inject into focused terminal.
-        // Let's use broadcast_input if none selected, or we can just send it to all.
-        await invoke("broadcast_input", { input: promptContent + "\n" });
+        await invoke("broadcast_input", { input: promptContent });
       }
     } catch (e) {
       console.error("Injection failed", e);

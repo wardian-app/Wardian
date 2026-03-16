@@ -131,7 +131,8 @@ pub fn run() {
             commands::workflow::save_workflow_library,
             commands::library::get_library_tree,
             commands::library::save_prompt,
-            commands::library::update_prompt_metadata
+            commands::library::update_prompt_metadata,
+            commands::library::open_library_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

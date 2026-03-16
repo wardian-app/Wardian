@@ -4,12 +4,14 @@ import { LibraryCard } from './LibraryCard';
 
 interface LibraryGridProps {
     folder: LibraryFolder;
+    hasSelectedAgents: boolean;
     onPromptClick: (prompt: LibraryPrompt) => void;
     onToggleStar: (prompt: LibraryPrompt) => void;
     onFolderClick: (folder: LibraryFolder) => void;
+    onRunPrompt: (prompt: LibraryPrompt) => void;
 }
 
-export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, onPromptClick, onToggleStar, onFolderClick }) => {
+export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, hasSelectedAgents, onPromptClick, onToggleStar, onFolderClick, onRunPrompt }) => {
     return (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-4">
             {folder.children.map((child, index) => {
@@ -19,10 +21,15 @@ export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, onPromptClick,
                         <LibraryCard 
                             key={`prompt-${child.path}-${index}`}
                             prompt={child}
+                            hasSelectedAgents={hasSelectedAgents}
                             onClick={() => onPromptClick(child)}
                             onToggleStar={(e) => {
                                 e.stopPropagation();
                                 onToggleStar(child);
+                            }}
+                            onRun={(e) => {
+                                e.stopPropagation();
+                                onRunPrompt(child);
                             }}
                         />
                     );
