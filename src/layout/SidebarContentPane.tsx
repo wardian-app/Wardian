@@ -72,15 +72,14 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
         )}
 
         {activeTab === "command" && (
-          <CommandPanel 
-            selectedAgentCount={selectedAgentIds.size}
+          <CommandPanel
+            selectedAgentIds={selectedAgentIds}
             broadcastMessage={broadcastMessage}
             setBroadcastMessage={setBroadcastMessage}
             onBroadcast={onBroadcast}
             onCollapse={() => setLeftCollapsed(true)}
           />
         )}
-
         {activeTab === "classes" && (
           <ClassManagerPanel 
             agentClasses={agentClasses}

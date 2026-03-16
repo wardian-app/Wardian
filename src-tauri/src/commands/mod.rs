@@ -4,6 +4,7 @@ pub mod class;
 pub mod watchlist;
 pub mod fs;
 pub mod workflow;
+pub mod library;
 
 pub use agent::*;
 pub use terminal::*;
@@ -11,3 +12,4 @@ pub use class::*;
 pub use watchlist::*;
 pub use fs::*;
 pub use workflow::*;
+pub use library::*;

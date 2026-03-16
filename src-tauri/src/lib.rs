@@ -109,6 +109,7 @@ pub fn run() {
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
             commands::terminal::send_input_to_agent,
+            commands::terminal::inject_session_input,
             commands::terminal::broadcast_input,
             commands::terminal::resize_agent_terminal,
             commands::terminal::read_agent_pty,
@@ -127,7 +128,10 @@ pub fn run() {
             commands::workflow::pause_all_triggers,
             commands::workflow::resume_all_triggers,
             commands::workflow::load_workflow_library,
-            commands::workflow::save_workflow_library
+            commands::workflow::save_workflow_library,
+            commands::library::get_library_tree,
+            commands::library::save_prompt,
+            commands::library::update_prompt_metadata
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

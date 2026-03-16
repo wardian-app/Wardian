@@ -16,6 +16,7 @@ import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
+import { LibraryView } from "./LibraryView";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 
 function App() {
@@ -28,7 +29,7 @@ function App() {
 
 function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
-  const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
+  const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "library" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
   const handleWorkflowProgress = useWorkflowStore(s => s.handleProgress);
   const handleWorkflowStatusUpdate = useWorkflowStore(s => s.handleStatusUpdate);
@@ -378,7 +379,7 @@ function AppBody() {
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex gap-1 bg-[var(--color-wardian-sidebar-primary)]/50 p-1 rounded-lg border border-wardian-border overflow-x-auto no-scrollbar max-w-[500px]">
-                {["GRID", "DASHBOARD", "QUEUE", "WORKFLOWS", "GRAPH", "GARDEN"].map((label) => {
+                {["GRID", "DASHBOARD", "LIBRARY", "QUEUE", "WORKFLOWS", "GRAPH", "GARDEN"].map((label) => {
                   const mode = label.toLowerCase().replace("workflows", "workflow-builder") as any;
                   return (
                     <button
@@ -416,9 +417,13 @@ function AppBody() {
           )}
 
           {viewMode === "workflow-builder" && (
-            <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 min-h-0 bg-wardian-bg">
               <WorkflowBuilderView theme={theme} />
             </div>
+          )}
+
+          {viewMode === "library" && (
+            <LibraryView />
           )}
 
           {["queue", "graph", "garden"].map(mode => viewMode === mode && (

@@ -43,6 +43,8 @@ pub async fn create_agent_class(
         name: trimmed_name.clone(),
         description: description.trim().to_string(),
         is_default: false,
+        gemini_md: None,
+        assigned_skills: None,
     };
 
     custom.push(new_class.clone());

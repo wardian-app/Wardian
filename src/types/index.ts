@@ -50,4 +50,25 @@ export interface AgentClassDefinition {
     description: string;
     is_default: boolean;
     gemini_md?: string;
+    assigned_skills?: string[];
+}
+
+export interface LibraryItemMetadata {
+    id: string;
+    tags: string[];
+    is_starred: boolean;
+    last_used?: string;
+}
+
+export interface LibraryPrompt {
+    path: string;
+    name: string;
+    content: string;
+    metadata: LibraryItemMetadata;
+}
+
+export interface LibraryFolder {
+    path: string;
+    name: string;
+    children: (LibraryFolder | LibraryPrompt)[];
 }

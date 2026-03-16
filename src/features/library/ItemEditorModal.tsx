@@ -1,0 +1,92 @@
+import React, { useState, useEffect } from 'react';
+import { LibraryPrompt, LibraryItemMetadata } from '../../types';
+
+interface ItemEditorModalProps {
+    prompt: LibraryPrompt;
+    isOpen: boolean;
+    onClose: () => void;
+    onSave: (path: string, content: string, metadata: LibraryItemMetadata) => void;
+}
+
+export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ prompt, isOpen, onClose, onSave }) => {
+    const [content, setContent] = useState(prompt.content);
+    const [tagsText, setTagsText] = useState(prompt.metadata.tags.join(', '));
+    const [isStarred, setIsStarred] = useState(prompt.metadata.is_starred);
+
+    useEffect(() => {
+        if (isOpen) {
+            setContent(prompt.content);
+            setTagsText(prompt.metadata.tags.join(', '));
+            setIsStarred(prompt.metadata.is_starred);
+        }
+    }, [isOpen, prompt]);
+
+    if (!isOpen) return null;
+
+    const handleSave = () => {
+        const updatedMetadata = {
+            ...prompt.metadata,
+            tags: tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0),
+            is_starred: isStarred
+        };
+        onSave(prompt.path, content, updatedMetadata);
+        onClose();
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <div className="bg-wardian-bg border border-wardian-border rounded-xl w-full max-w-3xl h-[80vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
+                <div className="flex justify-between items-center p-4 border-b border-wardian-border bg-wardian-sidebar-primary">
+                    <h2 className="text-xl font-bold text-primary">{prompt.name}</h2>
+                    <button onClick={onClose} className="text-muted hover:text-primary transition-colors">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+                    <div className="flex flex-col gap-1">
+                        <label className="text-xs font-bold text-muted uppercase tracking-widest">Content</label>
+                        <textarea
+                            className="w-full h-64 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded p-3 text-primary text-sm focus:outline-none focus:border-[var(--color-wardian-accent)] font-mono resize-y"
+                            value={content}
+                            onChange={e => setContent(e.target.value)}
+                        />
+                    </div>
+                    
+                    <div className="flex flex-col gap-1">
+                        <label className="text-xs font-bold text-muted uppercase tracking-widest">Tags (comma separated)</label>
+                        <input
+                            type="text"
+                            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-primary text-sm focus:outline-none focus:border-[var(--color-wardian-accent)]"
+                            value={tagsText}
+                            onChange={e => setTagsText(e.target.value)}
+                            placeholder="e.g. react, debug, snippet"
+                        />
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-2">
+                        <input
+                            type="checkbox"
+                            id="starCheckbox"
+                            checked={isStarred}
+                            onChange={e => setIsStarred(e.target.checked)}
+                            className="w-4 h-4 bg-wardian-input-bg border-wardian-light rounded text-[var(--color-wardian-accent)] focus:ring-[var(--color-wardian-accent)]"
+                        />
+                        <label htmlFor="starCheckbox" className="text-sm font-medium text-primary cursor-pointer select-none">
+                            Quick Prompt
+                        </label>
+                    </div>
+                </div>
+
+                <div className="p-4 border-t border-wardian-border bg-wardian-sidebar-primary flex justify-end gap-3">
+                    <button onClick={onClose} className="px-4 py-2 rounded text-sm font-bold text-muted hover:text-primary transition-colors">
+                        Cancel
+                    </button>
+                    <button onClick={handleSave} className="px-4 py-2 rounded text-sm font-bold bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:brightness-110 transition-all shadow-[0_0_10px_var(--color-wardian-accent)]">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};

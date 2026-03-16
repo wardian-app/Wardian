@@ -42,6 +42,44 @@ pub async fn send_input_to_agent(
 }
 
 #[tauri::command]
+pub async fn inject_session_input(
+    session_id: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let senders = match state.input_senders.try_read() {
+        Ok(s) => s,
+        Err(_) => {
+            manager::log_debug(&format!(
+                "[Wardian] [{}] inject_session_input: input_senders write-locked",
+                session_id
+            ));
+            return Err("Input channel temporarily locked".to_string());
+        }
+    };
+    if let Some(tx) = senders.get(&session_id) {
+        // Send the text followed by a newline (CRLF for PTY usually, or just LF depending on translation)
+        // We'll send standard LF and let ConPTY handle translation.
+        let mut input = text;
+        if !input.ends_with('\n') {
+            input.push('\n');
+        }
+        match tx.try_send(input) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                manager::log_debug(&format!(
+                    "[Wardian] [{}] inject_session_input: channel error: {}",
+                    session_id, e
+                ));
+                Err(format!("Failed to inject input: {}", e))
+            }
+        }
+    } else {
+        Err(format!("Agent {} not found or is off", session_id))
+    }
+}
+
+#[tauri::command]
 pub async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
     let senders = state
         .input_senders
