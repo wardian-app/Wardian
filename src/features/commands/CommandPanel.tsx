@@ -48,16 +48,29 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
 
   const handleInject = async (promptContent: string) => {
     try {
+      const flattenedPrompt = promptContent.replace(/\r?\n/g, ' ');
       if (selectedAgentIds.size > 0) {
         for (const id of selectedAgentIds) {
-          await invoke("send_input_to_agent", { sessionId: id, input: promptContent });
+          await invoke("send_input_to_agent", { sessionId: id, input: flattenedPrompt });
         }
       } else {
-        await invoke("broadcast_input", { input: promptContent });
+        if (window.confirm("No agents selected. This will broadcast the prompt to ALL agents. Are you sure?")) {
+          await invoke("broadcast_input", { input: flattenedPrompt });
+        }
       }
     } catch (e) {
       console.error("Injection failed", e);
     }
+  };
+
+  const handleBroadcastSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selectedAgentIds.size === 0) {
+      if (!window.confirm("No agents selected. This will broadcast to ALL agents. Are you sure?")) {
+        return;
+      }
+    }
+    onBroadcast(e);
   };
 
   return (
@@ -79,13 +92,12 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
               <button 
                 key={`starred-${prompt.path}-${idx}`}
                 onClick={() => handleInject(prompt.content)}
-                className="flex items-center justify-between p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-primary hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group"
-                title={prompt.content}
+                className="flex flex-col items-start p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-primary hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group"
               >
-                <span className="text-xs font-bold truncate flex-1">{prompt.name}</span>
-                <svg className="w-4 h-4 opacity-50 group-hover:opacity-100 flex-shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-                </svg>
+                <span className="text-xs font-bold truncate w-full">{prompt.name}</span>
+                <span className="text-[10px] text-muted-neutral mt-1 w-full line-clamp-1 whitespace-pre-wrap leading-relaxed group-hover:text-primary/70 transition-colors">
+                  {prompt.content}
+                </span>
               </button>
             ))
           )}
@@ -94,7 +106,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
 
       <div className="mt-auto pt-6 border-t border-wardian-border flex-shrink-0">
         <h3 className="text-xs font-bold text-muted uppercase tracking-widest mb-4">Broadcast</h3>
-        <form onSubmit={onBroadcast} className="flex flex-col gap-2">
+        <form onSubmit={handleBroadcastSubmit} className="flex flex-col gap-2">
           <textarea
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-primary text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
             placeholder={selectedAgentIds.size > 0 ? `Message ${selectedAgentIds.size} selected...` : "Broadcast to all agents..."}

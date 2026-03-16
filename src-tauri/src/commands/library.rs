@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tauri::AppHandle;
 
 use crate::models::{LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt};
