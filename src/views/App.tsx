@@ -302,18 +302,16 @@ function AppBody() {
   };
 
   const onRestart = async (id: string) => {
-    if (confirm(offAgentIds.has(id) ? 'Start?' : 'Restart?')) {
-      try {
-        await invoke('resume_agent', { sessionId: id });
-        setOffAgentIds(prev => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
-        fetchAgents();
-      } catch (e) {
-        console.error(e);
-      }
+    try {
+      await invoke('resume_agent', { sessionId: id });
+      setOffAgentIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      fetchAgents();
+    } catch (e) {
+      console.error(e);
     }
   };
 
