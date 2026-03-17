@@ -60,7 +60,17 @@ export interface LibraryItemMetadata {
     last_used?: string;
 }
 
+export interface LibrarySkill {
+    type: 'Skill';
+    path: string;
+    name: string;
+    description: string;
+    content: string;
+    metadata: LibraryItemMetadata;
+}
+
 export interface LibraryPrompt {
+    type: 'Prompt';
     path: string;
     name: string;
     content: string;
@@ -68,7 +78,8 @@ export interface LibraryPrompt {
 }
 
 export interface LibraryFolder {
+    type: 'Folder';
     path: string;
     name: string;
-    children: (LibraryFolder | LibraryPrompt)[];
+    children: (LibraryFolder | LibraryPrompt | LibrarySkill)[];
 }

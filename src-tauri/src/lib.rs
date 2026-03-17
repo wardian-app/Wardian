@@ -130,9 +130,12 @@ pub fn run() {
             commands::workflow::load_workflow_library,
             commands::workflow::save_workflow_library,
             commands::library::get_library_tree,
-            commands::library::save_prompt,
-            commands::library::update_prompt_metadata,
+            commands::library::save_library_item,
+            commands::library::update_library_metadata,
             commands::library::open_library_folder,
+            commands::library::deploy_skill,
+            commands::library::remove_deployed_skill,
+            commands::library::list_deployed_skills,
             commands::patch::run_gemini_patch
         ])
         .run(tauri::generate_context!())

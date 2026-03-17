@@ -34,10 +34,10 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
       for (const child of folder.children) {
         if ('content' in child) {
           if (child.metadata.is_starred) {
-            results.push(child);
+            results.push(child as LibraryPrompt);
           }
-        } else {
-          traverse(child);
+        } else if ('children' in child) {
+          traverse(child as LibraryFolder);
         }
       }
     }

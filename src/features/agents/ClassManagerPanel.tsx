@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentClassDefinition } from "../../types";
 
+import { ManageSkills } from "../library/ManageSkills";
+
 interface ClassManagerPanelProps {
   agentClasses: AgentClassDefinition[];
   onClassesUpdated: () => void;
@@ -133,7 +135,8 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                     </button>
                   </div>
-                  <p className="text-[11px] text-muted-neutral">{cls.description}</p>
+                  <p className="text-[11px] text-muted-neutral mb-2">{cls.description}</p>
+                  <ManageSkills targetType="class" targetId={cls.name} />
                 </div>
               ))}
             </div>

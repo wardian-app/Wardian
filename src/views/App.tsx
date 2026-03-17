@@ -70,10 +70,11 @@ function AppBody() {
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
-  const { theme, autoPatchGemini } = useSettingsStore();
+  const { theme } = useSettingsStore();
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [activeListId, setActiveListId] = useState<string>("all");
+  const hasAutoPatched = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -83,10 +84,11 @@ function AppBody() {
       } catch { /* first run */ }
     })();
 
-    if (autoPatchGemini) {
+    if (useSettingsStore.getState().autoPatchGemini && !hasAutoPatched.current) {
+      hasAutoPatched.current = true;
       invoke('run_gemini_patch').catch(e => console.error("Auto patch failed:", e));
     }
-  }, [autoPatchGemini]);
+  }, []);
 
   const persistWatchlists = useCallback(async (lists: Watchlist[]) => {
     setWatchlists(lists);

@@ -122,6 +122,19 @@ pub async fn kill_agent(
             // Explicitly drop the job object to ensure all processes in the tree (including PTY hosts) are killed.
             let _ = agent.job_object.take();
         }
+
+        // Cleanup: remove the agent's private directory
+        if let Some(home) = crate::utils::fs::get_wardian_home() {
+            let agent_dir = home.join("agents").join(&session_id);
+            if agent_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
+                    manager::log_debug(&format!("[WARDIAN] Failed to remove agent directory {:?}: {}", agent_dir, e));
+                } else {
+                    manager::log_debug(&format!("[WARDIAN] Successfully removed agent directory {:?}", agent_dir));
+                }
+            }
+        }
+
         Ok(())
     } else {
         let err_msg = format!("Agent with session ID {} not found", session_id);

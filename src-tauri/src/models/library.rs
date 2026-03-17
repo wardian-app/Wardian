@@ -11,10 +11,20 @@ pub struct LibraryItemMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")] // Allows discriminating between folder and prompt in TS if needed, but TS uses structure. We'll just return structures.
+#[serde(tag = "type")]
 pub struct LibraryPrompt {
     pub path: String,
     pub name: String,
+    pub content: String,
+    pub metadata: LibraryItemMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub struct LibrarySkill {
+    pub path: String,
+    pub name: String,
+    pub description: String,
     pub content: String,
     pub metadata: LibraryItemMetadata,
 }
@@ -31,6 +41,7 @@ pub struct LibraryFolder {
 pub enum LibraryNode {
     Folder(LibraryFolder),
     Prompt(LibraryPrompt),
+    Skill(LibrarySkill),
 }
 
 #[cfg(test)]

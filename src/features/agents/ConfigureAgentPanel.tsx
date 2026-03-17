@@ -4,6 +4,7 @@ import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "../../types";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { requiresRestart } from "./configUtils";
 import { AdvancedSettings } from '../../components/AdvancedSettings';
+import { ManageSkills } from '../library/ManageSkills';
 
 interface Props {
   agentId: string;
@@ -180,6 +181,8 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             />
           </div>
         </div>
+
+        <ManageSkills targetType="agent" targetId={config.session_id} />
 
         <AdvancedSettings 
           config={config} 

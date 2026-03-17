@@ -1,35 +1,35 @@
 import React, { useState, useEffect } from 'react';
-import { LibraryPrompt, LibraryItemMetadata } from '../../types';
+import { LibraryPrompt, LibrarySkill, LibraryItemMetadata } from '../../types';
 
 interface ItemEditorModalProps {
-    prompt: LibraryPrompt;
+    item: LibraryPrompt | LibrarySkill;
     isOpen: boolean;
     onClose: () => void;
     onSave: (path: string, content: string, metadata: LibraryItemMetadata) => void;
 }
 
-export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ prompt, isOpen, onClose, onSave }) => {
-    const [content, setContent] = useState(prompt.content);
-    const [tagsText, setTagsText] = useState(prompt.metadata.tags.join(', '));
-    const [isStarred, setIsStarred] = useState(prompt.metadata.is_starred);
+export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, onClose, onSave }) => {
+    const [content, setContent] = useState(item.content);
+    const [tagsText, setTagsText] = useState(item.metadata.tags.join(', '));
+    const [isStarred, setIsStarred] = useState(item.metadata.is_starred);
 
     useEffect(() => {
         if (isOpen) {
-            setContent(prompt.content);
-            setTagsText(prompt.metadata.tags.join(', '));
-            setIsStarred(prompt.metadata.is_starred);
+            setContent(item.content);
+            setTagsText(item.metadata.tags.join(', '));
+            setIsStarred(item.metadata.is_starred);
         }
-    }, [isOpen, prompt]);
+    }, [isOpen, item]);
 
     if (!isOpen) return null;
 
     const handleSave = () => {
         const updatedMetadata = {
-            ...prompt.metadata,
+            ...item.metadata,
             tags: tagsText.split(',').map(t => t.trim()).filter(t => t.length > 0),
             is_starred: isStarred
         };
-        onSave(prompt.path, content, updatedMetadata);
+        onSave(item.path, content, updatedMetadata);
         onClose();
     };
 
@@ -46,7 +46,7 @@ export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ prompt, isOpen
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
                             </svg>
                         </button>
-                        <h2 className="text-xl font-bold text-primary">{prompt.name}</h2>
+                        <h2 className="text-xl font-bold text-primary">{item.name}</h2>
                     </div>
                     <button onClick={onClose} className="text-muted hover:text-primary transition-colors">
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
