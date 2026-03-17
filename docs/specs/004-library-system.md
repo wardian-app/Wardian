@@ -1,4 +1,4 @@
-# ADR 004: Wardian Library System (Prompts & Skills)
+# Spec 004: Wardian Library System (Prompts & Skills)
 
 **Status**: Proposed  
 **Date**: 2026-03-15  

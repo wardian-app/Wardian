@@ -1,4 +1,4 @@
-# ADR 003: Multi-Provider Support (The Provider Trait)
+# Spec 003: Multi-Provider Support (The Provider Trait)
 
 * **Status:** Proposed
 * **Date:** 2026-03-15

@@ -1,4 +1,4 @@
-# ADR 001: Knowledge Task System (KTS) Milestone 1
+# Spec 001: Knowledge Task System (KTS) Milestone 1
 
 * **Status:** Proposed
 * **Date:** 2026-03-15

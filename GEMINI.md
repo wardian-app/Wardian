@@ -9,7 +9,7 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
    - [ ] **Frontend**: Run `npm run lint`, `npm run test`, and `npm run build`.
    - [ ] **Backend**: Run `cargo clippy`, `cargo test`, and `cargo check` (in `src-tauri`).
 2. **Documentation**:
-   - [ ] Document strategic decisions in a new **ADR** in `docs/adrs/`.
+   - [ ] Document strategic decisions in a new **Spec** in `docs/specs/`.
    - [ ] Update related guides in `docs/guide/` or `docs/developer/`.
    - [ ] Ensure public APIs/complex logic have appropriate JSDoc or Rust docstrings.
 3. **Safety & Integrity**:

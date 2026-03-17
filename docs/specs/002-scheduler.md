@@ -1,4 +1,4 @@
-# ADR 002: Internal Rust Heartbeat (Scheduler)
+# Spec 002: Internal Rust Heartbeat (Scheduler)
 
 * **Status:** Proposed
 * **Date:** 2026-03-15
