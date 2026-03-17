@@ -21,8 +21,6 @@ interface SidebarContentPaneProps {
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
-  theme: "dark" | "light" | "system";
-  setTheme: (theme: "dark" | "light" | "system") => void;
 }
 
 export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
@@ -38,8 +36,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
-  theme,
-  setTheme,
 }) => {
   return (
     <aside className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
@@ -104,8 +100,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
 
         {activeTab === "settings" && (
           <SettingsPanel 
-            theme={theme}
-            setTheme={setTheme}
             onCollapse={() => setLeftCollapsed(true)}
           />
         )}

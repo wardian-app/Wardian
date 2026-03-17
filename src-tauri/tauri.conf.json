@@ -33,6 +33,6 @@
       "icons/white/icon.icns",
       "icons/white/icon.ico"
     ],
-    "resources": ["agent_prompts/*"]
+    "resources": ["agent_prompts/*", "../scripts/*"]
   }
 }

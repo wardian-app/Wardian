@@ -1,16 +1,35 @@
-import React from "react";
+import React, { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 interface SettingsPanelProps {
-  theme: "dark" | "light" | "system";
-  setTheme: (theme: "dark" | "light" | "system") => void;
   onCollapse: () => void;
 }
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
-  theme,
-  setTheme,
   onCollapse,
 }) => {
+  const { theme, setTheme, autoPatchGemini, setAutoPatchGemini } = useSettingsStore();
+  const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "success" | "error">("idle");
+  const [patchMessage, setPatchMessage] = useState("");
+
+  const handleRunPatch = async () => {
+    setPatchStatus("running");
+    setPatchMessage("");
+    try {
+      await invoke<string>("run_gemini_patch");
+      setPatchStatus("success");
+      setPatchMessage("Gemini CLI Patch Applied Successfully.");
+      setTimeout(() => {
+        setPatchStatus("idle");
+        setPatchMessage("");
+      }, 5000);
+    } catch (e: any) {
+      setPatchStatus("error");
+      setPatchMessage(`Patch failed: ${e}`);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
@@ -20,8 +39,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </button>
       </div>
       
-      <div className="flex flex-col gap-6">
-        <div className="bg-transparent mb-2">
+      <div className="flex flex-col gap-8 flex-1 overflow-y-auto pr-2 no-scrollbar">
+        <div className="bg-transparent">
           <h3 className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest mb-4">Theme</h3>
           <div className="grid grid-cols-3 gap-3">
             {/* System Theme Card */}
@@ -76,7 +95,49 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           </div>
         </div>
 
-        <div className="text-center p-4">
+        <div className="border-t border-wardian-border pt-6">
+          <h3 className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest mb-4">Advanced</h3>
+          
+          <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
+            <label className="text-sm font-bold text-primary flex items-center gap-2 cursor-pointer select-none">
+              <input 
+                type="checkbox" 
+                checked={autoPatchGemini}
+                onChange={(e) => setAutoPatchGemini(e.target.checked)}
+                className="w-4 h-4 rounded border-wardian-border text-[var(--color-wardian-accent)] focus:ring-[var(--color-wardian-accent)] bg-wardian-input-bg"
+              />
+              Auto-patch Gemini CLI
+            </label>
+            
+            <div className="flex justify-center my-2">
+              <button 
+                onClick={handleRunPatch}
+                disabled={patchStatus === "running"}
+                className={`px-6 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
+                  patchStatus === "running" ? "bg-wardian-border text-muted border-transparent cursor-not-allowed" : 
+                  "bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                }`}
+              >
+                {patchStatus === "running" ? "Patching..." : "Run Patch Now"}
+              </button>
+            </div>
+            
+            <p className="text-[10px] text-muted-neutral leading-relaxed text-left">
+              Applies a custom patch to enable skill discovery in included directories. Reruns on every launch.
+            </p>
+
+            {patchMessage && (
+              <div className={`p-2 mt-1 rounded border text-xs font-medium text-left ${
+                patchStatus === "success" ? "bg-green-500/10 border-green-500/20 text-green-400" : 
+                "bg-red-500/10 border-red-500/20 text-red-400"
+              }`}>
+                {patchMessage}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="text-center p-4 mt-auto">
           <p className="text-[10px] text-muted-neutral italic">More settings coming in Phase 3.</p>
         </div>
       </div>

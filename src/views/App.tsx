@@ -18,6 +18,7 @@ import { PlaceholderView } from "./PlaceholderView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
 import { LibraryView } from "./LibraryView";
 import { useWorkflowStore } from "../store/useWorkflowStore";
+import { useSettingsStore } from "../store/useSettingsStore";
 
 function App() {
   return (
@@ -69,9 +70,7 @@ function AppBody() {
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
-  const [theme, setTheme] = useState<"dark" | "light" | "system">(() => {
-    return (localStorage.getItem("theme") as "dark" | "light" | "system") || "system";
-  });
+  const { theme, autoPatchGemini } = useSettingsStore();
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [activeListId, setActiveListId] = useState<string>("all");
@@ -83,7 +82,11 @@ function AppBody() {
         if (data && data.length > 0) setWatchlists(data);
       } catch { /* first run */ }
     })();
-  }, []);
+
+    if (autoPatchGemini) {
+      invoke('run_gemini_patch').catch(e => console.error("Auto patch failed:", e));
+    }
+  }, [autoPatchGemini]);
 
   const persistWatchlists = useCallback(async (lists: Watchlist[]) => {
     setWatchlists(lists);
@@ -103,7 +106,6 @@ function AppBody() {
       document.documentElement.setAttribute("data-theme", effectiveTheme);
     };
     applyTheme();
-    localStorage.setItem("theme", theme);
     mediaQuery.addEventListener("change", applyTheme);
     return () => mediaQuery.removeEventListener("change", applyTheme);
   }, [theme]);
@@ -354,8 +356,6 @@ function AppBody() {
         broadcastMessage={broadcastMessage}
         setBroadcastMessage={setBroadcastMessage}
         onBroadcast={broadcastInput}
-        theme={theme}
-        setTheme={setTheme}
       />
 
       <main className="flex-1 h-full flex flex-col overflow-hidden relative">

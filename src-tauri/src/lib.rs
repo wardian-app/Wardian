@@ -132,7 +132,8 @@ pub fn run() {
             commands::library::get_library_tree,
             commands::library::save_prompt,
             commands::library::update_prompt_metadata,
-            commands::library::open_library_folder
+            commands::library::open_library_folder,
+            commands::patch::run_gemini_patch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
