@@ -10,7 +10,7 @@ interface LibraryViewProps {
 }
 
 export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) => {
-    const { libraryTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab, deploySkill } = useLibraryStore();
+    const { promptTree, skillTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab, deploySkill } = useLibraryStore();
     
     // Navigation state
     const [currentPath, setCurrentPath] = useState<string[]>([]);
@@ -28,6 +28,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
     }, [activeTab]);
 
     const currentFolder = useMemo(() => {
+        const libraryTree = activeTab === 'prompts' ? promptTree : skillTree;
         if (!libraryTree) return null;
         let folder = libraryTree;
         for (const segment of currentPath) {
@@ -39,7 +40,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
             }
         }
         return folder;
-    }, [libraryTree, currentPath]);
+    }, [promptTree, skillTree, activeTab, currentPath]);
 
     const filteredFolder = useMemo(() => {
         if (!currentFolder) return null;
@@ -77,7 +78,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
         return { ...currentFolder, children };
     }, [currentFolder, searchQuery, showQuickOnly]);
 
-    if (isLoading && !libraryTree) {
+    if (isLoading && !(activeTab === 'prompts' ? promptTree : skillTree)) {
         return <div className="flex-1 flex items-center justify-center text-muted">Loading library...</div>;
     }
 

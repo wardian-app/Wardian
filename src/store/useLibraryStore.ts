@@ -3,12 +3,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { LibraryFolder, LibraryItemMetadata } from '../types';
 
 interface LibraryState {
-  libraryTree: LibraryFolder | null;
+  promptTree: LibraryFolder | null;
+  skillTree: LibraryFolder | null;
   isLoading: boolean;
   error: string | null;
   activeTab: 'prompts' | 'skills';
   setActiveTab: (tab: 'prompts' | 'skills') => void;
-  fetchLibraryTree: () => Promise<void>;
+  fetchLibraryTree: (type?: 'prompts' | 'skills') => Promise<void>;
   saveLibraryItem: (path: string, content: string, metadata: LibraryItemMetadata) => Promise<void>;
   updateLibraryMetadata: (path: string, metadata: LibraryItemMetadata) => Promise<void>;
   openLibraryFolder: (path?: string) => Promise<void>;
@@ -18,21 +19,27 @@ interface LibraryState {
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
-  libraryTree: null,
+  promptTree: null,
+  skillTree: null,
   isLoading: false,
   error: null,
   activeTab: 'prompts',
 
   setActiveTab: (tab) => {
     set({ activeTab: tab });
-    get().fetchLibraryTree();
+    get().fetchLibraryTree(tab);
   },
 
-  fetchLibraryTree: async () => {
+  fetchLibraryTree: async (type) => {
+    const targetType = type || get().activeTab;
     set({ isLoading: true, error: null });
     try {
-      const tree = await invoke<LibraryFolder>('get_library_tree', { libraryType: get().activeTab });
-      set({ libraryTree: tree, isLoading: false });
+      const tree = await invoke<LibraryFolder>('get_library_tree', { libraryType: targetType });
+      if (targetType === 'prompts') {
+        set({ promptTree: tree, isLoading: false });
+      } else {
+        set({ skillTree: tree, isLoading: false });
+      }
     } catch (e: any) {
       set({ error: e.toString(), isLoading: false });
     }

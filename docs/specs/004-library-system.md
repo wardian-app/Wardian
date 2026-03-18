@@ -21,7 +21,12 @@ Wardian requires a centralized, high-efficiency repository for managing reusable
    - **Main View**: `LibraryView.tsx` will be a primary workspace view for management, folder navigation, and tagging.
    - **Injection Hub**: The **Command Sidebar Tab** (`CommandPanel.tsx`) will be refactored to display Starred Prompts for immediate injection into the focused terminal.
 
-4. **Technical Implementation**:
+5. **Skill Deployment Model (Direct Copying)**:
+   - To ensure strict agent isolation and avoid "bleedover" between sessions, skills will be **physically copied** (recursively) from the Library to the target entity's `.agents/skills/` directory upon assignment.
+   - **Precedence**: This ensures that an agent spawned from a class "inherits" its own local, immutable snapshot of that skill.
+   - **Updates**: Updating a skill in the Library will *not* automatically update running agents; a deliberate "Re-deploy" action will be required to refresh an agent's or class's skill set.
+
+6. **Technical Implementation**:
    - New Tauri command `inject_session_input(session_id: String, text: String)` will write bytes directly to the process stdin followed by `\n`.
 
 ## Consequences

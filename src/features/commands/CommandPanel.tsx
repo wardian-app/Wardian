@@ -18,17 +18,17 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   onBroadcast,
   onCollapse,
 }) => {
-  const { libraryTree, fetchLibraryTree } = useLibraryStore();
+  const { promptTree, fetchLibraryTree } = useLibraryStore();
 
   useEffect(() => {
-    if (!libraryTree) {
-      fetchLibraryTree();
+    if (!promptTree) {
+      fetchLibraryTree('prompts');
     }
-  }, [libraryTree, fetchLibraryTree]);
+  }, [promptTree, fetchLibraryTree]);
 
   const quickPrompts = useMemo(() => {
     const results: LibraryPrompt[] = [];
-    if (!libraryTree) return results;
+    if (!promptTree) return results;
 
     function traverse(folder: LibraryFolder) {
       for (const child of folder.children) {
@@ -42,9 +42,9 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
       }
     }
 
-    traverse(libraryTree);
+    traverse(promptTree);
     return results;
-  }, [libraryTree]);
+  }, [promptTree]);
 
   const handleInject = async (promptContent: string) => {
     try {
