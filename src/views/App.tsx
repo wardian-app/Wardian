@@ -374,31 +374,25 @@ function AppBody() {
           className="flex-1 overflow-y-auto p-2 flex flex-col"
           onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
         >
-          <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-end">
-            <div>
-              <h1 className="text-4xl font-bold tracking-tight text-primary mb-2">Wardian</h1>
-              <p className="text-muted text-sm font-medium tracking-wide">Integrated Agent Environment</p>
+          <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-center">
+            <div className="flex gap-1 bg-[var(--color-wardian-sidebar-primary)]/50 p-1.5 rounded-lg border border-wardian-border overflow-x-auto no-scrollbar max-w-[600px]">
+              {["GRID", "DASHBOARD", "QUEUE", "LIBRARY", "WORKFLOWS", "GRAPH", "GARDEN"].map((label) => {
+                const mode = label.toLowerCase().replace("workflows", "workflow-builder") as any;
+                return (
+                  <button
+                    key={label}
+                    onClick={() => setViewMode(mode)}
+                    className={`px-4 py-2 rounded-md text-[11px] font-bold transition-all whitespace-nowrap ${viewMode === mode ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]' : 'text-muted-neutral hover:text-primary'}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex gap-1 bg-[var(--color-wardian-sidebar-primary)]/50 p-1 rounded-lg border border-wardian-border overflow-x-auto no-scrollbar max-w-[500px]">
-                {["GRID", "DASHBOARD", "LIBRARY", "QUEUE", "WORKFLOWS", "GRAPH", "GARDEN"].map((label) => {
-                  const mode = label.toLowerCase().replace("workflows", "workflow-builder") as any;
-                  return (
-                    <button
-                      key={label}
-                      onClick={() => setViewMode(mode)}
-                      className={`px-3 py-1.5 rounded-md text-[9px] font-bold transition-all whitespace-nowrap ${viewMode === mode ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] shadow-[0_0_10px_var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'}`}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-muted-neutral uppercase tracking-widest">
-                <span>CPU: {Object.values(telemetry).reduce((acc, curr) => acc + curr.cpu_usage, 0).toFixed(1)}%</span>
-                <span>MEM: {Object.values(telemetry).reduce((acc, curr) => acc + curr.memory_mb, 0).toFixed(0)} MB</span>
-                <span className="text-[var(--color-wardian-accent)]">Active: {agents.filter(a => !offAgentIds.has(a.session_id)).length}</span>
-              </div>
+            <div className="flex items-center gap-4 text-[11px] font-mono font-bold text-muted-neutral uppercase tracking-widest mr-8">
+              <span>CPU: {Object.values(telemetry).reduce((acc, curr) => acc + curr.cpu_usage, 0).toFixed(1)}%</span>
+              <span>MEM: {Object.values(telemetry).reduce((acc, curr) => acc + curr.memory_mb, 0).toFixed(0)} MB</span>
+              <span className="text-[var(--color-wardian-accent)]">Active: {agents.filter(a => !offAgentIds.has(a.session_id)).length}</span>
             </div>
           </header>
 
