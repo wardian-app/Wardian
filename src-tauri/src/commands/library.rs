@@ -305,3 +305,62 @@ pub async fn list_deployed_skills(_app: AppHandle, target_type: String, target_i
 
     Ok(skills)
 }
+
+#[tauri::command]
+pub async fn list_skill_deployments(_app: AppHandle, skill_name: String) -> Result<Vec<crate::models::SkillDeployment>, String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let mut deployments = Vec::new();
+
+    // Check user (global)
+    let user_target = home.join("common").join(".agents").join("skills").join(&skill_name);
+    if user_target.exists() && user_target.is_dir() {
+        deployments.push(crate::models::SkillDeployment {
+            target_type: "user".to_string(),
+            target_id: "global".to_string(),
+        });
+    }
+
+    // Check classes
+    let classes_dir = home.join("classes");
+    if classes_dir.exists() {
+        if let Ok(entries) = fs::read_dir(classes_dir) {
+            for entry in entries.flatten() {
+                if let Ok(ty) = entry.file_type() {
+                    if ty.is_dir() {
+                        let class_name = entry.file_name().to_string_lossy().to_string();
+                        let class_target = entry.path().join(".agents").join("skills").join(&skill_name);
+                        if class_target.exists() && class_target.is_dir() {
+                            deployments.push(crate::models::SkillDeployment {
+                                target_type: "class".to_string(),
+                                target_id: class_name,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check agents
+    let agents_dir = home.join("agents");
+    if agents_dir.exists() {
+        if let Ok(entries) = fs::read_dir(agents_dir) {
+            for entry in entries.flatten() {
+                if let Ok(ty) = entry.file_type() {
+                    if ty.is_dir() {
+                        let agent_id = entry.file_name().to_string_lossy().to_string();
+                        let agent_target = entry.path().join(".agents").join("skills").join(&skill_name);
+                        if agent_target.exists() && agent_target.is_dir() {
+                            deployments.push(crate::models::SkillDeployment {
+                                target_type: "agent".to_string(),
+                                target_id: agent_id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(deployments)
+}

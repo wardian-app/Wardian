@@ -136,6 +136,7 @@ pub fn run() {
             commands::library::deploy_skill,
             commands::library::remove_deployed_skill,
             commands::library::list_deployed_skills,
+            commands::library::list_skill_deployments,
             commands::patch::run_gemini_patch
         ])
         .run(tauri::generate_context!())

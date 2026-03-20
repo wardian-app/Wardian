@@ -16,6 +16,7 @@ interface LibraryState {
   deploySkill: (sourcePath: string, targetType: "agent" | "class" | "user", targetId: string) => Promise<void>;
   removeDeployedSkill: (targetType: "agent" | "class" | "user", targetId: string, skillName: string) => Promise<void>;
   listDeployedSkills: (targetType: "agent" | "class" | "user", targetId: string) => Promise<string[]>;
+  listSkillDeployments: (skillName: string) => Promise<{ target_type: string; target_id: string }[]>;
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
@@ -83,5 +84,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   listDeployedSkills: async (targetType, targetId) => {
     return await invoke<string[]>('list_deployed_skills', { targetType, targetId });
+  },
+
+  listSkillDeployments: async (skillName) => {
+    return await invoke<{ target_type: string; target_id: string }[]>('list_skill_deployments', { skillName });
   }
 }));

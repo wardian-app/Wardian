@@ -44,6 +44,12 @@ pub enum LibraryNode {
     Skill(LibrarySkill),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillDeployment {
+    pub target_type: String,
+    pub target_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
