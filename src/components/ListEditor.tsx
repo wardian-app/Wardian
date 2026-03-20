@@ -65,7 +65,7 @@ export const ListEditor: React.FC<ListEditorProps> = ({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="block text-[10px] font-bold text-muted-neutral uppercase">{label}</label>
+      <label className="block text-[10px] font-bold text-muted-neutral">{label}</label>
       <div className="flex flex-col gap-1">
         {/* System Values (Locked) */}
         {safeSystemValues.map((val, idx) => (

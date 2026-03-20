@@ -9,11 +9,9 @@ const PauseAllIcon = () => <svg className="w-5 h-5" fill="currentColor" viewBox=
 const PlayAllIcon = () => <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z" /></svg>;
 const SearchIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>;
 
-interface WorkflowSidebarProps {
-  onCollapse: () => void;
-}
+interface WorkflowSidebarProps {}
 
-export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onCollapse }) => {
+export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
   const { 
     availableWorkflows, 
     fetchWorkflows, 
@@ -56,14 +54,9 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onCollapse }) 
       <div className="flex flex-col gap-3 mb-6">
         {/* Title Row */}
         <div className="flex justify-between items-center">
-          <h2 className="text-xl font-bold text-primary tracking-tight uppercase truncate">
-            WORKFLOWS
+          <h2 className="text-xl font-bold text-primary tracking-tight truncate">
+            Workflows
           </h2>
-          <button onClick={onCollapse} className="text-bright-neutral hover:text-primary transition-colors">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
         </div>
 
         {/* Search Bar */}
@@ -121,7 +114,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onCollapse }) 
 
         {/* 1. Workflows (The Library) */}
         <div className="flex-1 flex flex-col min-h-0">
-          <div className="mb-4 text-xs font-bold text-muted-neutral uppercase tracking-widest">
+          <div className="mb-4 text-xs font-bold text-muted-neutral tracking-wide">
             Library
           </div>
           <WorkflowLibrary 

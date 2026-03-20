@@ -33,7 +33,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
   const SectionHeader = ({ title, count, section }: { title: string, count: number, section: keyof typeof openSections }) => (
     <button 
       onClick={() => toggle(section)}
-      className="w-full flex items-center justify-between py-2 text-xs font-bold text-muted-neutral hover:text-primary transition-colors uppercase tracking-widest border-t border-wardian-border/10 first:border-t-0 mt-1"
+      className="w-full flex items-center justify-between py-2 text-xs font-bold text-muted-neutral hover:text-primary transition-colors tracking-wide border-t border-wardian-border/10 first:border-t-0 mt-1"
     >
       <div className="flex items-center gap-2">
         <span>{title}</span>
@@ -65,7 +65,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                   </button>
                 </div>
                 <div className="flex items-center justify-between text-[9px] mb-1.5">
-                  <span className="text-cyan-400 font-bold tracking-widest uppercase">STEP {run.current_step}/{run.total_steps}</span>
+                  <span className="text-cyan-400 font-bold tracking-wide">Step {run.current_step}/{run.total_steps}</span>
                   <span className="text-muted-neutral truncate italic max-w-[60%]">{run.active_node_name}</span>
                 </div>
                 <div className="w-full bg-[var(--color-wardian-input-bg)] h-1.5 rounded-full overflow-hidden border border-white/5">
@@ -120,13 +120,13 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                 <div className="flex flex-col truncate pr-3">
                   <span className="text-[11px] font-bold text-primary truncate leading-tight tracking-tight">{s.workflow_name}</span>
                   <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[9px] font-mono text-muted-neutral uppercase tracking-tighter">{s.frequency}</span>
+                    <span className="text-[9px] font-mono text-muted-neutral tracking-tight">{s.frequency}</span>
                     <span className="text-[8px] text-[var(--color-wardian-accent)] opacity-60 font-bold">• NEXT IN 42M</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2.5">
                   <span className={`text-[8px] font-black px-1.5 py-0.5 rounded ${s.is_paused ? 'bg-amber-500/20 text-amber-500' : 'bg-emerald-500/20 text-emerald-400'}`}>
-                    {s.is_paused ? 'PAUSED' : 'LIVE'}
+                    {s.is_paused ? 'Paused' : 'Live'}
                   </span>
                   <button 
                     onClick={() => onToggleSchedule(s.id)}

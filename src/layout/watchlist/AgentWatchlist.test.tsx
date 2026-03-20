@@ -61,7 +61,6 @@ describe('AgentWatchlist', () => {
     onRestart: mockOnRestart,
     onDelete: mockOnDelete,
     collapsed: false,
-    onCollapse: vi.fn(),
     watchlists: sampleWatchlists,
     activeListId: 'all',
     onActiveListChange: mockOnActiveListChange,

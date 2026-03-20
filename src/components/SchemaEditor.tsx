@@ -77,7 +77,7 @@ const PropertyRow: React.FC<PropertyRowProps> = ({
           {renderNested()}
           <button 
             onClick={onAddSub}
-            className="mt-2 text-[9px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest hover:opacity-80 transition-all flex items-center gap-1.5 px-2 py-1 rounded border border-transparent hover:border-[var(--color-wardian-accent)]/20"
+            className="mt-2 text-[9px] font-bold text-[var(--color-wardian-accent)] tracking-wide hover:opacity-80 transition-all flex items-center gap-1.5 px-2 py-1 rounded border border-transparent hover:border-[var(--color-wardian-accent)]/20"
           >
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>
             Add Subfield
@@ -188,7 +188,7 @@ export const SchemaEditor: React.FC<SchemaEditorProps> = ({ value, onChange, nod
         ))}
         {level === 0 && Object.keys(props).length === 0 && (
             <div className="flex flex-col items-center justify-center py-8 text-center bg-[color-mix(in_srgb,var(--color-wardian-bg),black_5%)] border border-dashed border-wardian-border rounded-xl">
-              <span className="text-[10px] text-muted-neutral italic opacity-50 uppercase tracking-widest">No Fields Defined</span>
+              <span className="text-[10px] text-muted-neutral italic opacity-50 tracking-wide">No Fields Defined</span>
             </div>
         )}
       </div>
@@ -201,17 +201,17 @@ export const SchemaEditor: React.FC<SchemaEditorProps> = ({ value, onChange, nod
             <div className="flex gap-0.5">
                 <button 
                     onClick={() => setIsCodeView(false)}
-                    className={`px-4 py-1.5 rounded-lg text-[9px] font-bold uppercase tracking-widest transition-all cursor-pointer ${!isCodeView ? 'bg-[var(--color-wardian-accent)] text-black' : 'text-muted-neutral hover:text-[var(--color-wardian-text)] hover:bg-white/5'}`}
+                    className={`px-4 py-1.5 rounded-lg text-[9px] font-bold tracking-wide transition-all cursor-pointer ${!isCodeView ? 'bg-[var(--color-wardian-accent)] text-black' : 'text-muted-neutral hover:text-[var(--color-wardian-text)] hover:bg-white/5'}`}
                 >Visual</button>
                 <button 
                     onClick={() => setIsCodeView(true)}
-                    className={`px-4 py-1.5 rounded-lg text-[9px] font-bold uppercase tracking-widest transition-all cursor-pointer ${isCodeView ? 'bg-[var(--color-wardian-accent)] text-black' : 'text-muted-neutral hover:text-[var(--color-wardian-text)] hover:bg-white/5'}`}
+                    className={`px-4 py-1.5 rounded-lg text-[9px] font-bold tracking-wide transition-all cursor-pointer ${isCodeView ? 'bg-[var(--color-wardian-accent)] text-black' : 'text-muted-neutral hover:text-[var(--color-wardian-text)] hover:bg-white/5'}`}
                 >JSON</button>
             </div>
             {!isCodeView && (
                 <button 
                     onClick={() => addProperty(schemaObj)}
-                    className="text-[9px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest hover:bg-[var(--color-wardian-accent)]/10 px-4 py-1.5 rounded-lg transition-all flex items-center gap-1.5 border border-transparent hover:border-[var(--color-wardian-accent)]/30"
+                    className="text-[9px] font-bold text-[var(--color-wardian-accent)] tracking-wide hover:bg-[var(--color-wardian-accent)]/10 px-4 py-1.5 rounded-lg transition-all flex items-center gap-1.5 border border-transparent hover:border-[var(--color-wardian-accent)]/30"
                 >
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>
                     Add Property

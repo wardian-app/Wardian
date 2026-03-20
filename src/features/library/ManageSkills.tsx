@@ -84,7 +84,7 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
 
     return (
         <div className="flex flex-col gap-3 mt-4">
-            <h3 className="text-xs font-bold text-muted uppercase tracking-widest">Manage Skills</h3>
+            <h3 className="text-xs font-bold text-muted tracking-wide">Manage Skills</h3>
             
             <div className="flex flex-col gap-2 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded-lg p-3">
                 {deployedSkills.length === 0 ? (
@@ -121,7 +121,7 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
                 <button 
                     onClick={handleDeploy}
                     disabled={!selectedSkillToDeploy || isLoading}
-                    className={`px-3 py-1.5 rounded text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+                    className={`px-3 py-1.5 rounded text-[10px] font-bold tracking-wide transition-all flex items-center justify-center gap-2 ${
                         !selectedSkillToDeploy || isLoading ? "bg-wardian-border text-muted cursor-not-allowed" : 
                         "bg-wardian-card-bg-muted border border-wardian-light/50 text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
                     }`}

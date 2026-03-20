@@ -81,24 +81,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <div className={`w-2.5 h-2.5 rounded-full transition-colors ${statusColorClass}`}></div>
                   <h3 className="font-bold text-base text-primary truncate">{agent.session_name}</h3>
                 </div>
-                <span className="text-[9px] font-bold uppercase tracking-widest text-muted-neutral truncate">{agent.agent_class}</span>
+                <span className="text-[10px] font-bold text-muted-neutral truncate tracking-wide">{agent.agent_class}</span>
               </div>
 
 
               <div className="flex flex-1 items-center justify-start p-2 px-4 gap-8 overflow-x-auto no-scrollbar">
                 <div className="flex flex-col min-w-[120px]">
-                  <span className="text-[9px] font-bold text-muted-neutral uppercase mb-0.5">Hardware</span>
+                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Hardware</span>
                   <div className="flex items-center gap-2 text-xs font-mono text-primary">
                     <span className="text-wardian-processing bg-wardian-processing/10 px-1 py-0.5 rounded border border-wardian-processing/30">{metrics?.cpu_usage?.toFixed(1) || "0.0"}% CPU</span>
                     <span className="text-wardian-processing bg-wardian-processing/10 px-1 py-0.5 rounded border border-wardian-processing/30">{metrics?.memory_mb?.toFixed(0) || "0"} MB</span>
                   </div>
                 </div>
                 <div className="flex flex-col flex-1 min-w-[150px] max-w-[200px]">
-                  <span className="text-[9px] font-bold text-muted-neutral uppercase mb-0.5">Workspace</span>
+                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Workspace</span>
                   <span className="text-xs font-mono text-muted-neutral truncate" title={agent.folder}>{agent.folder}</span>
                 </div>
                 <div className="flex flex-col min-w-[110px]">
-                  <span className="text-[9px] font-bold text-muted-neutral uppercase mb-0.5">Born</span>
+                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Born</span>
                   <span className="text-[10px] font-mono text-muted-neutral">
                     {metrics?.init_timestamp 
                       ? new Date(metrics.init_timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) 
@@ -106,11 +106,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </span>
                 </div>
                 <div className="flex flex-col min-w-[60px]">
-                  <span className="text-[9px] font-bold text-muted-neutral uppercase mb-0.5">Queries</span>
+                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Queries</span>
                   <span className="text-xs font-bold text-[var(--color-wardian-accent)]">{metrics?.query_count || 0}</span>
                 </div>
                 <div className="flex flex-col flex-2 min-w-[200px]">
-                  <span className="text-[9px] font-bold text-muted-neutral uppercase mb-0.5">Current Status</span>
+                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Current Status</span>
                   <span className={`text-xs truncate ${effectiveStatus !== 'Idle' ? 'text-primary italic' : 'text-muted-neutral'}`}>{currentThought}</span>
                 </div>
               </div>
@@ -160,7 +160,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {filteredAgents.length === 0 && (
         <div className="col-span-full h-64 flex flex-col items-center justify-center text-muted border-2 border-dashed border-wardian-border rounded-xl w-full">
           <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-          <p className="text-sm font-bold uppercase tracking-widest">No Active Instances</p>
+          <p className="text-sm font-bold tracking-normal">No Active Instances</p>
         </div>
       )}
     </div>

@@ -12,6 +12,8 @@ import type { Watchlist } from "../layout/watchlist/types";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { SidebarIconRail, SidebarTab } from "../layout/SidebarIconRail";
 import { SidebarContentPane } from "../layout/SidebarContentPane";
+import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
+import type { ViewMode } from "../layout/titlebar/CustomTitleBar";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
@@ -30,7 +32,7 @@ function App() {
 
 function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
-  const [viewMode, setViewMode] = useState<"grid" | "dashboard" | "library" | "queue" | "workflow-builder" | "graph" | "garden">("grid");
+  const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
   const handleWorkflowProgress = useWorkflowStore(s => s.handleProgress);
   const handleWorkflowStatusUpdate = useWorkflowStore(s => s.handleStatusUpdate);
@@ -342,181 +344,153 @@ function AppBody() {
   };
 
   return (
-    <div className="flex h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
-      <SidebarIconRail activeTab={activeTab} setActiveTab={setActiveTab} setCollapsed={setLeftCollapsed} />
-      
-      <SidebarContentPane 
-        activeTab={activeTab}
+    <div className="flex flex-col h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
+      <CustomTitleBar
+        viewMode={viewMode}
+        setViewMode={setViewMode}
         leftCollapsed={leftCollapsed}
         setLeftCollapsed={setLeftCollapsed}
-        selectedAgentIds={selectedAgentIds}
-        setSelectedAgentIds={setSelectedAgentIds}
-        agents={agents}
-        agentClasses={agentClasses}
+        rightCollapsed={rightCollapsed}
+        setRightCollapsed={setRightCollapsed}
         telemetry={telemetry}
-        onAgentsUpdated={fetchAgents}
-        broadcastMessage={broadcastMessage}
-        setBroadcastMessage={setBroadcastMessage}
-        onBroadcast={broadcastInput}
-      />
-
-      <main className="flex-1 h-full flex flex-col overflow-hidden relative">
-        {leftCollapsed && (
-          <button
-            onClick={() => setLeftCollapsed(false)}
-            className="absolute top-6 left-6 z-20 p-2 bg-wardian-sidebar-primary border border-wardian-border rounded-lg text-primary hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
-          </button>
-        )}
-
-        <div 
-          className="flex-1 overflow-y-auto p-2 flex flex-col"
-          onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
-        >
-          <header className="mb-6 border-b border-wardian-border pb-4 flex justify-between items-center">
-            <div className="flex gap-1 bg-[var(--color-wardian-sidebar-primary)]/50 p-1.5 rounded-lg border border-wardian-border overflow-x-auto no-scrollbar max-w-[600px]">
-              {["GRID", "DASHBOARD", "QUEUE", "LIBRARY", "WORKFLOWS", "GRAPH", "GARDEN"].map((label) => {
-                const mode = label.toLowerCase().replace("workflows", "workflow-builder") as any;
-                return (
-                  <button
-                    key={label}
-                    onClick={() => setViewMode(mode)}
-                    className={`px-4 py-2 rounded-md text-[11px] font-bold transition-all whitespace-nowrap ${viewMode === mode ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]' : 'text-muted-neutral hover:text-primary'}`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex items-center gap-4 text-[11px] font-mono font-bold text-muted-neutral uppercase tracking-widest mr-8">
-              <span>CPU: {Object.values(telemetry).reduce((acc, curr) => acc + curr.cpu_usage, 0).toFixed(1)}%</span>
-              <span>MEM: {Object.values(telemetry).reduce((acc, curr) => acc + curr.memory_mb, 0).toFixed(0)} MB</span>
-              <span className="text-[var(--color-wardian-accent)]">Active: {agents.filter(a => !offAgentIds.has(a.session_id)).length}</span>
-            </div>
-          </header>
-
-          {notifications.length > 0 && (
-            <div className="fixed top-8 right-[calc(var(--sidebar-secondary-width)+2rem)] z-50 flex flex-col gap-2 max-w-md pointer-events-none">
-              {notifications.map(n => (
-                <div key={n.id} className="bg-gray-900 border-l-4 border-blue-500 p-4 shadow-2xl animate-in slide-in-from-right rounded-r pointer-events-auto">
-                  <div className="flex justify-between items-start gap-4">
-                    <div>
-                      <p className="text-xs font-bold text-blue-400 mb-1">{agents.find(a => a.session_id === n.session_id)?.session_name || "Unknown Agent"}</p>
-                      <p className="text-sm text-primary">{n.message}</p>
-                    </div>
-                    <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-primary">&times;</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {viewMode === "workflow-builder" && (
-            <div className="flex-1 min-h-0 bg-wardian-bg">
-              <WorkflowBuilderView theme={theme} />
-            </div>
-          )}
-
-          {viewMode === "library" && (
-            <LibraryView selectedAgentIds={selectedAgentIds} />
-          )}
-
-          {["queue", "graph", "garden"].map(mode => viewMode === mode && (
-            <div key={mode} className="flex-1 flex flex-col min-h-0">
-              <PlaceholderView viewMode={mode as any} />
-            </div>
-          ))}
-
-          {viewMode === "grid" && (
-            <GridView 
-              filteredAgents={filteredAgents}
-              telemetry={telemetry}
-              terminalTitles={terminalTitles}
-              currentThoughts={currentThoughts}
-              selectedAgentIds={selectedAgentIds}
-              offAgentIds={offAgentIds}
-              maximizedAgentId={maximizedAgentId}
-              draggedAgentId={draggedAgentId}
-              dragOverAgentId={dragOverAgentId}
-              editingAgentId={editingAgentId}
-              tempName={tempName}
-              theme={theme}
-              onMouseEnterCard={handleMouseEnterCard}
-              onMouseUp={handleMouseUp}
-              onMouseDown={handleMouseDown}
-              onCardClick={handleAgentCardClick}
-              onMaximize={setMaximizedAgentId}
-              onDelete={onDelete}
-              onRename={renameAgent}
-              setEditingAgentId={setEditingAgentId}
-              setTempName={setTempName}
-              handleTitleChange={handleTitleChange}
-              deriveCurrentThought={deriveCurrentThought}
-              getStatusColorClass={getStatusColorClass}
-            />
-          )}
-
-          {viewMode === "dashboard" && (
-            <DashboardView 
-              filteredAgents={filteredAgents}
-              telemetry={telemetry}
-              terminalTitles={terminalTitles}
-              currentThoughts={currentThoughts}
-              selectedAgentIds={selectedAgentIds}
-              offAgentIds={offAgentIds}
-              draggedAgentId={draggedAgentId}
-              dragOverAgentId={dragOverAgentId}
-              onMouseEnterCard={handleMouseEnterCard}
-              onMouseUp={handleMouseUp}
-              onMouseDown={handleMouseDown}
-              onCardClick={handleAgentCardClick}
-              onPause={onPause}
-              onRestart={onRestart}
-              onDelete={onDelete}
-              onQuery={sendCommand}
-              deriveCurrentThought={deriveCurrentThought}
-              getStatusColorClass={getStatusColorClass}
-            />
-          )}
-        </div>
-      </main>
-
-      <AgentWatchlist
         agents={agents}
-        telemetry={telemetry}
-        terminalTitles={terminalTitles}
-        currentThoughts={currentThoughts}
-        selectedAgentIds={selectedAgentIds}
         offAgentIds={offAgentIds}
-        onSelectionChange={setSelectedAgentIds}
-        onAgentClick={scrollToAgent}
-        onRename={renameAgent}
-        onReorderAgents={async (newOrder) => {
-          const newAgents = [...agents].sort((a, b) => newOrder.indexOf(a.session_id) - newOrder.indexOf(b.session_id));
-          setAgents(newAgents);
-          try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (e) { console.error(e); }
-        }}
-        onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
-        onPause={onPause}
-        onRestart={onRestart}
-        onDelete={onDelete}
-        collapsed={rightCollapsed}
-        onCollapse={() => setRightCollapsed(true)}
-        watchlists={watchlists}
-        activeListId={activeListId}
-        onActiveListChange={setActiveListId}
-        onWatchlistsChange={persistWatchlists}
       />
 
-      {rightCollapsed && (
-        <button
-          onClick={() => setRightCollapsed(false)}
-          className="absolute top-6 right-6 z-20 p-2 bg-[var(--color-wardian-sidebar-primary)] border border-wardian-light rounded-lg text-primary hover:text-[var(--color-wardian-accent)] transition-all shadow-xl"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
-        </button>
-      )}
+      <div className="flex flex-1 overflow-hidden">
+        <SidebarIconRail activeTab={activeTab} setActiveTab={setActiveTab} setCollapsed={setLeftCollapsed} />
+        
+        <SidebarContentPane 
+          activeTab={activeTab}
+          leftCollapsed={leftCollapsed}
+          selectedAgentIds={selectedAgentIds}
+          setSelectedAgentIds={setSelectedAgentIds}
+          agents={agents}
+          agentClasses={agentClasses}
+          telemetry={telemetry}
+          onAgentsUpdated={fetchAgents}
+          broadcastMessage={broadcastMessage}
+          setBroadcastMessage={setBroadcastMessage}
+          onBroadcast={broadcastInput}
+        />
+
+        <main className="flex-1 h-full flex flex-col overflow-hidden relative">
+          <div 
+            className="flex-1 overflow-y-auto p-2 flex flex-col"
+            onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
+          >
+            {notifications.length > 0 && (
+              <div className="fixed top-[calc(var(--topbar-height)+0.5rem)] right-[calc(var(--sidebar-secondary-width)+2rem)] z-50 flex flex-col gap-2 max-w-md pointer-events-none">
+                {notifications.map(n => (
+                  <div key={n.id} className="bg-gray-900 border-l-4 border-blue-500 p-4 shadow-2xl animate-in slide-in-from-right rounded-r pointer-events-auto">
+                    <div className="flex justify-between items-start gap-4">
+                      <div>
+                        <p className="text-xs font-bold text-blue-400 mb-1">{agents.find(a => a.session_id === n.session_id)?.session_name || "Unknown Agent"}</p>
+                        <p className="text-sm text-primary">{n.message}</p>
+                      </div>
+                      <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-primary">&times;</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {viewMode === "workflow-builder" && (
+              <div className="flex-1 min-h-0 bg-wardian-bg">
+                <WorkflowBuilderView theme={theme} />
+              </div>
+            )}
+
+            {viewMode === "library" && (
+              <LibraryView selectedAgentIds={selectedAgentIds} />
+            )}
+
+            {["queue", "graph", "garden"].map(mode => viewMode === mode && (
+              <div key={mode} className="flex-1 flex flex-col min-h-0">
+                <PlaceholderView viewMode={mode as any} />
+              </div>
+            ))}
+
+            {viewMode === "grid" && (
+              <GridView 
+                filteredAgents={filteredAgents}
+                telemetry={telemetry}
+                terminalTitles={terminalTitles}
+                currentThoughts={currentThoughts}
+                selectedAgentIds={selectedAgentIds}
+                offAgentIds={offAgentIds}
+                maximizedAgentId={maximizedAgentId}
+                draggedAgentId={draggedAgentId}
+                dragOverAgentId={dragOverAgentId}
+                editingAgentId={editingAgentId}
+                tempName={tempName}
+                theme={theme}
+                onMouseEnterCard={handleMouseEnterCard}
+                onMouseUp={handleMouseUp}
+                onMouseDown={handleMouseDown}
+                onCardClick={handleAgentCardClick}
+                onMaximize={setMaximizedAgentId}
+                onDelete={onDelete}
+                onRename={renameAgent}
+                setEditingAgentId={setEditingAgentId}
+                setTempName={setTempName}
+                handleTitleChange={handleTitleChange}
+                deriveCurrentThought={deriveCurrentThought}
+                getStatusColorClass={getStatusColorClass}
+              />
+            )}
+
+            {viewMode === "dashboard" && (
+              <DashboardView 
+                filteredAgents={filteredAgents}
+                telemetry={telemetry}
+                terminalTitles={terminalTitles}
+                currentThoughts={currentThoughts}
+                selectedAgentIds={selectedAgentIds}
+                offAgentIds={offAgentIds}
+                draggedAgentId={draggedAgentId}
+                dragOverAgentId={dragOverAgentId}
+                onMouseEnterCard={handleMouseEnterCard}
+                onMouseUp={handleMouseUp}
+                onMouseDown={handleMouseDown}
+                onCardClick={handleAgentCardClick}
+                onPause={onPause}
+                onRestart={onRestart}
+                onDelete={onDelete}
+                onQuery={sendCommand}
+                deriveCurrentThought={deriveCurrentThought}
+                getStatusColorClass={getStatusColorClass}
+              />
+            )}
+          </div>
+        </main>
+
+        <AgentWatchlist
+          agents={agents}
+          telemetry={telemetry}
+          terminalTitles={terminalTitles}
+          currentThoughts={currentThoughts}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          onSelectionChange={setSelectedAgentIds}
+          onAgentClick={scrollToAgent}
+          onRename={renameAgent}
+          onReorderAgents={async (newOrder) => {
+            const newAgents = [...agents].sort((a, b) => newOrder.indexOf(a.session_id) - newOrder.indexOf(b.session_id));
+            setAgents(newAgents);
+            try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (e) { console.error(e); }
+          }}
+          onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
+          onPause={onPause}
+          onRestart={onRestart}
+          onDelete={onDelete}
+          collapsed={rightCollapsed}
+          watchlists={watchlists}
+          activeListId={activeListId}
+          onActiveListChange={setActiveListId}
+          onWatchlistsChange={persistWatchlists}
+        />
+      </div>
     </div>
   );
 }

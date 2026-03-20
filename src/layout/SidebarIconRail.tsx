@@ -20,10 +20,6 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
 
   return (
     <aside className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
-      <div className="w-10 h-10 flex items-center justify-center mb-4">
-        <img src="/icon-transparent.png" alt="Wardian" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(241,211,130,0.3)]" />
-      </div>
-
       <button
         onClick={() => handleTabClick("agent-config")}
         className={`p-3 rounded-xl transition-all ${activeTab === "agent-config" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}

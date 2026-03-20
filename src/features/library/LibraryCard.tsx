@@ -74,7 +74,7 @@ export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgent
             {item.metadata.tags && item.metadata.tags.length > 0 && (
                 <div className="flex flex-wrap gap-1 mt-2">
                     {item.metadata.tags.map(tag => (
-                        <span key={tag} className="px-2 py-0.5 bg-wardian-light/10 text-[var(--color-wardian-accent)] border border-[var(--color-wardian-accent)]/20 rounded text-[10px] uppercase font-bold tracking-wider">
+                        <span key={tag} className="px-2 py-0.5 bg-wardian-light/10 text-[var(--color-wardian-accent)] border border-[var(--color-wardian-accent)]/20 rounded text-[10px] font-bold tracking-wide">
                             {tag}
                         </span>
                     ))}

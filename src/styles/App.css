@@ -37,6 +37,208 @@
   --sidebar-primary-width: 64px;
   --sidebar-content-width: 260px;
   --sidebar-secondary-width: 240px;
+
+  /* TopBar */
+  --topbar-height: 40px;
+}
+
+/* ── Custom Title Bar ────────────────────────────────── */
+.titlebar {
+  height: var(--topbar-height);
+  min-height: var(--topbar-height);
+  display: flex;
+  align-items: stretch;
+  background: var(--color-wardian-sidebar-primary);
+  border-bottom: 1px solid var(--color-wardian-border);
+  user-select: none;
+  z-index: 50;
+  -webkit-app-region: drag;
+}
+
+/* ── Zone Layout ─────────────────────────────────────── */
+.titlebar-zone {
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+
+/* Zone 1: Aligns with entire left sidebar (rail + content) */
+.titlebar-left {
+  width: var(--titlebar-left-width);
+  padding: 0 8px;
+  justify-content: flex-start;
+  border-right: 1px solid var(--color-wardian-border);
+  flex-shrink: 0;
+  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Zone 2: Sits over the main content area - Window Centered */
+.titlebar-center-container {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  position: relative;
+  min-width: 0;
+}
+
+.titlebar-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  gap: 1px;
+}
+
+/* Zone 3: Aligns with the right sidebar column */
+.titlebar-right {
+  width: var(--titlebar-right-width, 240px);
+  min-width: 180px; /* Persistent area for window controls */
+  padding: 0;
+  border-left: 1px solid transparent;
+  flex-shrink: 0;
+  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Show border only when not collapsed */
+.titlebar-right:not([style*="--titlebar-right-width: 0px"]) {
+  border-left: 1px solid var(--color-wardian-border);
+}
+
+.titlebar-right-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 8px;
+  height: 100%;
+}
+
+/* ── Workspace Tabs — Obsidian Style (Zone 2) ────────── */
+.titlebar-tab {
+  position: relative;
+  padding: 0 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-wardian-text-muted-neutral);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  border-right: 1px solid transparent;
+  border-left: 1px solid transparent;
+  height: 100%;
+}
+
+.titlebar-tab:hover {
+  color: var(--color-wardian-text);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.titlebar-tab.active {
+  color: var(--color-wardian-text);
+  background: var(--color-wardian-bg);
+  border-right-color: var(--color-wardian-border);
+  border-left-color: var(--color-wardian-border);
+}
+
+.titlebar-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-wardian-bg);
+}
+
+.titlebar-tab.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--color-wardian-accent);
+}
+
+/* ── Panel Toggle Buttons ────────────────────────────── */
+.titlebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--color-wardian-text-muted-neutral);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.titlebar-toggle:hover {
+  color: var(--color-wardian-text);
+  background: var(--color-wardian-card-bg-muted);
+}
+
+.titlebar-toggle.active {
+  color: var(--color-wardian-accent);
+}
+
+/* ── Telemetry Micro-Display (Corner of Main View) ────── */
+.titlebar-telemetry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-weight: 600;
+  color: var(--color-wardian-text-muted-neutral);
+  letter-spacing: normal; /* Normal spacing for Title Case logic */
+  pointer-events: none;
+  padding-right: 12px;
+  margin-left: auto; /* Push to the end of the center container */
+}
+
+.titlebar-telemetry-accent {
+  color: var(--color-wardian-accent);
+}
+
+/* ── Window Controls ─────────────────────────────────── */
+.titlebar-window-controls {
+  display: flex;
+  align-items: stretch;
+  height: var(--topbar-height);
+  margin-left: 4px;
+}
+
+.titlebar-winbtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--color-wardian-text-muted-neutral);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.titlebar-winbtn:hover {
+  background: var(--color-wardian-card-bg-muted);
+  color: var(--color-wardian-text);
+}
+
+.titlebar-winbtn-close:hover {
+  background: #e81123;
+  color: #fff;
 }
 
 [data-theme='light'] {
@@ -202,8 +404,8 @@
   padding: 2px 8px;
   font-size: 10px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  text-transform: none;
+  letter-spacing: normal;
   color: var(--color-wardian-text-muted-neutral);
   background: transparent;
   border: 1px solid var(--color-wardian-border-light);

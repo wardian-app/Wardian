@@ -29,7 +29,6 @@ interface AgentWatchlistProps {
   onRestart: (agentId: string) => void;
   onDelete: (agentId: string) => void;
   collapsed: boolean;
-  onCollapse: () => void;
   watchlists: Watchlist[];
   activeListId: string;
   onActiveListChange: (id: string) => void;
@@ -52,7 +51,6 @@ export default function AgentWatchlist({
   onRestart,
   onDelete,
   collapsed,
-  onCollapse,
   watchlists,
   activeListId,
   onActiveListChange,
@@ -270,7 +268,7 @@ export default function AgentWatchlist({
       <div className="p-4 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
         {/* ── Header ─────────────────────────────────────── */}
         <div className="flex justify-between items-center mb-3">
-          <h2 className="text-sm font-bold text-primary uppercase tracking-widest truncate">
+          <h2 className="text-sm font-bold text-primary tracking-tight truncate">
             {activeList ? activeList.name : "All Agents"}
           </h2>
           <div className="flex items-center gap-1">
@@ -280,11 +278,6 @@ export default function AgentWatchlist({
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-              </svg>
-            </button>
-            <button onClick={onCollapse} className="p-1 text-primary hover:text-[var(--color-wardian-accent)]">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
               </svg>
             </button>
           </div>
@@ -336,7 +329,7 @@ export default function AgentWatchlist({
         </div>
 
         {/* ── Column Headers ─────────────────────────────── */}
-        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 text-[9px] font-bold text-muted-neutral uppercase tracking-wider border-b border-wardian-border mb-1">
+        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 text-[10px] font-bold text-muted-neutral tracking-wide border-b border-wardian-border mb-1">
           <span></span>
           <span>Agent</span>
           <span>Status</span>
@@ -344,7 +337,7 @@ export default function AgentWatchlist({
         </div>
 
         {/* ── Agent Rows ─────────────────────────────────── */}
-        <div 
+        <div
           className="flex-1 overflow-y-auto no-scrollbar"
           onClick={() => onSelectionChange(new Set())}
         >
@@ -369,25 +362,25 @@ export default function AgentWatchlist({
 
                   const now = Date.now();
                   const DOUBLE_CLICK_TOLERANCE = 450;
-                  const isDoubleClick = lastClickRef.current && 
-                                       lastClickRef.current.id === agentId && 
+                  const isDoubleClick = lastClickRef.current &&
+                                       lastClickRef.current.id === agentId &&
                                        (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
-                  
+
                   lastClickRef.current = { id: agentId, time: now };
 
                   if (e.shiftKey && lastSelectedIdRef.current) {
                     const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
                     const lastIndex = displayedAgents.findIndex(a => a.session_id === lastSelectedIdRef.current);
-                    
+
                     if (currentIndex !== -1 && lastIndex !== -1) {
                       const start = Math.min(currentIndex, lastIndex);
                       const end = Math.max(currentIndex, lastIndex);
                       const rangeIds = displayedAgents.slice(start, end + 1).map(a => a.session_id);
-                      
-                      const next = (e.ctrlKey || e.metaKey) 
-                        ? new Set([...selectedAgentIds, ...rangeIds]) 
+
+                      const next = (e.ctrlKey || e.metaKey)
+                        ? new Set([...selectedAgentIds, ...rangeIds])
                         : new Set(rangeIds);
-                        
+
                       onSelectionChange(next);
                       return;
                     }
@@ -449,7 +442,7 @@ export default function AgentWatchlist({
                       {agent.session_name}
                     </p>
                   )}
-                  <p className="text-[9px] text-muted-neutral font-mono truncate uppercase">
+                  <p className="text-[10px] text-primary/50 font-medium truncate tracking-wide">
                     {agent.agent_class}
                   </p>
                 </div>
@@ -472,19 +465,19 @@ export default function AgentWatchlist({
 
         {/* ── Footer ─────────────────────────────────────── */}
         <div className="mt-3 pt-3 border-t border-wardian-border flex justify-between items-center">
-          <span className="text-[9px] text-muted-neutral uppercase tracking-wider">
+          <span className="text-[10px] text-muted-neutral font-medium">
             {displayedAgents.length} agent{displayedAgents.length !== 1 ? "s" : ""}
           </span>
           <div className="flex gap-2">
             <button
               onClick={() => onSelectionChange(new Set(displayedAgents.map((a) => a.session_id)))}
-              className="text-[10px] font-bold text-muted-neutral hover:text-primary uppercase tracking-tighter"
+              className="text-[10px] font-bold text-muted-neutral hover:text-primary tracking-tighter"
             >
               Select All
             </button>
             <button
               onClick={() => onSelectionChange(new Set())}
-              className="text-[10px] font-bold text-muted-neutral hover:text-primary uppercase tracking-tighter"
+              className="text-[10px] font-bold text-muted-neutral hover:text-primary tracking-tighter"
             >
               Clear
             </button>

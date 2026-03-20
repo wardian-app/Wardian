@@ -68,7 +68,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
   return (
     <div className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-xs font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest">
+        <h3 className="text-xs font-bold text-[var(--color-wardian-accent)] tracking-wide">
           Configure Agent
         </h3>
         <button
@@ -90,7 +90,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
         {/* Basic Fields */}
         <div className="flex flex-col gap-4">
           <div>
-            <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Agent Name</label>
+            <label className="block text-[10px] font-bold text-muted-neutral mb-1">Agent Name</label>
             <input
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               value={config.session_name}
@@ -98,7 +98,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             />
           </div>
           <div>
-            <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Agent Class</label>
+            <label className="block text-[10px] font-bold text-muted-neutral mb-1">Agent Class</label>
             <select
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               value={config.agent_class}
@@ -120,7 +120,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             </select>
           </div>
           <div>
-            <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Workspace Path</label>
+            <label className="block text-[10px] font-bold text-muted-neutral mb-1">Workspace Path</label>
             <input
               readOnly
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded px-3 py-2 text-xs text-muted-neutral font-mono focus:outline-none select-text cursor-text"
@@ -129,7 +129,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           </div>
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-[10px] font-bold text-muted-neutral uppercase">Session ID</label>
+              <label className="block text-[10px] font-bold text-muted-neutral">Session ID</label>
               <button 
                 type="button"
                 onClick={async () => {
@@ -141,7 +141,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                     console.error("Failed to copy", e);
                   }
                 }}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedId ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-primary hover:bg-wardian-light border border-transparent'}`}
+                className={`text-[9px] font-bold tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedId ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-primary hover:bg-wardian-light border border-transparent'}`}
               >
                 {copiedId ? "Copied!" : "Copy"}
               </button>
@@ -154,7 +154,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           </div>
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-[10px] font-bold text-muted-neutral uppercase">Log Path</label>
+              <label className="block text-[10px] font-bold text-muted-neutral">Log Path</label>
               <button 
                 type="button"
                 disabled={!telemetry[agentId]?.log_path}
@@ -169,7 +169,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                     console.error("Failed to copy", e);
                   }
                 }}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedLog ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-primary hover:bg-wardian-light border border-transparent disabled:opacity-30 disabled:cursor-not-allowed'}`}
+                className={`text-[9px] font-bold tracking-wider px-2 py-1 rounded transition-all active:scale-95 cursor-pointer ${copiedLog ? 'bg-wardian-success/20 text-wardian-success border border-wardian-success/30' : 'bg-wardian-card-bg-muted text-muted-neutral hover:text-primary hover:bg-wardian-light border border-transparent disabled:opacity-30 disabled:cursor-not-allowed'}`}
               >
                 {copiedLog ? "Copied!" : "Copy"}
               </button>
@@ -192,7 +192,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
         <button
           type="submit"
           disabled={isSaving}
-          className="w-full mt-2 bg-[var(--color-wardian-accent)] hover:opacity-90 disabled:opacity-50 text-[var(--color-wardian-bg)] py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest transition-all shadow-lg shadow-[var(--color-wardian-accent)]/20"
+          className="w-full mt-2 bg-[var(--color-wardian-accent)] hover:opacity-90 disabled:opacity-50 text-[var(--color-wardian-bg)] py-2.5 rounded-lg font-bold text-xs tracking-wide transition-all shadow-lg shadow-[var(--color-wardian-accent)]/20"
         >
           {isSaving ? "Saving..." : "Save Changes"}
         </button>

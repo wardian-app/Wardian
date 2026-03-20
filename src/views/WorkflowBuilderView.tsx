@@ -332,7 +332,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         {/* Left: Registry Management */}
         <div className="flex items-center gap-2">
           <select 
-            className="bg-[var(--color-wardian-bg)] border border-wardian-border text-[var(--color-wardian-text)] text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-md focus:ring-1 focus:ring-[var(--color-wardian-accent)] outline-none cursor-pointer"
+            className="bg-[var(--color-wardian-bg)] border border-wardian-border text-[var(--color-wardian-text)] text-[10px] font-bold tracking-wide px-3 py-1.5 rounded-md focus:ring-1 focus:ring-[var(--color-wardian-accent)] outline-none cursor-pointer"
             value={activeWorkflowId || ''}
             onChange={(e) => {
               const wf = availableWorkflows.find(w => w.id === e.target.value);
@@ -433,7 +433,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
               </div>
             </>
           ) : (
-            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em] opacity-30 select-none">No Workflow Active</span>
+            <span className="text-[10px] font-bold text-muted-neutral tracking-wide opacity-30 select-none">No Workflow Active</span>
           )}
         </div>
 
@@ -451,14 +451,14 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             }}
             className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'hidden'}`}
           >
-            RESET
+            Reset
           </button>
           <button 
             disabled={!activeWorkflowId}
             onClick={handleSave}
             className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed hidden'}`}
           >
-            {isSaving ? 'SAVING...' : 'SAVE CHANGES'}
+            {isSaving ? 'Saving...' : 'Save Changes'}
           </button>
           <button 
             onClick={handleRun}
@@ -466,7 +466,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer' : 'bg-red-500/10 text-red-500/50 cursor-not-allowed border border-red-500/20 shadow-none scale-100'}`}
             title={hasGraphErrors ? "Cannot run: Fix node errors first" : undefined}
           >
-            {hasGraphErrors ? 'GRAPH ERROR' : 'RUN WORKFLOW'}
+            {hasGraphErrors ? 'Graph Error' : 'Run Workflow'}
           </button>
         </div>
       </div>
@@ -481,7 +481,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             <div className="p-2 bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_90%)] text-[var(--color-wardian-accent)] rounded-lg group-hover:bg-[var(--color-wardian-accent)] transition-all group-hover:text-[var(--color-wardian-bg)]">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
             </div>
-            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest group-hover:text-[var(--color-wardian-text)]">Add Block</span>
+            <span className="text-[10px] font-bold text-muted-neutral tracking-wide group-hover:text-[var(--color-wardian-text)]">Add Block</span>
           </button>
         </div>
 
@@ -583,9 +583,9 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     <button
                       key={cat}
                       onClick={() => setActiveCategory(cat)}
-                      className={`w-full text-left px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer ${activeCategory === cat ? 'bg-[var(--color-wardian-accent)]/10 text-[var(--color-wardian-accent)] shadow-sm' : 'text-muted-neutral hover:bg-[var(--color-wardian-card-bg-muted)] hover:text-[var(--color-wardian-text)]'}`}
+                      className={`w-full text-left px-4 py-3 rounded-xl text-xs font-bold tracking-wide transition-all cursor-pointer ${activeCategory === cat ? 'bg-[var(--color-wardian-accent)]/10 text-[var(--color-wardian-accent)] shadow-sm' : 'text-muted-neutral hover:bg-[var(--color-wardian-card-bg-muted)] hover:text-[var(--color-wardian-text)]'}`}
                     >
-                      {cat === "ALL" ? "✦ All Blocks" : cat}
+                      {cat === "ALL" ? "✦ All Blocks" : cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase()}
                     </button>
                   ))}
                 </nav>
@@ -594,7 +594,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
               {/* Main Content */}
               <div className="flex-1 flex flex-col min-w-0">
                 <div className="h-16 border-b border-wardian-border flex items-center justify-between px-8 bg-[var(--color-wardian-card)]">
-                  <span className="text-sm font-mono font-bold text-muted-neutral uppercase tracking-[0.2em]">{activeCategory} Blocks ({filteredBlocks.length})</span>
+                  <span className="text-sm font-mono font-bold text-muted-neutral tracking-wide">{activeCategory.charAt(0).toUpperCase() + activeCategory.slice(1).toLowerCase()} Blocks ({filteredBlocks.length})</span>
                   <button 
                     onClick={() => setIsBlockLibraryOpen(false)}
                     className="p-2 hover:bg-[var(--color-wardian-card-bg-muted)] rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
@@ -645,8 +645,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       >
         <div className="flex justify-between items-center p-6 border-b border-wardian-border bg-white/5">
           <div className="flex flex-col">
-            <h3 className="text-lg font-bold text-[var(--color-wardian-text)] uppercase tracking-tighter">Node Settings</h3>
-            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">
+            <h3 className="text-lg font-bold text-[var(--color-wardian-text)] tracking-tight">Node Settings</h3>
+            <span className="text-[10px] font-bold text-muted-neutral tracking-wide">
               {BLOCK_LIBRARY.find(b => b.type === selectedNode?.type && (selectedNode?.data.blockName ? b.name === selectedNode.data.blockName : true))?.name || selectedNode?.type}
             </span>
           </div>
@@ -657,7 +657,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             {/* Core Fields (Shared with Canvas) */}
             <div className="space-y-6">
               <div className="flex flex-col gap-2">
-                <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">Display Name</label>
+                <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] tracking-wide">Display Name</label>
                 <RenderableInput 
                   className="!rounded-xl"
                   value={(selectedNode?.data.label as string) || ""}
@@ -765,7 +765,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
                   return (
                     <div key={field.name} className="flex flex-col gap-2">
-                      <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{field.label}</label>
+                      <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] tracking-wide">{field.label}</label>
                       {field.type === 'schema' ? (
                         <SchemaEditor 
                           value={val}

@@ -214,7 +214,7 @@ export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onR
             className="flex items-center gap-2 px-2 py-1.5 mb-0.5 text-[10px] font-bold text-muted hover:text-primary cursor-pointer transition-colors group"
           >
             <span className={`text-[8px] transition-transform duration-200 opacity-30 ${folder.isCollapsed ? '-rotate-90' : 'rotate-0'}`}>▼</span>
-            <span className="uppercase tracking-widest truncate">{folder.name}</span>
+            <span className="truncate">{folder.name}</span>
             <span className="text-[9px] opacity-40 ml-auto font-mono group-hover:opacity-100">{folder.workflowIds.length}</span>
           </div>
           {!folder.isCollapsed && (

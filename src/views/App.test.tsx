@@ -111,15 +111,8 @@ describe("Agent List Management", () => {
     expect(result).toBeDefined();
   });
 
-  it("shows the correct active count in header", async () => {
-    setupDefaultMocks(sampleAgents, defaultClasses);
-    await act(async () => {
-      render(<App />);
-    });
-    await waitFor(() => {
-      expect(screen.getByText(/Active: 3/)).toBeInTheDocument();
-    }, { timeout: 3000 });
-  });
+  // NOTE: Telemetry "Active: N" was moved out of the TopBar into DashboardView.
+  // A dedicated test should be added in DashboardView.test.tsx when that view is built.
 
   it("calls list_agents on mount", async () => {
     setupDefaultMocks([], defaultClasses);
@@ -252,12 +245,12 @@ describe("Agent Watchlist Sidebar", () => {
 // ── View Mode Toggle Tests ─────────────────────────────────────────────
 
 describe("View Mode Toggle", () => {
-  it("renders GRID and DASHBOARD toggle buttons", async () => {
+  it("renders Grid and Dashboard toggle buttons", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByText("GRID")).toBeInTheDocument();
-    expect(screen.getByText("DASHBOARD")).toBeInTheDocument();
+    expect(screen.getByText("Grid")).toBeInTheDocument();
+    expect(screen.getByText("Dashboard")).toBeInTheDocument();
   });
 });
 

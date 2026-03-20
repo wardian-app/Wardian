@@ -55,7 +55,7 @@ export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, 
                 
                 <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
                     <div className="flex flex-col gap-1">
-                        <label className="text-xs font-bold text-muted uppercase tracking-widest">Content</label>
+                        <label className="text-xs font-bold text-muted tracking-wide border-b border-wardian-border/20 pb-1 mb-1">Content</label>
                         <textarea
                             className="w-full h-64 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded p-3 text-primary text-sm focus:outline-none focus:border-[var(--color-wardian-accent)] font-mono resize-y"
                             value={content}
@@ -64,7 +64,7 @@ export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, 
                     </div>
                     
                     <div className="flex flex-col gap-1">
-                        <label className="text-xs font-bold text-muted uppercase tracking-widest">Tags (comma separated)</label>
+                        <label className="text-xs font-bold text-muted tracking-wide border-b border-wardian-border/20 pb-1 mb-1">Tags (comma separated)</label>
                         <input
                             type="text"
                             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-primary text-sm focus:outline-none focus:border-[var(--color-wardian-accent)]"

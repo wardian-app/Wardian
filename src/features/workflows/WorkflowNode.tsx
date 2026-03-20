@@ -86,7 +86,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-[var(--color-wardian-text-muted)]">{blockDef?.name || type}</span>
+            <span className="text-[9px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">{blockDef?.name || type}</span>
             {triggersHardSync && (
               <span title="Hard Sync Triggered (Agent Resume Cycle)" className="text-[var(--color-wardian-warning)] animate-pulse">
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
@@ -97,7 +97,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 <svg className="w-3 h-3 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
-                <span className="text-[8px] font-bold text-red-500 uppercase tracking-wider">Missing Backlink</span>
+                <span className="text-[8px] font-bold text-red-500 tracking-wide">Missing Backlink</span>
               </div>
             )}
             {type === 'trigger' && useWorkflowStore.getState().nodes.filter(n => n.type === 'trigger').length > 1 && (
@@ -105,7 +105,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 <svg className="w-3 h-3 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
-                <span className="text-[8px] font-bold text-red-500 uppercase tracking-wider">Multiple Triggers</span>
+                <span className="text-[8px] font-bold text-red-500 tracking-wide">Multiple Triggers</span>
               </div>
             )}
           </div>
@@ -182,7 +182,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
 
               return (
                 <div key={field.name} className="flex flex-col gap-1">
-                  <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-text-muted)]">{field.label}</span>
+                  <span className="text-[8px] font-mono text-[var(--color-wardian-text-muted)] tracking-wide">{field.label}</span>
                   
                   {field.type === 'textarea' || field.type === 'code' || field.type === 'text' ? (
                     <RenderableInput
@@ -227,7 +227,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
             {/* Cron Summary */}
             {blockDef?.name === 'Cron Schedule' && (
               <div className="flex flex-col gap-1 p-2 bg-[var(--color-wardian-accent)]/5 rounded border border-[var(--color-wardian-accent)]/10">
-                <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-accent)] font-bold">Schedule</span>
+                <span className="text-[8px] font-mono text-[var(--color-wardian-accent)] font-bold tracking-wide">Schedule</span>
                 <span className="text-xs text-[var(--color-wardian-text)] font-medium">
                   {(() => {
                     const cfg = data.config || {};
@@ -246,12 +246,12 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
 
         <div className="space-y-2 pt-2 border-t border-[var(--color-wardian-border)]">
           <div className="flex flex-col gap-0.5">
-            <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Input</span>
+            <span className="text-[7px] font-mono tracking-wide text-[var(--color-wardian-text-muted)] opacity-50">Input</span>
             <span className="text-[9px] font-mono text-[var(--color-wardian-text)]/70 break-all leading-tight">{data.inputs || 'None'}</span>
           </div>
           {(!blockDef?.ports || blockDef.ports.outputs.length === 1) && (
             <div className="flex flex-col gap-0.5">
-              <span className="text-[7px] font-mono uppercase tracking-widest text-[var(--color-wardian-text-muted)] opacity-50">Output</span>
+              <span className="text-[7px] font-mono tracking-wide text-[var(--color-wardian-text-muted)] opacity-50">Output</span>
               <span className="text-[9px] font-mono text-[var(--color-wardian-processing)] break-all leading-tight">{data.outputs || 'JSON'}</span>
             </div>
           )}
@@ -269,10 +269,10 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                           isFalse || isDone ? '!bg-[var(--color-wardian-error)]' :
                           '!bg-[var(--color-wardian-border-heavy)]';
         
-        const labelText = port === 'on_true' ? 'TRUE' : 
-                         port === 'on_false' ? 'FALSE' : 
-                         port === 'body' ? 'ITERATE' : 
-                         port === 'done' ? 'EXIT' : '';
+        const labelText = port === 'on_true' ? 'True' : 
+                         port === 'on_false' ? 'False' : 
+                         port === 'body' ? 'Iterate' : 
+                         port === 'done' ? 'Exit' : '';
 
         return (
           <div key={port} className="absolute" style={{ top: `${(index + 1) * (100 / (blockDef.ports!.outputs.length + 1))}%`, right: '-4px' }}>
@@ -285,7 +285,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
             />
             {labelText && (
               <div className="absolute left-6 top-0 -translate-y-1/2 flex items-center h-4 px-2 py-0 border border-wardian-border bg-[var(--color-wardian-bg)] rounded-full shadow-[0_0_10px_rgba(0,0,0,0.5)] z-20 pointer-events-none">
-                <span className={`text-[8px] font-black uppercase tracking-widest whitespace-nowrap leading-none ${
+                <span className={`text-[8px] font-black tracking-wide whitespace-nowrap leading-none ${
                     isTrue || isBody ? 'text-[var(--color-wardian-success)]' : 
                     isFalse || isDone ? 'text-[var(--color-wardian-error)]' : 
                     'text-[var(--color-wardian-text-muted)]'

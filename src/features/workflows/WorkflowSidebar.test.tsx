@@ -28,7 +28,6 @@ describe('WorkflowSidebar', () => {
   const mockStopAllTriggers = vi.fn();
   const mockPauseAllTriggers = vi.fn();
   const mockResumeAllTriggers = vi.fn();
-  const mockOnCollapse = vi.fn();
 
   const defaultStoreValues = {
     availableWorkflows: [
@@ -53,9 +52,9 @@ describe('WorkflowSidebar', () => {
   });
 
   it('renders fixed header controls correctly', () => {
-    render(<WorkflowSidebar onCollapse={mockOnCollapse} />);
+    render(<WorkflowSidebar />);
     
-    expect(screen.getByText('WORKFLOWS')).toBeInTheDocument();
+    expect(screen.getByText('Workflows')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Search workflows...')).toBeInTheDocument();
     
     // Check governance buttons by title
@@ -64,19 +63,9 @@ describe('WorkflowSidebar', () => {
     expect(screen.getByTitle('Resume All')).toBeInTheDocument();
   });
 
-  it('calls onCollapse when collapse button is clicked', () => {
-    render(<WorkflowSidebar onCollapse={mockOnCollapse} />);
-    screen.getByRole('button', { name: (_n, el) => el?.querySelector('path')?.getAttribute('d')?.includes('M15 19l-7-7 7-7') || false });
-    // In WorkflowSidebar.tsx line 62, the button has the svg. Testing the button itself.
-    fireEvent.click(screen.getByRole('button', { name: '' })); // The button with the svg icon has no text
-    // Refined selector for the collapse button (it's the first button in the first row)
-    const buttons = screen.getAllByRole('button');
-    fireEvent.click(buttons[0]); // First button is usually the collapse one in our layout
-    expect(mockOnCollapse).toHaveBeenCalled();
-  });
 
   it('filters workflows based on search query', async () => {
-    render(<WorkflowSidebar onCollapse={mockOnCollapse} />);
+    render(<WorkflowSidebar />);
     
     const searchInput = screen.getByPlaceholderText('Search workflows...');
     
@@ -90,7 +79,7 @@ describe('WorkflowSidebar', () => {
   });
 
   it('triggers governance actions correctly', async () => {
-    render(<WorkflowSidebar onCollapse={mockOnCollapse} />);
+    render(<WorkflowSidebar />);
     
     // Stop All
     fireEvent.click(screen.getByTitle('Stop All (Panic)'));
@@ -111,7 +100,7 @@ describe('WorkflowSidebar', () => {
     // This test verifies the logic in activeWorkflows useMemo (even if we mock child, we can check props if we wanted to)
     // But since we are testing WorkflowSidebar, and it passes filteredWorkflows to WorkflowLibrary, 
     // we already tested search. Active monitoring just gets activeRuns/schedules directly.
-    render(<WorkflowSidebar onCollapse={mockOnCollapse} />);
+    render(<WorkflowSidebar />);
     expect(screen.getByTestId('active-monitoring')).toBeInTheDocument();
   });
 });

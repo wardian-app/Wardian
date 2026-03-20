@@ -20,7 +20,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
         <button 
           type="button"
           onClick={() => setShowAdvanced(!showAdvanced)}
-          className="flex items-center gap-2 text-[10px] font-bold text-muted uppercase tracking-widest hover:text-primary transition-colors"
+          className="flex items-center gap-2 text-[10px] font-bold text-muted tracking-wide hover:text-primary transition-colors"
         >
           <svg 
             className={`w-3 h-3 transform transition-transform ${showAdvanced ? 'rotate-90' : ''}`} 
@@ -36,7 +36,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
         <div className="flex flex-col gap-4 pt-2">
           {/* Gemini CLI Properties */}
           <div className="flex flex-col gap-4">
-              <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest mb-1 border-b border-wardian-border pb-1">Gemini CLI Parameters</h4>
+              <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-1 border-b border-wardian-border pb-1">Gemini CLI Parameters</h4>
               
               <div className="grid grid-cols-2 gap-2 mb-1">
                   <label className="flex items-center gap-2 text-xs text-muted-neutral">
@@ -62,7 +62,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
               </div>
 
               <div>
-                  <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Model Override</label>
+                  <label className="block text-[10px] font-bold text-muted-neutral mb-1">Model Override</label>
                   <input
                   className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
                   placeholder="e.g. gemini-2.5-flash"
@@ -72,7 +72,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
               </div>
 
               <div>
-                  <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Approval Mode</label>
+                  <label className="block text-[10px] font-bold text-muted-neutral mb-1">Approval Mode</label>
                   <select
                   className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
                   value={config.approval_mode || ""}
@@ -121,7 +121,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
               />
 
               <div>
-                  <label className="block text-[10px] font-bold text-muted-neutral uppercase mb-1">Output Format</label>
+                  <label className="block text-[10px] font-bold text-muted-neutral mb-1">Output Format</label>
                   <select
                   className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
                   value={config.output_format || ""}
@@ -138,7 +138,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
           {/* Custom Arguments */}
           <div className="flex flex-col gap-4">
               <div>
-                  <label className="block text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase mb-1">Custom Arguments</label>
+                  <label className="block text-[10px] font-bold text-[var(--color-wardian-accent)] mb-1">Custom Arguments</label>
                   <textarea
                   className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-16 resize-none font-mono"
                   placeholder='--extra-flag --some-opt "a value with spaces"'

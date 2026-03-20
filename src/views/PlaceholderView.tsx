@@ -15,15 +15,15 @@ export const PlaceholderView: React.FC<PlaceholderViewProps> = ({ viewMode }) =>
         {viewMode === "graph" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>}
         {viewMode === "garden" && <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>}
       </div>
-      <h2 className="text-2xl font-bold text-primary mb-2 uppercase tracking-widest">
-        {viewMode.replace("-", " ")}
+      <h2 className="text-2xl font-bold text-primary mb-2 tracking-tight">
+        {viewMode.split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")}
       </h2>
       <p className="text-muted max-w-md mx-auto mb-8 font-medium italic">
         Advanced {viewMode === 'queue' ? 'human-in-the-loop' : viewMode} features coming in Phase {phase}.
       </p>
       <div className="flex gap-4">
-        <div className="px-6 py-2 rounded-full border border-gray-800 text-[10px] font-bold text-muted-neutral uppercase tracking-widest">Planned</div>
-        <div className="px-6 py-2 rounded-full bg-[var(--color-wardian-accent)]/10 text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-widest border border-[var(--color-wardian-accent)]/20">Phase {phase}</div>
+        <div className="px-6 py-2 rounded-full border border-gray-800 text-[10px] font-bold text-muted-neutral tracking-wide">Planned</div>
+        <div className="px-6 py-2 rounded-full bg-[var(--color-wardian-accent)]/10 text-[10px] font-bold text-[var(--color-wardian-accent)] tracking-wide border border-[var(--color-wardian-accent)]/20">Phase {phase}</div>
       </div>
     </div>
   );

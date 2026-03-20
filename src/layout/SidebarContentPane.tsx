@@ -11,7 +11,6 @@ import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
 interface SidebarContentPaneProps {
   activeTab: SidebarTab;
   leftCollapsed: boolean;
-  setLeftCollapsed: (collapsed: boolean) => void;
   selectedAgentIds: Set<string>;
   setSelectedAgentIds: (ids: Set<string>) => void;
   agents: AgentConfig[];
@@ -26,7 +25,6 @@ interface SidebarContentPaneProps {
 export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   activeTab,
   leftCollapsed,
-  setLeftCollapsed,
   selectedAgentIds,
   setSelectedAgentIds,
   agents,
@@ -42,11 +40,8 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
       <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
         {activeTab === "agent-config" && (
           <>
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold text-primary tracking-tight">AGENT CONFIG</h2>
-              <button onClick={() => setLeftCollapsed(true)} className="text-bright-neutral hover:text-primary transition-colors">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
-              </button>
+            <div className="flex items-center gap-4">
+              <h2 className="text-xl font-bold text-primary tracking-tight">Agent Config</h2>
             </div>
 
             {selectedAgentIds.size === 1 ? (
@@ -73,14 +68,12 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             broadcastMessage={broadcastMessage}
             setBroadcastMessage={setBroadcastMessage}
             onBroadcast={onBroadcast}
-            onCollapse={() => setLeftCollapsed(true)}
           />
         )}
         {activeTab === "classes" && (
           <ClassManagerPanel 
             agentClasses={agentClasses}
             onClassesUpdated={onAgentsUpdated}
-            onCollapse={() => setLeftCollapsed(true)}
           />
         )}
 
@@ -89,19 +82,17 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
               <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
             </div>
-            <h3 className="text-sm font-bold text-primary mb-2 uppercase tracking-widest">Remote Nodes</h3>
+            <h3 className="text-sm font-bold text-primary mb-2 tracking-wide">Remote Nodes</h3>
             <p className="text-xs text-muted italic px-4">SSH Manager and remote execution capabilities are arriving in Phase 4.</p>
           </div>
         )}
 
         {activeTab === "workflows" && (
-          <WorkflowSidebar onCollapse={() => setLeftCollapsed(true)} />
+          <WorkflowSidebar />
         )}
 
         {activeTab === "settings" && (
-          <SettingsPanel 
-            onCollapse={() => setLeftCollapsed(true)}
-          />
+          <SettingsPanel />
         )}
       </div>
     </aside>

@@ -2,13 +2,9 @@ import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "../../store/useSettingsStore";
 
-interface SettingsPanelProps {
-  onCollapse: () => void;
-}
+interface SettingsPanelProps {}
 
-export const SettingsPanel: React.FC<SettingsPanelProps> = ({
-  onCollapse,
-}) => {
+export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
   const { theme, setTheme, autoPatchGemini, setAutoPatchGemini } = useSettingsStore();
   const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "success" | "error">("idle");
   const [patchMessage, setPatchMessage] = useState("");
@@ -33,15 +29,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   return (
     <div className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-xl font-bold text-primary tracking-tight">SETTINGS</h2>
-        <button onClick={onCollapse} className="text-bright-neutral hover:text-primary transition-colors">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
-        </button>
+        <h2 className="text-xl font-bold text-primary tracking-tight">Settings</h2>
       </div>
       
       <div className="flex flex-col gap-8 flex-1 overflow-y-auto pr-2 no-scrollbar">
         <div className="bg-transparent">
-          <h3 className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest mb-4">Theme</h3>
+          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Theme</h3>
           <div className="grid grid-cols-3 gap-3">
             {/* System Theme Card */}
             <button
@@ -53,7 +46,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <div className="flex-1 bg-gray-900 border-r border-wardian-border"></div>
                 <div className="flex-1 bg-gray-100"></div>
               </div>
-              <span className={`text-[11px] font-bold uppercase tracking-tight ${theme === 'system' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>System</span>
+              <span className={`text-[11px] font-bold tracking-tight ${theme === 'system' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>System</span>
             </button>
 
             {/* Dark Theme Card */}
@@ -69,7 +62,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   <div className="w-full h-full rounded-sm bg-gray-800/50"></div>
                 </div>
               </div>
-              <span className={`text-[11px] font-bold uppercase tracking-tight ${theme === 'dark' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Dark</span>
+              <span className={`text-[11px] font-bold tracking-tight ${theme === 'dark' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Dark</span>
             </button>
 
             {/* Light Theme Card */}
@@ -85,7 +78,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   <div className="w-full h-full rounded-sm bg-gray-100/50"></div>
                 </div>
               </div>
-              <span className={`text-[11px] font-bold uppercase tracking-tight ${theme === 'light' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Light</span>
+              <span className={`text-[11px] font-bold tracking-tight ${theme === 'light' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Light</span>
             </button>
           </div>
           <div className="mt-3 px-1">
@@ -96,7 +89,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="border-t border-wardian-border pt-6">
-          <h3 className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest mb-4">Advanced</h3>
+          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Advanced</h3>
           
           <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
             <label className="text-sm font-bold text-primary flex items-center gap-2 cursor-pointer select-none">
