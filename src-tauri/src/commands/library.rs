@@ -226,6 +226,7 @@ fn get_target_skills_dir(target_type: &str, target_id: &str) -> Result<std::path
     let base = match target_type {
         "agent" => home.join("agents").join(target_id),
         "class" => home.join("classes").join(target_id),
+        "user" => home.join("common"), // Deploying to user common folder
         _ => return Err(format!("Unknown target type: {}", target_type)),
     };
     Ok(base.join(".agents").join("skills"))

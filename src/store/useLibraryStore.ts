@@ -13,9 +13,9 @@ interface LibraryState {
   saveLibraryItem: (path: string, content: string, metadata: LibraryItemMetadata) => Promise<void>;
   updateLibraryMetadata: (path: string, metadata: LibraryItemMetadata) => Promise<void>;
   openLibraryFolder: (path?: string) => Promise<void>;
-  deploySkill: (sourcePath: string, targetType: "agent" | "class", targetId: string) => Promise<void>;
-  removeDeployedSkill: (targetType: "agent" | "class", targetId: string, skillName: string) => Promise<void>;
-  listDeployedSkills: (targetType: "agent" | "class", targetId: string) => Promise<string[]>;
+  deploySkill: (sourcePath: string, targetType: "agent" | "class" | "user", targetId: string) => Promise<void>;
+  removeDeployedSkill: (targetType: "agent" | "class" | "user", targetId: string, skillName: string) => Promise<void>;
+  listDeployedSkills: (targetType: "agent" | "class" | "user", targetId: string) => Promise<string[]>;
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({

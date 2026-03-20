@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { LibraryGrid } from '../features/library/LibraryGrid';
 import { ItemEditorModal } from '../features/library/ItemEditorModal';
+import { AssignSkillModal } from '../features/library/AssignSkillModal';
 import { LibraryFolder, LibraryPrompt, LibrarySkill } from '../types';
 
 interface LibraryViewProps {
@@ -10,13 +11,16 @@ interface LibraryViewProps {
 }
 
 export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) => {
-    const { promptTree, skillTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab, deploySkill } = useLibraryStore();
+    const { promptTree, skillTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab } = useLibraryStore();
     
     // Navigation state
     const [currentPath, setCurrentPath] = useState<string[]>([]);
     
     // Editor state
     const [editingItem, setEditingItem] = useState<LibraryPrompt | LibrarySkill | null>(null);
+
+    // Assign Skill Modal State
+    const [assigningSkill, setAssigningSkill] = useState<LibrarySkill | null>(null);
 
     // Search & Filter
     const [searchQuery, setSearchQuery] = useState('');
@@ -87,23 +91,15 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
     }
 
     const handleItemAction = async (item: LibraryPrompt | LibrarySkill) => {
-        if (selectedAgentIds.size === 0) {
-            console.warn("No agent selected to perform action.");
-            return;
-        }
-        
         if ('description' in item) {
-            // Deploy Skill
-            try {
-                for (const id of selectedAgentIds) {
-                    await deploySkill(item.path, 'agent', id);
-                }
-                console.log(`Successfully deployed ${item.name} to ${selectedAgentIds.size} agents.`);
-            } catch (e) {
-                console.error('Failed to deploy skill', e);
-            }
+            // Open Assign Skill Modal
+            setAssigningSkill(item as LibrarySkill);
         } else {
             // Run Prompt
+            if (selectedAgentIds.size === 0) {
+                console.warn("No agent selected to perform action.");
+                return;
+            }
             try {
                 const flattenedPrompt = item.content.replace(/\r?\n/g, ' ');
                 for (const id of selectedAgentIds) {
@@ -223,6 +219,14 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                     isOpen={true}
                     onClose={() => setEditingItem(null)}
                     onSave={saveLibraryItem}
+                />
+            )}
+            
+            {assigningSkill && (
+                <AssignSkillModal 
+                    skill={assigningSkill}
+                    isOpen={true}
+                    onClose={() => setAssigningSkill(null)}
                 />
             )}
         </div>

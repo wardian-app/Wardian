@@ -33,12 +33,12 @@ export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgent
                     {item.name}
                 </h3>
                 <div className="flex items-center gap-1">
-                    {hasSelectedAgents && (
+                    {(hasSelectedAgents || isSkill) && (
                         <button 
                             onClick={handleAction}
                             disabled={isActioning}
                             className={`p-1.5 rounded-md text-wardian-success transition-all z-10 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 hover:bg-wardian-success/10'}`}
-                            title={isSkill ? "Deploy to Selected Agent(s)" : "Send to Selected Agent(s)"}
+                            title={isSkill ? "Assign Skill" : "Send to Selected Agent(s)"}
                         >
                             {isActioning ? (
                                 <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor">
