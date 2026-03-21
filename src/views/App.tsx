@@ -55,6 +55,22 @@ function AppBody() {
     };
   }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate]);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === "Tab") {
+        e.preventDefault();
+        setViewMode(prev => {
+          const modes: ViewMode[] = ["grid", "dashboard", "queue", "library", "workflow-builder", "graph", "garden"];
+          const currentIndex = modes.indexOf(prev);
+          const nextIndex = e.shiftKey ? (currentIndex - 1 + modes.length) % modes.length : (currentIndex + 1) % modes.length;
+          return modes[nextIndex];
+        });
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
   const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
   const handleTitleChange = useCallback((agentId: string, title: string) => {
