@@ -101,27 +101,18 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
       </div>
 
       <div className="border-t border-wardian-border pt-4 overflow-y-auto no-scrollbar flex-1 pb-8">
-        <h3 className="text-xs font-bold text-muted tracking-wide mb-3">Default Classes</h3>
+        <h3 className="text-xs font-bold text-muted tracking-wide mb-3">Available Classes</h3>
         <div className="space-y-2 mb-6">
-          {agentClasses.filter(c => c.is_default).map(cls => (
-            <div key={cls.name} className="p-3 bg-wardian-card-bg-muted border border-wardian-border rounded-lg">
+          {agentClasses.map(cls => (
+            <div key={cls.name} className={`p-3 bg-wardian-card-bg-muted border rounded-lg group ${cls.is_default ? 'border-wardian-border' : 'border-[var(--color-wardian-accent)]/20'}`}>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-sm font-bold text-primary">{cls.name}</span>
-                <span className="text-[9px] font-bold text-muted-neutral tracking-wide bg-wardian-card-bg-muted px-2 py-0.5 rounded">Default</span>
-              </div>
-              <p className="text-[11px] text-muted-neutral">{cls.description}</p>
-            </div>
-          ))}
-        </div>
-
-        {agentClasses.filter(c => !c.is_default).length > 0 && (
-          <>
-            <h3 className="text-xs font-bold text-[var(--color-wardian-accent)] tracking-wide mb-3">Custom Classes</h3>
-            <div className="space-y-2">
-              {agentClasses.filter(c => !c.is_default).map(cls => (
-                <div key={cls.name} className="p-3 bg-wardian-card-bg-muted border border-[var(--color-wardian-accent)]/20 rounded-lg group">
-                  <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-primary">{cls.name}</span>
+                    {cls.is_default && (
+                        <span className="text-[9px] font-bold text-muted-neutral tracking-wide bg-wardian-card-bg-muted px-2 py-0.5 rounded border border-wardian-light/30">Default</span>
+                    )}
+                </div>
+                {!cls.is_default && (
                     <button
                       onClick={() => deleteAgentClass(cls.name)}
                       className="text-muted hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-0.5"
@@ -129,14 +120,13 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                     </button>
-                  </div>
-                  <p className="text-[11px] text-muted-neutral mb-2">{cls.description}</p>
-                  <ManageSkills targetType="class" targetId={cls.name} />
-                </div>
-              ))}
+                )}
+              </div>
+              <p className="text-[11px] text-muted-neutral mb-2">{cls.description}</p>
+              <ManageSkills targetType="class" targetId={cls.name} />
             </div>
-          </>
-        )}
+          ))}
+        </div>
       </div>
     </div>
   );

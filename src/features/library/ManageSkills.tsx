@@ -109,7 +109,7 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
                     value={selectedSkillToDeploy}
                     onChange={(e) => setSelectedSkillToDeploy(e.target.value)}
                     disabled={isLoading}
-                    className="flex-1 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)]"
+                    className="flex-1 min-w-0 truncate bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)]"
                 >
                     <option value="">Select a skill to deploy...</option>
                     {availableSkills.filter(s => !deployedSkills.includes(s.name)).map(s => (
