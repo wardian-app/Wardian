@@ -113,6 +113,19 @@ pub async fn spawn_gemini_cli(
         .system_include_directories
         .clone()
         .unwrap_or_default();
+        
+    // Retroactive injection of private agent directory
+    if let Some(home) = crate::utils::fs::get_wardian_home() {
+        let agent_dir = home.join("agents").join(&config.session_id);
+        if !agent_dir.exists() {
+            let _ = std::fs::create_dir_all(&agent_dir);
+        }
+        let agent_dir_str = agent_dir.to_string_lossy().to_string();
+        if !final_includes.contains(&agent_dir_str) {
+            final_includes.push(agent_dir_str);
+        }
+    }
+
     if let Some(ref user_dirs) = config.include_directories {
         for dir in user_dirs {
             if !final_includes.contains(dir) {
