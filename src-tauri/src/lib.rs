@@ -81,7 +81,13 @@ pub fn run() {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
                             let mut agents_map = state.agents.lock().await;
                             let mut order_map = state.agent_order.lock().await;
-                            for config in configs {
+                            for mut config in configs {
+                                // Retroactively ensure the private agent directory is included
+                                config.system_include_directories = Some(utils::fs::resolve_system_include_directories(
+                                    &config.agent_class,
+                                    &config.session_id,
+                                ));
+
                                 if let Ok(agent) = manager::spawn_gemini_cli(app_handle.clone(), config.clone(), true).await {
                                     if let Some(ref tx) = agent.stdin_tx {
                                         if let Ok(mut senders) = state.input_senders.write() {

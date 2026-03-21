@@ -61,6 +61,7 @@ pub async fn spawn_agent(
     config.is_off = is_off.unwrap_or(false);
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
         &agent_class,
+        &session_id,
     ));
 
     let active_agent = manager::spawn_gemini_cli(app.clone(), config.clone(), false).await?;
@@ -277,7 +278,7 @@ pub async fn update_agent_config(
                 agent.config.agent_class, new_config.agent_class
             ));
             new_config.system_include_directories = Some(
-                crate::utils::fs::resolve_system_include_directories(&new_config.agent_class),
+                crate::utils::fs::resolve_system_include_directories(&new_config.agent_class, &new_config.session_id),
             );
         }
 

@@ -2,17 +2,26 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
 
-pub fn resolve_system_include_directories(class_name: &str) -> Vec<String> {
+pub fn resolve_system_include_directories(class_name: &str, session_id: &str) -> Vec<String> {
     let mut dirs = Vec::new();
     if let Some(app_dir) = get_wardian_home() {
         let class_path = app_dir.join("classes").join(class_name);
         let common_path = app_dir.join("common");
+        let agent_path = app_dir.join("agents").join(session_id);
+
+        // Ensure the private agent directory exists
+        if !agent_path.exists() {
+            let _ = std::fs::create_dir_all(&agent_path);
+        }
 
         if common_path.exists() {
             dirs.push(common_path.to_string_lossy().to_string());
         }
         if class_path.exists() {
             dirs.push(class_path.to_string_lossy().to_string());
+        }
+        if agent_path.exists() {
+            dirs.push(agent_path.to_string_lossy().to_string());
         }
     }
     dirs

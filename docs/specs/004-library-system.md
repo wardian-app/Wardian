@@ -19,7 +19,10 @@ Wardian requires a centralized, high-efficiency repository for managing reusable
    - **Metadata**: A `library.json` sidecar file in the library root will store "Virtual" metadata (Tags, Stars/Favorites) keyed by the relative file path.
 
 3. **Workspace Integration**:
-   - **Main View**: `LibraryView.tsx` acts as the primary workspace view for management, featuring tabs for Prompts and Skills, folder navigation, and assigning actions.
+   - **Main View**: `LibraryView.tsx` acts as the primary workspace view for management of all agent "Blueprints". It includes three primary sections:
+     - **Prompts**: Reusable terminal injections.
+     - **Skills**: Physically deployed capabilities (`.agents/skills/`).
+     - **Classes**: Global agent type definitions (relocated from the sidebar for a more spacious management experience).
    - **Injection Hub**: The **Command Sidebar Tab** (`CommandPanel.tsx`) dynamically displays "Quick Prompts" (starred) for immediate injection into the focused terminal.
 
 5. **Skill Deployment Model (Direct Copying)**:

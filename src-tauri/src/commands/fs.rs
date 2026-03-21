@@ -1,6 +1,6 @@
 #[tauri::command]
-pub fn resolve_system_include_directories(class_name: String) -> Vec<String> {
-    crate::utils::fs::resolve_system_include_directories(&class_name)
+pub fn resolve_system_include_directories(class_name: String, session_id: String) -> Vec<String> {
+    crate::utils::fs::resolve_system_include_directories(&class_name, &session_id)
 }
 
 #[tauri::command]

@@ -107,7 +107,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                 updateField("agent_class", newClass);
                 // Proactively resolve system include directories for the new class
                 try {
-                  const sysDirs: string[] = await invoke("resolve_system_include_directories", { className: newClass });
+                  const sysDirs: string[] = await invoke("resolve_system_include_directories", { className: newClass, sessionId: config.session_id });
                   updateField("system_include_directories", sysDirs);
                 } catch (err) {
                   console.error("Failed to resolve system include dirs", err);
