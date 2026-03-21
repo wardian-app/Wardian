@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -13,6 +13,30 @@ export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
   setRightCollapsed,
 }) => {
   const appWindow = isTauri ? getCurrentWindow() : null;
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    if (!appWindow) return;
+    
+    let unlisten: (() => void) | undefined;
+    
+    const updateMaximized = async () => {
+      const maximized = await appWindow.isMaximized();
+      setIsMaximized(maximized);
+    };
+
+    updateMaximized();
+
+    appWindow.onResized(() => {
+      updateMaximized();
+    }).then(u => {
+      unlisten = u;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [appWindow]);
 
   return (
     <div className="titlebar-zone titlebar-right">
@@ -43,10 +67,17 @@ export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
           <button
             onClick={() => appWindow?.toggleMaximize()}
             className="titlebar-winbtn"
-            title="Maximize"
+            title={isMaximized ? "Restore Down" : "Maximize"}
           >
             <svg width="10" height="10" viewBox="0 0 10 10">
-              <rect x="1.5" y="1.5" width="7" height="7" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+              {isMaximized ? (
+                <>
+                  <path d="M2.5 3.5v-1h5v5h-1" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                  <rect x="1.5" y="4.5" width="5" height="5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                </>
+              ) : (
+                <rect x="1.5" y="1.5" width="7" height="7" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+              )}
             </svg>
           </button>
           <button
