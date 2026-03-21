@@ -4,6 +4,7 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { LibraryGrid } from '../features/library/LibraryGrid';
 import { ItemEditorModal } from '../features/library/ItemEditorModal';
 import { AssignSkillModal } from '../features/library/AssignSkillModal';
+import { AssignPromptModal } from '../features/library/AssignPromptModal';
 import { LibraryFolder, LibraryPrompt, LibrarySkill } from '../types';
 
 interface LibraryViewProps {
@@ -12,15 +13,18 @@ interface LibraryViewProps {
 
 export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) => {
     const { promptTree, skillTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab } = useLibraryStore();
-    
+
     // Navigation state
     const [currentPath, setCurrentPath] = useState<string[]>([]);
-    
+
     // Editor state
     const [editingItem, setEditingItem] = useState<LibraryPrompt | LibrarySkill | null>(null);
 
     // Assign Skill Modal State
     const [assigningSkill, setAssigningSkill] = useState<LibrarySkill | null>(null);
+
+    // Assign Prompt Modal State
+    const [assigningPrompt, setAssigningPrompt] = useState<LibraryPrompt | null>(null);
 
     // Search & Filter
     const [searchQuery, setSearchQuery] = useState('');
@@ -97,7 +101,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
         } else {
             // Run Prompt
             if (selectedAgentIds.size === 0) {
-                console.warn("No agent selected to perform action.");
+                setAssigningPrompt(item as LibraryPrompt);
                 return;
             }
             try {
@@ -198,7 +202,6 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                 {filteredFolder ? (
                     <LibraryGrid 
                         folder={filteredFolder}
-                        hasSelectedAgents={selectedAgentIds.size > 0}
                         onFolderClick={(f) => setCurrentPath([...currentPath, f.name])}
                         onItemClick={(p) => setEditingItem(p)}
                         onToggleStar={(p) => {
@@ -227,6 +230,14 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                     skill={assigningSkill}
                     isOpen={true}
                     onClose={() => setAssigningSkill(null)}
+                />
+            )}
+
+            {assigningPrompt && (
+                <AssignPromptModal
+                    prompt={assigningPrompt}
+                    isOpen={true}
+                    onClose={() => setAssigningPrompt(null)}
                 />
             )}
         </div>

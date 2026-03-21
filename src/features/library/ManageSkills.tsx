@@ -8,7 +8,7 @@ interface ManageSkillsProps {
 }
 
 export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId }) => {
-    const { skillTree, listDeployedSkills, deploySkill, removeDeployedSkill, activeTab, setActiveTab } = useLibraryStore();
+    const { skillTree, listDeployedSkills, deploySkill, removeDeployedSkill, fetchLibraryTree } = useLibraryStore();
     const [deployedSkills, setDeployedSkills] = useState<string[]>([]);
     const [availableSkills, setAvailableSkills] = useState<LibrarySkill[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -31,10 +31,8 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
     }, [targetType, targetId]);
 
     useEffect(() => {
-        if (!skillTree || activeTab !== 'skills') {
-            if (activeTab !== 'skills') {
-                setActiveTab('skills');
-            }
+        if (!skillTree) {
+            fetchLibraryTree('skills');
         } else {
             const skills: LibrarySkill[] = [];
             function traverse(folder: LibraryFolder) {
@@ -49,7 +47,7 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
             traverse(skillTree);
             setAvailableSkills(skills);
         }
-    }, [skillTree, activeTab, setActiveTab]);
+    }, [skillTree, fetchLibraryTree]);
 
     const handleDeploy = async () => {
         if (!selectedSkillToDeploy) return;

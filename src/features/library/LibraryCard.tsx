@@ -3,19 +3,15 @@ import { LibraryPrompt, LibrarySkill } from '../../types';
 
 interface LibraryCardProps {
     item: LibraryPrompt | LibrarySkill;
-    hasSelectedAgents: boolean;
     onClick: () => void; // This is now used for editing
     onToggleStar: (e: React.MouseEvent) => void;
     onAction: (e: React.MouseEvent) => Promise<void> | void; // This is now the main card click
 }
 
-export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgents, onClick, onToggleStar, onAction }) => {
-    const isSkill = 'description' in item;
+export const LibraryCard: React.FC<LibraryCardProps> = ({ item, onClick, onToggleStar, onAction }) => {
     const [isActioning, setIsActioning] = useState(false);
 
     const handleMainClick = async (e: React.MouseEvent) => {
-        if (!isSkill && !hasSelectedAgents) return; // Prompts require selected agents
-        
         setIsActioning(true);
         try {
             await onAction(e);
@@ -31,9 +27,7 @@ export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgent
 
     return (
         <div 
-            className={`bg-wardian-card-bg border border-wardian-border rounded-xl p-4 flex flex-col gap-3 transition-all group relative ${
-                (isSkill || hasSelectedAgents) ? 'cursor-pointer hover:border-wardian-success/60' : 'cursor-default'
-            }`}
+            className="bg-wardian-card-bg border border-wardian-border rounded-xl p-4 flex flex-col gap-3 transition-all group relative cursor-pointer hover:border-[var(--color-wardian-accent)] hover:shadow-sm"
             onClick={handleMainClick}
         >
             <div className="flex justify-between items-start">

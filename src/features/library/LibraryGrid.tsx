@@ -4,14 +4,13 @@ import { LibraryCard } from './LibraryCard';
 
 interface LibraryGridProps {
     folder: LibraryFolder;
-    hasSelectedAgents: boolean;
     onItemClick: (item: LibraryPrompt | LibrarySkill) => void;
     onToggleStar: (item: LibraryPrompt | LibrarySkill) => void;
     onFolderClick: (folder: LibraryFolder) => void;
     onItemAction: (item: LibraryPrompt | LibrarySkill) => Promise<void> | void;
 }
 
-export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, hasSelectedAgents, onItemClick, onToggleStar, onFolderClick, onItemAction }) => {
+export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, onItemClick, onToggleStar, onFolderClick, onItemAction }) => {
     // Sort children so folders come first
     const sortedChildren = [...folder.children].sort((a, b) => {
         const aIsItem = 'metadata' in a;
@@ -32,7 +31,6 @@ export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, hasSelectedAge
                         <LibraryCard 
                             key={`item-${item.path}-${index}`}
                             item={item}
-                            hasSelectedAgents={hasSelectedAgents}
                             onClick={() => onItemClick(item)}
                             onToggleStar={(e) => {
                                 e.stopPropagation();
