@@ -4,17 +4,18 @@ import { LibraryPrompt, LibrarySkill } from '../../types';
 interface LibraryCardProps {
     item: LibraryPrompt | LibrarySkill;
     hasSelectedAgents: boolean;
-    onClick: () => void;
+    onClick: () => void; // This is now used for editing
     onToggleStar: (e: React.MouseEvent) => void;
-    onAction: (e: React.MouseEvent) => Promise<void> | void;
+    onAction: (e: React.MouseEvent) => Promise<void> | void; // This is now the main card click
 }
 
 export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgents, onClick, onToggleStar, onAction }) => {
     const isSkill = 'description' in item;
     const [isActioning, setIsActioning] = useState(false);
 
-    const handleAction = async (e: React.MouseEvent) => {
-        e.stopPropagation();
+    const handleMainClick = async (e: React.MouseEvent) => {
+        if (!isSkill && !hasSelectedAgents) return; // Prompts require selected agents
+        
         setIsActioning(true);
         try {
             await onAction(e);
@@ -23,39 +24,38 @@ export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgent
         }
     };
 
+    const handleEditClick = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        onClick();
+    };
+
     return (
         <div 
-            className="bg-wardian-card-bg border border-wardian-border rounded-xl p-4 flex flex-col gap-3 cursor-pointer hover:border-[var(--color-wardian-accent)] transition-all group relative"
-            onClick={onClick}
+            className={`bg-wardian-card-bg border border-wardian-border rounded-xl p-4 flex flex-col gap-3 transition-all group relative ${
+                (isSkill || hasSelectedAgents) ? 'cursor-pointer hover:border-wardian-success/60' : 'cursor-default'
+            }`}
+            onClick={handleMainClick}
         >
             <div className="flex justify-between items-start">
                 <h3 className="text-primary font-bold text-lg truncate flex items-center gap-2" title={item.name}>
                     {item.name}
+                    {isActioning && (
+                        <svg className="w-4 h-4 text-wardian-success animate-spin flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <circle cx="12" cy="12" r="10" strokeWidth="4" strokeOpacity="0.25"></circle>
+                            <path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" fill="currentColor"></path>
+                        </svg>
+                    )}
                 </h3>
                 <div className="flex items-center gap-1">
-                    {(hasSelectedAgents || isSkill) && (
-                        <button 
-                            onClick={handleAction}
-                            disabled={isActioning}
-                            className={`p-1.5 rounded-md text-wardian-success transition-all z-10 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 hover:bg-wardian-success/10'}`}
-                            title={isSkill ? "Assign Skill" : "Send to Selected Agent(s)"}
-                        >
-                            {isActioning ? (
-                                <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                                    <circle cx="12" cy="12" r="10" strokeWidth="4" strokeOpacity="0.25"></circle>
-                                    <path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" fill="currentColor"></path>
-                                </svg>
-                            ) : (
-                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                                    {isSkill ? (
-                                        <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-                                    ) : (
-                                        <path d="M8 5v14l11-7z" />
-                                    )}
-                                </svg>
-                            )}
-                        </button>
-                    )}
+                    <button 
+                        onClick={handleEditClick}
+                        className="p-1.5 rounded-md text-muted-neutral transition-all z-10 opacity-0 group-hover:opacity-100 hover:text-primary hover:bg-wardian-light/10"
+                        title="Edit Item"
+                    >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                    </button>
                     <button 
                         onClick={(e) => { e.stopPropagation(); onToggleStar(e); }}
                         className={`p-1.5 rounded-md transition-colors z-10 ${item.metadata.is_starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-muted-neutral opacity-0 group-hover:opacity-100 hover:text-primary'}`}
@@ -67,12 +67,12 @@ export const LibraryCard: React.FC<LibraryCardProps> = ({ item, hasSelectedAgent
                 </div>
             </div>
             
-            <p className="text-muted text-sm line-clamp-3 overflow-hidden flex-1">
+            <p className="text-muted text-sm line-clamp-3 overflow-hidden flex-1 pointer-events-none">
                 {item.content || "No content."}
             </p>
 
             {item.metadata.tags && item.metadata.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-2">
+                <div className="flex flex-wrap gap-1 mt-2 pointer-events-none">
                     {item.metadata.tags.map(tag => (
                         <span key={tag} className="px-2 py-0.5 bg-wardian-light/10 text-[var(--color-wardian-accent)] border border-[var(--color-wardian-accent)]/20 rounded text-[10px] font-bold tracking-wide">
                             {tag}

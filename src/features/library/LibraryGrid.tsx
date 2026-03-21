@@ -12,9 +12,19 @@ interface LibraryGridProps {
 }
 
 export const LibraryGrid: React.FC<LibraryGridProps> = ({ folder, hasSelectedAgents, onItemClick, onToggleStar, onFolderClick, onItemAction }) => {
+    // Sort children so folders come first
+    const sortedChildren = [...folder.children].sort((a, b) => {
+        const aIsItem = 'metadata' in a;
+        const bIsItem = 'metadata' in b;
+        if (aIsItem === bIsItem) {
+            return a.name.localeCompare(b.name);
+        }
+        return aIsItem ? 1 : -1;
+    });
+
     return (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-4">
-            {folder.children.map((child, index) => {
+            {sortedChildren.map((child, index) => {
                 if ('metadata' in child) {
                     // It's a LibraryPrompt or LibrarySkill
                     const item = child as (LibraryPrompt | LibrarySkill);
