@@ -29,9 +29,9 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
     </button>
     
     {!leftCollapsed && (
-      <div className="titlebar-telemetry">
-        <span>CPU {Object.values(telemetry).reduce((acc, t) => acc + t.cpu_usage, 0).toFixed(1)}%</span>
-        <span>MEM {Object.values(telemetry).reduce((acc, t) => acc + t.memory_mb, 0).toFixed(0)}MB</span>
+      <div className="titlebar-telemetry label-small lowercase !tracking-normal">
+        <span>cpu {Object.values(telemetry).reduce((acc, t) => acc + t.cpu_usage, 0).toFixed(1)}%</span>
+        <span>mem {Object.values(telemetry).reduce((acc, t) => acc + t.memory_mb, 0).toFixed(0)}mb</span>
         <span className="titlebar-telemetry-accent">
           {agents.filter(a => !offAgentIds.has(a.session_id)).length} active
         </span>

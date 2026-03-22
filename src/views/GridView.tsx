@@ -84,7 +84,7 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg ${isMaximized ? 'fixed inset-0 z-[100] h-screen w-screen rounded-none m-0 border-none transition-none' : 'relative transition-all rounded-xl border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border')} ${draggedAgentId === agentId && !isMaximized ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId && !isMaximized ? 'translate-y-[-2px]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg ${isMaximized ? 'fixed inset-0 z-[100] h-screen w-screen rounded-none m-0 border-none transition-none' : 'relative transition-all rounded-xl border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent' : 'border-wardian-border')} ${draggedAgentId === agentId && !isMaximized ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId && !isMaximized ? 'translate-y-[-2px]' : ''}`}
           >
             <div 
               onMouseEnter={() => onMouseEnterCard(agentId)}
@@ -127,7 +127,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                    </button>
                  )}
-                  <button onClick={(e) => { e.stopPropagation(); onDelete(agentId); }} className="text-bright-neutral hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                  <button onClick={(e) => { e.stopPropagation(); onDelete(agentId); }} className="text-bright-neutral hover:text-wardian-error transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                </div>
             </div>
 

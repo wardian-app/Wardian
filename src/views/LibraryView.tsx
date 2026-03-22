@@ -139,7 +139,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                 <div className="w-px h-6 bg-wardian-border mx-2"></div>
 
                 {/* Breadcrumbs */}
-                <div className="flex items-center gap-2 flex-1 text-sm font-bold tracking-wide overflow-x-auto no-scrollbar">
+                <div className="flex items-center gap-2 flex-1 label-small overflow-x-auto no-scrollbar">
                     <button 
                         className="text-muted hover:text-[var(--color-wardian-accent)] transition-colors whitespace-nowrap"
                         onClick={() => setCurrentPath([])}
@@ -170,7 +170,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                 <div className="flex items-center gap-3">
                     <button 
                         onClick={() => openLibraryFolder(currentPath.join('/'))}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-wardian-light text-xs font-bold text-muted hover:text-primary hover:border-wardian-border transition-all whitespace-nowrap"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-wardian-border label-small text-muted hover:text-primary hover:border-wardian-accent transition-all whitespace-nowrap"
                         title="Reveal Folder in File Explorer"
                     >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -183,16 +183,16 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                         placeholder={`Search ${activeTab}...`}
                         value={searchQuery}
                         onChange={e => setSearchQuery(e.target.value)}
-                        className="bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded-full px-4 py-1.5 text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] w-64"
+                        className="bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-full px-4 py-1.5 text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] w-64 text-primary"
                     />
                     <button 
                         onClick={() => setShowQuickOnly(!showQuickOnly)}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-bold transition-all whitespace-nowrap ${showQuickOnly ? 'bg-yellow-400/10 border-yellow-400/30 text-yellow-400' : 'bg-transparent border-wardian-light text-muted hover:border-wardian-border'}`}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border label-small transition-all whitespace-nowrap ${showQuickOnly ? 'bg-wardian-warning/10 border-wardian-warning/30 text-wardian-warning shadow-wardian-accent' : 'bg-transparent border-wardian-border text-muted hover:border-wardian-accent'}`}
                     >
                         <svg className="w-3.5 h-3.5" fill={showQuickOnly ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
                         </svg>
-                        Filter
+                        Starred
                     </button>
                 </div>
             </div>

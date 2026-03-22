@@ -77,21 +77,21 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
         <div className="flex justify-center items-center gap-4 py-1 border-b border-wardian-border/20 pb-4">
           <button 
             onClick={handleStopAll}
-            className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20 transition-all hover:scale-110 active:scale-95"
+            className="p-2 rounded-lg bg-wardian-error/10 hover:bg-wardian-error/20 text-wardian-error border border-wardian-error/20 transition-all hover:scale-110 active:scale-95"
             title="Stop All (Panic)"
           >
             <StopAllIcon />
           </button>
           <button 
             onClick={() => pauseAllTriggers()}
-            className="p-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border border-amber-500/20 transition-all hover:scale-110 active:scale-95"
+            className="p-2 rounded-lg bg-wardian-warning/10 hover:bg-wardian-warning/20 text-wardian-warning border border-wardian-warning/20 transition-all hover:scale-110 active:scale-95"
             title="Pause All"
           >
             <PauseAllIcon />
           </button>
           <button 
             onClick={() => resumeAllTriggers()}
-            className="p-2 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 border border-emerald-500/20 transition-all hover:scale-110 active:scale-95"
+            className="p-2 rounded-lg bg-wardian-success/10 hover:bg-wardian-success/20 text-wardian-success border border-wardian-success/20 transition-all hover:scale-110 active:scale-95"
             title="Resume All"
           >
             <PlayAllIcon />
@@ -114,7 +114,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
 
         {/* 1. Workflows (The Library) */}
         <div className="flex-1 flex flex-col min-h-0">
-          <div className="mb-4 text-xs font-bold text-muted-neutral tracking-wide">
+          <div className="mb-4 label-small">
             Library
           </div>
           <WorkflowLibrary 

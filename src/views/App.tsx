@@ -398,10 +398,10 @@ function AppBody() {
             {notifications.length > 0 && (
               <div className="fixed top-[calc(var(--topbar-height)+0.5rem)] right-[calc(var(--sidebar-secondary-width)+2rem)] z-50 flex flex-col gap-2 max-w-md pointer-events-none">
                 {notifications.map(n => (
-                  <div key={n.id} className="bg-gray-900 border-l-4 border-blue-500 p-4 shadow-2xl animate-in slide-in-from-right rounded-r pointer-events-auto">
+                  <div key={n.id} className="bg-wardian-card border-l-4 border-wardian-accent p-4 shadow-2xl animate-in slide-in-from-right rounded-r pointer-events-auto">
                     <div className="flex justify-between items-start gap-4">
                       <div>
-                        <p className="text-xs font-bold text-blue-400 mb-1">{agents.find(a => a.session_id === n.session_id)?.session_name || "Unknown Agent"}</p>
+                        <p className="text-xs font-bold text-wardian-accent mb-1">{agents.find(a => a.session_id === n.session_id)?.session_name || "Unknown Agent"}</p>
                         <p className="text-sm text-primary">{n.message}</p>
                       </div>
                       <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-primary">&times;</button>

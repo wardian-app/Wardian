@@ -321,7 +321,7 @@ export default function AgentWatchlist({
         {/* ── Search ─────────────────────────────────────── */}
         <div className="mb-3">
           <input
-            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded-lg px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-lg px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="Search agents..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.currentTarget.value)}
@@ -329,7 +329,7 @@ export default function AgentWatchlist({
         </div>
 
         {/* ── Column Headers ─────────────────────────────── */}
-        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 text-[10px] font-bold text-muted-neutral tracking-wide border-b border-wardian-border mb-1">
+        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 label-small border-b border-wardian-border mb-1">
           <span></span>
           <span>Agent</span>
           <span>Status</span>
@@ -465,19 +465,19 @@ export default function AgentWatchlist({
 
         {/* ── Footer ─────────────────────────────────────── */}
         <div className="mt-3 pt-3 border-t border-wardian-border flex justify-between items-center">
-          <span className="text-[10px] text-muted-neutral font-medium">
+          <span className="label-small lowercase !tracking-normal">
             {displayedAgents.length} agent{displayedAgents.length !== 1 ? "s" : ""}
           </span>
           <div className="flex gap-2">
             <button
               onClick={() => onSelectionChange(new Set(displayedAgents.map((a) => a.session_id)))}
-              className="text-[10px] font-bold text-muted-neutral hover:text-primary tracking-tighter"
+              className="label-small lowercase !tracking-normal hover:text-primary transition-colors"
             >
               Select All
             </button>
             <button
               onClick={() => onSelectionChange(new Set())}
-              className="text-[10px] font-bold text-muted-neutral hover:text-primary tracking-tighter"
+              className="label-small lowercase !tracking-normal hover:text-primary transition-colors"
             >
               Clear
             </button>

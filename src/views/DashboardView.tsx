@@ -87,18 +87,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
               <div className="flex flex-1 items-center justify-start p-2 px-4 gap-8 overflow-x-auto no-scrollbar">
                 <div className="flex flex-col min-w-[120px]">
-                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Hardware</span>
+                  <span className="label-small mb-0.5">Hardware</span>
                   <div className="flex items-center gap-2 text-xs font-mono text-primary">
                     <span className="text-wardian-processing bg-wardian-processing/10 px-1 py-0.5 rounded border border-wardian-processing/30">{metrics?.cpu_usage?.toFixed(1) || "0.0"}% CPU</span>
                     <span className="text-wardian-processing bg-wardian-processing/10 px-1 py-0.5 rounded border border-wardian-processing/30">{metrics?.memory_mb?.toFixed(0) || "0"} MB</span>
                   </div>
                 </div>
                 <div className="flex flex-col flex-1 min-w-[150px] max-w-[200px]">
-                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Workspace</span>
+                  <span className="label-small mb-0.5">Workspace</span>
                   <span className="text-xs font-mono text-muted-neutral truncate" title={agent.folder}>{agent.folder}</span>
                 </div>
                 <div className="flex flex-col min-w-[110px]">
-                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Born</span>
+                  <span className="label-small mb-0.5">Born</span>
                   <span className="text-[10px] font-mono text-muted-neutral">
                     {metrics?.init_timestamp 
                       ? new Date(metrics.init_timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) 
@@ -106,11 +106,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </span>
                 </div>
                 <div className="flex flex-col min-w-[60px]">
-                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Queries</span>
+                  <span className="label-small mb-0.5">Queries</span>
                   <span className="text-xs font-bold text-[var(--color-wardian-accent)]">{metrics?.query_count || 0}</span>
                 </div>
                 <div className="flex flex-col flex-2 min-w-[200px]">
-                  <span className="text-[10px] font-bold text-muted-neutral mb-0.5">Current Status</span>
+                  <span className="label-small mb-0.5">Current Status</span>
                   <span className={`text-xs truncate ${effectiveStatus !== 'Idle' ? 'text-primary italic' : 'text-muted-neutral'}`}>{currentThought}</span>
                 </div>
               </div>
@@ -142,12 +142,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       onChange={(e) => { if (e.target.value) { onQuery(agentId, e.target.value); e.target.value = ""; } }}
                     >
                       <option value="" disabled>Query</option>
-                      <option value="Summarize what you have done so far." className="text-black">Summarize</option>
-                      <option value="Learn the provided context and outline your approach." className="text-black">Learn</option>
-                      <option value="Validate your recent changes and run tests." className="text-black">Validate</option>
+                      <option value="Summarize what you have done so far." className="text-primary bg-wardian-card">Summarize</option>
+                      <option value="Learn the provided context and outline your approach." className="text-primary bg-wardian-card">Learn</option>
+                      <option value="Validate your recent changes and run tests." className="text-primary bg-wardian-card">Validate</option>
                     </select>
                     <div className="absolute inset-y-0 right-1.5 flex items-center pointer-events-none">
-                      <svg className="w-2.5 h-2.5 text-blue-400/50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"></path></svg>
+                      <svg className="w-2.5 h-2.5 text-wardian-processing/50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"></path></svg>
                     </div>
                   </div>
                 </div>

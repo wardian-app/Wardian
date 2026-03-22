@@ -425,7 +425,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                       deleteWorkflow(activeWorkflowId);
                     }
                   }}
-                  className={`p-1.5 transition-colors text-muted-neutral hover:text-red-500 cursor-pointer`}
+                  className={`p-1.5 transition-colors text-muted-neutral hover:text-wardian-error cursor-pointer`}
                   title={"Delete This Workflow"}
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -433,7 +433,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
               </div>
             </>
           ) : (
-            <span className="text-[10px] font-bold text-muted-neutral tracking-wide opacity-30 select-none">No Workflow Active</span>
+            <span className="label-small opacity-30 select-none">No Workflow Active</span>
           )}
         </div>
 
@@ -463,7 +463,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
           <button 
             onClick={handleRun}
             disabled={!activeWorkflowId || hasGraphErrors}
-            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer' : 'bg-red-500/10 text-red-500/50 cursor-not-allowed border border-red-500/20 shadow-none scale-100'}`}
+            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer shadow-wardian-accent' : 'bg-wardian-error/10 text-wardian-error/50 cursor-not-allowed border border-wardian-error/20 shadow-none scale-100'}`}
             title={hasGraphErrors ? "Cannot run: Fix node errors first" : undefined}
           >
             {hasGraphErrors ? 'Graph Error' : 'Run Workflow'}
@@ -476,12 +476,12 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         <div className="absolute top-6 left-6 z-20">
           <button 
             onClick={() => { setIsBlockLibraryOpen(true); }}
-            className="group flex items-center gap-3 bg-[var(--color-wardian-card)] border border-wardian-border-heavy p-2 pr-4 rounded-xl hover:border-[var(--color-wardian-accent)] transition-all shadow-2xl cursor-pointer"
+            className="group flex items-center gap-3 bg-[var(--color-wardian-card)] border border-wardian-border-heavy p-2 pr-4 rounded-xl hover:border-[var(--color-wardian-accent)] transition-all shadow-wardian-accent cursor-pointer"
           >
             <div className="p-2 bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_90%)] text-[var(--color-wardian-accent)] rounded-lg group-hover:bg-[var(--color-wardian-accent)] transition-all group-hover:text-[var(--color-wardian-bg)]">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
             </div>
-            <span className="text-[10px] font-bold text-muted-neutral tracking-wide group-hover:text-[var(--color-wardian-text)]">Add Block</span>
+            <span className="label-small group-hover:text-[var(--color-wardian-text)]">Add Block</span>
           </button>
         </div>
 

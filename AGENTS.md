@@ -2,6 +2,13 @@
 
 All agents contributing to the Wardian codebase must adhere to the following architectural and stylistic standards.
 
+## 🎭 Brand Personality & Guiding Principles
+These clusters guide both the architectural integrity and the user experience of Wardian.
+
+- **Tactile**: Physical-first organization. Drag-and-drop grids, local filesystem junctions for skills, and visible telemetry.
+- **Ecological / Transparent**: A living "Habitat" where agents evolve. "Markdown-as-Truth" ensuring the system's state is always inspectable on disk.
+- **High-Tech / Omniscient**: High-performance orchestration powered by Rust. A "Command Center" view of multiple agent minds in real-time.
+
 ## ✅ Pre-Commit Checklist
 Before requesting a commit or finalizing a task, ensure the following steps are completed:
 
