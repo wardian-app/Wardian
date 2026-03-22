@@ -1,6 +1,7 @@
 import React from "react";
+import { FolderTree } from "lucide-react";
 
-export type SidebarTab = "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
+export type SidebarTab = "explorer" | "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
 
 interface SidebarIconRailProps {
   activeTab: SidebarTab;
@@ -20,6 +21,15 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
 
   return (
     <aside className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
+      <button
+        onClick={() => handleTabClick("explorer")}
+        className={`relative p-3 rounded-xl transition-all group ${activeTab === "explorer" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="File Explorer"
+      >
+        {activeTab === "explorer" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
+        <FolderTree className="w-6 h-6 group-hover:scale-110 transition-transform" strokeWidth={2} />
+      </button>
+
       <button
         onClick={() => handleTabClick("agent-config")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "agent-config" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}

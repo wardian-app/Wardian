@@ -7,6 +7,7 @@ import { ClassManagerPanel } from "../features/agents/ClassManagerPanel";
 import { CommandPanel } from "../features/commands/CommandPanel";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
+import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
 
 interface SidebarContentPaneProps {
   activeTab: SidebarTab;
@@ -39,7 +40,11 @@ interface SidebarContentPaneProps {
   }) => {
     return (
       <aside className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
-        <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
+        <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)] flex flex-col min-h-0 h-full">
+        {activeTab === "explorer" && (
+          <ExplorerPanel selectedAgentIds={selectedAgentIds} agents={agents} />
+        )}
+
         {activeTab === "agent-config" && (
           <>
             <div className="flex items-center gap-4">

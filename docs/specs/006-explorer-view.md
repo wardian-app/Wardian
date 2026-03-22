@@ -1,6 +1,6 @@
 # Spec 006: Explorer Left Sidebar
 
-* **Status:** Proposed
+* **Status:** Implemented
 * **Date:** 2026-03-22
 * **Decider:** Architect
 

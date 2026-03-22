@@ -1,6 +1,6 @@
 # Spec 005: Modernized Top-Bar & Sidebar Navigation
 
-* **Status:** Proposed
+* **Status:** Implemented
 * **Date:** 2026-03-17
 * **Decider:** Architect
 
