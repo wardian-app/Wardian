@@ -375,7 +375,6 @@ function AppBody() {
 
       <div className="flex flex-1 overflow-hidden">
         <SidebarIconRail activeTab={activeTab} setActiveTab={setActiveTab} setCollapsed={setLeftCollapsed} />
-        
         <SidebarContentPane 
           activeTab={activeTab}
           leftCollapsed={leftCollapsed}
@@ -385,6 +384,7 @@ function AppBody() {
           agentClasses={agentClasses}
           telemetry={telemetry}
           onAgentsUpdated={fetchAgents}
+          onClassesUpdated={fetchAgentClasses}
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}

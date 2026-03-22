@@ -35,19 +35,15 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
       <LeftSidebarControls
         leftCollapsed={props.leftCollapsed}
         setLeftCollapsed={props.setLeftCollapsed}
+        telemetry={props.telemetry}
+        agents={props.agents}
+        offAgentIds={props.offAgentIds}
       />
       <div className="titlebar-center-container">
         <WorkspaceTabs
           viewMode={props.viewMode}
           setViewMode={props.setViewMode}
         />
-        <div className="titlebar-telemetry">
-          <span>CPU {Object.values(props.telemetry).reduce((acc, t) => acc + t.cpu_usage, 0).toFixed(1)}%</span>
-          <span>MEM {Object.values(props.telemetry).reduce((acc, t) => acc + t.memory_mb, 0).toFixed(0)}MB</span>
-          <span className="titlebar-telemetry-accent">
-            {props.agents.filter(a => !props.offAgentIds.has(a.session_id)).length} active
-          </span>
-        </div>
       </div>
       <RightWindowControls
         rightCollapsed={props.rightCollapsed}

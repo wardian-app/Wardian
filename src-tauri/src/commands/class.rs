@@ -21,22 +21,12 @@ pub async fn create_agent_class(
         return Err("Class name cannot be empty".to_string());
     }
 
-    let all = manager::get_all_agent_classes(&app);
+    let mut all = manager::get_all_agent_classes(&app);
     if all
         .iter()
         .any(|c| c.name.to_lowercase() == trimmed_name.to_lowercase())
     {
         return Err(format!("A class named '{}' already exists", trimmed_name));
-    }
-
-    let mut custom: Vec<AgentClassDefinition> = Vec::new();
-    if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
-        let custom_path = app_dir.join("custom_classes.json");
-        if let Ok(data) = std::fs::read_to_string(&custom_path) {
-            if let Ok(parsed) = serde_json::from_str::<Vec<AgentClassDefinition>>(&data) {
-                custom = parsed;
-            }
-        }
     }
 
     let new_class = AgentClassDefinition {
@@ -47,8 +37,8 @@ pub async fn create_agent_class(
         assigned_skills: None,
     };
 
-    custom.push(new_class.clone());
-    manager::save_custom_classes(&app, &custom)?;
+    all.push(new_class.clone());
+    manager::save_classes(&app, &all)?;
 
     if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
         let role_dir = app_dir.join("classes").join(&trimmed_name);
@@ -77,7 +67,7 @@ pub async fn delete_agent_class(
 ) -> Result<Vec<AgentClassDefinition>, String> {
     manager::log_debug(&format!("[WARDIAN] delete_agent_class called: {}", name));
 
-    let all = manager::get_all_agent_classes(&app);
+    let mut all = manager::get_all_agent_classes(&app);
     if let Some(found) = all.iter().find(|c| c.name == name) {
         if found.is_default {
             return Err("Cannot delete a default class".to_string());
@@ -86,18 +76,8 @@ pub async fn delete_agent_class(
         return Err(format!("Class '{}' not found", name));
     }
 
-    let mut custom: Vec<AgentClassDefinition> = Vec::new();
-    if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
-        let custom_path = app_dir.join("custom_classes.json");
-        if let Ok(data) = std::fs::read_to_string(&custom_path) {
-            if let Ok(parsed) = serde_json::from_str::<Vec<AgentClassDefinition>>(&data) {
-                custom = parsed;
-            }
-        }
-    }
-
-    custom.retain(|c| c.name != name);
-    manager::save_custom_classes(&app, &custom)?;
+    all.retain(|c| c.name != name);
+    manager::save_classes(&app, &all)?;
 
     if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
         let role_dir = app_dir.join("classes").join(&name);

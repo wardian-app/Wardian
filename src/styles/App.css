@@ -209,16 +209,10 @@
   color: var(--color-wardian-text-muted-neutral);
   letter-spacing: normal; /* Normal spacing for Title Case logic */
   pointer-events: none;
-  padding-right: 12px;
-  margin-left: auto; /* Push to the end of the center container */
+  margin-left: 12px; /* Push away from the toggle button */
   white-space: nowrap;
 }
 
-@container (max-width: 850px) {
-  .titlebar-telemetry {
-    display: none;
-  }
-}
 @container (max-width: 500px) {
   .titlebar-tab {
     padding: 0 8px;

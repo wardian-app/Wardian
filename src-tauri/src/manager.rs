@@ -637,31 +637,22 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 }
 
 pub fn get_all_agent_classes(_app: &AppHandle) -> Vec<AgentClassDefinition> {
-    let mut defaults: Vec<AgentClassDefinition> =
-        serde_json::from_str(include_str!("default_classes.json")).unwrap_or_default();
-    for d in defaults.iter_mut() {
-        d.is_default = true;
-    }
-    let mut custom = Vec::new();
     if let Some(app_dir) = get_wardian_home() {
-        if let Ok(data) = std::fs::read_to_string(app_dir.join("custom_classes.json")) {
-            custom = serde_json::from_str::<Vec<AgentClassDefinition>>(&data).unwrap_or_default();
+        let classes_path = app_dir.join("classes.json");
+        if let Ok(data) = std::fs::read_to_string(&classes_path) {
+            return serde_json::from_str::<Vec<AgentClassDefinition>>(&data).unwrap_or_default();
         }
     }
-    for c in custom.iter_mut() {
-        c.is_default = false;
-    }
-    defaults.extend(custom);
-    defaults
+    Vec::new()
 }
 
-pub fn save_custom_classes(
+pub fn save_classes(
     _app: &AppHandle,
     classes: &[AgentClassDefinition],
 ) -> Result<(), String> {
     let app_dir = get_wardian_home().ok_or("No home dir")?;
     let json = serde_json::to_string_pretty(classes).map_err(|e| e.to_string())?;
-    std::fs::write(app_dir.join("custom_classes.json"), json).map_err(|e| e.to_string())?;
+    std::fs::write(app_dir.join("classes.json"), json).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -671,6 +662,32 @@ pub fn init_agent_classes(app: &AppHandle) {
         let _ = std::fs::create_dir_all(&classes_dir);
         let _ = std::fs::create_dir_all(app_dir.join("common/desk"));
         let _ = std::fs::create_dir_all(app_dir.join("common/lineages"));
+
+        let classes_path = app_dir.join("classes.json");
+        
+        // Migration and Initialization
+        if !classes_path.exists() {
+            let mut defaults: Vec<AgentClassDefinition> =
+                serde_json::from_str(include_str!("default_classes.json")).unwrap_or_default();
+            for d in defaults.iter_mut() {
+                d.is_default = true;
+            }
+
+            let custom_path = app_dir.join("custom_classes.json");
+            if custom_path.exists() {
+                if let Ok(data) = std::fs::read_to_string(&custom_path) {
+                    let mut custom = serde_json::from_str::<Vec<AgentClassDefinition>>(&data).unwrap_or_default();
+                    for c in custom.iter_mut() {
+                        c.is_default = false;
+                    }
+                    defaults.extend(custom);
+                }
+                // We've successfully merged. We could delete custom_classes.json here.
+                let _ = std::fs::remove_file(&custom_path);
+            }
+
+            let _ = save_classes(app, &defaults);
+        }
 
         let classes = get_all_agent_classes(app);
         for cls in &classes {

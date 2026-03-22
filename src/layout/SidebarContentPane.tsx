@@ -17,12 +17,13 @@ interface SidebarContentPaneProps {
   agentClasses: AgentClassDefinition[];
   telemetry: Record<string, AgentTelemetry>;
   onAgentsUpdated: () => void;
+  onClassesUpdated: () => void;
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
-}
+  }
 
-export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
+  export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   activeTab,
   leftCollapsed,
   selectedAgentIds,
@@ -31,13 +32,14 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   agentClasses,
   telemetry,
   onAgentsUpdated,
+  onClassesUpdated,
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
-}) => {
-  return (
-    <aside className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
-      <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
+  }) => {
+    return (
+      <aside className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
+        <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)]">
         {activeTab === "agent-config" && (
           <>
             <div className="flex items-center gap-4">
@@ -71,12 +73,11 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
           />
         )}
         {activeTab === "classes" && (
-          <ClassManagerPanel 
+          <ClassManagerPanel
             agentClasses={agentClasses}
-            onClassesUpdated={onAgentsUpdated}
+            onClassesUpdated={onClassesUpdated}
           />
         )}
-
         {activeTab === "ssh" && (
           <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
