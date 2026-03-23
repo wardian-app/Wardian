@@ -13,11 +13,18 @@ pub fn validate_directory_path(path: String) -> bool {
 }
 
 #[tauri::command]
-pub fn get_explorer_root(session_id: Option<String>) -> Result<String, String> {
-    let app_dir = crate::manager::get_wardian_home().ok_or("No home char")?;
+pub async fn get_explorer_root(
+    session_id: Option<String>,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<String, String> {
     if let Some(id) = session_id {
-        Ok(app_dir.join("agents").join(id).to_string_lossy().into_owned())
+        let agents = state.agents.lock().await;
+        if let Some(agent) = agents.get(&id) {
+            return Ok(agent.config.folder.clone());
+        }
+        return Err("Agent not found".into());
     } else {
+        let app_dir = crate::manager::get_wardian_home().ok_or("No home dir")?;
         Ok(app_dir.to_string_lossy().into_owned())
     }
 }

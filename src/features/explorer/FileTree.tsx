@@ -20,10 +20,10 @@ const getFileIcon = (extension: string | null) => {
   if (!extension) return <File className="w-4 h-4 text-wardian-text-muted shrink-0" />;
   const ext = extension.toLowerCase();
   if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) {
-    return <Image className="w-4 h-4 text-blue-400 shrink-0" />;
+    return <Image className="w-4 h-4 text-wardian-processing shrink-0" />;
   }
   if (['ts', 'tsx', 'js', 'jsx', 'json', 'rs', 'py', 'html', 'css', 'md'].includes(ext)) {
-    return <Code className="w-4 h-4 text-yellow-500 shrink-0" />;
+    return <Code className="w-4 h-4 text-wardian-accent shrink-0" />;
   }
   return <FileText className="w-4 h-4 text-wardian-text-muted shrink-0" />;
 }
@@ -84,8 +84,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
       {nodes.map(node => (
         <React.Fragment key={node.path}>
           <div 
-            className="flex items-center gap-1.5 py-1 px-2 hover:bg-wardian-card-bg-muted cursor-pointer rounded-md text-sm whitespace-nowrap overflow-hidden select-none group w-full"
-            style={{ paddingLeft: `${(depth * 12) + 8}px` }}
+            className="flex items-center shrink-0 gap-1.5 py-[2px] pr-2 hover:bg-wardian-card-bg-muted cursor-pointer rounded-md text-[13px] whitespace-nowrap overflow-hidden select-none group w-full"
+            style={{ paddingLeft: `${(depth * 14) + 2}px` }}
             onClick={(e) => handleClick(e, node)}
             onContextMenu={(e) => onContextMenu && onContextMenu(e, node)}
           >
@@ -99,7 +99,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
             
             <span className="text-wardian-text-muted flex items-center shrink-0">
               {node.is_dir ? (
-                <Folder className={`w-4 h-4 ${expanded[node.path] ? 'fill-blue-500 text-blue-500' : 'text-blue-400'}`} />
+                <Folder className={`w-4 h-4 ${expanded[node.path] ? 'fill-wardian-accent/20 text-wardian-accent' : 'text-wardian-processing'}`} />
               ) : (
                 getFileIcon(node.extension)
               )}

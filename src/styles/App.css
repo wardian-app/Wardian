@@ -336,8 +336,7 @@
 .label-small {
   font-size: 10px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.05em;
   color: var(--color-wardian-text-muted-neutral);
 }
 

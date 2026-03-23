@@ -465,19 +465,19 @@ export default function AgentWatchlist({
 
         {/* ── Footer ─────────────────────────────────────── */}
         <div className="mt-3 pt-3 border-t border-wardian-border flex justify-between items-center">
-          <span className="label-small lowercase !tracking-normal">
-            {displayedAgents.length} agent{displayedAgents.length !== 1 ? "s" : ""}
+          <span className="label-small !tracking-normal">
+            {displayedAgents.length} Agent{displayedAgents.length !== 1 ? "s" : ""}
           </span>
           <div className="flex gap-2">
             <button
               onClick={() => onSelectionChange(new Set(displayedAgents.map((a) => a.session_id)))}
-              className="label-small lowercase !tracking-normal hover:text-primary transition-colors"
+              className="label-small !tracking-normal hover:text-primary transition-colors"
             >
               Select All
             </button>
             <button
               onClick={() => onSelectionChange(new Set())}
-              className="label-small lowercase !tracking-normal hover:text-primary transition-colors"
+              className="label-small !tracking-normal hover:text-primary transition-colors"
             >
               Clear
             </button>

@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree } from "lucide-react";
+import { Folder } from "lucide-react";
 
 export type SidebarTab = "explorer" | "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
 
@@ -27,7 +27,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
         title="File Explorer"
       >
         {activeTab === "explorer" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
-        <FolderTree className="w-6 h-6 group-hover:scale-110 transition-transform" strokeWidth={2} />
+        <Folder className="w-6 h-6 group-hover:scale-110 transition-transform" strokeWidth={2} />
       </button>
 
       <button
