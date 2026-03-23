@@ -5,6 +5,7 @@ export interface AgentConfig {
     folder: string;
     resume_session?: string;
     is_off: boolean;
+    provider?: string;
     debug?: boolean;
     model?: string;
     sandbox?: boolean;
@@ -49,7 +50,7 @@ export interface AgentClassDefinition {
     name: string;
     description: string;
     is_default: boolean;
-    gemini_md?: string;
+    instruction_content?: string;
     assigned_skills?: string[];
 }
 

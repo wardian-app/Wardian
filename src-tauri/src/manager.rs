@@ -1,4 +1,5 @@
-use crate::models::{AgentClassDefinition, AgentConfig, AgentTelemetry};
+use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentTelemetry};
+use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -25,35 +26,13 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
     }
 }
 
-pub fn resolve_gemini_binary() -> (String, Vec<String>) {
-    if cfg!(target_os = "windows") {
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let target = std::path::Path::new(&appdata)
-            .join("npm")
-            .join("node_modules")
-            .join("@google")
-            .join("gemini-cli")
-            .join("dist")
-            .join("index.js");
-
-        if target.exists() {
-            (
-                "node".to_string(),
-                vec![target.to_string_lossy().to_string()],
-            )
-        } else {
-            ("gemini.cmd".to_string(), vec![])
-        }
-    } else {
-        ("gemini".to_string(), vec![])
-    }
-}
-
-pub async fn spawn_gemini_cli(
+pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
     is_restored: bool,
 ) -> Result<ActiveAgent, String> {
+    let provider = ProviderFactory::resolve(&config.provider)?;
+
     let cwd = if config.folder.is_empty() {
         if cfg!(windows) {
             std::env::var("USERPROFILE")
@@ -102,96 +81,23 @@ pub async fn spawn_gemini_cli(
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let (bin, args) = resolve_gemini_binary();
+    let (bin, base_args) = provider.get_executable();
     let mut cmd = CommandBuilder::new(bin);
-    for arg in args {
+    for arg in base_args {
         cmd.arg(arg);
     }
     cmd.cwd(&expected_folder);
 
-    let mut final_includes = config
-        .system_include_directories
-        .clone()
-        .unwrap_or_default();
-    if let Some(ref user_dirs) = config.include_directories {
-        for dir in user_dirs {
-            if !final_includes.contains(dir) {
-                final_includes.push(dir.clone());
-            }
-        }
-    }
-
-    if !final_includes.is_empty() {
-        cmd.arg("--include-directories");
-        cmd.arg(final_includes.join(","));
-    }
-
-    if config.debug.unwrap_or(false) {
-        cmd.arg("--debug");
-    }
-    if let Some(ref model) = config.model {
-        cmd.arg("--model");
-        cmd.arg(model);
-    }
-    if config.sandbox.unwrap_or(false) {
-        cmd.arg("--sandbox");
-    }
-    if config.yolo.unwrap_or(false) {
-        cmd.arg("--yolo");
-    }
-    if let Some(ref approval) = config.approval_mode {
-        if !approval.trim().is_empty() {
-            cmd.arg("--approval-mode");
-            cmd.arg(approval);
-        }
-    }
-    if let Some(ref policy) = config.policy {
-        if !policy.is_empty() {
-            cmd.arg("--policy");
-            cmd.arg(policy.join(","));
-        }
-    }
-    if config.experimental_acp.unwrap_or(false) {
-        cmd.arg("--experimental-acp");
-    }
-    if let Some(ref servers) = config.allowed_mcp_server_names {
-        for s in servers {
-            cmd.arg("--allowed-mcp-server-names");
-            cmd.arg(s);
-        }
-    }
-    if let Some(ref extensions) = config.extensions {
-        if !extensions.is_empty() {
-            cmd.arg("--extensions");
-            cmd.arg(extensions.join(","));
-        }
-    }
-    if config.screen_reader.unwrap_or(false) {
-        cmd.arg("--screen-reader");
-    }
-    if let Some(ref format) = config.output_format {
-        cmd.arg("--output-format");
-        cmd.arg(format);
-    }
-
-    if let Some(ref custom) = config.custom_args {
-        if let Some(args) = shlex::split(custom) {
-            for arg in args {
-                cmd.arg(arg);
-            }
-        }
+    let is_resume = config.resume_session.as_deref().is_some_and(|s| !s.is_empty());
+    let spawn_args = provider.get_spawn_args(&config, is_resume);
+    for arg in &spawn_args {
+        cmd.arg(arg);
     }
 
     let resume_id = config.resume_session.as_deref().unwrap_or("");
-
-    if !resume_id.is_empty() {
-        cmd.arg("--resume");
-        cmd.arg(resume_id);
-    }
-
     log_debug(&format!(
-        "[Wardian] Spawning gemini. Session: {}, Resume ID: {}, Restored: {}",
-        config.session_id, resume_id, is_restored
+        "[Wardian] Spawning {} agent. Session: {}, Resume ID: {}, Restored: {}",
+        provider.name(), config.session_id, resume_id, is_restored
     ));
 
     let child = pair
@@ -256,6 +162,7 @@ pub async fn spawn_gemini_cli(
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
 
+    // PTY reader thread: uses provider.parse_output() for event classification
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -275,28 +182,29 @@ pub async fn spawn_gemini_cli(
                                 .into_iter::<serde_json::Value>();
                             match stream.next() {
                                 Some(Ok(parsed)) => {
-                                    if let Some(msg_type) =
-                                        parsed.get("type").and_then(|v| v.as_str())
-                                    {
-                                        if msg_type == "user" {
-                                            if let Ok(mut count) = query_count_clone.lock() {
-                                                *count += 1;
-                                            }
-                                            if let Ok(mut status) = current_status_clone.lock() {
-                                                *status = "Processing...".to_string();
-                                            }
-                                        } else if msg_type == "init" {
-                                            if let Ok(mut ts) = init_timestamp_clone.lock() {
-                                                if let Some(timestamp) =
-                                                    parsed.get("timestamp").and_then(|v| v.as_str())
-                                                {
-                                                    *ts = Some(timestamp.to_string());
+                                    // Use provider to classify the raw JSON into an AgentEvent
+                                    let raw_line = parsed.to_string();
+                                    if let Some(event) = provider.parse_output(&raw_line) {
+                                        match event {
+                                            AgentEvent::UserQuery => {
+                                                if let Ok(mut count) = query_count_clone.lock() {
+                                                    *count += 1;
+                                                }
+                                                if let Ok(mut status) = current_status_clone.lock() {
+                                                    *status = "Processing...".to_string();
                                                 }
                                             }
-                                        } else if ["gemini", "model", "info"].contains(&msg_type) {
-                                            if let Ok(mut status) = current_status_clone.lock() {
-                                                *status = "Idle".to_string();
+                                            AgentEvent::Init { timestamp, .. } => {
+                                                if let Ok(mut ts) = init_timestamp_clone.lock() {
+                                                    *ts = timestamp;
+                                                }
                                             }
+                                            AgentEvent::ModelResponse => {
+                                                if let Ok(mut status) = current_status_clone.lock() {
+                                                    *status = "Idle".to_string();
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     let _ = app.emit("agent-json-event", serde_json::json!({ "session_id": sid_out, "data": parsed }));
@@ -370,14 +278,16 @@ pub async fn resize_pty(
     Ok(())
 }
 
-pub async fn run_gemini_headless(
+pub async fn run_headless(
     cwd: &std::path::PathBuf,
     prompt: &str,
     session_id: &str,
     output_format: &str,
+    provider_name: &str,
 ) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
-    let (bin, args) = resolve_gemini_binary();
+    let provider = ProviderFactory::resolve(provider_name)?;
+    let (bin, base_args) = provider.get_executable();
     let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
         let mut c = tokio::process::Command::new("cmd");
         c.arg("/c").arg(&bin);
@@ -385,7 +295,7 @@ pub async fn run_gemini_headless(
     } else {
         tokio::process::Command::new(&bin)
     };
-    for arg in args {
+    for arg in base_args {
         cmd.arg(arg);
     }
     cmd.arg("-p")
@@ -423,9 +333,13 @@ pub async fn run_gemini_headless(
     }
 }
 
-pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<String> {
+pub async fn obtain_session_id(
+    cwd: &std::path::PathBuf,
+    provider_name: &str,
+) -> Option<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
-    let (bin, args) = resolve_gemini_binary();
+    let provider = ProviderFactory::resolve(provider_name).ok()?;
+    let (bin, base_args) = provider.get_executable();
     let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
         let mut c = tokio::process::Command::new("cmd");
         c.arg("/c").arg(&bin);
@@ -433,7 +347,7 @@ pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<Stri
     } else {
         tokio::process::Command::new(&bin)
     };
-    for arg in args {
+    for arg in base_args {
         cmd.arg(arg);
     }
     cmd.arg("-p")
@@ -454,11 +368,9 @@ pub async fn obtain_session_id_headless(cwd: &std::path::PathBuf) -> Option<Stri
                     break;
                 }
                 if session_id_res.is_none() && line.trim().starts_with('{') {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if parsed.get("type").and_then(|v| v.as_str()) == Some("init") {
-                            if let Some(id) = parsed.get("session_id").and_then(|v| v.as_str()) {
-                                session_id_res = Some(id.to_string());
-                            }
+                    if let Some(AgentEvent::Init { session_id, .. }) = provider.parse_output(line.trim()) {
+                        if !session_id.is_empty() {
+                            session_id_res = Some(session_id);
                         }
                     }
                 }
@@ -693,8 +605,10 @@ pub fn init_agent_classes(app: &AppHandle) {
         for cls in &classes {
             let role_dir = classes_dir.join(&cls.name);
             let _ = std::fs::create_dir_all(&role_dir);
-            let md_path = role_dir.join("GEMINI.md");
-            if !md_path.exists() {
+            
+            // 1. Create AGENTS.md master file
+            let agents_md_path = role_dir.join("AGENTS.md");
+            if !agents_md_path.exists() {
                 let content = if cls.is_default {
                     app.path()
                         .resolve(
@@ -707,7 +621,15 @@ pub fn init_agent_classes(app: &AppHandle) {
                 } else {
                     format!("# {} Agent\n\n{}\n", cls.name, cls.description)
                 };
-                let _ = std::fs::write(md_path, content);
+                let _ = std::fs::write(agents_md_path, content);
+            }
+
+            // 2. Create provider stub files
+            for stub_name in &["GEMINI.md", "CLAUDE.md"] {
+                let stub_path = role_dir.join(stub_name);
+                if !stub_path.exists() {
+                    let _ = std::fs::write(stub_path, "@AGENTS.md\n");
+                }
             }
         }
     }

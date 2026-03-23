@@ -15,7 +15,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
 }) => {
   const [newClassName, setNewClassName] = useState("");
   const [newClassDesc, setNewClassDesc] = useState("");
-  const [newClassGeminiMd, setNewClassGeminiMd] = useState("");
+  const [newClassInstruction, setNewClassInstruction] = useState("");
   const [isCreatingClass, setIsCreatingClass] = useState(false);
 
   const createAgentClass = async (e: React.FormEvent) => {
@@ -26,12 +26,12 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
       await invoke("create_agent_class", {
         name: newClassName,
         description: newClassDesc,
-        geminiMd: newClassGeminiMd || null,
+        instructionContent: newClassInstruction || null,
       });
       onClassesUpdated();
       setNewClassName("");
       setNewClassDesc("");
-      setNewClassGeminiMd("");
+      setNewClassInstruction("");
     } catch (error) {
       alert(`Failed to create class: ${error}`);
     } finally {
@@ -77,13 +77,13 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
             />
           </div>
           <div>
-            <label className="block text-[10px] font-bold text-muted-neutral mb-1">Gemini.md</label>
+            <label className="block text-[10px] font-bold text-muted-neutral mb-1">Instructions</label>
             <textarea
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-40 resize-none font-mono"
               placeholder={`# Role: ${newClassName || "Agent"}\n\nDefine the agent's system prompt...`}
 
-              value={newClassGeminiMd}
-              onChange={(e) => setNewClassGeminiMd(e.currentTarget.value)}
+              value={newClassInstruction}
+              onChange={(e) => setNewClassInstruction(e.currentTarget.value)}
             />
           </div>
           <button

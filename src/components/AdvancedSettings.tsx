@@ -36,7 +36,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
         <div className="flex flex-col gap-4 pt-2">
           {/* Gemini CLI Properties */}
           <div className="flex flex-col gap-4">
-              <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-1 border-b border-wardian-border pb-1">Gemini CLI Parameters</h4>
+              <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-1 border-b border-wardian-border pb-1">Provider Parameters</h4>
               
               <div className="grid grid-cols-2 gap-2 mb-1">
                   <label className="flex items-center gap-2 text-xs text-muted-neutral">

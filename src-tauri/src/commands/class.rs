@@ -12,7 +12,7 @@ pub async fn list_agent_classes(app: AppHandle) -> Result<Vec<AgentClassDefiniti
 pub async fn create_agent_class(
     name: String,
     description: String,
-    gemini_md: Option<String>,
+    instruction_content: Option<String>,
     app: AppHandle,
 ) -> Result<Vec<AgentClassDefinition>, String> {
     manager::log_debug(&format!("[WARDIAN] create_agent_class called: {}", name));
@@ -33,7 +33,7 @@ pub async fn create_agent_class(
         name: trimmed_name.clone(),
         description: description.trim().to_string(),
         is_default: false,
-        gemini_md: None,
+        instruction_content: None,
         assigned_skills: None,
     };
 
@@ -43,16 +43,23 @@ pub async fn create_agent_class(
     if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
         let role_dir = app_dir.join("classes").join(&trimmed_name);
         let _ = std::fs::create_dir_all(&role_dir);
-        let gemini_md_path = role_dir.join("GEMINI.md");
-        if !gemini_md_path.exists() {
-            let content = match gemini_md {
-                Some(ref md) if !md.trim().is_empty() => md.clone(),
-                _ => format!("# {} Agent
 
-{}
-", trimmed_name, new_class.description),
+        // Create AGENTS.md master instruction file
+        let agents_md_path = role_dir.join("AGENTS.md");
+        if !agents_md_path.exists() {
+            let content = match instruction_content {
+                Some(ref md) if !md.trim().is_empty() => md.clone(),
+                _ => format!("# {} Agent\n\n{}\n", trimmed_name, new_class.description),
             };
-            let _ = std::fs::write(gemini_md_path, content);
+            let _ = std::fs::write(agents_md_path, content);
+        }
+
+        // Create provider stubs
+        for stub_name in &["GEMINI.md", "CLAUDE.md"] {
+            let stub_path = role_dir.join(stub_name);
+            if !stub_path.exists() {
+                let _ = std::fs::write(stub_path, "@AGENTS.md\n");
+            }
         }
     }
 

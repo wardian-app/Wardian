@@ -687,11 +687,13 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                             let state = app.state::<crate::state::AppState>();
                             let mut was_online = false;
                             let mut agent_cfg = None;
+                            let mut provider_name = "gemini".to_string();
 
                             {
                                 let mut agents_map = state.agents.lock().await;
                                 if let Some(agent) = agents_map.get_mut(agent_id) {
                                     agent_cfg = Some(agent.config.clone());
+                                    provider_name = agent.config.provider.clone();
                                     let _ = app.emit("agents-updated", ()); // Notify UI early
                                     if let Some(mut child) = agent.child_process.take() {
                                         was_online = true;
@@ -713,7 +715,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
 
                             let run_result = tokio::time::timeout(
                                 std::time::Duration::from_millis(timeout_ms),
-                                crate::manager::run_gemini_headless(&cwd, &prompt, agent_id, output_format)
+                                crate::manager::run_headless(&cwd, &prompt, agent_id, output_format, &provider_name)
                             ).await;
                             
                             let run_result = match run_result {
@@ -748,7 +750,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                                 if let Some(mut cfg) = agent_cfg {
                                     cfg.is_off = false;
                                     log_debug(&format!("[Wardian] Restoring agent {} to Online state after headless run", agent_id));
-                                    if let Ok(agent) = crate::manager::spawn_gemini_cli(app.clone(), cfg.clone(), false).await {
+                                    if let Ok(agent) = crate::manager::spawn_agent(app.clone(), cfg.clone(), false).await {
                                         let mut agents_map = state.agents.lock().await;
                                         if let Some(ref tx) = agent.stdin_tx {
                                             if let Ok(mut senders) = state.input_senders.write() {
@@ -819,7 +821,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                                 log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
                                 let run_result = tokio::time::timeout(
                                     std::time::Duration::from_millis(timeout_ms),
-                                    crate::manager::run_gemini_headless(&cwd, &prompt, agent_id, output_format)
+                                    crate::manager::run_headless(&cwd, &prompt, agent_id, output_format, "gemini")
                                 ).await;
 
                                 let run_result = match run_result {

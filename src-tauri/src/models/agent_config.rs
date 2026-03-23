@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_provider() -> String {
+    "gemini".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -13,6 +17,8 @@ pub struct AgentConfig {
     pub resume_session: Option<String>,
     #[serde(default)]
     pub is_off: bool,
+    #[serde(default = "default_provider")]
+    pub provider: String,
     #[serde(default)]
     pub debug: Option<bool>,
     #[serde(default)]
@@ -49,8 +55,8 @@ pub struct AgentClassDefinition {
     pub description: String,
     #[serde(default)]
     pub is_default: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gemini_md: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", alias = "gemini_md")]
+    pub instruction_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_skills: Option<Vec<String>>,
 }
@@ -86,7 +92,7 @@ mod tests {
             name: "DevOps".into(),
             description: "Manages CI/CD".into(),
             is_default: false,
-            gemini_md: Some("some content".into()),
+            instruction_content: Some("some content".into()),
             assigned_skills: Some(vec!["skill1".into(), "skill2".into()]),
         };
         let json = serde_json::to_string(&cls).unwrap();
@@ -94,7 +100,7 @@ mod tests {
         assert_eq!(cls.name, deserialized.name);
         assert_eq!(cls.description, deserialized.description);
         assert_eq!(cls.is_default, deserialized.is_default);
-        assert_eq!(cls.gemini_md, deserialized.gemini_md);
+        assert_eq!(cls.instruction_content, deserialized.instruction_content);
         assert_eq!(cls.assigned_skills, deserialized.assigned_skills);
     }
 }

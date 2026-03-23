@@ -37,12 +37,12 @@ pub async fn spawn_agent(
             std::path::PathBuf::from(&folder)
         };
 
-        if let Some(real_sid) = manager::obtain_session_id_headless(&cwd).await {
+        if let Some(real_sid) = manager::obtain_session_id(&cwd, "gemini").await {
             manager::log_debug(&format!(
                 "[WARDIAN] Intercepted stream-json session ID: {}",
                 real_sid
             ));
-            // Properly set final_resume because manager::spawn_gemini_cli requires it to launch the persistent agent with --resume
+            // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
             session_id = Some(real_sid.clone());
             actual_resume = Some(real_sid);
         } else {
@@ -64,7 +64,7 @@ pub async fn spawn_agent(
         &session_id,
     ));
 
-    let active_agent = manager::spawn_gemini_cli(app.clone(), config.clone(), false).await?;
+    let active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
 
     // Register input sender BEFORE locking agents map
     if let Some(ref tx) = active_agent.stdin_tx {
@@ -204,7 +204,7 @@ pub async fn resume_agent(
         if agent.config.resume_session.is_none() {
             agent.config.resume_session = Some(agent.config.session_id.clone());
         }
-        let new_active = manager::spawn_gemini_cli(app.clone(), agent.config.clone(), true).await?;
+        let new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
 
         // Register new input sender
         if let Some(ref tx) = new_active.stdin_tx {

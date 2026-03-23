@@ -1,5 +1,6 @@
 pub mod manager;
 pub mod models;
+pub mod providers;
 pub mod state;
 pub mod utils;
 pub mod commands;
@@ -88,7 +89,7 @@ pub fn run() {
                                     &config.session_id,
                                 ));
 
-                                if let Ok(agent) = manager::spawn_gemini_cli(app_handle.clone(), config.clone(), true).await {
+                                if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true).await {
                                     if let Some(ref tx) = agent.stdin_tx {
                                         if let Ok(mut senders) = state.input_senders.write() {
                                             senders.insert(config.session_id.clone(), tx.clone());
