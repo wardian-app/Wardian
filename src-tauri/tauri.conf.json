@@ -29,11 +29,11 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/white/32x32.png",
-      "icons/white/128x128.png",
-      "icons/white/128x128@2x.png",
-      "icons/white/icon.icns",
-      "icons/white/icon.ico"
+      "icons/transparent/32x32.png",
+      "icons/transparent/128x128.png",
+      "icons/transparent/128x128@2x.png",
+      "icons/transparent/icon.icns",
+      "icons/transparent/icon.ico"
     ],
     "resources": ["agent_prompts/*", "../scripts/*"]
   }
