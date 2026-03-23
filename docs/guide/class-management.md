@@ -1,47 +1,33 @@
-# Custom Agent Classes
+# Class Management
 
-Wardian allows you to define specialized **Agent Classes** to give your agent swarm tailored identities and system-wide mandates.
+In Wardian, a **Class** is more than just a label—it is a functional blueprint that defines the core identity, intelligence, and equipment of your agents.
 
-## 🛠️ Creating a Custom Class
+## 🏛️ The Class Library
+Class management has been relocated from the sidebar to the **Library** view to provide a spacious, professional editor for your blueprints.
 
-1. Open the **Left Sidebar (Explorer)** and select the **Class Manager** icon.
-2. Fill out the **Create Class** form:
-    - **Name**: A clear identifier (e.g., "DevOps", "Tester").
-    - **Description**: A short summary of the agent's role.
-    - **GEMINI.md**: The foundational system prompt for the agent. This defines its identity, mission, and tool preferences.
+1. Click **LIBRARY** in the top bar.
+2. Select the **Classes** tab.
+3. Browse the list of available classes or click **Create New Class**.
 
-### What goes in GEMINI.md?
-The `GEMINI.md` is where you define the agent's personality and instructions. It should follow this standard structure:
-```markdown
-# Role: [Class Name]
+## 🔧 Configuring a Blueprint
 
-Define the mission and expertise of the agent.
+### 1. Instruction Set (AGENTS.md)
+Each class is governed by a markdown file. This is where you define:
+- **Role & Personality**: Who the agent is (e.g., "A skeptical security auditor").
+- **Constraints**: What the agent cannot do (e.g., "Never overwrite existing .env files").
+- **Standard Procedures**: How the agent should approach tasks (e.g., "Always draft a plan before executing").
 
-## Core Mandates
-- Rule 1
-- Rule 2
+### 2. Pre-Assigned Skills
+You can pre-load a class with specific modular skills. 
+- When you assign a skill to a class, every agent spawned from that blueprint will automatically have a physical link to those skills in its local directory.
+- This ensures your `Coder` class always starts with `github-cli` and `typescript-tools` ready to go.
 
-## Capabilities & Tool Usage
-- Preferred tools and their specific application.
-```
+### 3. Registry Persistence
+All your custom classes are stored in `~/.wardian/classes.json`. This single file is the source of truth for the Rust backend when spawning new sessions.
 
-## 📂 Automatic Directory Setup
-When a custom class is created, Wardian automatically:
-1. Creates a specialized directory in `~/.wardian/classes/[Class_Name]/`.
-2. Populates it with your provided `GEMINI.md`.
-3. Makes the class available in the **Spawn Instance** form.
-
-## 🗑️ Managing Classes
-
-### Default Classes
-Wardian comes with a set of built-in classes (Architect, Coder, Researcher, etc.) that are read-only and provide a solid foundation for any project.
-
-### Custom Classes
-- **Deleting**: You can delete any custom class by clicking the trash icon in the Class Manager list.
-- **Editing**: To edit a class, modify the `GEMINI.md` file located in its `~/.wardian/classes/` directory. Agents spawned from this class will automatically pick up the new instructions on their next restart.
-
-## 🤖 Precedence of Instructions
-When an agent starts, it combines instructions from multiple sources in this priority order:
-1. **User Request**: The immediate task at hand.
-2. **Project `GEMINI.md`**: Global project-level rules (found in the project root).
-3. **Class `GEMINI.md`**: The role-specific foundation (defined in the Class Manager).
+## 🚀 Spawning from a Class
+To use your blueprint:
+1. Navigate to the **Agent Configuration** tab in the Left Sidebar.
+2. Select your class from the dropdown.
+3. Click **Spawn Instance**.
+The agent will inherit all instructions and skills defined in the Library for that class.

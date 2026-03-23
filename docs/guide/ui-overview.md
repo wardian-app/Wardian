@@ -1,46 +1,44 @@
 # User Interface Overview
 
-Wardian features a high-fidelity, dual-sidebar interface designed for dense information monitoring and rapid multi-agent orchestration.
+Wardian features a high-fidelity, professional interface designed for dense information monitoring and rapid multi-agent orchestration. The layout is optimized for a "Command Center" experience, inspired by productivity tools like Obsidian and VS Code.
 
-## 🧱 The Layout Matrix
+## 🧱 The Layout Architecture
 
-### 1. Navigation Rail (Far Left)
-The thin vertical icon strip used to switch between primary application modes:
-- **Agent Configuration**: Spawn new agents and manage their local settings.
-- **Command Center**: Broadcast commands to multiple agents simultaneously.
-- **Class Manager**: Define and edit agent prompt classes (Architect, Coder, etc.).
-- **Workflows**: Access the visual builder and your saved workflow library.
-- **Remote Connections**: Manage SSH hosts for remote agent deployment.
-- **Settings**: System-wide preferences and theme engine.
+### 1. Unified Top Bar
+The fixed header at the top of the application acts as the global navigation and system telemetry hub.
+- **Left**: Workspace branding and sidebar toggle controls.
+- **Center (View Switcher)**: Quickly toggle between primary workspace modes:
+    - **GRID**: The primary terminal workspace for live agent interaction.
+    - **DASHBOARD**: A summary view of system health and active agent status.
+    - **LIBRARY**: Management center for Prompts, Skills, and Agent Classes.
+    - **WORKFLOWS**: Visual canvas for building automated agent sequences.
+    - **QUEUE / GRAPH / GARDEN**: Specialized visualizations for high-fidelity orchestration.
+- **Right (Telemetry)**: Real-time monitoring of aggregate **CPU**, **Memory**, and **Active Agent** count.
 
-### 2. Content Pane (Left)
-A context-aware, collapsible sidebar that displays the specific menu or form for the active Navigation Rail icon.
-- *Tip*: Collapse this pane (using the `>` button) to maximize your central workspace while keeping the rail icons accessible.
+### 2. Left Sidebar (Control & Context)
+The Left Sidebar provides the "Context" for your work. It consists of:
+- **Navigation Rail**: Vertical icon strip to switch between sidebar tabs:
+    - **Explorer**: Browse the physical files of the selected agent or the Wardian home.
+    - **Agent Configuration**: Quick settings for spawning and tuning agents.
+    - **Command Center**: Broadcast prompts to multiple agents simultaneously.
+    - **Settings**: System-wide preferences and theme engine.
+- **Content Pane**: Displays the detailed menu or tree for the active rail icon.
 
-### 3. Main View (Center)
-The primary workspace where you interact with agents. Use the **View Switcher** (top right) to toggle modes:
-- **GRID**: The primary terminal workspace. Displays agent TUIs in a responsive grid. Supports drag-and-drop reordering.
-- **DASHBOARD**: A summary view of system health, active agent status, and resource usage (CPU/Memory).
-- **WORKFLOWS**: The visual canvas for building and executing automated agent sequences.
-- **QUEUE / GRAPH / GARDEN**: Placeholder views for future high-fidelity interaction visualizations.
-
-### 4. Agent Watchlist (Far Right)
-A collapsible, high-fidelity roster for real-time monitoring of all agent instances.
-- **Status Indicators**: Emerald (Idle), Cyan (Processing), Amber (Action Needed), Gray (Off), Red (Error).
-- **Thought Bubbles**: Real-time "thought" stream showing what the agent is currently working on.
-- **Watchlists**: Organize agents into custom groups (e.g., "Frontend Team", "Critical Tasks") for easier monitoring.
+### 3. Right Sidebar (The Roster)
+The **Agent Watchlist** is your persistent high-fidelity roster for monitoring all active agent instances.
+- **Status Indicators**: Instant visual feedback on agent states (Idle, Processing, Action Needed, Error).
+- **Thought Stream**: A real-time glimpse into the agent's internal monologue and current task progress.
+- **Watchlists**: Organize agents into logical groups (e.g., "Dev Team", "Security Audit") for easier oversight.
 
 ## 🖱️ Interaction Patterns
 
-### Drag and Drop
-- **In Grid**: Drag agent headers to reorder them within the grid layout.
-- **In Watchlist**: Drag agents to reorder them in the roster or move them between custom watchlists.
+### "Physical-First" Navigation
+Wardian mirrors your local file system. Most items in the **Library** or **Explorer** correspond to physical files on your disk (`~/.wardian/`), ensuring your work is transparent and portable.
 
-### Selection & Multi-Action
-- **Single Click**: Focuses an agent in the watchlist and highlights it in the grid.
-- **Ctrl/Cmd + Click**: Select multiple agents for broadcast commands or bulk actions.
-- **Shift + Click**: Select a range of agents in the watchlist.
+### Contextual Awareness
+The interface is reactive. Selecting an agent in the **Roster** (Right Sidebar) will automatically re-root the **Explorer** (Left Sidebar) to that agent's specific working directory.
 
-### Telemetry & Notifications
-- **Global Header**: Real-time aggregate CPU and Memory usage across all active agents.
-- **Alerts**: Floating notifications appear in the top right for critical agent feedback or tool requirements.
+### Keyboard Shortcuts
+- **Ctrl + Tab**: Cycle through main View Modes.
+- **Ctrl + Shift + Tab**: Cycle through main View Modes in reverse.
+- **Ctrl + B**: Toggle the Left Sidebar visibility.

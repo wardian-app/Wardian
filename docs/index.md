@@ -8,11 +8,12 @@ Wardian provides a professional-grade interface for managing, monitoring, and au
 
 ## 🚀 Key Features
 
-- **Dual-Sidebar Command Center**: A professional-grade layout for dense information monitoring and rapid orchestration.
+- **Unified Command Center**: An Obsidian-style layout with a global Top Bar for centralized navigation and telemetry.
 - **Dynamic Terminal Grid**: Monitor multiple agent TUIs simultaneously with responsive grid layouts and drag-and-drop reordering.
+- **Library System**: A centralized repository for managing agent Blueprints (Classes), reusable Prompts, and modular Skills.
+- **File Explorer**: A context-aware tree view for browsing agent workspaces and global project files.
 - **Visual Workflow Builder**: Design and execute complex multi-agent sequences using a pulse-based, deterministic execution engine.
 - **Agent Watchlist (Roster)**: Real-time telemetry, status tracking, and "thought" stream monitoring in a high-fidelity roster.
-- **Physical Integrity**: Robust PTY management with Windows Job Object protection and resource isolation.
 
 ## 🛠️ Get Started
 
@@ -26,4 +27,4 @@ Whether you are a user looking to manage your daily agent operations or a develo
 
 Wardian is built on a **Modular Domain Design** ensuring a strict separation between the "Physical Layer" (Rust/PTY) and the "Logical Layer" (Workflows/Intent).
 
-Read our **[Architecture Decision Records (ADRs)](./adrs/index.md)** to understand the strategic rationale behind every core feature.
+Read our **[Specifications (Specs)](./specs/index.md)** to understand the strategic rationale behind every core feature.
