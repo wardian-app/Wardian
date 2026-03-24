@@ -615,17 +615,24 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             }
 
                             if let Some(last) = lines.iter().rev().find(|l| {
-                                matches!(
-                                    l.get("type").and_then(|v| v.as_str()),
-                                    Some("user") | Some("assistant") | Some("result")
-                                )
+                                let t = l.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                t == "user" || t == "assistant" || t == "result" || t == "system"
                             }) {
                                 let m_type = last.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                s_val = if m_type == "user" {
-                                    "Processing...".into()
-                                } else {
-                                    "Idle".into()
-                                };
+                                if m_type == "system" {
+                                    if last.get("subtype").and_then(|v| v.as_str()) == Some("permission_request") {
+                                        s_val = "Action Needed".into();
+                                    } else {
+                                        // Ignore other system events, they don't cleanly define state
+                                    }
+                                } else if m_type == "user" {
+                                    s_val = "Processing...".into();
+                                } else if m_type == "assistant" {
+                                    // If we see an assistant message, we are either still streaming or just finished.
+                                    s_val = "Processing...".into();
+                                } else if m_type == "result" {
+                                    s_val = "Idle".into();
+                                }
                             }
                         }
                         _ => {
