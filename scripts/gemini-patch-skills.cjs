@@ -1,77 +1,110 @@
 const fs = require('fs');
 const path = require('path');
 
-function locateGeminiJs() {
-    const candidates = [
-        path.join(__dirname, 'bundle', 'gemini.js'),
-        path.join(process.cwd(), 'bundle', 'gemini.js'),
-    ];
-    if (process.platform === 'win32' && process.env.APPDATA) {
-        candidates.push(path.join(process.env.APPDATA, 'npm', 'node_modules', '@google', 'gemini-cli', 'bundle', 'gemini.js'));
-    }
-    for (const p of candidates) {
-        if (fs.existsSync(p)) return p;
+function getCliDir() {
+    const target = 'C:\\nvm4w\\nodejs\\node_modules\\@google\\gemini-cli';
+    if (fs.existsSync(path.join(target, 'package.json'))) {
+        return target;
     }
     return null;
 }
 
-const geminiJsPath = locateGeminiJs();
-if (!geminiJsPath) {
-    process.exit(0);
+const cliDir = getCliDir();
+if (!cliDir) {
+    console.error('Could not find gemini-cli installation.');
+    process.exit(1);
 }
 
-let content = fs.readFileSync(geminiJsPath, 'utf8');
+console.log(`Found CLI dir at ${cliDir}`);
 
-const pathAliasMatch = content.match(/const\s+builtinDir\s*=\s*(path\d+)\.join\(__dirname\d+,\s*"builtin"\)/);
-const pathAlias = pathAliasMatch ? pathAliasMatch[1] : 'path70';
-
-console.log('Applying skill discovery patch...');
-
-// REPLACEMENT: Use an extremely broad regex to find and replace the ENTIRE discoverSkills method body.
-// This ensures that any previous versions (including the "rootSkills" version) are completely wiped.
-const discoverSkillsFullRegex = /async\s+discoverSkills\s*\([^)]*\)\s*\{[\s\S]*?this\.addSkillsWithPrecedence\(projectAgentSkills\);\s*\}/i;
-
-const discoverSkillsFullReplacement = `async discoverSkills(storage2, extensions = [], isTrusted = false, includeDirectories = [], loadFromIncludeDirectories = false) {
-        this.clearSkills();
-        await this.discoverBuiltinSkills();
-        for (const extension of extensions) {
-          if (extension.isActive && extension.skills) {
-            this.addSkillsWithPrecedence(extension.skills);
-          }
+function findFiles(dir, filter) {
+    let results = [];
+    if (!fs.existsSync(dir)) return results;
+    const list = fs.readdirSync(dir);
+    for (const file of list) {
+        const filePath = path.join(dir, file);
+        const stat = fs.statSync(filePath);
+        // Avoid deep traversal of node_modules unless it's our core package
+        if (stat.isDirectory() && !filePath.endsWith('node_modules')) {
+            results = results.concat(findFiles(filePath, filter));
+        } else if (!stat.isDirectory() && filter(filePath)) {
+            results.push(filePath);
         }
+    }
+    return results;
+}
+
+// Support bundled (<=0.34.0-preview, >=0.35.0) and unbundled (0.34.0 stable) structures
+let searchDirs = [
+    path.join(cliDir, 'bundle'),
+    path.join(cliDir, 'dist'),
+    path.join(cliDir, 'node_modules', '@google', 'gemini-cli-core', 'dist')
+];
+
+let allJsFiles = [];
+for (const dir of searchDirs) {
+    if (fs.existsSync(dir)) {
+        allJsFiles = allJsFiles.concat(findFiles(dir, f => f.endsWith('.js')));
+    }
+}
+
+let patchedFiles = 0;
+
+for (const file of allJsFiles) {
+    let content = fs.readFileSync(file, 'utf8');
+    let changed = false;
+
+    if (content.includes('// Treat included directories as secondary workspaces')) {
+        console.log(`Already patched: ${file}`);
+        continue;
+    }
+
+    // 1. Patch discoverSkills method definition dynamically
+    const sigRegex = /(async\s+discoverSkills\s*\([^)]*)(\)\s*\{)/;
+    const anchorRegex = /(const\s+(\w+)\s*=\s*await\s+loadSkillsFromDir\(.*?getUserSkillsDir\(\)\);)/;
+    
+    if (sigRegex.test(content) && anchorRegex.test(content)) {
+        console.log(`Patching discoverSkills definition in ${file}`);
+        
+        const pathAliasMatch = content.match(/const\s+builtinDir\s*=\s*(path\w*)\.join\(/);
+        const pathAlias = pathAliasMatch ? pathAliasMatch[1] : 'path';
+
+        // Update signature to accept new parameters
+        content = content.replace(sigRegex, '$1, includeDirectories = [], loadFromIncludeDirectories = false$2');
+        
+        // Inject logic right before User Skills are loaded
+        const injection = `
+        // Treat included directories as secondary workspaces
         if (loadFromIncludeDirectories && includeDirectories.length > 0) {
           for (const dir of includeDirectories) {
-            // Included folders: .gemini/skills/ and .agents/skills/ only
             const geminiSkills = await loadSkillsFromDir(${pathAlias}.join(dir, ".gemini", "skills"));
             this.addSkillsWithPrecedence(geminiSkills);
             const agentSkills = await loadSkillsFromDir(${pathAlias}.join(dir, ".agents", "skills"));
             this.addSkillsWithPrecedence(agentSkills);
           }
         }
-        const userSkills = await loadSkillsFromDir(Storage.getUserSkillsDir());
-        this.addSkillsWithPrecedence(userSkills);
-        const userAgentSkills = await loadSkillsFromDir(Storage.getUserAgentSkillsDir());
-        this.addSkillsWithPrecedence(userAgentSkills);
-        if (!isTrusted) {
-          debugLogger.debug("Workspace skills disabled because folder is not trusted.");
-          return;
-        }
-        const projectSkills = await loadSkillsFromDir(storage2.getProjectSkillsDir());
-        this.addSkillsWithPrecedence(projectSkills);
-        const projectAgentSkills = await loadSkillsFromDir(storage2.getProjectAgentSkillsDir());
-        this.addSkillsWithPrecedence(projectAgentSkills);
-      }`;
+        $1`;
+        content = content.replace(anchorRegex, injection);
+        changed = true;
+    }
 
-if (!discoverSkillsFullRegex.test(content)) {
-    console.error('Error: Could not locate the discoverSkills method in bundle/gemini.js');
-    process.exit(1);
+    // 2. Patch call sites robustly
+    // Matches up to the closing parenthesis before a semicolon or bracket
+    const callSiteRegex = /await\s+this\.getSkillManager\(\)\.discoverSkills\([\s\S]*?\)(?=;|\s+\{)/g;
+    if (callSiteRegex.test(content)) {
+        console.log(`Patching discoverSkills call sites in ${file}`);
+        content = content.replace(callSiteRegex, `await this.getSkillManager().discoverSkills(this.storage, this.getExtensions(), this.isTrustedFolder(), this.workspaceContext.getDirectories(), this.loadMemoryFromIncludeDirectories)`);
+        changed = true;
+    }
+
+    if (changed) {
+        fs.writeFileSync(file, content);
+        patchedFiles++;
+    }
 }
 
-content = content.replace(discoverSkillsFullRegex, discoverSkillsFullReplacement);
-
-// Re-verify call sites (idempotent)
-const callSiteRegex = /await\s+this\.getSkillManager\(\)\.discoverSkills\([\s\S]*?\)(?=;|\s+\{)/g;
-content = content.replace(callSiteRegex, `await this.getSkillManager().discoverSkills(this.storage, this.getExtensions(), this.isTrustedFolder(), this.workspaceContext.getDirectories(), this.loadMemoryFromIncludeDirectories)`);
-
-fs.writeFileSync(geminiJsPath, content);
-console.log('Successfully applied skill discovery patch.');
+if (patchedFiles > 0) {
+    console.log(`Successfully patched ${patchedFiles} file(s).`);
+} else {
+    console.log('No files needed patching. The environment might already be patched or the structure is unrecognized.');
+}

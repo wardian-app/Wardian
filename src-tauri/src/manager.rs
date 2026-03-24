@@ -88,6 +88,12 @@ pub async fn spawn_agent(
     }
     cmd.cwd(&expected_folder);
 
+    // Enable CLAUDE.md discovery from --add-dir directories so that
+    // class/common/agent instruction files are loaded natively.
+    if config.provider == "claude" {
+        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+    }
+
     let is_resume = config.resume_session.as_deref().is_some_and(|s| !s.is_empty());
     let spawn_args = provider.get_spawn_args(&config, is_resume);
     for arg in &spawn_args {
@@ -194,6 +200,11 @@ pub async fn spawn_agent(
                                                     *status = "Processing...".to_string();
                                                 }
                                             }
+                                            AgentEvent::Generating => {
+                                                if let Ok(mut status) = current_status_clone.lock() {
+                                                    *status = "Processing...".to_string();
+                                                }
+                                            }
                                             AgentEvent::Init { timestamp, .. } => {
                                                 if let Ok(mut ts) = init_timestamp_clone.lock() {
                                                     *ts = timestamp;
@@ -201,7 +212,18 @@ pub async fn spawn_agent(
                                             }
                                             AgentEvent::ModelResponse => {
                                                 if let Ok(mut status) = current_status_clone.lock() {
-                                                    *status = "Idle".to_string();
+                                                    // Claude: finished turn → waiting for user input ("Action Needed")
+                                                    // Other providers: Idle (log-based detection dominates)
+                                                    *status = if provider.name() == "Claude" {
+                                                        "Action Needed".to_string()
+                                                    } else {
+                                                        "Idle".to_string()
+                                                    };
+                                                }
+                                            }
+                                            AgentEvent::ActionRequired { .. } => {
+                                                if let Ok(mut status) = current_status_clone.lock() {
+                                                    *status = "Action Needed".to_string();
                                                 }
                                             }
                                             _ => {}
@@ -223,6 +245,10 @@ pub async fn spawn_agent(
                 }
                 Err(_) => break,
             }
+        }
+        // Process terminated (EOF or error) — mark status as Off
+        if let Ok(mut status) = current_status_clone.lock() {
+            *status = "Off".to_string();
         }
     });
 
@@ -298,13 +324,26 @@ pub async fn run_headless(
     for arg in base_args {
         cmd.arg(arg);
     }
-    cmd.arg("-p")
-        .arg(prompt)
-        .arg("--output-format")
-        .arg(output_format)
-        .arg("--resume")
-        .arg(session_id)
-        .current_dir(cwd)
+    match provider_name {
+        "claude" => {
+            cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
+                .arg("--print")
+                .arg("--output-format")
+                .arg(output_format)
+                .arg("--resume")
+                .arg(session_id)
+                .arg(prompt);
+        }
+        _ => {
+            cmd.arg("-p")
+                .arg(prompt)
+                .arg("--output-format")
+                .arg(output_format)
+                .arg("--resume")
+                .arg(session_id);
+        }
+    }
+    cmd.current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
 
@@ -340,52 +379,90 @@ pub async fn obtain_session_id(
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider = ProviderFactory::resolve(provider_name).ok()?;
     let (bin, base_args) = provider.get_executable();
-    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/c").arg(&bin);
-        c
-    } else {
-        tokio::process::Command::new(&bin)
-    };
+    let mut cmd = tokio::process::Command::new(&bin);
     for arg in base_args {
         cmd.arg(arg);
     }
-    cmd.arg("-p")
-        .arg("Introduce yourself")
-        .arg("-o")
-        .arg("stream-json")
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    if provider_name == "claude" {
+        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
+            .arg("--print")
+            .arg("--verbose")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("Introduce yourself")
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    } else {
+        cmd.arg("-p")
+            .arg("Introduce yourself")
+            .arg("-o")
+            .arg("stream-json")
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
 
-    if let Ok(mut child) = cmd.spawn() {
-        let mut session_id_res = None;
-        if let Some(stdout) = child.stdout.take() {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            while let Ok(n) = reader.read_line(&mut line).await {
-                if n == 0 {
-                    break;
-                }
-                if session_id_res.is_none() && line.trim().starts_with('{') {
-                    if let Some(AgentEvent::Init { session_id, .. }) = provider.parse_output(line.trim()) {
-                        if !session_id.is_empty() {
-                            session_id_res = Some(session_id);
+    log_debug(&format!("[WARDIAN-DEBUG] Running obtain_session_id for provider {}", provider_name));
+    match cmd.spawn() {
+        Ok(mut child) => {
+            log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
+            let mut session_id_res = None;
+            
+            if let Some(stdout) = child.stdout.take() {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 {
+                        log_debug("[WARDIAN-DEBUG] Reached EOF on stdout.");
+                        break;
+                    }
+                    let trimmed = line.trim();
+                    if session_id_res.is_none() {
+                        if let Some(start) = trimmed.find('{') {
+                            let json_part = &trimmed[start..];
+                            if let Some(evt) = provider.parse_output(json_part) {
+                                if let AgentEvent::Init { session_id, .. } = evt {
+                                    if !session_id.is_empty() {
+                                        log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", session_id));
+                                        session_id_res = Some(session_id);
+                                    }
+                                }
+                            }
                         }
                     }
+                    line.clear();
                 }
-                line.clear();
             }
+            let _ = child.wait().await;
+            log_debug(&format!("[WARDIAN-DEBUG] Returning session_id: {:?}", session_id_res));
+            session_id_res
         }
-        let _ = child.wait().await;
-        return session_id_res;
+        Err(e) => {
+            log_debug(&format!("[WARDIAN-DEBUG] Failed to spawn cmd: {:?}", e));
+            None
+        }
     }
-    None
+}
+
+/// Converts a workspace absolute path into Claude Code's project directory name.
+/// Claude replaces each of `:`, `\`, `/`, `.` with `-`.
+/// e.g. `D:\Development\Wardian` → `D--Development-Wardian`
+fn claude_project_dir_name(workspace: &str) -> String {
+    workspace
+        .chars()
+        .map(|c| match c {
+            ':' | '\\' | '/' | '.' => '-',
+            _ => c,
+        })
+        .collect()
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     struct AgentSnapshot {
         session_id: String,
+        provider: String,
+        folder: String,
         process_id: Option<u32>,
         query_count: std::sync::Arc<std::sync::Mutex<usize>>,
         init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -399,6 +476,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             .iter()
             .map(|(sid, agent)| AgentSnapshot {
                 session_id: sid.clone(),
+                provider: agent.config.provider.clone(),
+                folder: agent.config.folder.clone(),
                 process_id: agent.process_id,
                 query_count: agent.query_count.clone(),
                 init_timestamp: agent.init_timestamp.clone(),
@@ -457,63 +536,127 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 );
             }
 
+            // Detect whether the agent process is still alive
+            let process_alive = snap
+                .process_id
+                .map(|pid| sys.process(sysinfo::Pid::from_u32(pid)).is_some())
+                .unwrap_or(false);
+
             let mut q_count = 0;
             let mut i_ts = None;
             let mut s_val = "Idle".to_string();
             let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
 
+            // Provider-aware log discovery
             if log_path_lock.is_none() {
-                if let Some(app_dir) = get_wardian_home() {
-                    let tmp_dir = app_dir.join("../.gemini/tmp");
-                    if let Ok(entries) = std::fs::read_dir(tmp_dir) {
-                        for entry in entries.flatten() {
-                            let chat_dir = entry.path().join("chats");
-                            if let Ok(chat_files) = std::fs::read_dir(chat_dir) {
-                                for chat_file in chat_files.flatten() {
-                                    if let Ok(content) = std::fs::read_to_string(chat_file.path()) {
-                                        if let Ok(p) =
-                                            serde_json::from_str::<serde_json::Value>(&content)
-                                        {
-                                            if p.get("sessionId").and_then(|v| v.as_str())
-                                                == Some(&snap.session_id)
-                                            {
-                                                *log_path_lock = Some(chat_file.path());
-                                                break;
+                match snap.provider.as_str() {
+                    "claude" => {
+                        // Claude Code stores sessions at:
+                        // ~/.claude/projects/<project_dir>/<session_id>.jsonl
+                        // where <project_dir> is the workspace path with :\/. replaced by -
+                        if let Some(home) = dirs::home_dir() {
+                            let project_dir = claude_project_dir_name(&snap.folder);
+                            let candidate = home
+                                .join(".claude")
+                                .join("projects")
+                                .join(&project_dir)
+                                .join(format!("{}.jsonl", snap.session_id));
+                            if candidate.exists() {
+                                *log_path_lock = Some(candidate);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Gemini: scan .gemini/tmp for chat log files
+                        if let Some(app_dir) = get_wardian_home() {
+                            let tmp_dir = app_dir.join("../.gemini/tmp");
+                            if let Ok(entries) = std::fs::read_dir(tmp_dir) {
+                                for entry in entries.flatten() {
+                                    let chat_dir = entry.path().join("chats");
+                                    if let Ok(chat_files) = std::fs::read_dir(chat_dir) {
+                                        for chat_file in chat_files.flatten() {
+                                            if let Ok(content) = std::fs::read_to_string(chat_file.path()) {
+                                                if let Ok(p) =
+                                                    serde_json::from_str::<serde_json::Value>(&content)
+                                                {
+                                                    if p.get("sessionId").and_then(|v| v.as_str())
+                                                        == Some(&snap.session_id)
+                                                    {
+                                                        *log_path_lock = Some(chat_file.path());
+                                                        break;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
+                                    if log_path_lock.is_some() {
+                                        break;
+                                    }
                                 }
-                            }
-                            if log_path_lock.is_some() {
-                                break;
                             }
                         }
                     }
                 }
             }
 
+            // Provider-aware log parsing for status/query enrichment
             if let Some(ref path) = *log_path_lock {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
-                            q_count = msgs
-                                .iter()
-                                .filter(|m| m.get("type").and_then(|v| v.as_str()) == Some("user"))
-                                .count();
-                            if let Some(last) = msgs.last() {
-                                let m_type =
-                                    last.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match snap.provider.as_str() {
+                        "claude" => {
+                            // Claude logs are JSONL — one JSON object per line
+                            let lines: Vec<serde_json::Value> = content
+                                .lines()
+                                .filter_map(|l| serde_json::from_str(l).ok())
+                                .collect();
+
+                            q_count = lines.iter().filter(|l| {
+                                l.get("type").and_then(|v| v.as_str()) == Some("user")
+                            }).count();
+
+                            if let Some(first) = lines.first() {
+                                if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
+                                    i_ts = Some(ts.to_string());
+                                }
+                            }
+
+                            if let Some(last) = lines.iter().rev().find(|l| {
+                                matches!(
+                                    l.get("type").and_then(|v| v.as_str()),
+                                    Some("user") | Some("assistant") | Some("result")
+                                )
+                            }) {
+                                let m_type = last.get("type").and_then(|v| v.as_str()).unwrap_or("");
                                 s_val = if m_type == "user" {
                                     "Processing...".into()
-                                } else if ["gemini", "model", "info"].contains(&m_type) {
-                                    "Idle".into()
                                 } else {
+                                    // "assistant" or "result": Claude finished its turn, waiting for user
                                     "Action Needed".into()
                                 };
                             }
                         }
-                        if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
-                            i_ts = Some(st.to_string());
+                        _ => {
+                            // Gemini logs are a single JSON object with a messages array
+                            if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
+                                    q_count = msgs.iter().filter(|m| {
+                                        m.get("type").and_then(|v| v.as_str()) == Some("user")
+                                    }).count();
+                                    if let Some(last) = msgs.last() {
+                                        let m_type = last.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                        s_val = if m_type == "user" {
+                                            "Processing...".into()
+                                        } else if ["gemini", "model", "info"].contains(&m_type) {
+                                            "Idle".into()
+                                        } else {
+                                            "Action Needed".into()
+                                        };
+                                    }
+                                }
+                                if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
+                                    i_ts = Some(st.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -525,7 +668,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             if let Some(ts) = i_ts {
                 *snap.init_timestamp.lock().unwrap() = Some(ts);
             }
-            if s_val != "Idle" || *snap.current_status.lock().unwrap() == "Idle" {
+
+            // If the process has terminated, force status to "Off" so the UI
+            // doesn't stay stuck on "Processing..." or "Action Needed".
+            if !process_alive && snap.process_id.is_some() {
+                *snap.current_status.lock().unwrap() = "Off".to_string();
+            } else if s_val != "Idle" || *snap.current_status.lock().unwrap() == "Idle" {
                 *snap.current_status.lock().unwrap() = s_val;
             }
 
@@ -574,6 +722,9 @@ pub fn init_agent_classes(app: &AppHandle) {
         let _ = std::fs::create_dir_all(&classes_dir);
         let _ = std::fs::create_dir_all(app_dir.join("common/desk"));
         let _ = std::fs::create_dir_all(app_dir.join("common/lineages"));
+
+        // Ensure Claude can discover skills from the canonical .agents/skills/ location
+        ensure_claude_skills_link(&app_dir.join("common"));
 
         let classes_path = app_dir.join("classes.json");
         
@@ -624,7 +775,10 @@ pub fn init_agent_classes(app: &AppHandle) {
                 let _ = std::fs::write(agents_md_path, content);
             }
 
-            // 2. Create provider stub files
+            // 2. Symlink .claude/skills/ → .agents/skills/ for Claude discovery
+            ensure_claude_skills_link(&role_dir);
+
+            // 3. Create provider stub files
             for stub_name in &["GEMINI.md", "CLAUDE.md"] {
                 let stub_path = role_dir.join(stub_name);
                 if !stub_path.exists() {
