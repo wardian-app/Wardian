@@ -13,6 +13,8 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
         if !agent_path.exists() {
             let _ = std::fs::create_dir_all(&agent_path);
         }
+        // Ensure Claude can discover skills from agent's .agents/skills/
+        ensure_claude_skills_link(&agent_path);
 
         if common_path.exists() {
             dirs.push(common_path.to_string_lossy().to_string());
@@ -25,6 +27,51 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
         }
     }
     dirs
+}
+
+/// Ensures `.claude/skills` is a symlink (or junction on Windows) pointing to
+/// `.agents/skills` within the given base directory. This lets Claude Code
+/// natively discover skills from the provider-agnostic canonical location.
+/// No-ops if the link already exists and points to the right target.
+pub fn ensure_claude_skills_link(base_dir: &std::path::Path) {
+    let canonical = base_dir.join(".agents").join("skills");
+    let link = base_dir.join(".claude").join("skills");
+
+    // Ensure canonical dir exists
+    let _ = std::fs::create_dir_all(&canonical);
+
+    // If link already exists (symlink, junction, or real dir), check if it's correct
+    if link.exists() || link.symlink_metadata().is_ok() {
+        // Already a symlink/junction — verify target
+        if let Ok(target) = std::fs::read_link(&link) {
+            if target == canonical {
+                return; // Already correct
+            }
+            // Wrong target — remove and recreate
+            let _ = std::fs::remove_dir(&link);
+        } else {
+            // Real directory, not a symlink — leave it alone to avoid data loss
+            return;
+        }
+    }
+
+    // Ensure parent .claude/ dir exists
+    let _ = std::fs::create_dir_all(base_dir.join(".claude"));
+
+    // Create the symlink/junction
+    #[cfg(windows)]
+    {
+        // Use a junction (no elevated privileges required, unlike symlinks)
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&canonical)
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::os::unix::fs::symlink(&canonical, &link);
+    }
 }
 
 pub fn validate_directory_path(path: &str) -> bool {

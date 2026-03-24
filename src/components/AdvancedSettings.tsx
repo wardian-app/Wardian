@@ -37,53 +37,42 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
           {/* Gemini CLI Properties */}
           <div className="flex flex-col gap-4">
               <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-1 border-b border-wardian-border pb-1">Provider Parameters</h4>
-              
+
               <div className="grid grid-cols-2 gap-2 mb-1">
                   <label className="flex items-center gap-2 text-xs text-muted-neutral">
                       <input type="checkbox" checked={config.debug || false} onChange={e => updateField("debug", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
                       Debug Mode
                   </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-neutral">
-                      <input type="checkbox" checked={config.sandbox || false} onChange={e => updateField("sandbox", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
-                      Sandbox
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-neutral">
-                      <input type="checkbox" checked={config.yolo || false} onChange={e => updateField("yolo", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
-                      YOLO
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-neutral">
-                      <input type="checkbox" checked={config.experimental_acp || false} onChange={e => updateField("experimental_acp", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
-                      Exp. ACP
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-neutral">
-                      <input type="checkbox" checked={config.screen_reader || false} onChange={e => updateField("screen_reader", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
-                      Screen Reader
-                  </label>
+                  {(!config.provider || config.provider === 'gemini') && (
+                    <>
+                      <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                          <input type="checkbox" checked={config.sandbox || false} onChange={e => updateField("sandbox", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                          Sandbox
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                          <input type="checkbox" checked={config.yolo || false} onChange={e => updateField("yolo", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                          YOLO
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                          <input type="checkbox" checked={config.experimental_acp || false} onChange={e => updateField("experimental_acp", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                          Exp. ACP
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                          <input type="checkbox" checked={config.screen_reader || false} onChange={e => updateField("screen_reader", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                          Screen Reader
+                      </label>
+                    </>
+                  )}
               </div>
 
               <div>
                   <label className="block text-[10px] font-bold text-muted-neutral mb-1">Model Override</label>
                   <input
                   className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                  placeholder="e.g. gemini-2.5-flash"
+                  placeholder="e.g. gemini-2.5-flash / claude-3-7-sonnet"
                   value={config.model || ""}
                   onChange={(e) => updateField("model", e.target.value || undefined)}
                   />
-              </div>
-
-              <div>
-                  <label className="block text-[10px] font-bold text-muted-neutral mb-1">Approval Mode</label>
-                  <select
-                  className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                  value={config.approval_mode || ""}
-                  onChange={(e) => updateField("approval_mode", (e.target.value as any) || undefined)}
-                  >
-                      <option value="">(None - Inherit Default)</option>
-                      <option value="default">Default</option>
-                      <option value="auto_edit">Auto Edit</option>
-                      <option value="yolo">YOLO</option>
-                      <option value="plan">Plan</option>
-                  </select>
               </div>
 
               <ListEditor 
@@ -99,40 +88,123 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                 }}
               />
 
-              <ListEditor 
-                label="Policies" 
-                values={config.policy} 
-                placeholder="e.g. read_only"
-                onChange={(vals: string[]) => updateField("policy", vals)} 
-              />
+              {config.provider === 'claude' && (
+                <>
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Permission Mode</label>
+                      <select
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      value={config.permission_mode || ""}
+                      onChange={(e) => updateField("permission_mode", (e.target.value as any) || undefined)}
+                      >
+                          <option value="">(None - Inherit Default)</option>
+                          <option value="default">Default</option>
+                          <option value="plan">Plan</option>
+                          <option value="auto-accept">Auto Accept</option>
+                      </select>
+                  </div>
 
-              <ListEditor 
-                label="Allowed MCP Servers" 
-                values={config.allowed_mcp_server_names} 
-                placeholder="e.g. sqlite-mcp"
-                onChange={(vals: string[]) => updateField("allowed_mcp_server_names", vals)} 
-              />
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Max Turns</label>
+                      <input
+                      type="number"
+                      min="0"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      placeholder="Unlimited"
+                      value={config.max_turns ?? ""}
+                      onChange={(e) => updateField("max_turns", e.target.value ? parseInt(e.target.value) : undefined)}
+                      />
+                  </div>
 
-              <ListEditor 
-                label="Extensions" 
-                values={config.extensions} 
-                placeholder="e.g. github, search"
-                onChange={(vals: string[]) => updateField("extensions", vals)} 
-              />
+                  <ListEditor
+                    label="Allowed Tools"
+                    values={config.allowed_tools}
+                    placeholder="e.g. Read, Write, Bash"
+                    onChange={(vals: string[]) => updateField("allowed_tools", vals)}
+                  />
 
-              <div>
-                  <label className="block text-[10px] font-bold text-muted-neutral mb-1">Output Format</label>
-                  <select
-                  className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                  value={config.output_format || ""}
-                  onChange={(e) => updateField("output_format", (e.target.value as "text" | "json" | "stream-json") || undefined)}
-                  >
-                      <option value="">(None - Inherit Default)</option>
-                      <option value="text">Text</option>
-                      <option value="json">JSON</option>
-                      <option value="stream-json">Stream JSON</option>
-                  </select>
-              </div>
+                  <ListEditor
+                    label="Disallowed Tools"
+                    values={config.disallowed_tools}
+                    placeholder="e.g. Bash"
+                    onChange={(vals: string[]) => updateField("disallowed_tools", vals)}
+                  />
+
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">MCP Config Path</label>
+                      <input
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors font-mono"
+                      placeholder="e.g. ~/.claude/mcp.json"
+                      value={config.mcp_config || ""}
+                      onChange={(e) => updateField("mcp_config", e.target.value || undefined)}
+                      />
+                  </div>
+
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Append System Prompt</label>
+                      <textarea
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-16 resize-none"
+                      placeholder="Additional instructions appended to Claude's system prompt"
+                      value={config.append_system_prompt || ""}
+                      onChange={(e) => updateField("append_system_prompt", e.target.value || undefined)}
+                      />
+                  </div>
+                </>
+              )}
+
+              {(!config.provider || config.provider === 'gemini') && (
+                <>
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Approval Mode</label>
+                      <select
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      value={config.approval_mode || ""}
+                      onChange={(e) => updateField("approval_mode", (e.target.value as any) || undefined)}
+                      >
+                          <option value="">(None - Inherit Default)</option>
+                          <option value="default">Default</option>
+                          <option value="auto_edit">Auto Edit</option>
+                          <option value="yolo">YOLO</option>
+                          <option value="plan">Plan</option>
+                      </select>
+                  </div>
+
+                  <ListEditor 
+                    label="Policies" 
+                    values={config.policy} 
+                    placeholder="e.g. read_only"
+                    onChange={(vals: string[]) => updateField("policy", vals)} 
+                  />
+
+                  <ListEditor 
+                    label="Allowed MCP Servers" 
+                    values={config.allowed_mcp_server_names} 
+                    placeholder="e.g. sqlite-mcp"
+                    onChange={(vals: string[]) => updateField("allowed_mcp_server_names", vals)} 
+                  />
+
+                  <ListEditor 
+                    label="Extensions" 
+                    values={config.extensions} 
+                    placeholder="e.g. github, search"
+                    onChange={(vals: string[]) => updateField("extensions", vals)} 
+                  />
+
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Output Format</label>
+                      <select
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      value={config.output_format || ""}
+                      onChange={(e) => updateField("output_format", (e.target.value as "text" | "json" | "stream-json") || undefined)}
+                      >
+                          <option value="">(None - Inherit Default)</option>
+                          <option value="text">Text</option>
+                          <option value="json">JSON</option>
+                          <option value="stream-json">Stream JSON</option>
+                      </select>
+                  </div>
+                </>
+              )}
           </div>
 
           {/* Custom Arguments */}

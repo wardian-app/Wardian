@@ -20,6 +20,14 @@ export interface AgentConfig {
     screen_reader?: boolean;
     output_format?: "text" | "json" | "stream-json";
     custom_args?: string;
+
+    // Claude-specific fields
+    permission_mode?: "default" | "plan" | "auto-accept";
+    max_turns?: number;
+    allowed_tools?: string[];
+    disallowed_tools?: string[];
+    append_system_prompt?: string;
+    mcp_config?: string;
 }
 
 export * from "./workflow";

@@ -47,6 +47,20 @@ pub struct AgentConfig {
     pub output_format: Option<String>,
     #[serde(default)]
     pub custom_args: Option<String>,
+
+    // Claude-specific fields
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub append_system_prompt: Option<String>,
+    #[serde(default)]
+    pub mcp_config: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

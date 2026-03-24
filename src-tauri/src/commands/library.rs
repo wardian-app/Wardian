@@ -226,7 +226,7 @@ fn get_target_skills_dir(target_type: &str, target_id: &str) -> Result<std::path
     let base = match target_type {
         "agent" => home.join("agents").join(target_id),
         "class" => home.join("classes").join(target_id),
-        "user" => home.join("common"), // Deploying to user common folder
+        "user" => home.join("common"),
         _ => return Err(format!("Unknown target type: {}", target_type)),
     };
     Ok(base.join(".agents").join("skills"))
@@ -250,7 +250,7 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 pub async fn deploy_skill(_app: AppHandle, source_path: String, target_type: String, target_id: String) -> Result<(), String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let src_dir = home.join(LIBRARY_SKILLS_DIR).join(&source_path);
-    
+
     if !src_dir.exists() || !src_dir.is_dir() {
         return Err(format!("Skill source not found or is not a directory: {:?}", src_dir));
     }
@@ -263,12 +263,10 @@ pub async fn deploy_skill(_app: AppHandle, source_path: String, target_type: Str
     let skill_name = Path::new(&source_path).file_name().unwrap_or_default();
     let dst_dir = target_skills_dir.join(skill_name);
 
-    // Fallback to recursive copy. 
-    // Directory symlinks on Windows require elevated privileges or developer mode.
     if dst_dir.exists() {
         fs::remove_dir_all(&dst_dir).map_err(|e| e.to_string())?;
     }
-    
+
     copy_dir_all(&src_dir, &dst_dir).map_err(|e| e.to_string())?;
 
     Ok(())

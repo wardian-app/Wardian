@@ -23,6 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 .gemini/*
+.claude/*
 
 # Backup and test files
 *.bak

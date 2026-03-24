@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use crate::models::provider::AgentProvider;
 use crate::providers::gemini::GeminiProvider;
+use crate::providers::claude::ClaudeProvider;
 
 /// Resolves the correct `AgentProvider` implementation based on the provider name
 /// stored in `AgentConfig`.
@@ -12,10 +13,12 @@ impl ProviderFactory {
     /// Currently supported: `"gemini"`.
     /// Returns `Err` for unknown provider names.
     pub fn resolve(provider_name: &str) -> Result<Arc<dyn AgentProvider>, String> {
-        match provider_name.to_lowercase().as_str() {
+        let lower = provider_name.to_lowercase();
+        match lower.as_str() {
             "gemini" => Ok(Arc::new(GeminiProvider::new())),
+            "claude" => Ok(Arc::new(ClaudeProvider::new())), // Added Claude provider
             other => Err(format!(
-                "Unknown provider '{}'. Supported providers: gemini",
+                "Unknown provider '{}'. Supported providers: gemini, claude", // Updated error message
                 other
             )),
         }
@@ -41,13 +44,20 @@ mod tests {
     }
 
     #[test]
+    fn resolve_claude_succeeds() {
+        let provider = ProviderFactory::resolve("claude");
+        assert!(provider.is_ok());
+        assert_eq!(provider.unwrap().name(), "Claude");
+    }
+
+    #[test]
     fn resolve_unknown_returns_error() {
-        let result = ProviderFactory::resolve("claude");
+        let result = ProviderFactory::resolve("invalid_provider_name");
         assert!(result.is_err());
         match result {
             Err(err) => {
                 assert!(err.contains("Unknown provider"));
-                assert!(err.contains("claude"));
+                assert!(err.contains("invalid_provider_name"));
             }
             Ok(_) => panic!("Expected error for unknown provider"),
         }

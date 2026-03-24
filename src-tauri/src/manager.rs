@@ -212,13 +212,7 @@ pub async fn spawn_agent(
                                             }
                                             AgentEvent::ModelResponse => {
                                                 if let Ok(mut status) = current_status_clone.lock() {
-                                                    // Claude: finished turn → waiting for user input ("Action Needed")
-                                                    // Other providers: Idle (log-based detection dominates)
-                                                    *status = if provider.name() == "Claude" {
-                                                        "Action Needed".to_string()
-                                                    } else {
-                                                        "Idle".to_string()
-                                                    };
+                                                    *status = "Idle".to_string();
                                                 }
                                             }
                                             AgentEvent::ActionRequired { .. } => {
@@ -630,8 +624,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 s_val = if m_type == "user" {
                                     "Processing...".into()
                                 } else {
-                                    // "assistant" or "result": Claude finished its turn, waiting for user
-                                    "Action Needed".into()
+                                    "Idle".into()
                                 };
                             }
                         }
@@ -646,10 +639,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                         let m_type = last.get("type").and_then(|v| v.as_str()).unwrap_or("");
                                         s_val = if m_type == "user" {
                                             "Processing...".into()
-                                        } else if ["gemini", "model", "info"].contains(&m_type) {
-                                            "Idle".into()
                                         } else {
-                                            "Action Needed".into()
+                                            "Idle".into()
                                         };
                                     }
                                 }

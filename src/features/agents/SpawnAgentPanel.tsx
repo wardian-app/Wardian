@@ -130,6 +130,19 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
         </div>
         <div>
           <label className="block text-[10px] font-bold text-muted-neutral mb-1">
+            Provider Engine
+          </label>
+          <select
+            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+            value={spawnAdvancedConfig.provider || "gemini"}
+            onChange={(e) => setSpawnAdvancedConfig(prev => ({ ...prev, provider: e.target.value }))}
+          >
+            <option value="gemini">Gemini</option>
+            <option value="claude">Claude</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold text-muted-neutral mb-1">
             Session ID (Optional)
           </label>
           <input
@@ -139,7 +152,6 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
             onChange={(e) => setResumeSession(e.currentTarget.value)}
           />
         </div>
-
         <AdvancedSettings
           config={spawnAdvancedConfig}
           updateField={(field, val) =>

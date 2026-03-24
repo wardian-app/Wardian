@@ -49,7 +49,7 @@ pub async fn create_agent_class(
         if !agents_md_path.exists() {
             let content = match instruction_content {
                 Some(ref md) if !md.trim().is_empty() => md.clone(),
-                _ => format!("# {} Agent\n\n{}\n", trimmed_name, new_class.description),
+                _ => format!("# Role: {}\n\n{}\n", trimmed_name, new_class.description),
             };
             let _ = std::fs::write(agents_md_path, content);
         }

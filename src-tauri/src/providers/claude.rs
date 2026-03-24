@@ -1,0 +1,364 @@
+use crate::models::provider::{AgentEvent, AgentProvider};
+use crate::models::AgentConfig;
+
+/// The concrete `AgentProvider` implementation for Claude Code CLI.
+pub struct ClaudeProvider;
+
+impl Default for ClaudeProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClaudeProvider {
+    pub fn new() -> Self {
+        ClaudeProvider
+    }
+}
+
+impl AgentProvider for ClaudeProvider {
+    fn name(&self) -> &str {
+        "Claude"
+    }
+
+    fn get_executable(&self) -> (String, Vec<String>) {
+        ("claude".to_string(), vec![])
+    }
+
+    fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+
+        // Persistent PTY session: use streaming JSON I/O without --print
+        // so Claude stays alive and processes multiple turns from stdin.
+        args.push("--verbose".into());
+        args.push("--input-format".into());
+        args.push("stream-json".into());
+        args.push("--output-format".into());
+        args.push("stream-json".into());
+
+        if let Some(ref model) = config.model {
+            args.push("--model".into());
+            args.push(model.clone());
+        }
+
+        // Only set --name on fresh sessions; skip on resume to avoid conflicts with --resume
+        if !is_resume && !config.session_name.trim().is_empty() {
+            args.push("--name".into());
+            args.push(config.session_name.clone());
+        }
+
+        let mut final_includes = config
+            .system_include_directories
+            .clone()
+            .unwrap_or_default();
+        if let Some(ref user_dirs) = config.include_directories {
+            for dir in user_dirs {
+                if !final_includes.contains(dir) {
+                    final_includes.push(dir.clone());
+                }
+            }
+        }
+        if !final_includes.is_empty() {
+            for dir in final_includes {
+                args.push("--add-dir".into());
+                args.push(dir);
+            }
+        }
+
+        if config.debug.unwrap_or(false) {
+            args.push("--debug".into());
+            args.push("api,hooks".into());
+        }
+
+        // Claude-specific parameters
+        if let Some(ref mode) = config.permission_mode {
+            if !mode.trim().is_empty() {
+                args.push("--permission-mode".into());
+                args.push(mode.clone());
+            }
+        }
+        if let Some(turns) = config.max_turns {
+            if turns > 0 {
+                args.push("--max-turns".into());
+                args.push(turns.to_string());
+            }
+        }
+        if let Some(ref tools) = config.allowed_tools {
+            for tool in tools {
+                args.push("--allowedTools".into());
+                args.push(tool.clone());
+            }
+        }
+        if let Some(ref tools) = config.disallowed_tools {
+            for tool in tools {
+                args.push("--disallowedTools".into());
+                args.push(tool.clone());
+            }
+        }
+        if let Some(ref prompt) = config.append_system_prompt {
+            if !prompt.trim().is_empty() {
+                args.push("--append-system-prompt".into());
+                args.push(prompt.clone());
+            }
+        }
+        if let Some(ref path) = config.mcp_config {
+            if !path.trim().is_empty() {
+                args.push("--mcp-config".into());
+                args.push(path.clone());
+            }
+        }
+
+        // Custom args (shell-parsed) - users can supply additional flags here
+        if let Some(ref custom) = config.custom_args {
+            if let Some(parsed) = shlex::split(custom) {
+                args.extend(parsed);
+            }
+        }
+
+        // Resume flag
+        let resume_id = config.resume_session.as_deref().unwrap_or("");
+        if is_resume && !resume_id.is_empty() {
+            args.push("--resume".into());
+            args.push(resume_id.to_string());
+        }
+
+        args
+    }
+
+    fn parse_output(&self, line: &str) -> Option<AgentEvent> {
+        let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+        let msg_type = parsed.get("type")?.as_str()?;
+
+        // Example Claude stream-json mapping:
+        // Claude's exact JSON format is undocumented, so we will pass
+        // most events directly mapping known keys, or fallback to returning Unknown
+        // so that the frontend terminal logic can just render the raw JSON payload.
+        match msg_type {
+            "system" => {
+                let subtype = parsed.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                match subtype {
+                    "init" => {
+                        let session_id = parsed
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let timestamp = parsed
+                            .get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        Some(AgentEvent::Init { session_id, timestamp })
+                    }
+                    // Claude Code emits this when a tool call needs explicit permission
+                    "permission_request" => {
+                        let message = parsed
+                            .get("tool_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool")
+                            .to_string();
+                        Some(AgentEvent::ActionRequired { message })
+                    }
+                    _ => Some(AgentEvent::Unknown),
+                }
+            }
+            // User input is sent via stdin; Claude echoes it on stdout when received
+            "user" => Some(AgentEvent::UserQuery),
+            // Claude is actively streaming a response
+            "assistant" | "message_stream" => Some(AgentEvent::Generating),
+            // Claude finished the full response turn
+            "result" => Some(AgentEvent::ModelResponse),
+            _ => Some(AgentEvent::Unknown),
+        }
+    }
+
+    fn get_instruction_filename(&self) -> &str {
+        "CLAUDE.md"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_provider() -> ClaudeProvider {
+        ClaudeProvider::new()
+    }
+
+    #[test]
+    fn name_returns_claude() {
+        let p = make_provider();
+        assert_eq!(p.name(), "Claude");
+    }
+
+    #[test]
+    fn instruction_filename_is_claude_md() {
+        let p = make_provider();
+        assert_eq!(p.get_instruction_filename(), "CLAUDE.md");
+    }
+
+    #[test]
+    fn spawn_args_minimal_config() {
+        let p = make_provider();
+        let config = AgentConfig::default();
+        let args = p.get_spawn_args(&config, false);
+        // Base persistent session arguments (no --print)
+        assert_eq!(
+            args[0..5],
+            vec![
+                "--verbose",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_output_init_event() {
+        let p = make_provider();
+        let line = r#"{"type":"system","subtype":"init","session_id":"abc-123","timestamp":"2026-01-01T00:00:00Z"}"#;
+        let event = p.parse_output(line).unwrap();
+        assert_eq!(
+            event,
+            AgentEvent::Init {
+                session_id: "abc-123".into(),
+                timestamp: Some("2026-01-01T00:00:00Z".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_output_permission_request() {
+        let p = make_provider();
+        let line = r#"{"type":"system","subtype":"permission_request","tool_name":"bash"}"#;
+        let event = p.parse_output(line).unwrap();
+        assert_eq!(
+            event,
+            AgentEvent::ActionRequired { message: "bash".into() }
+        );
+    }
+
+    #[test]
+    fn parse_output_assistant_is_generating() {
+        let p = make_provider();
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
+    fn parse_output_result_is_idle() {
+        let p = make_provider();
+        let line = r#"{"type":"result","subtype":"success","result":"done"}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+    }
+
+    #[test]
+    fn parse_output_user_is_query() {
+        let p = make_provider();
+        let line = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::UserQuery);
+    }
+
+    #[test]
+    fn parse_output_unknown_type() {
+        let p = make_provider();
+        let line = r#"{"type":"something_new","data":42}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_output_invalid_json() {
+        let p = make_provider();
+        assert!(p.parse_output("not json").is_none());
+    }
+
+    #[test]
+    fn spawn_args_permission_mode() {
+        let p = make_provider();
+        let config = AgentConfig {
+            permission_mode: Some("auto-accept".into()),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--permission-mode".to_string()));
+        assert!(args.contains(&"auto-accept".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_max_turns() {
+        let p = make_provider();
+        let config = AgentConfig {
+            max_turns: Some(10),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--max-turns".to_string()));
+        assert!(args.contains(&"10".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_allowed_tools() {
+        let p = make_provider();
+        let config = AgentConfig {
+            allowed_tools: Some(vec!["Read".into(), "Write".into()]),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        let count = args.iter().filter(|a| *a == "--allowedTools").count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn spawn_args_disallowed_tools() {
+        let p = make_provider();
+        let config = AgentConfig {
+            disallowed_tools: Some(vec!["Bash".into()]),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--disallowedTools".to_string()));
+        assert!(args.contains(&"Bash".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_append_system_prompt() {
+        let p = make_provider();
+        let config = AgentConfig {
+            append_system_prompt: Some("Always respond in JSON".into()),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--append-system-prompt".to_string()));
+        assert!(args.contains(&"Always respond in JSON".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_mcp_config() {
+        let p = make_provider();
+        let config = AgentConfig {
+            mcp_config: Some("/path/to/mcp.json".into()),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--mcp-config".to_string()));
+        assert!(args.contains(&"/path/to/mcp.json".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_name_skipped_on_resume() {
+        let p = make_provider();
+        let config = AgentConfig {
+            session_name: "MyAgent".into(),
+            resume_session: Some("session-abc".into()),
+            ..Default::default()
+        };
+        // Fresh spawn includes --name
+        let args_fresh = p.get_spawn_args(&config, false);
+        assert!(args_fresh.contains(&"--name".to_string()));
+        // Resume omits --name
+        let args_resume = p.get_spawn_args(&config, true);
+        assert!(!args_resume.contains(&"--name".to_string()));
+        assert!(args_resume.contains(&"--resume".to_string()));
+    }
+}

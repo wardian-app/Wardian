@@ -15,8 +15,16 @@ describe("deriveEffectiveStatus", () => {
     expect(deriveEffectiveStatus("✋ Action Required", undefined, "Idle")).toBe("Action Needed");
   });
 
-  it("returns Idle when title contains Ready", () => {
-    expect(deriveEffectiveStatus("Ready - Gemini", undefined, "Processing...")).toBe("Idle");
+  it("returns Idle when title contains Ready and backend is neutral", () => {
+    expect(deriveEffectiveStatus("Ready - Gemini", undefined, "Idle")).toBe("Idle");
+  });
+
+  it("preserves Processing when title contains Ready but backend is active", () => {
+    expect(deriveEffectiveStatus("Ready - Gemini", undefined, "Processing...")).toBe("Processing...");
+  });
+
+  it("preserves Action Needed when title contains Ready but backend is active", () => {
+    expect(deriveEffectiveStatus("Ready - Gemini", undefined, "Action Needed")).toBe("Action Needed");
   });
 
   it("returns Idle when title contains ◇ diamond", () => {
@@ -220,6 +228,40 @@ describe("classifyJsonEvent", () => {
 
   it("returns none for event with only unknown type", () => {
     expect(classifyJsonEvent({ type: "unknown" })).toEqual({ type: "none" });
+  });
+
+  // Claude-specific events
+  it("classifies Claude assistant event as progress with text", () => {
+    const result = classifyJsonEvent({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "Let me check the file." }] },
+    });
+    expect(result).toEqual({ type: "progress", thought: "Let me check the file." });
+  });
+
+  it("truncates long Claude assistant text", () => {
+    const longText = "A".repeat(60);
+    const result = classifyJsonEvent({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: longText }] },
+    });
+    expect(result.type).toBe("progress");
+    if (result.type === "progress") {
+      expect(result.thought.length).toBeLessThanOrEqual(50);
+      expect(result.thought.endsWith("...")).toBe(true);
+    }
+  });
+
+  it("classifies Claude assistant event without text as Responding", () => {
+    const result = classifyJsonEvent({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "tool_use", name: "Bash" }] },
+    });
+    expect(result).toEqual({ type: "progress", thought: "Responding..." });
+  });
+
+  it("classifies Claude result event as clear_thought", () => {
+    expect(classifyJsonEvent({ type: "result", subtype: "success" })).toEqual({ type: "clear_thought" });
   });
 });
 

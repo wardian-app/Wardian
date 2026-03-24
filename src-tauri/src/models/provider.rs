@@ -13,6 +13,8 @@ pub enum AgentEvent {
     UserQuery,
     /// The model has finished responding (agent is now idle).
     ModelResponse,
+    /// The model is actively generating a response (agent is processing).
+    Generating,
     /// The agent requires user intervention.
     ActionRequired { message: String },
     /// An unrecognized event type.

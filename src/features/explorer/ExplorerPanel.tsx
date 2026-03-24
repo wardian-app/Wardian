@@ -101,7 +101,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
       
       {rootPath && (
         <div className="flex items-center gap-1.5 py-1 mb-2 border-b border-wardian-border/30 w-full group">
-          <span className="label-small font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors" title={rootPath}>
+          <span className="label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors" title={rootPath}>
             {rootPath}
           </span>
         </div>
