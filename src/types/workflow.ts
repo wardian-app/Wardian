@@ -71,12 +71,19 @@ export interface WorkflowSummary {
   trigger_status: WorkflowTriggerStatus;
 }
 
+export interface ScheduleDefinition {
+  schedule_type: "one_time" | "recurring" | "cron";
+  value: string;
+  active: boolean;
+}
+
 export interface ScheduledRun {
   id: string;
   workflow_id: string;
   workflow_name: string;
-  next_run_epoch_ms: number;
-  frequency: string;
+  schedule: ScheduleDefinition;
+  role_mappings: Record<string, string>;
+  next_run_epoch_ms: number | null;
   is_paused: boolean;
 }
 

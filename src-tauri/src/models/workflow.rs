@@ -42,6 +42,27 @@ pub struct WorkflowDefinition {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScheduleDefinition {
+    /// "one_time" | "recurring" | "cron"
+    pub schedule_type: String,
+    /// ISO8601 datetime for one_time, duration string (e.g. "60m") for recurring, cron expression for cron
+    pub value: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScheduledRun {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub schedule: ScheduleDefinition,
+    pub role_mappings: HashMap<String, String>,
+    /// Epoch ms of next scheduled execution (computed by scheduler)
+    pub next_run_epoch_ms: Option<u64>,
+    pub is_paused: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkflowTelemetryEvent {
     pub workflow_id: String,
     pub node_id: String,
