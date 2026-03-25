@@ -40,6 +40,8 @@ export interface WorkflowDefinition {
   name: string;
   settings: WorkflowSettings;
   nodes: WorkflowNode[];
+  /** Maps role names to agent session IDs. Set before execution. */
+  role_mappings?: Record<string, string>;
 }
 
 export interface WorkflowExecutionState {

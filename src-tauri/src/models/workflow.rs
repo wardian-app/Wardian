@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodePosition {
@@ -34,6 +35,10 @@ pub struct WorkflowDefinition {
     pub name: String,
     pub settings: WorkflowSettings,
     pub nodes: Vec<WorkflowNode>,
+    /// Maps template role names to live agent session IDs.
+    /// Example: {"primary_coder": "abc-123-session-id"}
+    #[serde(default)]
+    pub role_mappings: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
