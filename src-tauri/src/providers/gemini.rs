@@ -162,7 +162,7 @@ impl AgentProvider for GeminiProvider {
                     Some(AgentEvent::Unknown)
                 }
             }
-            "result" => Some(AgentEvent::ModelResponse),
+            "result" => Some(AgentEvent::TurnCompleted),
             _ => Some(AgentEvent::Unknown),
         }
     }
@@ -399,7 +399,7 @@ mod tests {
         }
         
         let line_result = r#"{"type":"result","status":"success"}"#;
-        assert_eq!(p.parse_output(line_result).unwrap(), AgentEvent::ModelResponse);
+        assert_eq!(p.parse_output(line_result).unwrap(), AgentEvent::TurnCompleted);
         
         let line_gen = r#"{"type":"message","role":"assistant","content":"hello"}"#;
         assert_eq!(p.parse_output(line_gen).unwrap(), AgentEvent::Generating);

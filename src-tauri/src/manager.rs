@@ -217,6 +217,18 @@ pub async fn spawn_agent(
                                                     *status = "Idle".to_string();
                                                 }
                                             }
+                                            AgentEvent::TurnCompleted => {
+                                                if let Ok(mut status) = current_status_clone.lock() {
+                                                    *status = if provider.name() == "Claude" {
+                                                        "Action Needed".to_string()
+                                                    } else {
+                                                        "Idle".to_string()
+                                                    };
+                                                }
+                                                let _ = app.emit("agent-turn-completed", serde_json::json!({
+                                                    "session_id": sid_out
+                                                }));
+                                            }
                                             AgentEvent::ActionRequired { .. } => {
                                                 if let Ok(mut status) = current_status_clone.lock() {
                                                     *status = "Action Needed".to_string();

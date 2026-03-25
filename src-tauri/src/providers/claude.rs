@@ -166,7 +166,7 @@ impl AgentProvider for ClaudeProvider {
             // Claude is actively streaming a response
             "assistant" | "message_stream" => Some(AgentEvent::Generating),
             // Claude finished the full response turn
-            "result" => Some(AgentEvent::ModelResponse),
+            "result" => Some(AgentEvent::TurnCompleted),
             _ => Some(AgentEvent::Unknown),
         }
     }
@@ -247,10 +247,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_output_result_is_idle() {
+    fn parse_output_result_is_turn_completed() {
         let p = make_provider();
         let line = r#"{"type":"result","subtype":"success","result":"done"}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
     }
 
     #[test]
