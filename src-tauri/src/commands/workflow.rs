@@ -1,4 +1,4 @@
-use crate::models::WorkflowDefinition;
+use crate::models::{WorkflowDefinition, ScheduledRun};
 use crate::workflow_engine;
 use tauri::AppHandle;
 use serde_json::Value;
@@ -49,4 +49,34 @@ pub fn load_workflow_library() -> Result<Value, String> {
 #[tauri::command]
 pub fn save_workflow_library(state: Value) -> Result<(), String> {
     workflow_engine::save_workflow_library(&state)
+}
+
+#[tauri::command]
+pub fn list_scheduled_runs() -> Result<Vec<ScheduledRun>, String> {
+    Ok(workflow_engine::load_scheduled_runs())
+}
+
+#[tauri::command]
+pub fn create_scheduled_run(run: ScheduledRun) -> Result<(), String> {
+    let mut runs = workflow_engine::load_scheduled_runs();
+    runs.push(run);
+    workflow_engine::save_scheduled_runs(&runs)
+}
+
+#[tauri::command]
+pub fn delete_scheduled_run(run_id: String) -> Result<(), String> {
+    let runs: Vec<ScheduledRun> = workflow_engine::load_scheduled_runs()
+        .into_iter()
+        .filter(|r| r.id != run_id)
+        .collect();
+    workflow_engine::save_scheduled_runs(&runs)
+}
+
+#[tauri::command]
+pub fn toggle_scheduled_run(run_id: String) -> Result<(), String> {
+    let mut runs = workflow_engine::load_scheduled_runs();
+    if let Some(run) = runs.iter_mut().find(|r| r.id == run_id) {
+        run.is_paused = !run.is_paused;
+    }
+    workflow_engine::save_scheduled_runs(&runs)
 }

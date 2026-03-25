@@ -125,6 +125,26 @@ pub fn get_workflows_dir() -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflows"))
 }
 
+pub fn get_scheduled_runs_path() -> Option<PathBuf> {
+    get_wardian_home().map(|h| h.join("scheduled_runs.json"))
+}
+
+pub fn load_scheduled_runs() -> Vec<crate::models::ScheduledRun> {
+    if let Some(path) = get_scheduled_runs_path() {
+        if let Ok(content) = fs::read_to_string(path) {
+            return serde_json::from_str(&content).unwrap_or_default();
+        }
+    }
+    Vec::new()
+}
+
+pub fn save_scheduled_runs(runs: &[crate::models::ScheduledRun]) -> Result<(), String> {
+    let path = get_scheduled_runs_path().ok_or("No home dir")?;
+    let content = serde_json::to_string_pretty(runs).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn get_logs_dir(workflow_id: &str) -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflow_logs").join(workflow_id))
 }
