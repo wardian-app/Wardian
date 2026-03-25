@@ -650,12 +650,27 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                     }
                 },
                 "agent" => {
-                    let agent_id = node.config.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+                    // Role-based resolution with agent_id fallback
+                    let role = node.config.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    let direct_id = node.config.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+
+                    let agent_id = if !role.is_empty() {
+                        wf.role_mappings.get(role)
+                            .map(|s| s.as_str())
+                            .unwrap_or("")
+                    } else {
+                        direct_id
+                    };
+
                     let mut prompt = node.config.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     prompt = interpolate_string(&prompt, &registry);
 
                     if agent_id.is_empty() {
-                        node_error = Some("Missing agent_id or role".to_string());
+                        node_error = Some(if !role.is_empty() {
+                            format!("Role '{}' not mapped to an agent. Set role_mappings before running.", role)
+                        } else {
+                            "Missing agent_id or role".to_string()
+                        });
                     } else {
                         // Resolve provider name from live agent state or saved config
                         let provider_name = {
