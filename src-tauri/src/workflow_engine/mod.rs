@@ -17,6 +17,26 @@ use std::process::Stdio;
 
 // ... (interpolate_string, get_registry_value, evaluate_logic remain above)
 
+/// Flattens provider-specific response wrappers into a uniform output.
+/// Gemini wraps in `{"response": "..."}`, Claude wraps in `{"result": "..."}`.
+fn flatten_headless_response(mut data: Value) -> Value {
+    let response_str = data.get("response").and_then(|v| v.as_str())
+        .or_else(|| data.get("result").and_then(|v| v.as_str()));
+
+    if let Some(resp_str) = response_str {
+        if let Ok(inner) = serde_json::from_str::<Value>(resp_str) {
+            if let Some(obj) = inner.as_object() {
+                if let Some(out_obj) = data.as_object_mut() {
+                    for (k, v) in obj {
+                        out_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+    data
+}
+
 /// Resolves the current working directory for a node.
 fn resolve_cwd(node_config: &Value, agent_id: &str) -> PathBuf {
     let cwd = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("C:\\"));
@@ -635,8 +655,29 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                     prompt = interpolate_string(&prompt, &registry);
 
                     if agent_id.is_empty() {
-                        node_error = Some("Missing agent_id".to_string());
+                        node_error = Some("Missing agent_id or role".to_string());
                     } else {
+                        // Resolve provider name from live agent state or saved config
+                        let provider_name = {
+                            let state = app.state::<crate::state::AppState>();
+                            let agents_map = state.agents.lock().await;
+                            if let Some(agent) = agents_map.get(agent_id) {
+                                agent.config.provider.clone()
+                            } else {
+                                // Fallback: read from persisted state
+                                let mut found = "gemini".to_string();
+                                if let Some(home) = get_wardian_home() {
+                                    if let Ok(data) = std::fs::read_to_string(home.join("wardian_state.json")) {
+                                        if let Ok(configs) = serde_json::from_str::<Vec<crate::models::AgentConfig>>(&data) {
+                                            if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
+                                                found = cfg.provider.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                                found
+                            }
+                        };
                         let output_format = node.config.get("output_format")
                             .or_else(|| node.config.get("mode"))
                             .and_then(|v| v.as_str())
@@ -687,13 +728,11 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                             let state = app.state::<crate::state::AppState>();
                             let mut was_online = false;
                             let mut agent_cfg = None;
-                            let mut provider_name = "gemini".to_string();
 
                             {
                                 let mut agents_map = state.agents.lock().await;
                                 if let Some(agent) = agents_map.get_mut(agent_id) {
                                     agent_cfg = Some(agent.config.clone());
-                                    provider_name = agent.config.provider.clone();
                                     let _ = app.emit("agents-updated", ()); // Notify UI early
                                     if let Some(mut child) = agent.child_process.take() {
                                         was_online = true;
@@ -724,20 +763,8 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                             };
                             
                             match run_result {
-                                Ok(mut data) => {
-                                    // Flatten Gemini CLI structured response if it contains a JSON response string
-                                    if let Some(resp_str) = data.get("response").and_then(|v| v.as_str()) {
-                                        if let Ok(inner) = serde_json::from_str::<Value>(resp_str) {
-                                            if let Some(obj) = inner.as_object() {
-                                                if let Some(out_obj) = data.as_object_mut() {
-                                                    for (k, v) in obj {
-                                                        out_obj.insert(k.clone(), v.clone());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    output_payload = data;
+                                Ok(data) => {
+                                    output_payload = flatten_headless_response(data);
                                 },
                                 Err(e) => {
                                     log_debug(&format!("[Wardian] Headless JSON agent failed: {}", e));
@@ -790,14 +817,10 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                                 let (completion_tx, mut completion_rx) = tokio::sync::mpsc::channel::<Value>(1);
                                 let agent_id_clone = agent_id.to_string();
                                 
-                                let handler_id = app.listen_any("agent-json-event", move |event| {
+                                let handler_id = app.listen_any("agent-turn-completed", move |event| {
                                     if let Ok(parsed) = serde_json::from_str::<Value>(event.payload()) {
                                         if parsed.get("session_id").and_then(|v| v.as_str()) == Some(&agent_id_clone) {
-                                            let data = parsed.get("data").cloned().unwrap_or(Value::Null);
-                                            let msg_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                            if ["gemini", "model", "info"].contains(&msg_type) {
-                                                let _ = completion_tx.try_send(data);
-                                            }
+                                            let _ = completion_tx.try_send(parsed);
                                         }
                                     }
                                 });
@@ -821,7 +844,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                                 log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
                                 let run_result = tokio::time::timeout(
                                     std::time::Duration::from_millis(timeout_ms),
-                                    crate::manager::run_headless(&cwd, &prompt, agent_id, output_format, "gemini")
+                                    crate::manager::run_headless(&cwd, &prompt, agent_id, output_format, &provider_name)
                                 ).await;
 
                                 let run_result = match run_result {
@@ -830,20 +853,8 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                                 };
 
                                 match run_result {
-                                    Ok(mut data) => {
-                                        // Flatten Gemini CLI structured response
-                                        if let Some(resp_str) = data.get("response").and_then(|v| v.as_str()) {
-                                            if let Ok(inner) = serde_json::from_str::<Value>(resp_str) {
-                                                if let Some(obj) = inner.as_object() {
-                                                    if let Some(out_obj) = data.as_object_mut() {
-                                                        for (k, v) in obj {
-                                                            out_obj.insert(k.clone(), v.clone());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        output_payload = data;
+                                    Ok(data) => {
+                                        output_payload = flatten_headless_response(data);
                                     },
                                     Err(e) => {
                                         log_debug(&format!("[Wardian] Headless fallback failed: {}", e));
