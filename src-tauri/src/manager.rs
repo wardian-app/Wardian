@@ -163,7 +163,9 @@ pub async fn spawn_agent(
     let output_buffer_clone = output_buffer.clone();
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
     let query_count_clone = query_count.clone();
-    let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    )));
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
@@ -598,18 +600,21 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     match snap.provider.as_str() {
                         "claude" => {
                             // Claude logs are JSONL — one JSON object per line
-                            let lines: Vec<serde_json::Value> = content
-                                .lines()
-                                .filter_map(|l| serde_json::from_str(l).ok())
-                                .collect();
-
-                            q_count = lines.iter().filter(|l| {
-                                l.get("type").and_then(|v| v.as_str()) == Some("user")
-                            }).count();
-
-                            if let Some(first) = lines.first() {
-                                if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
-                                    i_ts = Some(ts.to_string());
+                            for line in content.lines() {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                                    if parsed.get("type").and_then(|v| v.as_str()) == Some("user") {
+                                        q_count += 1;
+                                    }
+                                    if i_ts.is_none() {
+                                        if let Some(ts) = parsed.get("timestamp").and_then(|v| v.as_str()) {
+                                            i_ts = Some(ts.to_string());
+                                        } else if let Some(ts_num) = parsed.get("timestamp").and_then(|v| v.as_i64()) {
+                                            // Fallback if timestamp is an epoch number
+                                            if let Some(dt) = chrono::DateTime::from_timestamp_millis(ts_num) {
+                                                i_ts = Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

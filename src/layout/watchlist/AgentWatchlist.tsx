@@ -11,7 +11,7 @@ import {
   getListsContainingAgent,
   getListsNotContainingAgent,
 } from "./watchlistUtils";
-import { deriveCurrentThought, getStatusColorClass } from "../../utils/statusUtils";
+import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 
 interface AgentWatchlistProps {
   agents: AgentConfig[];
@@ -446,8 +446,8 @@ export default function AgentWatchlist({
                     {agent.agent_class}
                   </p>
                 </div>
-                <span className={`text-[9px] truncate max-w-[60px] ${status === "Processing..." ? "text-[var(--color-wardian-accent)]" : status === "Action Needed" ? "text-wardian-warning" : "text-muted-neutral"}`}>
-                  {status === "Processing..." ? thought.substring(0, 12) : status === "Action Needed" ? "Action" : status === "Off" ? "Off" : "Idle"}
+                <span className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
+                  {getAgentStatusLabel(status, thought)}
                 </span>
                 <span className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
                   {metrics?.query_count ?? "–"}

@@ -130,8 +130,30 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
 }
 
 /**
- * Returns the CSS class for the status indicator dot.
+ * Returns the short text label for the status to be displayed in lists/dashboards.
  */
+export function getAgentStatusLabel(status: string, thought: string, maxLength: number = 12): string {
+  if (status === "Processing...") {
+    return thought.substring(0, maxLength);
+  }
+  if (status === "Action Needed") {
+    return "Action Needed";
+  }
+  if (status === "Off") {
+    return "Off";
+  }
+  return "Idle";
+}
+
+/**
+ * Returns the text color CSS class for the status.
+ */
+export function getAgentStatusTextClass(status: string): string {
+  if (status === "Processing...") return "text-[var(--color-wardian-accent)]";
+  if (status === "Action Needed") return "text-wardian-warning";
+  if (status === "Off") return "text-muted-neutral";
+  return "text-muted-neutral";
+}
 export function getStatusColorClass(effectiveStatus: string): string {
   if (effectiveStatus === "Processing...") {
     return "bg-wardian-processing shadow-[0_0_8px_var(--color-wardian-processing)] animate-pulse";
