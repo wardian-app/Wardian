@@ -338,6 +338,112 @@ pub async fn init_triggers(app: AppHandle) {
     for wf in workflows {
         start_workflow_triggers(app.clone(), wf).await;
     }
+    // Start the unified scheduler
+    start_scheduler(app).await;
+}
+
+pub async fn start_scheduler(app: AppHandle) {
+    let state = app.state::<crate::state::AppState>();
+
+    // Cancel any existing scheduler
+    {
+        let mut handle = state.scheduler_handle.lock().await;
+        if let Some(h) = handle.take() {
+            h.abort();
+        }
+    }
+
+    let app_clone = app.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            let state = app_clone.state::<crate::state::AppState>();
+            if state.triggers_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+
+            let mut runs = load_scheduled_runs();
+            let now_ms = Utc::now().timestamp_millis() as u64;
+            let mut modified = false;
+
+            for run in runs.iter_mut() {
+                if run.is_paused || !run.schedule.active {
+                    continue;
+                }
+
+                // Compute next_run if missing
+                if run.next_run_epoch_ms.is_none() {
+                    run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+                    modified = true;
+                }
+
+                if let Some(next) = run.next_run_epoch_ms {
+                    if now_ms >= next {
+                        log_debug(&format!("[Wardian] Scheduler firing run {} for workflow {}", run.id, run.workflow_id));
+
+                        let payload = serde_json::json!({
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "scheduled_run_id": run.id,
+                            "role_mappings": run.role_mappings,
+                        });
+
+                        let _ = run_workflow(app_clone.clone(), run.workflow_id.clone(), Some(payload)).await;
+
+                        // Advance next_run
+                        run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+                        if run.schedule.schedule_type == "one_time" {
+                            run.schedule.active = false;
+                        }
+                        modified = true;
+                    }
+                }
+            }
+
+            if modified {
+                let _ = save_scheduled_runs(&runs);
+            }
+        }
+    });
+
+    let mut scheduler = state.scheduler_handle.lock().await;
+    *scheduler = Some(handle);
+}
+
+fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -> Option<u64> {
+    match schedule.schedule_type.as_str() {
+        "one_time" => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&schedule.value) {
+                let ms = dt.timestamp_millis() as u64;
+                if ms > now_ms { Some(ms) } else { None }
+            } else {
+                None
+            }
+        }
+        "recurring" => {
+            let value = &schedule.value;
+            let (num_str, unit) = value.split_at(value.len().saturating_sub(1));
+            let num: u64 = num_str.parse().unwrap_or(0);
+            let ms = match unit {
+                "s" => num * 1000,
+                "m" => num * 60 * 1000,
+                "h" => num * 3600 * 1000,
+                "d" => num * 86400 * 1000,
+                _ => 0,
+            };
+            if ms > 0 { Some(now_ms + ms) } else { None }
+        }
+        "cron" => {
+            if let Ok(sched) = Schedule::from_str(&schedule.value) {
+                sched.upcoming(chrono::Local)
+                    .next()
+                    .map(|dt| dt.timestamp_millis() as u64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: &str) {
@@ -500,8 +606,19 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
 
 pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option<Value>) -> Result<(), String> {
     let workflows = list_workflows()?;
-    let wf = workflows.into_iter().find(|w| w.id == wf_id)
+    let mut wf = workflows.into_iter().find(|w| w.id == wf_id)
         .ok_or_else(|| format!("Workflow {} not found", wf_id))?;
+
+    // Merge role_mappings from payload (e.g. from scheduler) into the workflow
+    if let Some(ref payload) = initial_payload {
+        if let Some(mappings) = payload.get("role_mappings").and_then(|v| v.as_object()) {
+            for (k, v) in mappings {
+                if let Some(s) = v.as_str() {
+                    wf.role_mappings.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+    }
 
     let log_dir = get_logs_dir(&wf_id).ok_or("Could not find log path")?;
     fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
