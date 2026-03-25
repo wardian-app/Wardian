@@ -489,37 +489,63 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
             let wf_id = wf.id.clone();
             let config = node.config.clone();
 
-            // --- Cron Trigger ---
+            // --- Cron / Scheduled Trigger ---
+            // Instead of spawning a dedicated tokio task per cron trigger,
+            // register a ScheduledRun entry. The unified heartbeat scheduler
+            // (30s loop) handles all timed execution from scheduled_runs.json.
             if let Some(cron_expr) = config.get("cron").and_then(|v| v.as_str()) {
-                let cron_str = cron_expr.to_string();
-                let wf_id_cron = wf_id.clone();
-                let app_cron = app_clone.clone();
-                if let Ok(schedule) = Schedule::from_str(&cron_str) {
-                    let handle = tokio::spawn(async move {
-                        loop {
-                            let now = Utc::now().with_timezone(&chrono::Local);
-                            if let Some(next) = schedule.upcoming(chrono::Local).next() {
-                                let duration = (next - now).to_std().unwrap_or(std::time::Duration::from_secs(1));
-                                 tokio::time::sleep(duration).await;
-                                
-                                let state = app_cron.state::<crate::state::AppState>();
-                                if state.triggers_paused.load(std::sync::atomic::Ordering::SeqCst) {
-                                    log_debug(&format!("[Wardian] Trigger for {} skipped (Paused)", wf_id_cron));
-                                    continue;
-                                }
+                if Schedule::from_str(cron_expr).is_ok() {
+                    let schedule_type = config.get("schedule_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Custom");
 
-                                log_debug(&format!("[Wardian] Triggering workflow {} via cron {}", wf_id_cron, cron_str));
-                                let payload = serde_json::json!({
-                                    "timestamp": Utc::now().to_rfc3339(),
-                                    "id": wf_id_cron.clone()
-                                });
-                                let _ = run_workflow(app_cron.clone(), wf_id_cron.clone(), Some(payload)).await;
-                            } else {
-                                break;
-                            }
-                        }
-                    });
-                    handles.push(handle);
+                    let mut runs = load_scheduled_runs();
+
+                    // Check if a ScheduledRun for this workflow+node already exists
+                    let run_id = format!("{}-{}", wf.id, node.id);
+                    let existing = runs.iter_mut().find(|r| r.id == run_id);
+
+                    // Build a human-readable description for the schedule
+                    let description = match schedule_type {
+                        "Minutes" => format!("Every {}m", config.get("interval").and_then(|v| v.as_str()).unwrap_or("?")),
+                        "Hours" => format!("Every {}h", config.get("interval").and_then(|v| v.as_str()).unwrap_or("?")),
+                        "Daily" => format!("Daily at {}", config.get("time").and_then(|v| v.as_str()).unwrap_or("?")),
+                        "Weekly" => format!("{} at {}", config.get("days").and_then(|v| v.as_str()).unwrap_or("?"), config.get("time").and_then(|v| v.as_str()).unwrap_or("?")),
+                        _ => cron_expr.to_string(),
+                    };
+
+                    if let Some(existing_run) = existing {
+                        // Update the schedule value in case it changed
+                        existing_run.schedule.value = cron_expr.to_string();
+                        existing_run.schedule.active = true;
+                        existing_run.workflow_name = wf.name.clone();
+                        existing_run.description = description;
+                        existing_run.role_mappings = wf.role_mappings.clone();
+                        // Reset next_run so the scheduler recomputes it
+                        existing_run.next_run_epoch_ms = None;
+                    } else {
+                        runs.push(crate::models::ScheduledRun {
+                            id: run_id.clone(),
+                            workflow_id: wf.id.clone(),
+                            workflow_name: wf.name.clone(),
+                            schedule: crate::models::ScheduleDefinition {
+                                schedule_type: "cron".to_string(),
+                                value: cron_expr.to_string(),
+                                active: true,
+                            },
+                            role_mappings: wf.role_mappings.clone(),
+                            description: description.clone(),
+                            next_run_epoch_ms: None,
+                            is_paused: false,
+                        });
+
+                        log_debug(&format!(
+                            "[Wardian] Registered scheduled run {} for workflow '{}' (cron: {})",
+                            run_id, wf.name, cron_expr
+                        ));
+                    }
+
+                    let _ = save_scheduled_runs(&runs);
                 }
             }
 

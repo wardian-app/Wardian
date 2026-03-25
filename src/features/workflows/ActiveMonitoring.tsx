@@ -1,16 +1,32 @@
 import React, { useState } from 'react';
+import type { ScheduledRun } from '../../types/workflow';
 
 // Icons
 const StopIcon = () => <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5 5h10v10H5z" /></svg>;
 const ActivityIcon = () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2"><path d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>;
 
+function formatNextRun(epochMs: number | null): string {
+  if (!epochMs) return "—";
+  const diff = epochMs - Date.now();
+  if (diff <= 0) return "Due";
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+// Trash icon for delete
+const TrashIcon = () => <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>;
+
 interface ActiveMonitoringProps {
   activeRuns: any[];
-  schedules: any[];
+  schedules: ScheduledRun[];
   activeWorkflows: any[];
   onStopRun: (id: string) => void;
   onStopTrigger: (id: string) => void;
   onToggleSchedule: (id: string) => void;
+  onDeleteSchedule?: (id: string) => void;
 }
 
 export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
@@ -19,7 +35,8 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
   activeWorkflows,
   onStopRun,
   onStopTrigger,
-  onToggleSchedule
+  onToggleSchedule,
+  onDeleteSchedule,
 }) => {
   const [openSections, setOpenSections] = useState({
     runs: true,
@@ -120,20 +137,30 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                 <div className="flex flex-col truncate pr-3">
                   <span className="text-[11px] font-bold text-primary truncate leading-tight tracking-tight">{s.workflow_name}</span>
                   <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[9px] font-mono text-muted-neutral tracking-tight">{s.frequency}</span>
-                    <span className="text-[8px] text-[var(--color-wardian-accent)] opacity-60 font-bold">• NEXT IN 42M</span>
+                    <span className="text-[9px] font-mono text-muted-neutral tracking-tight">{s.description || `${s.schedule.schedule_type}: ${s.schedule.value}`}</span>
+                    <span className="text-[8px] text-[var(--color-wardian-accent)] opacity-60 font-bold">• NEXT IN {formatNextRun(s.next_run_epoch_ms)}</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2.5">
                   <span className={`text-[8px] font-black px-1.5 py-0.5 rounded ${s.is_paused ? 'bg-amber-500/20 text-amber-500' : 'bg-emerald-500/20 text-emerald-400'}`}>
                     {s.is_paused ? 'Paused' : 'Live'}
                   </span>
-                  <button 
+                  <button
                     onClick={() => onToggleSchedule(s.id)}
                     className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-primary transition-all"
+                    title={s.is_paused ? 'Resume' : 'Pause'}
                   >
                     {s.is_paused ? <ActivityIcon /> : <StopIcon />}
                   </button>
+                  {onDeleteSchedule && (
+                    <button
+                      onClick={() => onDeleteSchedule(s.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-red-500 transition-all"
+                      title="Delete Schedule"
+                    >
+                      <TrashIcon />
+                    </button>
+                  )}
                 </div>
               </div>
             ))

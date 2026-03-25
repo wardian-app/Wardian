@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
 import { WorkflowLibrary } from './WorkflowLibrary';
 import { ActiveMonitoring } from './ActiveMonitoring';
@@ -22,10 +22,15 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
     pauseAllTriggers,
     resumeAllTriggers,
     activeRuns,
-    schedules
+    scheduledRuns,
+    loadScheduledRuns,
+    toggleScheduledRun,
+    deleteScheduledRun,
   } = useWorkflowStore();
   
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => { loadScheduledRuns(); }, [loadScheduledRuns]);
 
   const filteredWorkflows = useMemo(() => {
     if (!searchQuery.trim()) return availableWorkflows;
@@ -101,13 +106,14 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
 
       <div className="flex-1 flex flex-col min-h-0 overflow-y-auto no-scrollbar pr-1 -mr-1">
         {/* Monitoring Area */}
-        <ActiveMonitoring 
+        <ActiveMonitoring
           activeRuns={activeRuns}
-          schedules={schedules}
+          schedules={scheduledRuns}
           activeWorkflows={activeWorkflows}
           onStopRun={(id) => console.log('Stop Run', id)}
           onStopTrigger={(id) => console.log('Stop Trigger', id)}
-          onToggleSchedule={(id) => console.log('Toggle Schedule', id)}
+          onToggleSchedule={(id) => toggleScheduledRun(id)}
+          onDeleteSchedule={(id) => deleteScheduledRun(id)}
         />
 
         <div className="my-4 border-t border-wardian-border/20" />

@@ -83,6 +83,8 @@ export interface ScheduledRun {
   workflow_name: string;
   schedule: ScheduleDefinition;
   role_mappings: Record<string, string>;
+  /** Human-readable description (e.g. "Every 5m", "Daily at 09:00") */
+  description?: string;
   next_run_epoch_ms: number | null;
   is_paused: boolean;
 }

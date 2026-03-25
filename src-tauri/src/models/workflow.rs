@@ -57,6 +57,9 @@ pub struct ScheduledRun {
     pub workflow_name: String,
     pub schedule: ScheduleDefinition,
     pub role_mappings: HashMap<String, String>,
+    /// Human-readable description (e.g. "Every 5m", "Daily at 09:00")
+    #[serde(default)]
+    pub description: String,
     /// Epoch ms of next scheduled execution (computed by scheduler)
     pub next_run_epoch_ms: Option<u64>,
     pub is_paused: bool,
