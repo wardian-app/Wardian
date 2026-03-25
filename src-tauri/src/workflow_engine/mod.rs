@@ -1,3 +1,5 @@
+mod migrate;
+
 use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 use crate::utils::fs::{get_wardian_home, validate_workspace_path};
 use crate::manager::log_debug;
@@ -311,6 +313,7 @@ pub fn list_workflows() -> Result<Vec<WorkflowDefinition>, String> {
 }
 
 pub async fn init_triggers(app: AppHandle) {
+    migrate::migrate_workflows_if_needed();
     let workflows = list_workflows().unwrap_or_default();
     for wf in workflows {
         start_workflow_triggers(app.clone(), wf).await;
