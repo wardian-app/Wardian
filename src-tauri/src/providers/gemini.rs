@@ -152,6 +152,17 @@ impl AgentProvider for GeminiProvider {
             }
             "user" => Some(AgentEvent::UserQuery),
             "gemini" | "model" | "info" => Some(AgentEvent::ModelResponse),
+            "message" => {
+                let role = parsed.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                if role == "user" {
+                    Some(AgentEvent::UserQuery)
+                } else if role == "assistant" || role == "model" {
+                    Some(AgentEvent::Generating)
+                } else {
+                    Some(AgentEvent::Unknown)
+                }
+            }
+            "result" => Some(AgentEvent::ModelResponse),
             _ => Some(AgentEvent::Unknown),
         }
     }
@@ -373,6 +384,9 @@ mod tests {
         let line = r#"{"type":"user","content":"hello"}"#;
         let event = p.parse_output(line).unwrap();
         assert_eq!(event, AgentEvent::UserQuery);
+        
+        let line_msg = r#"{"type":"message","role":"user","content":"hello"}"#;
+        assert_eq!(p.parse_output(line_msg).unwrap(), AgentEvent::UserQuery);
     }
 
     #[test]
@@ -383,6 +397,12 @@ mod tests {
             let event = p.parse_output(&line).unwrap();
             assert_eq!(event, AgentEvent::ModelResponse, "Failed for type: {}", msg_type);
         }
+        
+        let line_result = r#"{"type":"result","status":"success"}"#;
+        assert_eq!(p.parse_output(line_result).unwrap(), AgentEvent::ModelResponse);
+        
+        let line_gen = r#"{"type":"message","role":"assistant","content":"hello"}"#;
+        assert_eq!(p.parse_output(line_gen).unwrap(), AgentEvent::Generating);
     }
 
     #[test]

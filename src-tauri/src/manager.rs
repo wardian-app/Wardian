@@ -538,7 +538,6 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 
             let mut q_count = 0;
             let mut i_ts = None;
-            let mut s_val = "Idle".to_string();
             let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
 
             // Provider-aware log discovery
@@ -613,43 +612,14 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     i_ts = Some(ts.to_string());
                                 }
                             }
-
-                            if let Some(last) = lines.iter().rev().find(|l| {
-                                let t = l.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                t == "user" || t == "assistant" || t == "result" || t == "system"
-                            }) {
-                                let m_type = last.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                if m_type == "system" {
-                                    if last.get("subtype").and_then(|v| v.as_str()) == Some("permission_request") {
-                                        s_val = "Action Needed".into();
-                                    } else {
-                                        // Ignore other system events, they don't cleanly define state
-                                    }
-                                } else if m_type == "user" {
-                                    s_val = "Processing...".into();
-                                } else if m_type == "assistant" {
-                                    // If we see an assistant message, we are either still streaming or just finished.
-                                    s_val = "Processing...".into();
-                                } else if m_type == "result" {
-                                    s_val = "Idle".into();
-                                }
-                            }
                         }
                         _ => {
                             // Gemini logs are a single JSON object with a messages array
                             if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
                                     q_count = msgs.iter().filter(|m| {
-                                        m.get("type").and_then(|v| v.as_str()) == Some("user")
+                                        m.get("type").and_then(|v| v.as_str()) == Some("user") || m.get("role").and_then(|v| v.as_str()) == Some("user")
                                     }).count();
-                                    if let Some(last) = msgs.last() {
-                                        let m_type = last.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                        s_val = if m_type == "user" {
-                                            "Processing...".into()
-                                        } else {
-                                            "Idle".into()
-                                        };
-                                    }
                                 }
                                 if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
                                     i_ts = Some(st.to_string());
@@ -671,8 +641,6 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             // doesn't stay stuck on "Processing..." or "Action Needed".
             if !process_alive && snap.process_id.is_some() {
                 *snap.current_status.lock().unwrap() = "Off".to_string();
-            } else if s_val != "Idle" || *snap.current_status.lock().unwrap() == "Idle" {
-                *snap.current_status.lock().unwrap() = s_val;
             }
 
             results.push(AgentTelemetry {
