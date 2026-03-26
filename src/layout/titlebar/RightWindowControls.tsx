@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
 
 interface RightWindowControlsProps {
   rightCollapsed: boolean;
@@ -53,8 +54,8 @@ export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
           </svg>
         </button>
 
-        {/* ── Window Controls ────────────────────────── */}
-        <div className="titlebar-window-controls">
+        {/* ── Window Controls (Windows/Linux only — macOS uses native traffic lights) */}
+        {!isMac && <div className="titlebar-window-controls">
           <button
             onClick={() => appWindow?.minimize()}
             className="titlebar-winbtn"
@@ -90,7 +91,7 @@ export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
               <line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" strokeWidth="1.2" />
             </svg>
           </button>
-        </div>
+        </div>}
       </div>
     </div>
   );
