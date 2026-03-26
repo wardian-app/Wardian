@@ -142,14 +142,13 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
               }
 
               // Conditional visibility for Cron fields
-              if (blockDef?.name === 'Cron Schedule') {
-                const st = data.config?.schedule_type || 'Custom';
-                if (st === 'Custom' && ['interval', 'time', 'days'].includes(field.name)) return null;
-                if (st === 'Minutes' && ['time', 'days'].includes(field.name)) return null;
-                if (st === 'Hours' && ['time', 'days'].includes(field.name)) return null;
-                if (st === 'Daily' && ['interval', 'days'].includes(field.name)) return null;
-                if (st === 'Weekly' && ['interval'].includes(field.name)) return null;
-                if (field.name === 'cron') return null;
+              if (blockDef?.name === 'Scheduled Trigger') {
+                const st = data.config?.schedule_type || 'Minutes';
+                if (st === 'Minutes' && ['time', 'days', 'datetime'].includes(field.name)) return null;
+                if (st === 'Hours' && ['time', 'days', 'datetime'].includes(field.name)) return null;
+                if (st === 'Daily' && ['interval', 'days', 'datetime'].includes(field.name)) return null;
+                if (st === 'Weekly' && ['interval', 'datetime'].includes(field.name)) return null;
+                if (st === 'One-Time' && ['interval', 'time', 'days'].includes(field.name)) return null;
               }
 
               // Loop conditional visibility (Hardened)
@@ -225,7 +224,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
             })}
 
             {/* Cron Summary */}
-            {blockDef?.name === 'Cron Schedule' && (
+            {blockDef?.name === 'Scheduled Trigger' && (
               <div className="flex flex-col gap-1 p-2 bg-[var(--color-wardian-accent)]/5 rounded border border-[var(--color-wardian-accent)]/10">
                 <span className="text-[8px] font-mono text-[var(--color-wardian-accent)] font-bold tracking-wide">Schedule</span>
                 <span className="text-xs text-[var(--color-wardian-text)] font-medium">
@@ -235,7 +234,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                     if (cfg.schedule_type === 'Hours') return `Every ${cfg.interval || 0}h`;
                     if (cfg.schedule_type === 'Daily') return `Daily at ${cfg.time || '00:00'}`;
                     if (cfg.schedule_type === 'Weekly') return `${cfg.days || 'Mon'} at ${cfg.time || '00:00'}`;
-                    if (cfg.schedule_type === 'Custom') return cfg.cron || 'Not set';
+                    if (cfg.schedule_type === 'One-Time') return cfg.datetime ? `Once at ${cfg.datetime}` : 'Set date/time';
                     return 'Select Frequency';
                   })()}
                 </span>

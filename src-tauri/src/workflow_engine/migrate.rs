@@ -28,7 +28,7 @@ pub fn migrate_workflows_if_needed() {
 
             let has_role = node.config.get("role")
                 .and_then(|v| v.as_str())
-                .map_or(false, |r| !r.is_empty());
+                .is_some_and(|r| !r.is_empty());
 
             if has_role {
                 continue;

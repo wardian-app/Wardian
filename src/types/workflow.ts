@@ -62,7 +62,7 @@ export interface WorkflowTelemetryEvent {
 }
 
 export type WorkflowTriggerStatus = 'active' | 'muted' | 'off';
-export type WorkflowTriggerType = 'cron' | 'webhook' | 'watcher' | 'manual';
+export type WorkflowTriggerType = 'scheduled' | 'webhook' | 'watcher' | 'manual';
 
 export interface WorkflowSummary {
   id: string;
@@ -72,7 +72,7 @@ export interface WorkflowSummary {
 }
 
 export interface ScheduleDefinition {
-  schedule_type: "one_time" | "recurring" | "cron";
+  schedule_type: "one_time" | "minutes" | "hours" | "daily" | "weekly";
   value: string;
   active: boolean;
 }

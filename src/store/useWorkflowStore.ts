@@ -10,7 +10,7 @@ import {
   addEdge,
 } from '@xyflow/react';
 import { invoke } from '@tauri-apps/api/core';
-import { WorkflowDefinition, NodeStatus, WorkflowTelemetryEvent } from '../types/workflow';
+import { WorkflowDefinition, NodeStatus, WorkflowTelemetryEvent, ScheduledRun } from '../types/workflow';
 import { AgentConfig, AgentClassDefinition } from '../types';
 import { BLOCK_LIBRARY } from '../features/workflows/blockLibrary';
 
@@ -24,7 +24,7 @@ interface WorkflowState {
   agentClasses: AgentClassDefinition[];
   isSaving: boolean;
   activeRuns: any[];
-  schedules: any[];
+  scheduledRuns: ScheduledRun[];
   
   // Actions
   onNodesChange: OnNodesChange;
@@ -52,6 +52,10 @@ interface WorkflowState {
   clearActiveWorkflow: () => void;
   handleProgress: (event: any) => void;
   handleStatusUpdate: (event: any) => void;
+  loadScheduledRuns: () => Promise<void>;
+  createScheduledRun: (run: ScheduledRun) => Promise<void>;
+  deleteScheduledRun: (runId: string) => Promise<void>;
+  toggleScheduledRun: (runId: string) => Promise<void>;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -64,7 +68,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   agentClasses: [],
   isSaving: false,
   activeRuns: [],
-  schedules: [],
+  scheduledRuns: [],
 
   onNodesChange: (changes) => {
     set({
@@ -364,5 +368,41 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       edges: [],
       nodeStatuses: {}
     });
-  }
+  },
+
+  loadScheduledRuns: async () => {
+    try {
+      const runs = await invoke<ScheduledRun[]>("list_scheduled_runs");
+      set({ scheduledRuns: runs });
+    } catch (err) {
+      console.error("Failed to load scheduled runs:", err);
+    }
+  },
+
+  createScheduledRun: async (run) => {
+    try {
+      await invoke("create_scheduled_run", { run });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to create scheduled run:", err);
+    }
+  },
+
+  deleteScheduledRun: async (runId) => {
+    try {
+      await invoke("delete_scheduled_run", { runId });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to delete scheduled run:", err);
+    }
+  },
+
+  toggleScheduledRun: async (runId) => {
+    try {
+      await invoke("toggle_scheduled_run", { runId });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to toggle scheduled run:", err);
+    }
+  },
 }));

@@ -43,9 +43,9 @@ pub struct WorkflowDefinition {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduleDefinition {
-    /// "one_time" | "recurring" | "cron"
+    /// "one_time" | "minutes" | "hours" | "daily" | "weekly"
     pub schedule_type: String,
-    /// ISO8601 datetime for one_time, duration string (e.g. "60m") for recurring, cron expression for cron
+    /// ISO8601 for one_time, interval number for minutes/hours, HH:MM for daily, "Mon,Wed@09:00" for weekly
     pub value: String,
     pub active: bool,
 }

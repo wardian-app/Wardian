@@ -42,7 +42,9 @@ describe('WorkflowSidebar', () => {
     pauseAllTriggers: mockPauseAllTriggers,
     resumeAllTriggers: mockResumeAllTriggers,
     activeRuns: [],
-    schedules: [],
+    scheduledRuns: [],
+    loadScheduledRuns: vi.fn(),
+    toggleScheduledRun: vi.fn(),
   };
 
   beforeEach(() => {

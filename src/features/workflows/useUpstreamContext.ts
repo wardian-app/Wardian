@@ -24,7 +24,7 @@ export const getDeepKeys = (node: any): VariableKey[] => {
       keys.push({ path: 'path', label: 'File Path' });
       keys.push({ path: 'event', label: 'Event Type' });
       keys.push({ path: 'timestamp', label: 'Timestamp' });
-    } else if (node.data?.blockName === 'Cron Schedule') {
+    } else if (node.data?.blockName === 'Scheduled Trigger') {
       keys.push({ path: 'timestamp', label: 'Fired At' });
       keys.push({ path: 'id', label: 'Schedule ID' });
     }

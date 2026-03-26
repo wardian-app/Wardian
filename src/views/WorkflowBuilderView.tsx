@@ -269,10 +269,9 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       config.max_iterations = '10';
       config.iterator_name = 'i';
     }
-    if (block.name === 'Cron Schedule') {
+    if (block.name === 'Scheduled Trigger') {
       config.schedule_type = 'Minutes';
       config.interval = '5';
-      config.cron = '0 */5 * * * *';
     }
 
     const newNode = {
@@ -668,50 +667,13 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   }}
                 />
               </div>
-              {/* Friendly Cron Sync Logic */}
-              {(() => {
-                if (selectedNode?.data.blockName === 'Cron Schedule') {
-                  const config = (selectedNode.data.config || {}) as any;
-                  const calculateCronPrefix = (cfg: any) => {
-                    const { schedule_type, interval, time, days } = cfg;
-                    const sec = "0";
-                    
-                    if (schedule_type === 'Minutes') {
-                      const min = interval ? `*/${interval}` : "*";
-                      return `${sec} ${min} * * * *`;
-                    }
-                    if (schedule_type === 'Hours') {
-                      const hr = interval ? `*/${interval}` : "*";
-                      return `${sec} 0 ${hr} * * *`;
-                    }
-                    if (schedule_type === 'Daily') {
-                      const [h, m] = (time || "00:00").split(":");
-                      return `${sec} ${parseInt(m || "0")} ${parseInt(h || "0")} * * *`;
-                    }
-                    if (schedule_type === 'Weekly') {
-                      const [h, m] = (time || "00:00").split(":");
-                      const dayMap: any = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-                      const dayList = (days || "Mon").split(",").map((d: string) => dayMap[d.toLowerCase().trim()] ?? d).join(",");
-                      return `${sec} ${parseInt(m || "0")} ${parseInt(h || "0")} * * ${dayList}`;
-                    }
-                    return cfg.cron || "0 * * * * *";
-                  };
-
-                  const currentCron = calculateCronPrefix(config);
-                  if (config.schedule_type && config.schedule_type !== 'Custom' && config.cron !== currentCron) {
-                    // Sync to store immediately
-                    setTimeout(() => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, 'cron', currentCron), 0);
-                  }
-                }
-                return null;
-              })()}
 
 
               {(() => {
                 const blockDef = BLOCK_LIBRARY.find(b => b.type === selectedNode?.type && (selectedNode?.data.blockName ? b.name === selectedNode.data.blockName : true));
                 if (!blockDef) return null;
 
-                const renderField = (field: any, isAdvanced: boolean = false) => {
+                const renderField = (field: any) => {
                   const val = (selectedNode?.data.config as any)?.[field.name] || '';
                   const sessionType = (selectedNode?.data.config as any)?.session_type || 'persistent';
 
@@ -725,15 +687,14 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     if (field.name === 'json_schema' && outputFormat !== 'json') return null;
                   }
 
-                  // Conditional visibility for Cron fields
-                  if (selectedNode?.data.blockName === 'Cron Schedule') {
-                    const st = (selectedNode?.data.config as any)?.schedule_type || 'Custom';
-                    if (st === 'Custom' && ['interval', 'time', 'days'].includes(field.name)) return null;
-                    if (st === 'Minutes' && ['time', 'days'].includes(field.name)) return null;
-                    if (st === 'Hours' && ['time', 'days'].includes(field.name)) return null;
-                    if (st === 'Daily' && ['interval', 'days'].includes(field.name)) return null;
-                    if (st === 'Weekly' && ['interval'].includes(field.name)) return null;
-                    if (field.name === 'cron' && !isAdvanced) return null; // Only show cron in advanced
+                  // Conditional visibility for Schedule fields
+                  if (selectedNode?.data.blockName === 'Scheduled Trigger') {
+                    const st = (selectedNode?.data.config as any)?.schedule_type || 'Minutes';
+                    if (st === 'Minutes' && ['time', 'days', 'datetime'].includes(field.name)) return null;
+                    if (st === 'Hours' && ['time', 'days', 'datetime'].includes(field.name)) return null;
+                    if (st === 'Daily' && ['interval', 'days', 'datetime'].includes(field.name)) return null;
+                    if (st === 'Weekly' && ['interval', 'datetime'].includes(field.name)) return null;
+                    if (st === 'One-Time' && ['interval', 'time', 'days'].includes(field.name)) return null;
                   }
 
                   // Conditional visibility for Loop fields
@@ -796,12 +757,12 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
                 return (
                   <>
-                    {blockDef.fields?.map(f => renderField(f, false))}
+                    {blockDef.fields?.map(f => renderField(f))}
                     
                     {blockDef.advancedFields && blockDef.advancedFields.length > 0 && (
                       <div className="pt-8 border-t border-wardian-border space-y-6">
                         <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em]">Advanced Configuration</h4>
-                        {blockDef.advancedFields.map(f => renderField(f, true))}
+                        {blockDef.advancedFields.map(f => renderField(f))}
                       </div>
                     )}
                   </>
