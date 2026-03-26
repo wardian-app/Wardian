@@ -135,9 +135,6 @@ pub async fn spawn_agent(
             None
         }
     };
-    #[cfg(not(windows))]
-    let job_object = None;
-
     let mut reader = pair
         .master
         .try_clone_reader()
