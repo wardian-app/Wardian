@@ -22,7 +22,42 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        ("claude".to_string(), vec![])
+        let exe_name = if cfg!(target_os = "windows") { "claude.cmd" } else { "claude" };
+
+        // 1. Try bare command in PATH
+        if let Some(paths) = std::env::var_os("PATH") {
+            for path in std::env::split_paths(&paths) {
+                let full_path = path.join(exe_name);
+                if full_path.exists() {
+                    return (exe_name.to_string(), vec![]);
+                }
+            }
+        }
+
+        // 2. Robust Fallback
+        if cfg!(target_os = "windows") {
+            if let Some(appdata) = dirs::data_dir() {
+                let npm_claude = appdata.join("npm").join("claude.cmd");
+                if npm_claude.exists() {
+                    return (npm_claude.to_string_lossy().to_string(), vec![]);
+                }
+            }
+        } else {
+            let home = dirs::home_dir().unwrap_or_default();
+            let fallbacks = vec![
+                home.join(".npm-global/bin/claude"),
+                std::path::PathBuf::from("/usr/local/bin/claude"),
+                std::path::PathBuf::from("/opt/homebrew/bin/claude"),
+            ];
+            for path in fallbacks {
+                if path.exists() {
+                    return (path.to_string_lossy().to_string(), vec![]);
+                }
+            }
+        }
+
+        // 3. Ultimate Fallback
+        (exe_name.to_string(), vec![])
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {

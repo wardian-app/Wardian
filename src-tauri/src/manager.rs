@@ -51,19 +51,7 @@ pub async fn spawn_agent(
 ) -> Result<ActiveAgent, String> {
     let provider = ProviderFactory::resolve(&config.provider)?;
 
-    let cwd = if config.folder.is_empty() {
-        if cfg!(windows) {
-            std::env::var("USERPROFILE")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("C:\\"))
-        } else {
-            std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        }
-    } else {
-        std::path::PathBuf::from(&config.folder)
-    };
+    let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
 
     let expected_folder = if config.folder.is_empty() {
         cwd.to_string_lossy().to_string()
