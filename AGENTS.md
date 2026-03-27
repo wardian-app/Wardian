@@ -65,3 +65,12 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
 - **Surgical Code Changes**: Use the `replace` tool for precise, context-aware edits. Avoid overwriting entire files unless scaffolding new modules.
 - **Verification-First**: A task is only complete once the behavioral correctness has been verified via the pre-commit checklist.
 - **TypeScript Sovereignty**: Strictly adhere to the types defined in `src/types/index.ts`. Never use `any` unless required by external library constraints.
+
+## 🌿 Git & Pull Request Standards
+All agents must follow these standards to ensure a clean, high-governance repository state:
+
+- **Branching**: Never work directly on `main`. Create descriptive feature branches (e.g., `feat/junction-refactor` or `fix/telemetry-bug`).
+- **Atomic Commits**: Group related changes into small, semantic commits. Use [Conventional Commits](https://www.conventionalcommits.org/) (e.g., `feat:`, `fix:`, `docs:`, `chore:`).
+- **Issue Linking**: Every PR must link to an existing GitHub issue. If no issue exists, create one before starting the implementation.
+- **PR Descriptions**: Always use the provided PR template. Explain the "Why" behind the change and include evidence of successful verification (logs or test results).
+- **CI Readiness**: Before opening a PR, run the full verification suite (`npm run lint/test` and `cargo clippy/test`) to ensure green status on GitHub Actions.

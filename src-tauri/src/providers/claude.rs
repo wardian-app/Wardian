@@ -26,15 +26,13 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
-        let mut args: Vec<String> = Vec::new();
-
-        // Persistent PTY session: use streaming JSON I/O without --print
-        // so Claude stays alive and processes multiple turns from stdin.
-        args.push("--verbose".into());
-        args.push("--input-format".into());
-        args.push("stream-json".into());
-        args.push("--output-format".into());
-        args.push("stream-json".into());
+        let mut args: Vec<String> = vec![
+            "--verbose".into(),
+            "--input-format".into(),
+            "stream-json".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+        ];
 
         if let Some(ref model) = config.model {
             args.push("--model".into());

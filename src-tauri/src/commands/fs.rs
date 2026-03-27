@@ -19,10 +19,10 @@ pub async fn get_explorer_root(
 ) -> Result<String, String> {
     if let Some(id) = session_id {
         let agents = state.agents.lock().await;
-        if let Some(agent) = agents.get(&id) {
-            return Ok(agent.config.folder.clone());
-        }
-        return Err("Agent not found".into());
+        agents
+            .get(&id)
+            .map(|agent| agent.config.folder.clone())
+            .ok_or_else(|| "Agent not found".to_string())
     } else {
         let app_dir = crate::manager::get_wardian_home().ok_or("No home dir")?;
         Ok(app_dir.to_string_lossy().into_owned())

@@ -400,7 +400,7 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
                             }
                         }).unwrap();
 
-                        if let Ok(_) = watcher.watch(&path_clone, RecursiveMode::NonRecursive) {
+                        if watcher.watch(&path_clone, RecursiveMode::NonRecursive).is_ok() {
                             while let Some(payload) = rx.recv().await {
                                 let state = app_file.state::<crate::state::AppState>();
                                 if state.triggers_paused.load(std::sync::atomic::Ordering::SeqCst) {
@@ -483,7 +483,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
 
         // 1. Identify Entry Points (nodes with no dependencies)
         for node in &wf.nodes {
-            if node.dependencies.as_ref().map_or(true, |d| d.is_empty()) {
+            if node.dependencies.as_ref().is_none_or(|d| d.is_empty()) {
                 queue.push_back(node.id.clone());
             }
         }
@@ -507,7 +507,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                 if !deps.is_empty() {
                     // Check if there is AT LEAST ONE unconsumed pulse
                     let mut is_satisfied = false;
-                    let node_consumed = consumed_pulses.entry(node.id.clone()).or_insert_with(HashMap::new);
+                    let node_consumed = consumed_pulses.entry(node.id.clone()).or_default();
 
                     if node.r#type == "wait" {
                         // Wait nodes: ALL dependent ports must have pulsed_count > consumed_count
@@ -618,7 +618,7 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                             registry.insert("storage".to_string(), storage.clone());
                             output_payload = serde_json::json!({ "status": "success", "op": "delete", "key": interpolated_key });
                         },
-                        "get" | _ => {
+                        _ => {
                             // Already in registry as 'storage', but we return the specific value as node output too
                             let val = if let Some(obj) = storage.as_object() {
                                 obj.get(&interpolated_key).cloned().unwrap_or(Value::Null)

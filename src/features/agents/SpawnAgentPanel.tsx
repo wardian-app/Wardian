@@ -32,12 +32,14 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
     setIsSpawning(true);
     try {
       await invoke<AgentConfig>("spawn_agent", {
-        sessionName: newSessionName,
-        agentClass: newAgentClass,
-        folder: newFolder,
-        resumeSession: resumeSession || null,
-        isOff: false,
-        configOverride: spawnAdvancedConfig,
+        req: {
+          sessionName: newSessionName,
+          agentClass: newAgentClass,
+          folder: newFolder,
+          resumeSession: resumeSession || null,
+          isOff: false,
+          configOverride: spawnAdvancedConfig,
+        },
       });
       setNewSessionName("");
       setNewAgentClass("Generalist");
