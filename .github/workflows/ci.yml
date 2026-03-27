@@ -67,10 +67,19 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev pkg-config
-          sudo apt-get install -y libgtk-3-dev libgdk-pixbuf2.0-dev
-          sudo apt-get install -y libsoup-3.0-dev
-          sudo apt-get install -y libjavascriptcoregtk-4.1-dev
+              sudo apt-get install -y build-essential curl wget file
+              # GTK and glib
+              sudo apt-get install -y libglib2.0-dev pkg-config
+              sudo apt-get install -y libgtk-3-dev libgdk-pixbuf2.0-dev
+              # Webkit2GTK (for webview - required by Tauri)
+              sudo apt-get install -y libwebkit2gtk-4.1-dev
+              # Additional GTK dependencies
+              sudo apt-get install -y libsoup-3.0-dev
+              sudo apt-get install -y libjavascriptcoregtk-4.1-dev
+              # X11 and window manager libraries
+              sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+              # Additional required libraries
+              sudo apt-get install -y libssl-dev libxkbcommon-dev
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
