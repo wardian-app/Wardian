@@ -755,6 +755,16 @@ pub fn init_agent_classes(app: &AppHandle) {
     }
 }
 
+pub fn get_agent_class_default_instruction(app: &AppHandle, class_name: &str) -> Option<String> {
+    app.path()
+        .resolve(
+            format!("agent_prompts/{}.md", class_name),
+            tauri::path::BaseDirectory::Resource,
+        )
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+}
+
 pub async fn kill_all_agents(state: &AppState) {
     let mut agents = state.agents.lock().await;
     for (sid, mut agent) in agents.drain() {
