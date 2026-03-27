@@ -8,10 +8,13 @@ export function deriveEffectiveStatus(
   currentThought: string | undefined,
   metricsStatus: string | undefined,
   isOff?: boolean,
-): "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" {
+): "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" {
   if (isOff) return "Off";
 
   let effectiveStatus: string = metricsStatus || "Pending...";
+
+  // Backend "Headless" status is authoritative — pass it through unchanged.
+  if (effectiveStatus === "Headless") return "Headless";
 
   // Title-based overrides. "Action Required" always upgrades status.
   // "◇ / Ready / Idle" can only set Idle when the backend hasn't reported an active state —
@@ -29,7 +32,7 @@ export function deriveEffectiveStatus(
   // A live thought signals activity, but must not override an explicit "Action Needed".
   if (currentThought && effectiveStatus !== "Action Needed") effectiveStatus = "Processing...";
 
-  return effectiveStatus as "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off";
+  return effectiveStatus as "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless";
 }
 
 /**
@@ -53,7 +56,7 @@ export function deriveCurrentThought(
   liveThought: string | undefined,
   metrics: AgentTelemetry | undefined,
   isOff?: boolean,
-): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" } {
+): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" } {
   let effectiveStatus = deriveEffectiveStatus(rawTitle, liveThought, metrics?.current_status, isOff);
   let currentThought = cleanThought(liveThought || rawTitle.trim());
 
@@ -133,6 +136,9 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
  * Returns the short text label for the status to be displayed in lists/dashboards.
  */
 export function getAgentStatusLabel(status: string, thought: string, maxLength: number = 12): string {
+  if (status === "Headless") {
+    return "Headless";
+  }
   if (status === "Processing...") {
     return thought.substring(0, maxLength);
   }
@@ -149,12 +155,16 @@ export function getAgentStatusLabel(status: string, thought: string, maxLength: 
  * Returns the text color CSS class for the status.
  */
 export function getAgentStatusTextClass(status: string): string {
+  if (status === "Headless") return "text-wardian-headless";
   if (status === "Processing...") return "text-[var(--color-wardian-accent)]";
   if (status === "Action Needed") return "text-wardian-warning";
   if (status === "Off") return "text-muted-neutral";
   return "text-muted-neutral";
 }
 export function getStatusColorClass(effectiveStatus: string): string {
+  if (effectiveStatus === "Headless") {
+    return "bg-wardian-headless shadow-[0_0_10px_var(--color-wardian-headless)] animate-pulse";
+  }
   if (effectiveStatus === "Processing...") {
     return "bg-wardian-processing shadow-[0_0_8px_var(--color-wardian-processing)] animate-pulse";
   }

@@ -547,6 +547,14 @@ pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: &str) {
     }
 }
 
+pub async fn stop_workflow_run(app: AppHandle, workflow_id: &str) {
+    let state = app.state::<crate::state::AppState>();
+    let mut runs = state.workflow_runs.lock().await;
+    if let Some(handle) = runs.remove(workflow_id) {
+        handle.abort();
+    }
+}
+
 pub async fn stop_all_triggers(app: AppHandle) {
     let state = app.state::<crate::state::AppState>();
     let mut triggers = state.workflow_triggers.lock().await;
@@ -771,7 +779,10 @@ pub async fn run_workflow(
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let log_path = log_dir.join(format!("{}.json", timestamp));
 
-    tauri::async_runtime::spawn(async move {
+    // Store the run handle for cancellation support
+    let wf_id_for_handle = wf_id.clone();
+    let app_for_handle = app.clone();
+    let handle = tauri::async_runtime::spawn(async move {
         let mut trace = Vec::new();
         let mut pulsed_ports: HashMap<(String, String), u32> = HashMap::new(); // (node_id, port_id) -> count
         let mut consumed_pulses: HashMap<String, HashMap<(String, String), u32>> = HashMap::new(); // node_id -> dependency -> count
@@ -783,13 +794,15 @@ pub async fn run_workflow(
         let mut storage = load_shared_storage();
         registry.insert("storage".to_string(), storage.clone());
 
-        let mut global_step_count = 0;
-        let hard_limit = wf.settings.max_iterations.max(100);
+        let mut global_step_count: usize = 0;
+        let mut total_enqueued: usize = 0;
+        let hard_limit = wf.settings.max_iterations.max(100) as usize;
 
         // 1. Identify Entry Points (nodes with no dependencies)
         for node in &wf.nodes {
             if node.dependencies.as_ref().is_none_or(|d| d.is_empty()) {
                 queue.push_back(node.id.clone());
+                total_enqueued += 1;
             }
         }
 
@@ -869,6 +882,14 @@ pub async fn run_workflow(
                     error: None,
                 },
             );
+
+            let _ = app.emit("workflow-progress", serde_json::json!({
+                "workflow_id": wf.id,
+                "workflow_name": wf.name,
+                "current_step": global_step_count,
+                "total_steps": total_enqueued + queue.len(),
+                "active_node_name": node.name.clone().unwrap_or_else(|| node.id.clone()),
+            }));
 
             // --- NODE LOGIC ---
             let mut result_ports = vec!["default".to_string()];
@@ -1056,9 +1077,12 @@ pub async fn run_workflow(
                             .unwrap_or(60000);
 
                         log_debug(&format!(
-                            "[Wardian] Agent node output_format: {}. Final Prompt Length: {}",
+                            "[Wardian] Agent node: agent_id={}, provider={}, output_format={}, prompt_len={}, prompt_preview='{}'",
+                            agent_id,
+                            provider_name,
                             output_format,
-                            prompt.len()
+                            prompt.len(),
+                            &prompt[..prompt.len().min(200)]
                         ));
 
                         // 1. Resolve CWD logic (Shared between modes)
@@ -1103,22 +1127,22 @@ pub async fn run_workflow(
                                 let mut agents_map = state.agents.lock().await;
                                 if let Some(agent) = agents_map.get_mut(agent_id) {
                                     agent_cfg = Some(agent.config.clone());
-                                    let _ = app.emit("agents-updated", ()); // Notify UI early
                                     if let Some(mut child) = agent.child_process.take() {
                                         was_online = true;
                                         let _ = child.kill();
                                         let _ = child.wait();
                                     }
-                                    agent.config.is_off = true; // Mark persistent config as off
+                                    // Mark status as Headless so the UI shows the purple indicator
                                     if let Ok(mut status) = agent.current_status.lock() {
-                                        *status = "Off".to_string();
+                                        *status = "Headless".to_string();
                                     }
                                     if let Ok(mut senders) = state.input_senders.write() {
                                         senders.remove(agent_id);
                                     }
                                     let order = state.agent_order.lock().await;
                                     crate::manager::save_state(&app, &agents_map, &order);
-                                    log_debug(&format!("[Wardian] Killed active PTY and persisted Off state for {} transition (was_online={})", agent_id, was_online));
+                                    let _ = app.emit("agents-updated", ());
+                                    log_debug(&format!("[Wardian] Killed active PTY and set Headless status for {} (was_online={})", agent_id, was_online));
                                 }
                             }
 
@@ -1152,7 +1176,7 @@ pub async fn run_workflow(
                                 }
                             }
 
-                            // Restore state if it was online
+                            // Restore state after headless run
                             if was_online {
                                 if let Some(mut cfg) = agent_cfg {
                                     cfg.is_off = false;
@@ -1173,6 +1197,15 @@ pub async fn run_workflow(
                                         let _ = app.emit("agents-updated", ());
                                     }
                                 }
+                            } else {
+                                // Agent was already off — reset from Headless back to Off
+                                let agents_map = state.agents.lock().await;
+                                if let Some(agent) = agents_map.get(agent_id) {
+                                    if let Ok(mut status) = agent.current_status.lock() {
+                                        *status = "Off".to_string();
+                                    }
+                                }
+                                let _ = app.emit("agents-updated", ());
                             }
                         } else {
                             // --- PTY TEXT MODE (With Headless Fallback) ---
@@ -1242,6 +1275,16 @@ pub async fn run_workflow(
                             } else {
                                 // Agent is OFFLINE: Fallback to Headless Execution
                                 log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
+                                // Set Headless status for UI indicator
+                                {
+                                    let agents_map = state.agents.lock().await;
+                                    if let Some(agent) = agents_map.get(agent_id) {
+                                        if let Ok(mut status) = agent.current_status.lock() {
+                                            *status = "Headless".to_string();
+                                        }
+                                    }
+                                }
+                                let _ = app.emit("agents-updated", ());
                                 let run_result = tokio::time::timeout(
                                     std::time::Duration::from_millis(timeout_ms),
                                     crate::manager::run_headless(
@@ -1271,6 +1314,16 @@ pub async fn run_workflow(
                                         node_error = Some(e);
                                     }
                                 }
+                                // Reset from Headless back to Off
+                                {
+                                    let agents_map = state.agents.lock().await;
+                                    if let Some(agent) = agents_map.get(agent_id) {
+                                        if let Ok(mut status) = agent.current_status.lock() {
+                                            *status = "Off".to_string();
+                                        }
+                                    }
+                                }
+                                let _ = app.emit("agents-updated", ());
                             }
                         }
                     }
@@ -1573,16 +1626,31 @@ pub async fn run_workflow(
                 if let Some(deps) = &candidate.dependencies {
                     if deps.iter().any(|d| d.node_id == current_node_id) {
                         queue.push_back(candidate.id.clone());
+                        total_enqueued += 1;
                     }
                 }
             }
         }
+
+        // Emit workflow completion status
+        let had_error = trace.iter().any(|e| e.status == "failed");
+        let _ = app.emit("workflow-status-updated", serde_json::json!({
+            "workflow_id": wf.id,
+            "status": if had_error { "failed" } else { "completed" },
+        }));
 
         // Save the execution log
         if let Ok(json) = serde_json::to_string_pretty(&trace) {
             let _ = fs::write(log_path, json);
         }
     });
+
+    // Store handle for cancellation
+    {
+        let state = app_for_handle.state::<crate::state::AppState>();
+        let mut runs = state.workflow_runs.lock().await;
+        runs.insert(wf_id_for_handle, handle);
+    }
 
     Ok(())
 }

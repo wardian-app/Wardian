@@ -42,6 +42,18 @@ pub async fn resume_all_triggers(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: String) -> Result<(), String> {
+    workflow_engine::stop_workflow_triggers(app, &workflow_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_workflow_run(app: AppHandle, workflow_id: String) -> Result<(), String> {
+    workflow_engine::stop_workflow_run(app, &workflow_id).await;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn load_workflow_library() -> Result<Value, String> {
     Ok(workflow_engine::load_workflow_library())
 }

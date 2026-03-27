@@ -16,6 +16,7 @@ import { BLOCK_LIBRARY, BlockDefinition } from '../features/workflows/blockLibra
 import { SchemaEditor } from '../components/SchemaEditor';
 import { RenderableInput } from '../components/RenderableInput';
 import { VariableAssistant } from '../features/workflows/VariableAssistant';
+import { RunPayloadModal, getManualTriggerSchema, getWorkflowRoles } from '../features/workflows/RunPayloadModal';
 
 const nodeTypes = {
   trigger: WorkflowNode,
@@ -77,7 +78,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     deleteWorkflow,
     updateActiveWorkflowName,
     duplicateNode,
-    isSaving
+    isSaving,
+    loadScheduledRuns
   } = useWorkflowStore();
 
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
@@ -88,12 +90,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   const [isRenamingWf, setIsRenamingWf] = React.useState(false);
   const [tempWfName, setTempWfName] = React.useState("");
 
-  const [runPayloadModal, setRunPayloadModal] = React.useState<{
-    isOpen: boolean;
-    nodeId: string;
-    values: Record<string, any>;
-    schema: any;
-  }>({ isOpen: false, nodeId: '', values: {}, schema: null });
+  const [isRunModalOpen, setIsRunModalOpen] = React.useState(false);
 
   const [contextMenu, setContextMenu] = React.useState<{
     visible: boolean;
@@ -195,34 +192,19 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
   const handleRun = async () => {
     handleSave();
-    
-    const manualTrigger = nodes.find(n => n.data.blockName === 'Manual Trigger');
-    if (manualTrigger) {
-      const schemaStr = (manualTrigger.data.config as any)?.input_schema;
-      if (schemaStr) {
-        try {
-          const schema = JSON.parse(schemaStr);
-          const properties = schema.properties || (schema.type === 'object' ? {} : null);
-          
-          if (properties && Object.keys(properties).length > 0) {
-            // Initialize default values
-            const initialValues: Record<string, any> = {};
-            Object.keys(properties).forEach(key => {
-              initialValues[key] = properties[key].default !== undefined ? properties[key].default : '';
-            });
 
-            setRunPayloadModal({
-              isOpen: true,
-              nodeId: manualTrigger.id,
-              values: initialValues,
-              schema: schema
-            });
-            return;
-          }
-        } catch (e) {}
-      }
+    // Scheduled triggers: save registers the schedule; don't execute immediately
+    const triggerNode = activeWorkflow?.nodes.find(n => n.type === 'trigger');
+    if (triggerNode?.name === 'Scheduled Trigger') {
+      loadScheduledRuns();
+      return;
     }
-    
+
+    if (activeWorkflow && (getManualTriggerSchema(activeWorkflow) || getWorkflowRoles(activeWorkflow).length > 0)) {
+      setIsRunModalOpen(true);
+      return;
+    }
+
     runActiveWorkflow();
   };
 
@@ -776,99 +758,17 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             </div>
         </div>
       </div>
-      {/* --- Run Payload Modal --- */}
-      {runPayloadModal.isOpen && (
-        <div className="absolute inset-0 z-[110] flex items-center justify-center p-8 bg-black/60 backdrop-blur-md animate-in fade-in duration-200">
-          <div className="bg-[var(--color-wardian-card)] border border-wardian-border-heavy w-full max-w-lg rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
-            <div className="p-6 border-b border-wardian-border flex items-center justify-between">
-              <div className="flex flex-col">
-                <h3 className="text-xl font-bold text-[var(--color-wardian-text)] tracking-tight">Manual Trigger</h3>
-                <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">Provide Input Parameters</span>
-              </div>
-              <button 
-                onClick={() => setRunPayloadModal({ ...runPayloadModal, isOpen: false })}
-                className="p-2 hover:bg-white/10 rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-              </button>
-            </div>
-
-            <div className="p-6 space-y-6 max-h-[60vh] overflow-y-auto no-scrollbar">
-               {Object.entries((runPayloadModal.schema?.properties || {}) as Record<string, any>).map(([key, prop]) => (
-                 <div key={key} className="flex flex-col gap-2">
-                   <div className="flex items-center justify-between">
-                     <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
-                     <div className="flex items-center gap-1.5 opacity-60">
-                       <span className="text-[9px] font-mono text-muted-neutral bg-white/5 px-1.5 py-0.5 rounded border border-white/10">{prop.type || 'string'}</span>
-                       <button 
-                         title="Variables supported (right-click input to insert)"
-                         className="p-1 hover:bg-white/10 rounded-md text-muted-neutral hover:text-[var(--color-wardian-accent)] transition-all cursor-help"
-                       >
-                         <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
-                       </button>
-                     </div>
-                   </div>
-                   <div className="bg-[var(--color-wardian-bg)] rounded-xl border border-wardian-border overflow-hidden">
-                     <RenderableInput 
-                        multiline={true}
-                        compact={true}
-                        value={String(runPayloadModal.values[key] || '')}
-                        nodeId={runPayloadModal.nodeId}
-                        placeholder={prop.description || `Enter ${key}...`}
-                        onChange={(val) => setRunPayloadModal(prev => ({ 
-                          ...prev, 
-                          values: { ...prev.values, [key]: val } 
-                        }))}
-                     />
-                   </div>
-                   {prop.description && <p className="text-[9px] text-muted-neutral/60 italic leading-snug">{prop.description}</p>}
-                 </div>
-               ))}
-            </div>
-
-            <div className="p-6 bg-[color-mix(in_srgb,var(--color-wardian-card),black_10%)] border-t border-wardian-border flex justify-end gap-3">
-               <button 
-                onClick={() => setRunPayloadModal({ ...runPayloadModal, isOpen: false })}
-                className="px-6 py-2 rounded-xl text-xs font-bold text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={() => {
-                  // Final conversion: try to parse values back to their intended types if possible
-                  const finalPayload: Record<string, any> = {};
-                  const properties = runPayloadModal.schema?.properties || {};
-                  
-                  Object.keys(runPayloadModal.values).forEach(key => {
-                    const val = runPayloadModal.values[key];
-                    const type = properties[key]?.type;
-                    
-                    if (type === 'number' || type === 'integer') {
-                      const num = Number(val);
-                      finalPayload[key] = isNaN(num) ? val : num;
-                    } else if (type === 'boolean') {
-                      finalPayload[key] = val === 'true' || val === true;
-                    } else if (type === 'object' || type === 'array') {
-                      try {
-                        finalPayload[key] = JSON.parse(val);
-                      } catch (e) {
-                        finalPayload[key] = val;
-                      }
-                    } else {
-                      finalPayload[key] = val;
-                    }
-                  });
-
-                  runActiveWorkflow(finalPayload);
-                  setRunPayloadModal({ ...runPayloadModal, isOpen: false });
-                }}
-                className="px-8 py-2 bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] rounded-xl text-[10px] font-bold uppercase tracking-widest hover:scale-105 active:scale-95 transition-all cursor-pointer"
-              >
-                Run Workflow
-              </button>
-            </div>
-          </div>
-        </div>
+      {activeWorkflow && (
+        <RunPayloadModal
+          workflow={activeWorkflow}
+          isOpen={isRunModalOpen}
+          agents={agents.map(a => ({ session_id: a.session_id, session_name: a.session_name }))}
+          onRun={(payload) => {
+            runActiveWorkflow(payload);
+            setIsRunModalOpen(false);
+          }}
+          onCancel={() => setIsRunModalOpen(false)}
+        />
       )}
     </div>
   );

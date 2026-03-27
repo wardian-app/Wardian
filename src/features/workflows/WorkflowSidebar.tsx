@@ -2,6 +2,8 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
 import { WorkflowLibrary } from './WorkflowLibrary';
 import { ActiveMonitoring } from './ActiveMonitoring';
+import { RunPayloadModal, getManualTriggerSchema, getWorkflowRoles } from './RunPayloadModal';
+import type { WorkflowDefinition } from '../../types/workflow';
 
 // Icons
 const StopAllIcon = () => <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M5 5h10v10H5z" /></svg>;
@@ -19,8 +21,11 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
     loadWorkflow,
     deleteWorkflow,
     stopAllTriggers,
+    stopWorkflowTriggers,
+    stopWorkflowRun,
     pauseAllTriggers,
     resumeAllTriggers,
+    agents,
     activeRuns,
     scheduledRuns,
     loadScheduledRuns,
@@ -29,6 +34,17 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
   } = useWorkflowStore();
   
   const [searchQuery, setSearchQuery] = useState('');
+  const [pendingRunWorkflow, setPendingRunWorkflow] = useState<WorkflowDefinition | null>(null);
+
+  const handleRunFromLibrary = (id: string) => {
+    const wf = availableWorkflows.find(w => w.id === id);
+    if (!wf) return;
+    if (getManualTriggerSchema(wf) || getWorkflowRoles(wf).length > 0) {
+      setPendingRunWorkflow(wf);
+    } else {
+      runWorkflowById(id);
+    }
+  };
 
   useEffect(() => { loadScheduledRuns(); }, [loadScheduledRuns]);
 
@@ -110,10 +126,11 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
           activeRuns={activeRuns}
           schedules={scheduledRuns}
           activeWorkflows={activeWorkflows}
-          onStopRun={(id) => console.log('Stop Run', id)}
-          onStopTrigger={(id) => console.log('Stop Trigger', id)}
+          onStopRun={(id) => stopWorkflowRun(id)}
+          onStopTrigger={(id) => { stopWorkflowTriggers(id); fetchWorkflows(); }}
           onToggleSchedule={(id) => toggleScheduledRun(id)}
           onDeleteSchedule={(id) => deleteScheduledRun(id)}
+          onRunNow={(workflowId) => { runWorkflowById(workflowId); loadScheduledRuns(); }}
         />
 
         <div className="my-4 border-t border-wardian-border/20" />
@@ -126,13 +143,17 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
           <WorkflowLibrary 
             workflows={filteredWorkflows.map(wf => {
               const triggerNode = wf.nodes.find(n => n.type === 'trigger');
+              let trigger_type = 'manual';
+              if (triggerNode?.name === 'Scheduled Trigger') trigger_type = 'scheduled';
+              else if (triggerNode?.name === 'File Watcher') trigger_type = 'watcher';
+              else if (triggerNode?.config?.type === 'Webhook') trigger_type = 'webhook';
               return {
                 ...wf,
-                trigger_type: triggerNode?.config?.type || 'manual',
+                trigger_type,
                 trigger_status: triggerNode?.config?.status || 'off'
               };
             })}
-            onRun={runWorkflowById}
+            onRun={handleRunFromLibrary}
             onEdit={(id) => {
               const wf = availableWorkflows.find(w => w.id === id);
               if (wf) loadWorkflow(wf);
@@ -141,6 +162,19 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
           />
         </div>
       </div>
+
+      {pendingRunWorkflow && (
+        <RunPayloadModal
+          workflow={pendingRunWorkflow}
+          isOpen={true}
+          agents={agents.map(a => ({ session_id: a.session_id, session_name: a.session_name }))}
+          onRun={(payload) => {
+            runWorkflowById(pendingRunWorkflow.id, payload);
+            setPendingRunWorkflow(null);
+          }}
+          onCancel={() => setPendingRunWorkflow(null)}
+        />
+      )}
     </div>
   );
 };

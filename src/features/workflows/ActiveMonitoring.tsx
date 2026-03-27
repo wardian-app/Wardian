@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import type { ScheduledRun } from '../../types/workflow';
+import React, { useState, useEffect, useRef } from 'react';
+import type { ActiveRunTracker, ScheduledRun } from '../../types/workflow';
 
 // Icons
 const StopIcon = () => <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5 5h10v10H5z" /></svg>;
@@ -16,17 +16,22 @@ function formatNextRun(epochMs: number | null): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-// Trash icon for delete
-const TrashIcon = () => <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>;
+interface ContextMenuState {
+  scheduleId: string;
+  workflowId: string;
+  x: number;
+  y: number;
+}
 
 interface ActiveMonitoringProps {
-  activeRuns: any[];
+  activeRuns: ActiveRunTracker[];
   schedules: ScheduledRun[];
   activeWorkflows: any[];
   onStopRun: (id: string) => void;
   onStopTrigger: (id: string) => void;
   onToggleSchedule: (id: string) => void;
   onDeleteSchedule?: (id: string) => void;
+  onRunNow?: (workflowId: string) => void;
 }
 
 export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
@@ -37,14 +42,26 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
   onStopTrigger,
   onToggleSchedule,
   onDeleteSchedule,
+  onRunNow,
 }) => {
   const [openSections, setOpenSections] = useState({
     runs: true,
     triggers: true,
     schedules: true
   });
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
+  const ctxRef = useRef<HTMLDivElement>(null);
 
-  const toggle = (section: keyof typeof openSections) => 
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const dismiss = (e: MouseEvent) => {
+      if (ctxRef.current && !ctxRef.current.contains(e.target as Node)) setCtxMenu(null);
+    };
+    document.addEventListener('mousedown', dismiss);
+    return () => document.removeEventListener('mousedown', dismiss);
+  }, [ctxMenu]);
+
+  const toggle = (section: keyof typeof openSections) =>
     setOpenSections(prev => ({ ...prev, [section]: !prev[section] }));
 
   const SectionHeader = ({ title, count, section }: { title: string, count: number, section: keyof typeof openSections }) => (
@@ -67,7 +84,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
       {openSections.runs && (
         <div className="px-2 space-y-2 pb-3 pt-1">
           {activeRuns.length === 0 ? (
-            <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">No active simulations</div>
+            <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">No active runs</div>
           ) : (
             activeRuns.map(run => (
               <div key={run.run_id} className="p-2.5 rounded-lg bg-[var(--color-wardian-card-bg)] border border-wardian-border/40 group hover:border-[var(--color-wardian-accent)]/30 transition-colors">
@@ -102,7 +119,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
       {openSections.triggers && (
         <div className="px-2 space-y-1 pb-3 pt-1">
           {activeWorkflows.length === 0 ? (
-            <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">Default awareness active</div>
+            <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">No live listeners</div>
           ) : (
             activeWorkflows.map(wf => (
               <div key={wf.id} className="flex justify-between items-center px-3 py-2 rounded-lg bg-emerald-500/5 border border-emerald-500/10 group hover:bg-emerald-500/10 transition-colors">
@@ -130,10 +147,14 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
       {openSections.schedules && (
         <div className="px-2 space-y-1 pb-4 pt-1">
           {schedules.length === 0 ? (
-            <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">No future events sync'd</div>
+            <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">No scheduled tasks</div>
           ) : (
             schedules.map(s => (
-              <div key={s.id} className="flex justify-between items-center px-3 py-2 rounded-lg bg-[var(--color-wardian-input-bg)] border border-wardian-border/20 group hover:border-white/10 transition-colors">
+              <div
+                key={s.id}
+                onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ scheduleId: s.id, workflowId: s.workflow_id, x: e.clientX, y: e.clientY }); }}
+                className="flex justify-between items-center px-3 py-2 rounded-lg bg-[var(--color-wardian-input-bg)] border border-wardian-border/20 group hover:border-white/10 transition-colors cursor-context-menu"
+              >
                 <div className="flex flex-col truncate pr-3">
                   <span className="text-[11px] font-bold text-primary truncate leading-tight tracking-tight">{s.workflow_name}</span>
                   <div className="flex items-center gap-2 mt-0.5">
@@ -152,18 +173,46 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                   >
                     {s.is_paused ? <ActivityIcon /> : <StopIcon />}
                   </button>
-                  {onDeleteSchedule && (
-                    <button
-                      onClick={() => onDeleteSchedule(s.id)}
-                      className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-red-500 transition-all"
-                      title="Delete Schedule"
-                    >
-                      <TrashIcon />
-                    </button>
-                  )}
                 </div>
               </div>
             ))
+          )}
+        </div>
+      )}
+      {/* Right-click context menu for scheduled tasks */}
+      {ctxMenu && (
+        <div
+          ref={ctxRef}
+          className="fixed z-[200] min-w-[140px] py-1 bg-[var(--color-wardian-card)] border border-wardian-border-heavy rounded-lg shadow-2xl animate-in fade-in zoom-in-95 duration-150"
+          style={{ top: ctxMenu.y, left: ctxMenu.x }}
+        >
+          {onRunNow && (
+            <button
+              onClick={() => { onRunNow(ctxMenu.workflowId); setCtxMenu(null); }}
+              className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[11px] text-primary hover:bg-white/5 transition-colors text-left"
+            >
+              <svg className="w-3 h-3 text-cyan-400" fill="currentColor" viewBox="0 0 20 20"><path d="M6 4l10 6-10 6z" /></svg>
+              Run Now
+            </button>
+          )}
+          <button
+            onClick={() => { onToggleSchedule(ctxMenu.scheduleId); setCtxMenu(null); }}
+            className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[11px] text-primary hover:bg-white/5 transition-colors text-left"
+          >
+            <ActivityIcon />
+            {schedules.find(s => s.id === ctxMenu.scheduleId)?.is_paused ? 'Resume' : 'Pause'}
+          </button>
+          {onDeleteSchedule && (
+            <>
+              <div className="my-1 border-t border-wardian-border/30" />
+              <button
+                onClick={() => { onDeleteSchedule(ctxMenu.scheduleId); setCtxMenu(null); }}
+                className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[11px] text-red-400 hover:bg-red-500/10 transition-colors text-left"
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                Delete
+              </button>
+            </>
           )}
         </div>
       )}

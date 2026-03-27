@@ -337,40 +337,85 @@ pub async fn run_headless(
             cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
                 .arg("--print")
                 .arg("--output-format")
-                .arg(output_format)
-                .arg("--resume")
-                .arg(session_id)
-                .arg(prompt);
+                .arg(output_format);
+            if !session_id.is_empty() {
+                cmd.arg("--resume").arg(session_id);
+            }
+            cmd.arg(prompt);
         }
         _ => {
             cmd.arg("-p")
                 .arg(prompt)
                 .arg("--output-format")
-                .arg(output_format)
-                .arg("--resume")
-                .arg(session_id);
+                .arg(output_format);
+            if !session_id.is_empty() {
+                cmd.arg("--resume").arg(session_id);
+            }
         }
     }
     cmd.current_dir(cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
+
+    // On Windows, prevent spawning a visible console window for headless runs.
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+    log_debug(&format!(
+        "[Wardian] run_headless: provider={}, session_id={}, cwd={}, prompt_len={}, output_format={}",
+        provider_name,
+        if session_id.is_empty() { "<none>" } else { session_id },
+        cwd.display(),
+        prompt.len(),
+        output_format
+    ));
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let mut output = String::new();
 
-    if let Some(stdout) = child.stdout.take() {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 {
-                break;
+    // Read stdout and stderr concurrently to avoid deadlock when stderr buffer fills.
+    let stdout_handle = {
+        let stdout = child.stdout.take();
+        tokio::spawn(async move {
+            let mut out = String::new();
+            if let Some(stream) = stdout {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 { break; }
+                    out.push_str(&line);
+                    line.clear();
+                }
             }
-            output.push_str(&line);
-            line.clear();
-        }
-    }
+            out
+        })
+    };
+
+    let stderr_handle = {
+        let stderr = child.stderr.take();
+        tokio::spawn(async move {
+            let mut err = String::new();
+            if let Some(stream) = stderr {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 { break; }
+                    err.push_str(&line);
+                    line.clear();
+                }
+            }
+            err
+        })
+    };
+
+    let (output, err_output) = tokio::join!(stdout_handle, stderr_handle);
+    let output = output.unwrap_or_default();
+    let err_output = err_output.unwrap_or_default();
 
     let _ = child.wait().await;
+
+    if !err_output.is_empty() {
+        log_debug(&format!("[Wardian] Headless stderr: {}", err_output.trim()));
+    }
 
     if output_format == "json" {
         serde_json::from_str(&output)

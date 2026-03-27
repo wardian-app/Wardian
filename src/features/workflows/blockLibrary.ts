@@ -90,8 +90,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     outputs: 'Agent Result', 
     ports: DEFAULT_PORTS,
     fields: [
-      { name: 'role', label: 'Agent Role', type: 'text', placeholder: 'e.g. primary_coder' },
-      { name: 'agent_id', label: 'Target Agent (Direct)', type: 'select', placeholder: 'Select Agent' },
+      { name: 'agent_id', label: 'Target Agent', type: 'select', placeholder: 'Select Agent' },
       { name: 'agent_class', label: 'Agent Class', type: 'select', placeholder: 'Select Class' },
       { name: 'prompt', label: 'Prompt Template', type: 'textarea', placeholder: 'Analyze {{nodes.step1.output}}' },
       { name: 'session_type', label: 'Session Type', type: 'select', options: ['persistent', 'temporary'] },

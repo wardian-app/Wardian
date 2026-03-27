@@ -25,7 +25,7 @@ pub fn run() {
     {
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
         use windows::core::PCWSTR;
-        let aumid: Vec<u16> = "org.wardian.app"
+        let aumid: Vec<u16> = "org.wardian.desktop"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -137,6 +137,8 @@ pub fn run() {
             commands::workflow::delete_workflow,
             commands::workflow::run_workflow,
             commands::workflow::stop_all_triggers,
+            commands::workflow::stop_workflow_triggers,
+            commands::workflow::stop_workflow_run,
             commands::workflow::pause_all_triggers,
             commands::workflow::resume_all_triggers,
             commands::workflow::load_workflow_library,
