@@ -18,7 +18,7 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
   agents,
   offAgentIds,
 }) => (
-  <div className="titlebar-zone titlebar-left" style={isMac ? { paddingLeft: "76px" } : undefined}>
+  <div className="titlebar-zone titlebar-left" style={isMac ? { paddingLeft: "72px" } : undefined}>
     <button
       onClick={() => setLeftCollapsed(!leftCollapsed)}
       className={`titlebar-toggle ${!leftCollapsed ? "active" : ""}`}

@@ -31,6 +31,7 @@
   --color-wardian-sidebar-primary: #f9fafb;
   --color-wardian-sidebar-secondary: #f3f4f6;
   --color-wardian-input-bg: rgba(255, 255, 255, 0.9);
+  --color-wardian-input-bg-rgb: 255, 255, 255;
   --color-wardian-card-bg-muted: rgba(0, 0, 0, 0.04);
 
   /* Sidebar Widths */
@@ -68,7 +69,7 @@
 /* Zone 1: Aligns with entire left sidebar (rail + content) */
 .titlebar-left {
   width: var(--titlebar-left-width);
-  padding: 0 8px;
+  padding: 0 12px;
   justify-content: flex-start;
   border-right: 1px solid var(--color-wardian-border);
   flex-shrink: 0;
@@ -287,6 +288,7 @@
   --color-wardian-sidebar-primary: #111827;
   --color-wardian-sidebar-secondary: #0f172a;
   --color-wardian-input-bg: rgba(31, 41, 55, 0.5);
+  --color-wardian-input-bg-rgb: 31, 41, 55;
   --color-wardian-card-bg-muted: rgba(31, 41, 55, 0.3);
 
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
@@ -607,4 +609,38 @@
 .edge-pulse-done path.react-flow__edge-path {
   stroke: var(--color-wardian-error) !important; 
   stroke-width: 3;
+}
+
+/* ── Custom Select (macOS Polished) ─────────────────── */
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%2388a088' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1rem;
+  padding-right: 2.5rem !important;
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  background-color: rgba(var(--color-wardian-input-bg-rgb), 0.65) !important;
+  border: 1px solid var(--color-wardian-border-light) !important;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+select:focus {
+  border-color: var(--color-wardian-accent) !important;
+  box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.15);
+}
+
+select optgroup {
+  background-color: var(--color-wardian-card);
+  color: var(--color-wardian-text);
+  font-weight: 700;
+  font-size: 11px;
+}
+
+select option {
+  background-color: var(--color-wardian-card);
+  color: var(--color-wardian-text);
+  padding: 8px;
 }
