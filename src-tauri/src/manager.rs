@@ -9,6 +9,24 @@ use tauri::{AppHandle, Emitter, Manager};
 pub use crate::utils::fs::*;
 pub use crate::utils::logging::log_debug;
 
+/// On macOS, GUI apps inherit a minimal PATH that excludes Homebrew, npm globals,
+/// Volta, and other user-level tool installs. Prepend the common locations so that
+/// `claude`, `gemini`, and similar CLIs can be found when spawning child processes.
+#[cfg(target_os = "macos")]
+fn macos_extended_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let extra = format!(
+        "{home}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:{home}/.npm-global/bin:{home}/.volta/bin",
+        home = home
+    );
+    if existing.is_empty() {
+        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", extra)
+    } else {
+        format!("{}:{}", extra, existing)
+    }
+}
+
 pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
     let mut configs: Vec<AgentConfig> = Vec::new();
     for id in order {
@@ -93,6 +111,8 @@ pub async fn spawn_agent(
     if config.provider == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
     }
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", macos_extended_path());
 
     let is_resume = config.resume_session.as_deref().is_some_and(|s| !s.is_empty());
     let spawn_args = provider.get_spawn_args(&config, is_resume);
@@ -382,6 +402,7 @@ pub async fn obtain_session_id(
             .arg("stream-json")
             .arg("Introduce yourself")
             .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     } else {
@@ -390,41 +411,54 @@ pub async fn obtain_session_id(
             .arg("-o")
             .arg("stream-json")
             .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     }
+
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", macos_extended_path());
 
     log_debug(&format!("[WARDIAN-DEBUG] Running obtain_session_id for provider {}", provider_name));
     match cmd.spawn() {
         Ok(mut child) => {
             log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
             let mut session_id_res = None;
-            
-            if let Some(stdout) = child.stdout.take() {
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
-                while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        log_debug("[WARDIAN-DEBUG] Reached EOF on stdout.");
-                        break;
-                    }
-                    let trimmed = line.trim();
-                    if session_id_res.is_none() {
+
+            let timeout = tokio::time::Duration::from_secs(30);
+            let read_future = async {
+                if let Some(stdout) = child.stdout.take() {
+                    let mut reader = BufReader::new(stdout);
+                    let mut line = String::new();
+                    while let Ok(n) = reader.read_line(&mut line).await {
+                        if n == 0 {
+                            log_debug("[WARDIAN-DEBUG] Reached EOF on stdout.");
+                            break;
+                        }
+                        let trimmed = line.trim();
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
                             if let Some(evt) = provider.parse_output(json_part) {
                                 if let AgentEvent::Init { session_id, .. } = evt {
                                     if !session_id.is_empty() {
                                         log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", session_id));
-                                        session_id_res = Some(session_id);
+                                        return Some(session_id);
                                     }
                                 }
                             }
                         }
+                        line.clear();
                     }
-                    line.clear();
                 }
+                None
+            };
+
+            match tokio::time::timeout(timeout, read_future).await {
+                Ok(sid) => session_id_res = sid,
+                Err(_) => log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id."),
             }
+
+            let _ = child.kill().await;
             let _ = child.wait().await;
             log_debug(&format!("[WARDIAN-DEBUG] Returning session_id: {:?}", session_id_res));
             session_id_res
