@@ -425,8 +425,9 @@ pub async fn obtain_session_id(
             log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
             let mut session_id_res = None;
 
-            let timeout = tokio::time::Duration::from_secs(30);
+            let timeout = tokio::time::Duration::from_secs(60);
             let read_future = async {
+                let mut session_id: Option<String> = None;
                 if let Some(stdout) = child.stdout.take() {
                     let mut reader = BufReader::new(stdout);
                     let mut line = String::new();
@@ -439,26 +440,37 @@ pub async fn obtain_session_id(
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
                             if let Some(evt) = provider.parse_output(json_part) {
-                                if let AgentEvent::Init { session_id, .. } = evt {
-                                    if !session_id.is_empty() {
-                                        log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", session_id));
-                                        return Some(session_id);
+                                match evt {
+                                    AgentEvent::Init { session_id: sid, .. } if !sid.is_empty() => {
+                                        log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", sid));
+                                        session_id = Some(sid);
                                     }
+                                    // ModelResponse means the prompt completed and the session
+                                    // has been persisted to disk — safe to stop reading.
+                                    AgentEvent::ModelResponse => {
+                                        log_debug("[WARDIAN-DEBUG] Prompt complete, session saved.");
+                                        break;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                         line.clear();
                     }
                 }
-                None
+                session_id
             };
 
-            match tokio::time::timeout(timeout, read_future).await {
-                Ok(sid) => session_id_res = sid,
-                Err(_) => log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id."),
-            }
+            let timed_out = match tokio::time::timeout(timeout, read_future).await {
+                Ok(sid) => { session_id_res = sid; false }
+                Err(_) => { log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id."); true }
+            };
 
-            let _ = child.kill().await;
+            // Only force-kill if we timed out; otherwise let the process exit naturally
+            // so the session is fully flushed to disk before we attempt --resume.
+            if timed_out {
+                let _ = child.kill().await;
+            }
             let _ = child.wait().await;
             log_debug(&format!("[WARDIAN-DEBUG] Returning session_id: {:?}", session_id_res));
             session_id_res
