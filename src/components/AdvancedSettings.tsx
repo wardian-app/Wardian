@@ -43,7 +43,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                       <input type="checkbox" checked={config.debug || false} onChange={e => updateField("debug", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
                       Debug Mode
                   </label>
-                  {(!config.provider || config.provider === 'gemini') && (
+                  {config.provider === 'gemini' && (
                     <>
                       <label className="flex items-center gap-2 text-xs text-muted-neutral">
                           <input type="checkbox" checked={config.sandbox || false} onChange={e => updateField("sandbox", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
@@ -69,7 +69,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                   <label className="block text-[10px] font-bold text-muted-neutral mb-1">Model Override</label>
                   <input
                   className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-                  placeholder="e.g. gemini-2.5-flash / claude-3-7-sonnet"
+                  placeholder="e.g. gemini-2.5-flash / claude-3-7-sonnet / gpt-5.4"
                   value={config.model || ""}
                   onChange={(e) => updateField("model", e.target.value || undefined)}
                   />
@@ -152,7 +152,7 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                 </>
               )}
 
-              {(!config.provider || config.provider === 'gemini') && (
+              {config.provider === 'gemini' && (
                 <>
                   <div>
                       <label className="block text-[10px] font-bold text-muted-neutral mb-1">Approval Mode</label>
@@ -202,6 +202,68 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                           <option value="json">JSON</option>
                           <option value="stream-json">Stream JSON</option>
                       </select>
+                  </div>
+                </>
+              )}
+
+              {config.provider === 'codex' && (
+                <>
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Sandbox Mode</label>
+                      <select
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      value={config.codex_sandbox_mode || ""}
+                      onChange={(e) => updateField("codex_sandbox_mode", (e.target.value as AgentConfig["codex_sandbox_mode"]) || undefined)}
+                      >
+                          <option value="">(None - Inherit Default)</option>
+                          <option value="read-only">read-only</option>
+                          <option value="workspace-write">workspace-write</option>
+                          <option value="danger-full-access">danger-full-access</option>
+                      </select>
+                  </div>
+
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Approval Policy</label>
+                      <select
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      value={config.codex_approval_policy || ""}
+                      onChange={(e) => updateField("codex_approval_policy", (e.target.value as AgentConfig["codex_approval_policy"]) || undefined)}
+                      >
+                          <option value="">(None - Inherit Default)</option>
+                          <option value="untrusted">untrusted</option>
+                          <option value="on-failure">on-failure</option>
+                          <option value="on-request">on-request</option>
+                          <option value="never">never</option>
+                      </select>
+                  </div>
+
+                  <div>
+                      <label className="block text-[10px] font-bold text-muted-neutral mb-1">Profile</label>
+                      <input
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      placeholder="e.g. wardian"
+                      value={config.codex_profile || ""}
+                      onChange={(e) => updateField("codex_profile", e.target.value || undefined)}
+                      />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 mb-1">
+                    <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                        <input type="checkbox" checked={config.codex_full_auto || false} onChange={e => updateField("codex_full_auto", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                        Full Auto
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                        <input type="checkbox" checked={config.codex_search || false} onChange={e => updateField("codex_search", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                        Search
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                        <input type="checkbox" checked={config.codex_skip_git_repo_check ?? true} onChange={e => updateField("codex_skip_git_repo_check", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                        Skip Git Check
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                        <input type="checkbox" checked={config.codex_ephemeral || false} onChange={e => updateField("codex_ephemeral", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                        Ephemeral
+                    </label>
                   </div>
                 </>
               )}

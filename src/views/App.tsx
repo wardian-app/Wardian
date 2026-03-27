@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition } from "../types";
+import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
-import { deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
+import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
 import { getAgentsForList } from "../layout/watchlist/watchlistUtils";
 import type { Watchlist } from "../layout/watchlist/types";
 
@@ -255,19 +255,18 @@ function AppBody() {
     fetchAgentClasses();
     const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
       const { session_id, data } = event.payload;
-      if (data.type === "progress") {
-        const thought = data.content || data.message || "Working...";
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: thought }));
-      } else if (["gemini", "model", "user", "info"].includes(data.type)) {
+      const effect = classifyJsonEvent(data as Record<string, unknown>);
+      if (effect.type === "progress") {
+        setCurrentThoughts(prev => ({ ...prev, [session_id]: effect.thought }));
+      } else if (effect.type === "clear_thought") {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
-      }
-      if (data.type === "alert" || (data.type !== "progress" && data.message)) {
+      } else if (effect.type === "notification") {
         const id = Math.random().toString(36).substring(7);
         setNotifications(prev => [{
           id,
           session_id,
-          message: data.message || JSON.stringify(data),
-          type: data.level || "info"
+          message: effect.message,
+          type: effect.level
         }, ...prev]);
         setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), 10000);
       }
@@ -283,9 +282,34 @@ function AppBody() {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
       const mapping: Record<string, AgentTelemetry> = {};
       for (const m of event.payload) mapping[m.session_id] = m;
-      setTelemetry(mapping);
+      setTelemetry(prev => {
+        const next = { ...prev };
+        for (const [sessionId, metric] of Object.entries(mapping)) {
+          next[sessionId] = metric;
+        }
+        return next;
+      });
     });
-    return () => { unlistenMetrics.then(fn => fn()); };
+    const unlistenStatus = listen<AgentStatusUpdate>("agent-status-updated", (event) => {
+      const { session_id, current_status } = event.payload;
+      setTelemetry(prev => ({
+        ...prev,
+        [session_id]: {
+          session_id,
+          cpu_usage: prev[session_id]?.cpu_usage ?? 0,
+          memory_mb: prev[session_id]?.memory_mb ?? 0,
+          uptime_seconds: prev[session_id]?.uptime_seconds ?? 0,
+          query_count: prev[session_id]?.query_count ?? 0,
+          init_timestamp: prev[session_id]?.init_timestamp ?? null,
+          current_status,
+          log_path: prev[session_id]?.log_path ?? null,
+        },
+      }));
+    });
+    return () => {
+      unlistenMetrics.then(fn => fn());
+      unlistenStatus.then(fn => fn());
+    };
   }, []);
 
   async function sendCommand(sessionId: string, cmd: string) {

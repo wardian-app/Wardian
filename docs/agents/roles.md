@@ -46,7 +46,8 @@ The system is built on a **Modular Multi-Agent Architecture** where each agent i
 
 ## 🛠️ Customizing Roles
 
-Roles are defined as standard Markdown files. When a new **Agent Class** is created, it resides in a dedicated directory within the application's configuration path, primarily managed via the `AGENTS.md` (the master instruction file).
+Roles are defined as standard Markdown files. When a new **Agent Class** is created, it resides in a dedicated directory within the application's configuration path, primarily managed via the `AGENTS.md` (the master instruction file). Providers like Codex read `AGENTS.md` directly, while providers like Gemini and Claude use thin stub files that point back to it.
+When a provider cannot discover those Wardian files from the repository root alone, Wardian projects them into a per-session `habitat` workspace so the provider still sees the same role and skill stack.
 
 ### Instruction Precedence:
 

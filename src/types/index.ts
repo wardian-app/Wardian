@@ -28,6 +28,15 @@ export interface AgentConfig {
     disallowed_tools?: string[];
     append_system_prompt?: string;
     mcp_config?: string;
+
+    // Codex-specific fields
+    codex_sandbox_mode?: "read-only" | "workspace-write" | "danger-full-access";
+    codex_approval_policy?: "untrusted" | "on-failure" | "on-request" | "never";
+    codex_profile?: string;
+    codex_full_auto?: boolean;
+    codex_search?: boolean;
+    codex_skip_git_repo_check?: boolean;
+    codex_ephemeral?: boolean;
 }
 
 export * from "./workflow";
@@ -41,6 +50,11 @@ export interface AgentOutputPayload {
 export interface AgentJsonEvent {
     session_id: string;
     data: any;
+}
+
+export interface AgentStatusUpdate {
+    session_id: string;
+    current_status: string;
 }
 
 export interface AgentTelemetry {

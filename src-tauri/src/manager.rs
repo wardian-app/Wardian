@@ -3,11 +3,64 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub use crate::utils::fs::*;
 pub use crate::utils::logging::log_debug;
+
+fn set_agent_status(
+    app: &AppHandle,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    next_status: &str,
+) {
+    if let Ok(mut status) = current_status.lock() {
+        if *status != next_status {
+            *status = next_status.to_string();
+            let _ = app.emit(
+                "agent-status-updated",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "current_status": next_status,
+                }),
+            );
+        }
+    }
+}
+
+fn apply_agent_event(
+    app: &AppHandle,
+    session_id: &str,
+    event: AgentEvent,
+    query_count: &std::sync::Arc<std::sync::Mutex<usize>>,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    match event {
+        AgentEvent::UserQuery => {
+            if let Ok(mut count) = query_count.lock() {
+                *count += 1;
+            }
+            set_agent_status(app, session_id, current_status, "Processing...");
+        }
+        AgentEvent::Generating => {
+            set_agent_status(app, session_id, current_status, "Processing...");
+        }
+        AgentEvent::Init { timestamp, .. } => {
+            if let Ok(mut ts) = init_timestamp.lock() {
+                *ts = timestamp;
+            }
+        }
+        AgentEvent::ModelResponse => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::ActionRequired { .. } => {
+            set_agent_status(app, session_id, current_status, "Action Needed");
+        }
+        AgentEvent::Unknown => {}
+    }
+}
 
 pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
     let mut configs: Vec<AgentConfig> = Vec::new();
@@ -86,12 +139,26 @@ pub async fn spawn_agent(
     for arg in base_args {
         cmd.arg(arg);
     }
-    cmd.cwd(&expected_folder);
+    let habitat_root = prepare_provider_habitat(
+        &config.provider,
+        &cwd,
+        &config.agent_class,
+        Some(&config.session_id),
+    )?;
+    let provider_cwd = habitat_root
+        .as_ref()
+        .map(|root| habitat_workspace_cwd(root))
+        .unwrap_or_else(|| cwd.clone());
+    cmd.cwd(&provider_cwd);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
     // class/common/agent instruction files are loaded natively.
     if config.provider == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+    } else if config.provider == "codex" {
+        if let Some(root) = habitat_root.as_ref() {
+            cmd.env("CODEX_HOME", habitat_codex_home(root));
+        }
     }
 
     let is_resume = config.resume_session.as_deref().is_some_and(|s| !s.is_empty());
@@ -167,8 +234,13 @@ pub async fn spawn_agent(
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
+    let log_path = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
 
     // PTY reader thread: uses provider.parse_output() for event classification
+    let pty_app = app.clone();
+    let pty_provider = provider.clone();
+    let sid_for_pty = sid_out.clone();
+    let pty_emit_app = app.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -190,40 +262,17 @@ pub async fn spawn_agent(
                                 Some(Ok(parsed)) => {
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
-                                    if let Some(event) = provider.parse_output(&raw_line) {
-                                        match event {
-                                            AgentEvent::UserQuery => {
-                                                if let Ok(mut count) = query_count_clone.lock() {
-                                                    *count += 1;
-                                                }
-                                                if let Ok(mut status) = current_status_clone.lock() {
-                                                    *status = "Processing...".to_string();
-                                                }
-                                            }
-                                            AgentEvent::Generating => {
-                                                if let Ok(mut status) = current_status_clone.lock() {
-                                                    *status = "Processing...".to_string();
-                                                }
-                                            }
-                                            AgentEvent::Init { timestamp, .. } => {
-                                                if let Ok(mut ts) = init_timestamp_clone.lock() {
-                                                    *ts = timestamp;
-                                                }
-                                            }
-                                            AgentEvent::ModelResponse => {
-                                                if let Ok(mut status) = current_status_clone.lock() {
-                                                    *status = "Idle".to_string();
-                                                }
-                                            }
-                                            AgentEvent::ActionRequired { .. } => {
-                                                if let Ok(mut status) = current_status_clone.lock() {
-                                                    *status = "Action Needed".to_string();
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                                    if let Some(event) = pty_provider.parse_output(&raw_line) {
+                                        apply_agent_event(
+                                            &pty_app,
+                                            &sid_for_pty,
+                                            event,
+                                            &query_count_clone,
+                                            &init_timestamp_clone,
+                                            &current_status_clone,
+                                        );
                                     }
-                                    let _ = app.emit("agent-json-event", serde_json::json!({ "session_id": sid_out, "data": parsed }));
+                                    let _ = pty_emit_app.emit("agent-json-event", serde_json::json!({ "session_id": sid_out, "data": parsed }));
                                     let consumed = stream.byte_offset();
                                     current_line = current_line[start + consumed..].to_string();
                                     continue;
@@ -241,10 +290,87 @@ pub async fn spawn_agent(
             }
         }
         // Process terminated (EOF or error) — mark status as Off
-        if let Ok(mut status) = current_status_clone.lock() {
-            *status = "Off".to_string();
-        }
+        set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Off");
     });
+
+    if config.provider == "codex" {
+        let watcher_app = app.clone();
+        let watcher_provider = provider.clone();
+        let watcher_session = config.session_id.clone();
+        let watcher_query_count = query_count.clone();
+        let watcher_init_timestamp = init_timestamp.clone();
+        let watcher_current_status = current_status.clone();
+        let watcher_log_path = log_path.clone();
+        let wardian_agent_dir = get_wardian_home()
+            .map(|home| home.join("agents").join(&watcher_session))
+            .filter(|path| path.exists())
+            .map(|path| path.to_string_lossy().to_string());
+
+        std::thread::spawn(move || {
+            let mut offset: u64 = 0;
+            loop {
+                let current = watcher_current_status
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
+                if current == "Off" {
+                    break;
+                }
+
+                let path = {
+                    let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
+                    if lock.is_none() {
+                        *lock = codex_session_file_path(&watcher_session, wardian_agent_dir.as_deref());
+                    }
+                    lock.clone()
+                };
+
+                if let Some(path) = path {
+                    if let Ok(mut out) = watcher_log_path.lock() {
+                        *out = Some(path.clone());
+                    }
+                    if let Ok(mut file) = std::fs::File::open(&path) {
+                        if let Ok(metadata) = file.metadata() {
+                            if metadata.len() < offset {
+                                offset = 0;
+                            }
+                        }
+                        if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
+                            let mut reader = std::io::BufReader::new(file);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                let read = reader.read_line(&mut line).unwrap_or(0);
+                                if read == 0 {
+                                    break;
+                                }
+                                offset += read as u64;
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                                    let raw_line = parsed.to_string();
+                                    if let Some(event) = watcher_provider.parse_output(&raw_line) {
+                                        apply_agent_event(
+                                            &watcher_app,
+                                            &watcher_session,
+                                            event,
+                                            &watcher_query_count,
+                                            &watcher_init_timestamp,
+                                            &watcher_current_status,
+                                        );
+                                    }
+                                    let _ = watcher_app.emit(
+                                        "agent-json-event",
+                                        serde_json::json!({ "session_id": watcher_session, "data": parsed }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+    }
 
     Ok(ActiveAgent {
         config: AgentConfig {
@@ -259,7 +385,7 @@ pub async fn spawn_agent(
         query_count,
         init_timestamp,
         current_status,
-        log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        log_path,
         #[cfg(windows)]
         job_object,
     })
@@ -286,15 +412,20 @@ pub async fn resize_pty(
         }
     };
     tokio::task::spawn_blocking(move || {
-        if let Ok(master) = master_arc.try_lock() {
-            let _ = master.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
-        }
-    });
+        let master = match master_arc.lock() {
+            Ok(master) => master,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+    })
+    .await
+    .map_err(|e| format!("Failed to join PTY resize task: {}", e))?
+    .map_err(|e| format!("Failed to resize PTY: {}", e))?;
     Ok(())
 }
 
@@ -319,6 +450,13 @@ pub async fn run_headless(
         cmd.arg(arg);
     }
     match provider_name {
+        "codex" => {
+            cmd.arg("exec")
+                .arg("resume")
+                .arg(session_id)
+                .arg("--json")
+                .arg(prompt);
+        }
         "claude" => {
             cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
                 .arg("--print")
@@ -358,7 +496,54 @@ pub async fn run_headless(
 
     let _ = child.wait().await;
 
-    if output_format == "json" {
+    if provider_name == "codex" {
+        let mut last_message = None;
+        for line in output.lines() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                match parsed.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "item.completed" => {
+                        if parsed
+                            .get("item")
+                            .and_then(|v| v.get("type"))
+                            .and_then(|v| v.as_str())
+                            == Some("agent_message")
+                        {
+                            last_message = parsed
+                                .get("item")
+                                .and_then(|v| v.get("text"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                    "event_msg" => {
+                        if parsed
+                            .get("payload")
+                            .and_then(|v| v.get("type"))
+                            .and_then(|v| v.as_str())
+                            == Some("agent_message")
+                        {
+                            last_message = parsed
+                                .get("payload")
+                                .and_then(|v| v.get("message"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if output_format == "json" {
+            Ok(serde_json::json!({
+                "thread_id": session_id,
+                "response": last_message.unwrap_or_default(),
+                "raw": output,
+            }))
+        } else {
+            Ok(serde_json::json!({ "text": last_message.unwrap_or(output) }))
+        }
+    } else if output_format == "json" {
         serde_json::from_str(&output)
             .map_err(|e| format!("Failed to parse JSON output: {}. Raw: {}", e, output))
     } else {
@@ -368,16 +553,98 @@ pub async fn run_headless(
 
 pub async fn obtain_session_id(
     cwd: &std::path::PathBuf,
-    provider_name: &str,
-) -> Option<String> {
+    agent_class: Option<&str>,
+    config: Option<&AgentConfig>,
+) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
-    let provider = ProviderFactory::resolve(provider_name).ok()?;
+    let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
+    let provider = ProviderFactory::resolve(provider_name)?;
     let (bin, base_args) = provider.get_executable();
-    let mut cmd = tokio::process::Command::new(&bin);
+    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/c").arg(&bin);
+        c
+    } else {
+        tokio::process::Command::new(&bin)
+    };
+    let class_name = agent_class
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            config
+                .and_then(|cfg| (!cfg.agent_class.trim().is_empty()).then_some(cfg.agent_class.as_str()))
+        })
+        .unwrap_or("");
+    let habitat_root = prepare_provider_habitat(provider_name, cwd, class_name, None)?;
+    let provider_cwd = habitat_root
+        .as_ref()
+        .map(|root| habitat_workspace_cwd(root))
+        .unwrap_or_else(|| cwd.clone());
     for arg in base_args {
         cmd.arg(arg);
     }
-    if provider_name == "claude" {
+    if provider_name == "codex" {
+        if let Some(root) = habitat_root.as_ref() {
+            cmd.env("CODEX_HOME", habitat_codex_home(root));
+        }
+        cmd.arg("exec");
+
+        if let Some(config) = config {
+            if let Some(ref model) = config.model {
+                cmd.arg("--model").arg(model);
+            }
+            if let Some(ref profile) = config.codex_profile {
+                if !profile.trim().is_empty() {
+                    cmd.arg("--profile").arg(profile);
+                }
+            }
+            if let Some(ref sandbox_mode) = config.codex_sandbox_mode {
+                if !sandbox_mode.trim().is_empty() {
+                    cmd.arg("--sandbox").arg(sandbox_mode);
+                }
+            }
+            if config.codex_full_auto.unwrap_or(false) {
+                cmd.arg("--full-auto");
+            }
+            if config.codex_search.unwrap_or(false) {
+                cmd.arg("--search");
+            }
+            if config.codex_skip_git_repo_check.unwrap_or(true) {
+                cmd.arg("--skip-git-repo-check");
+            }
+            if config.codex_ephemeral.unwrap_or(false) {
+                cmd.arg("--ephemeral");
+            }
+
+            let mut final_includes = config
+                .system_include_directories
+                .clone()
+                .unwrap_or_default();
+            if let Some(ref user_dirs) = config.include_directories {
+                for dir in user_dirs {
+                    if !final_includes.contains(dir) {
+                        final_includes.push(dir.clone());
+                    }
+                }
+            }
+            for dir in final_includes {
+                cmd.arg("--add-dir").arg(dir);
+            }
+
+            if let Some(ref custom) = config.custom_args {
+                if let Some(parsed) = shlex::split(custom) {
+                    for arg in parsed {
+                        cmd.arg(arg);
+                    }
+                }
+            }
+        }
+
+        cmd.arg("--json")
+            .arg("Introduce yourself")
+            .current_dir(&provider_cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
             .arg("--print")
             .arg("--verbose")
@@ -392,7 +659,7 @@ pub async fn obtain_session_id(
             .arg("Introduce yourself")
             .arg("-o")
             .arg("stream-json")
-            .current_dir(cwd)
+            .current_dir(&provider_cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     }
@@ -402,6 +669,7 @@ pub async fn obtain_session_id(
         Ok(mut child) => {
             log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
             let mut session_id_res = None;
+            let mut stderr_output = String::new();
             
             if let Some(stdout) = child.stdout.take() {
                 let mut reader = BufReader::new(stdout);
@@ -426,13 +694,39 @@ pub async fn obtain_session_id(
                     line.clear();
                 }
             }
+            if let Some(stderr) = child.stderr.take() {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 {
+                        break;
+                    }
+                    stderr_output.push_str(&line);
+                    line.clear();
+                }
+            }
             let _ = child.wait().await;
+            if session_id_res.is_none() && !stderr_output.trim().is_empty() {
+                log_debug(&format!(
+                    "[WARDIAN-DEBUG] obtain_session_id stderr: {}",
+                    stderr_output.trim()
+                ));
+            }
             log_debug(&format!("[WARDIAN-DEBUG] Returning session_id: {:?}", session_id_res));
-            session_id_res
+            session_id_res.ok_or_else(|| {
+                if stderr_output.trim().is_empty() {
+                    format!(
+                        "Provider {} did not return a session ID during initialization.",
+                        provider_name
+                    )
+                } else {
+                    stderr_output.trim().to_string()
+                }
+            })
         }
         Err(e) => {
             log_debug(&format!("[WARDIAN-DEBUG] Failed to spawn cmd: {:?}", e));
-            None
+            Err(format!("Failed to spawn {} bootstrap command: {}", provider_name, e))
         }
     }
 }
@@ -448,6 +742,70 @@ fn claude_project_dir_name(workspace: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+fn codex_session_file_path_in(base: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
+    let base = base.join("sessions");
+    let years = std::fs::read_dir(base).ok()?;
+
+    for year in years.flatten() {
+        let months = match std::fs::read_dir(year.path()) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for month in months.flatten() {
+            let days = match std::fs::read_dir(month.path()) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for day in days.flatten() {
+                let files = match std::fs::read_dir(day.path()) {
+                    Ok(entries) => entries,
+                    Err(_) => continue,
+                };
+                for file in files.flatten() {
+                    let path = file.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if file_name.ends_with(&format!("{}.jsonl", session_id)) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn codex_session_file_path(session_id: &str, wardian_agent_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if let Some(agent_dir) = wardian_agent_dir {
+        let projected_home = std::path::Path::new(agent_dir).join("habitat").join(".codex");
+        if let Some(path) = codex_session_file_path_in(&projected_home, session_id) {
+            return Some(path);
+        }
+    }
+
+    let global_home = dirs::home_dir()?.join(".codex");
+    codex_session_file_path_in(&global_home, session_id)
+}
+
+fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
+    for line in lines.iter().rev() {
+        let payload = line.get("payload")?;
+        let payload_type = payload.get("type").and_then(|v| v.as_str())?;
+        match payload_type {
+            "exec_approval_request" => return Some("Action Needed".to_string()),
+            "task_started" | "agent_message" | "exec_command_begin" | "exec_command_start" => {
+                return Some("Processing...".to_string())
+            }
+            "task_complete" => return Some("Idle".to_string()),
+            _ => {}
+        }
+    }
+    None
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
@@ -541,6 +899,15 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             // Provider-aware log discovery
             if log_path_lock.is_none() {
                 match snap.provider.as_str() {
+                    "codex" => {
+                        let agent_home = get_wardian_home()
+                            .map(|home| home.join("agents").join(&snap.session_id))
+                            .filter(|path| path.exists())
+                            .map(|path| path.to_string_lossy().to_string());
+                        if let Some(path) = codex_session_file_path(&snap.session_id, agent_home.as_deref()) {
+                            *log_path_lock = Some(path);
+                        }
+                    }
                     "claude" => {
                         // Claude Code stores sessions at:
                         // ~/.claude/projects/<project_dir>/<session_id>.jsonl
@@ -594,6 +961,36 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             if let Some(ref path) = *log_path_lock {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     match snap.provider.as_str() {
+                        "codex" => {
+                            let lines: Vec<serde_json::Value> = content
+                                .lines()
+                                .filter_map(|l| serde_json::from_str(l).ok())
+                                .collect();
+
+                            q_count = lines.iter().filter(|l| {
+                                l.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+                                    && l.get("payload")
+                                        .and_then(|v| v.get("type"))
+                                        .and_then(|v| v.as_str())
+                                        == Some("user_message")
+                            }).count();
+
+                            if let Some(meta) = lines.iter().find(|l| {
+                                l.get("type").and_then(|v| v.as_str()) == Some("session_meta")
+                            }) {
+                                if let Some(ts) = meta
+                                    .get("payload")
+                                    .and_then(|v| v.get("timestamp"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    i_ts = Some(ts.to_string());
+                                }
+                            }
+
+                            if let Some(status) = codex_status_from_log(&lines) {
+                                *snap.current_status.lock().unwrap() = status;
+                            }
+                        }
                         "claude" => {
                             // Claude logs are JSONL — one JSON object per line
                             let lines: Vec<serde_json::Value> = content
@@ -610,6 +1007,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     i_ts = Some(ts.to_string());
                                 }
                             }
+
                         }
                         _ => {
                             // Gemini logs are a single JSON object with a messages array
@@ -742,7 +1140,7 @@ pub fn init_agent_classes(app: &AppHandle) {
             // 2. Symlink .claude/skills/ → .agents/skills/ for Claude discovery
             ensure_claude_skills_link(&role_dir);
 
-            // 3. Create provider stub files
+            // 3. Create provider stub files for providers that do not read AGENTS.md directly
             for stub_name in &["GEMINI.md", "CLAUDE.md"] {
                 let stub_path = role_dir.join(stub_name);
                 if !stub_path.exists() {

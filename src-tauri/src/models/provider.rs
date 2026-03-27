@@ -41,7 +41,7 @@ pub trait AgentProvider: Send + Sync {
     fn parse_output(&self, line: &str) -> Option<AgentEvent>;
 
     /// Returns the instruction filename that this provider reads from class
-    /// directories (e.g., `"GEMINI.md"`, `"CLAUDE.md"`).
+    /// directories (e.g., `"GEMINI.md"`, `"CLAUDE.md"`, `"AGENTS.md"`).
     fn get_instruction_filename(&self) -> &str;
 }
 

@@ -263,6 +263,42 @@ describe("classifyJsonEvent", () => {
   it("classifies Claude result event as clear_thought", () => {
     expect(classifyJsonEvent({ type: "result", subtype: "success" })).toEqual({ type: "clear_thought" });
   });
+
+  it("classifies Codex turn.started as progress", () => {
+    expect(classifyJsonEvent({ type: "turn.started" })).toEqual({ type: "progress", thought: "Working..." });
+  });
+
+  it("classifies Codex turn.completed as clear_thought", () => {
+    expect(classifyJsonEvent({ type: "turn.completed" })).toEqual({ type: "clear_thought" });
+  });
+
+  it("classifies Codex agent_message payload as progress", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "agent_message", message: "Inspecting the repository now" },
+    })).toEqual({ type: "progress", thought: "Inspecting the repository now" });
+  });
+
+  it("classifies Codex exec command payload as progress", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "exec_command", command: "cargo test --all" },
+    })).toEqual({ type: "progress", thought: "cargo test --all" });
+  });
+
+  it("classifies Codex approval request as warning notification", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "exec_approval_request", command: "git status" },
+    })).toEqual({ type: "notification", message: "git status", level: "warning" });
+  });
+
+  it("classifies Codex task_complete as clear_thought", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "task_complete" },
+    })).toEqual({ type: "clear_thought" });
+  });
 });
 
 // ── getStatusColorClass ────────────────────────────────────────────────
