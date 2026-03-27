@@ -14,8 +14,10 @@ We will implement **GitHub Actions** as our primary CI engine.
 This workflow triggers on every Pull Request to `main` and on every push to `main`.
 
 #### Jobs:
-*   **`frontend`**: Runs `npm run lint` and `npm run test` on `ubuntu-latest`.
-*   **`backend`**: Runs `cargo clippy` and `cargo test` on `windows-latest` to ensure Win32-specific code is verified.
+*   **`security-audit`**: Runs `cargo audit` and `npm audit` to detect known vulnerabilities in the supply chain.
+*   **`frontend-quality`**: Runs `npm run lint` and `npm run test` on `ubuntu-latest`.
+*   **`backend-windows`**: Runs `cargo clippy` and `cargo test` on `windows-latest` to verify Win32-specific integrations.
+*   **`backend-linux-check`**: Runs `cargo check` on `ubuntu-latest` to ensure cross-platform compilation integrity.
 
 ### 2. Pull Request Standardization
 A `.github/PULL_REQUEST_TEMPLATE.md` is provided to ensure all contributors provide context, issue references, and testing verification for their changes.
