@@ -3,17 +3,30 @@ use crate::models::AgentConfig;
 use crate::state::AppState;
 use tauri::{AppHandle, State};
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnAgentRequest {
+    pub session_name: String,
+    pub agent_class: String,
+    pub folder: String,
+    pub resume_session: Option<String>,
+    pub is_off: Option<bool>,
+    pub config_override: Option<AgentConfig>,
+}
+
 #[tauri::command]
 pub async fn spawn_agent(
-    session_name: String,
-    agent_class: String,
-    folder: String,
-    resume_session: Option<String>,
-    is_off: Option<bool>,
-    config_override: Option<AgentConfig>,
+    req: SpawnAgentRequest,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AgentConfig, String> {
+    let session_name = req.session_name;
+    let agent_class = req.agent_class;
+    let folder = req.folder;
+    let resume_session = req.resume_session;
+    let is_off = req.is_off;
+    let config_override = req.config_override;
+
     manager::log_debug(&format!(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
@@ -173,11 +186,11 @@ pub async fn pause_agent(
         agent.process_id = None;
         agent.config.is_off = true;
         // Remove from input_senders
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
         if let Ok(mut status) = agent.current_status.lock() {
             *status = "Off".to_string();
+        }
+        if let Ok(mut senders) = state.input_senders.write() {
+            senders.remove(&session_id);
         }
         manager::save_state(&app, &agents, &order);
         Ok(())

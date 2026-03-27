@@ -75,7 +75,7 @@ pub async fn get_library_tree(_app: AppHandle, library_type: String) -> Result<L
                         let folder = build_tree(&path, base_dir, metadata_map, is_skills);
                         children.push(LibraryNode::Folder(folder));
                     }
-                } else if !is_skills && path.extension().map_or(false, |e| e == "md") {
+                } else if !is_skills && path.extension().is_some_and(|e| e == "md") {
                     let file_rel_path = path.strip_prefix(base_dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
                     let file_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
                     let content = fs::read_to_string(&path).unwrap_or_default();

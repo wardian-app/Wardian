@@ -118,7 +118,7 @@ pub async fn spawn_agent(
         if let Ok(job) = win32job::Job::create() {
             let mut info = job.query_extended_limit_info().unwrap_or_default();
             info.limit_kill_on_job_close();
-            let _ = job.set_extended_limit_info(&mut info);
+            let _ = job.set_extended_limit_info(&info);
             if let Some(pid) = process_id {
                 unsafe {
                     use winapi::um::processthreadsapi::OpenProcess;
@@ -285,7 +285,7 @@ pub async fn resize_pty(
             return Err(format!("Agent {} not found", session_id));
         }
     };
-    let _ = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         if let Ok(master) = master_arc.try_lock() {
             let _ = master.resize(PtySize {
                 rows,
@@ -415,12 +415,10 @@ pub async fn obtain_session_id(
                     if session_id_res.is_none() {
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
-                            if let Some(evt) = provider.parse_output(json_part) {
-                                if let AgentEvent::Init { session_id, .. } = evt {
-                                    if !session_id.is_empty() {
-                                        log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", session_id));
-                                        session_id_res = Some(session_id);
-                                    }
+                            if let Some(AgentEvent::Init { session_id, .. }) = provider.parse_output(json_part) {
+                                if !session_id.is_empty() {
+                                    log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", session_id));
+                                    session_id_res = Some(session_id);
                                 }
                             }
                         }

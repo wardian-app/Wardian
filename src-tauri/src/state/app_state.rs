@@ -18,6 +18,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
         let mut sys = sysinfo::System::new_all();
         sys.refresh_all();
         Self {
