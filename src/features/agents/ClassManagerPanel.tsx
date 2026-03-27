@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentClassDefinition } from "../../types";
+import { useConfirm } from "../../components/ConfirmDialog";
 
 import { ManageSkills } from "../library/ManageSkills";
 
@@ -13,6 +14,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   agentClasses,
   onClassesUpdated,
 }) => {
+  const confirm = useConfirm();
   const [newClassName, setNewClassName] = useState("");
   const [newClassDesc, setNewClassDesc] = useState("");
   const [newClassInstruction, setNewClassInstruction] = useState("");
@@ -40,7 +42,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   };
 
   const deleteAgentClass = async (name: string) => {
-    if (!confirm(`Delete custom class "${name}"? This will also remove its directory.`)) return;
+    if (!await confirm(`Delete custom class "${name}"? This will also remove its directory.`)) return;
     try {
       await invoke("delete_agent_class", { name });
       onClassesUpdated();
