@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { FileTree, FileNode } from './FileTree';
+import { useConfirm } from '../../components/ConfirmDialog';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
 }
 
 export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }) => {
+  const confirm = useConfirm();
   const [rootPath, setRootPath] = useState<string | null>(null);
   
   // Context Menu State
@@ -80,7 +82,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
 
   const handleDelete = async () => {
     if (activeNode) {
-      if (window.confirm(`Are you sure you want to delete ${activeNode.name}?`)) {
+      if (await confirm(`Are you sure you want to delete ${activeNode.name}?`)) {
         try {
           await invoke('delete_file', { path: activeNode.path });
           setRefreshKey(prev => prev + 1); // trigger remount of root FileTree

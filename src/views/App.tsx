@@ -10,6 +10,7 @@ import { getAgentsForList } from "../layout/watchlist/watchlistUtils";
 import type { Watchlist } from "../layout/watchlist/types";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
+import { useConfirm } from "../components/ConfirmDialog";
 import { SidebarIconRail, SidebarTab } from "../layout/SidebarIconRail";
 import { SidebarContentPane } from "../layout/SidebarContentPane";
 import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
@@ -31,6 +32,7 @@ function App() {
 }
 
 function AppBody() {
+  const confirm = useConfirm();
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
@@ -356,7 +358,7 @@ function AppBody() {
   };
 
   const onDelete = async (id: string) => {
-    if (confirm('Delete?')) {
+    if (await confirm('Delete this agent?')) {
       try {
         await invoke('kill_agent', { sessionId: id });
         setOffAgentIds(prev => {
