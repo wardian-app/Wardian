@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { WorkflowSidebar } from './WorkflowSidebar';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
+import { ConfirmProvider } from '../../components/ConfirmDialog';
 
 // Mock the store
 vi.mock('../../store/useWorkflowStore', () => ({
@@ -22,6 +23,9 @@ vi.mock('./WorkflowLibrary', () => ({
 vi.mock('./ActiveMonitoring', () => ({
   ActiveMonitoring: () => <div data-testid="active-monitoring">Monitoring Area</div>,
 }));
+
+const renderWithProvider = (ui: React.ReactElement) =>
+  render(<ConfirmProvider>{ui}</ConfirmProvider>);
 
 describe('WorkflowSidebar', () => {
   const mockFetchWorkflows = vi.fn();
@@ -48,11 +52,10 @@ describe('WorkflowSidebar', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (useWorkflowStore as any).mockReturnValue(defaultStoreValues);
-    window.confirm = vi.fn(() => true);
   });
 
   it('renders fixed header controls correctly', () => {
-    render(<WorkflowSidebar />);
+    renderWithProvider(<WorkflowSidebar />);
     
     expect(screen.getByText('Workflows')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Search workflows...')).toBeInTheDocument();
@@ -65,7 +68,7 @@ describe('WorkflowSidebar', () => {
 
 
   it('filters workflows based on search query', async () => {
-    render(<WorkflowSidebar />);
+    renderWithProvider(<WorkflowSidebar />);
     
     const searchInput = screen.getByPlaceholderText('Search workflows...');
     
@@ -79,12 +82,15 @@ describe('WorkflowSidebar', () => {
   });
 
   it('triggers governance actions correctly', async () => {
-    render(<WorkflowSidebar />);
+    renderWithProvider(<WorkflowSidebar />);
     
-    // Stop All
+    // Stop All — opens custom ConfirmDialog
     fireEvent.click(screen.getByTitle('Stop All (Panic)'));
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('STOP ALL'));
-    expect(mockStopAllTriggers).toHaveBeenCalled();
+    // The ConfirmDialog should now be visible with the STOP ALL message
+    await waitFor(() => expect(screen.getByText(/STOP ALL/)).toBeInTheDocument());
+    // Click "Confirm" in the dialog to proceed
+    fireEvent.click(screen.getByText('Confirm'));
+    await waitFor(() => expect(mockStopAllTriggers).toHaveBeenCalled());
     await waitFor(() => expect(mockFetchWorkflows).toHaveBeenCalled());
 
     // Pause All
@@ -100,7 +106,7 @@ describe('WorkflowSidebar', () => {
     // This test verifies the logic in activeWorkflows useMemo (even if we mock child, we can check props if we wanted to)
     // But since we are testing WorkflowSidebar, and it passes filteredWorkflows to WorkflowLibrary, 
     // we already tested search. Active monitoring just gets activeRuns/schedules directly.
-    render(<WorkflowSidebar />);
+    renderWithProvider(<WorkflowSidebar />);
     expect(screen.getByTestId('active-monitoring')).toBeInTheDocument();
   });
 });
