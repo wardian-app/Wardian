@@ -82,6 +82,24 @@ fn apply_agent_status_event(
     }
 }
 
+/// On macOS, GUI apps inherit a minimal PATH that excludes Homebrew, npm globals,
+/// Volta, and other user-level tool installs. Prepend the common locations so that
+/// `claude`, `gemini`, and similar CLIs can be found when spawning child processes.
+#[cfg(target_os = "macos")]
+fn macos_extended_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let extra = format!(
+        "{home}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:{home}/.npm-global/bin:{home}/.volta/bin",
+        home = home
+    );
+    if existing.is_empty() {
+        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", extra)
+    } else {
+        format!("{}:{}", extra, existing)
+    }
+}
+
 pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
     let mut configs: Vec<AgentConfig> = Vec::new();
     for id in order {
@@ -106,19 +124,7 @@ pub async fn spawn_agent(
 ) -> Result<ActiveAgent, String> {
     let provider = ProviderFactory::resolve(&config.provider)?;
 
-    let cwd = if config.folder.is_empty() {
-        if cfg!(windows) {
-            std::env::var("USERPROFILE")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("C:\\"))
-        } else {
-            std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        }
-    } else {
-        std::path::PathBuf::from(&config.folder)
-    };
+    let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
 
     let expected_folder = if config.folder.is_empty() {
         cwd.to_string_lossy().to_string()
@@ -189,6 +195,8 @@ pub async fn spawn_agent(
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
     }
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", macos_extended_path());
 
     let is_resume = config.resume_session.as_deref().is_some_and(|s| !s.is_empty());
     let spawn_args = provider.get_spawn_args(&config, is_resume);
@@ -231,9 +239,6 @@ pub async fn spawn_agent(
             None
         }
     };
-    #[cfg(not(windows))]
-    let job_object = None;
-
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -887,6 +892,7 @@ pub async fn obtain_session_id(
             .arg("stream-json")
             .arg("Introduce yourself")
             .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     } else {
@@ -895,9 +901,13 @@ pub async fn obtain_session_id(
             .arg("-o")
             .arg("stream-json")
             .current_dir(&provider_cwd)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     }
+
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", macos_extended_path());
 
     log_debug(&format!("[WARDIAN-DEBUG] Running obtain_session_id for provider {}", provider_name));
     match cmd.spawn() {
@@ -905,29 +915,52 @@ pub async fn obtain_session_id(
             log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
             let mut session_id_res = None;
             let mut stderr_output = String::new();
-            
-            if let Some(stdout) = child.stdout.take() {
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
-                while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        log_debug("[WARDIAN-DEBUG] Reached EOF on stdout.");
-                        break;
-                    }
-                    let trimmed = line.trim();
-                    if session_id_res.is_none() {
+
+            let timeout = tokio::time::Duration::from_secs(60);
+            let read_future = async {
+                let mut session_id: Option<String> = None;
+                if let Some(stdout) = child.stdout.take() {
+                    let mut reader = BufReader::new(stdout);
+                    let mut line = String::new();
+                    while let Ok(n) = reader.read_line(&mut line).await {
+                        if n == 0 {
+                            log_debug("[WARDIAN-DEBUG] Reached EOF on stdout.");
+                            break;
+                        }
+                        let trimmed = line.trim();
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
-                            if let Some(AgentEvent::Init { session_id, .. }) = provider.parse_output(json_part) {
-                                if !session_id.is_empty() {
-                                    log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", session_id));
-                                    session_id_res = Some(session_id);
+                            if let Some(evt) = provider.parse_output(json_part) {
+                                match evt {
+                                    AgentEvent::Init { session_id: sid, .. } if !sid.is_empty() => {
+                                        log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", sid));
+                                        session_id = Some(sid);
+                                    }
+                                    // ModelResponse means the prompt completed and the session
+                                    // has been persisted to disk — safe to stop reading.
+                                    AgentEvent::ModelResponse => {
+                                        log_debug("[WARDIAN-DEBUG] Prompt complete, session saved.");
+                                        break;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
+                        line.clear();
                     }
-                    line.clear();
                 }
+                session_id
+            };
+
+            let timed_out = match tokio::time::timeout(timeout, read_future).await {
+                Ok(sid) => { session_id_res = sid; false }
+                Err(_) => { log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id."); true }
+            };
+
+            // Only force-kill if we timed out; otherwise let the process exit naturally
+            // so the session is fully flushed to disk before we attempt --resume.
+            if timed_out {
+                let _ = child.kill().await;
             }
             if let Some(stderr) = child.stderr.take() {
                 let mut reader = BufReader::new(stderr);
@@ -1209,9 +1242,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         }
                     }
                     _ => {
-                        // Gemini: scan .gemini/tmp for chat log files
-                        if let Some(app_dir) = get_wardian_home() {
-                            let tmp_dir = app_dir.join("../.gemini/tmp");
+                        // Gemini: scan ~/.gemini/tmp for chat log files
+                        if let Some(home) = dirs::home_dir() {
+                            let tmp_dir = home.join(".gemini").join("tmp");
                             if let Ok(entries) = std::fs::read_dir(tmp_dir) {
                                 for entry in entries.flatten() {
                                     let chat_dir = entry.path().join("chats");

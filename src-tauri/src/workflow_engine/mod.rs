@@ -19,37 +19,8 @@ use std::process::Stdio;
 
 /// Resolves the current working directory for a node.
 fn resolve_cwd(node_config: &Value, agent_id: &str) -> PathBuf {
-    let cwd = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("C:\\"));
-    
-    // Priority 1: Explicitly provided folder in node config
-    if let Some(folder) = node_config.get("folder").and_then(|v| v.as_str()) {
-        if !folder.is_empty() {
-            let p = PathBuf::from(folder);
-            if let Ok(validated) = validate_workspace_path(&p) {
-                return validated;
-            }
-        }
-    }
-
-    // Priority 2: Persistent agent configuration (if agent_id is provided)
-    if !agent_id.is_empty() {
-        if let Some(home) = get_wardian_home() {
-            if let Ok(data) = std::fs::read_to_string(home.join("wardian_state.json")) {
-                if let Ok(configs) = serde_json::from_str::<Vec<crate::models::AgentConfig>>(&data) {
-                    if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
-                        if !cfg.folder.is_empty() {
-                            let p = PathBuf::from(&cfg.folder);
-                            if let Ok(validated) = validate_workspace_path(&p) {
-                                return validated;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    cwd
+    let folder = node_config.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+    crate::utils::fs::resolve_cwd(folder, agent_id)
 }
 
 /// Executes a command headlessly and returns the result in the mandatory schema.
@@ -660,27 +631,8 @@ pub async fn run_workflow(app: AppHandle, wf_id: String, initial_payload: Option
                         log_debug(&format!("[Wardian] Agent node output_format: {}. Final Prompt Length: {}", output_format, prompt.len()));
                         
                         // 1. Resolve CWD logic (Shared between modes)
-                        let mut cwd = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("C:\\"));
-                        
-                        // Priority 1: Explicitly provided folder in node config
-                        if let Some(folder) = node.config.get("folder").and_then(|v| v.as_str()) {
-                            if !folder.is_empty() {
-                                cwd = PathBuf::from(folder);
-                            }
-                        } else {
-                            // Priority 2: Persistent agent configuration
-                            if let Some(home) = get_wardian_home() {
-                                if let Ok(data) = std::fs::read_to_string(home.join("wardian_state.json")) {
-                                    if let Ok(configs) = serde_json::from_str::<Vec<crate::models::AgentConfig>>(&data) {
-                                        if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
-                                            if !cfg.folder.is_empty() {
-                                                cwd = PathBuf::from(&cfg.folder);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        let folder = node.config.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+                        let cwd = crate::utils::fs::resolve_cwd(folder, agent_id);
 
                         if output_format == "json" {
                             // --- HEADLESS JSON MODE (Always kills PTY for clean structured output) ---
