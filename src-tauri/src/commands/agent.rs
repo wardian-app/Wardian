@@ -36,19 +36,7 @@ pub async fn spawn_agent(
     let mut session_id = actual_resume.clone();
 
     if actual_resume.is_none() {
-        let cwd = if folder.is_empty() {
-            if cfg!(windows) {
-                std::env::var("USERPROFILE")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("C:"))
-            } else {
-                std::env::var("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            }
-        } else {
-            std::path::PathBuf::from(&folder)
-        };
+        let cwd = crate::utils::fs::resolve_cwd(&folder, "");
 
         let provider_name = config_override.as_ref().map(|c| c.provider.clone()).unwrap_or_else(|| "claude".to_string());
         match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {

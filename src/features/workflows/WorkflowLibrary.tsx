@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useWorkflowLibrary } from './useWorkflowLibrary';
 import { ContextMenu, ContextMenuItem } from '../../components/ContextMenu';
+import { useConfirm } from '../../components/ConfirmDialog';
 
 // Icons
 
@@ -32,6 +33,7 @@ interface WorkflowLibraryProps {
 }
 
 export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onRun, onEdit, onDelete }) => {
+  const confirm = useConfirm();
   const { folders, rootWorkflowIds, toggleFolderCollapse, moveWorkflowToFolder, addFolder, renameFolder, deleteFolder } = useWorkflowLibrary();
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, items: ContextMenuItem[] } | null>(null);
   const [draggedWorkflowId, setDraggedWorkflowId] = useState<string | null>(null);
@@ -101,8 +103,8 @@ export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onR
           if (name) renameFolder(targetId!, name);
         }},
         { label: 'Pause All Triggers in Folder', onClick: () => console.log('Pause All in Folder', targetId) },
-        { label: 'Delete Folder', danger: true, onClick: () => {
-          if (confirm('Delete folder and all workflows within?')) deleteFolder(targetId!);
+        { label: 'Delete Folder', danger: true, onClick: async () => {
+          if (await confirm('Delete folder and all workflows within?')) deleteFolder(targetId!);
         }},
       ];
     } else {

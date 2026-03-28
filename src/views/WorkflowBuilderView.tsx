@@ -1,4 +1,5 @@
 import React, { useMemo, useEffect } from 'react';
+import { useConfirm } from '../components/ConfirmDialog';
 import { 
   ReactFlow, 
   Background, 
@@ -80,6 +81,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     isSaving
   } = useWorkflowStore();
 
+  const confirm = useConfirm();
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
   const [isLibraryOpen, setIsBlockLibraryOpen] = React.useState(false);
   const [activeCategory, setActiveCategory] = React.useState("ALL");
@@ -419,9 +421,9 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path></svg>
                 </button>
 
-                <button 
-                  onClick={() => {
-                    if (activeWorkflowId && confirm("Delete this workflow?")) {
+                <button
+                  onClick={async () => {
+                    if (activeWorkflowId && await confirm("Delete this workflow?")) {
                       deleteWorkflow(activeWorkflowId);
                     }
                   }}

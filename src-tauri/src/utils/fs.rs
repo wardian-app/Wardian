@@ -10,6 +10,48 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
 
+pub fn get_default_user_dir() -> std::path::PathBuf {
+    dirs::home_dir().unwrap_or_else(|| {
+        if cfg!(windows) {
+            std::env::var("USERPROFILE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("C:\\"))
+        } else {
+            std::path::PathBuf::from("/")
+        }
+    })
+}
+
+pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
+    // Priority 1: Explicitly provided folder
+    if !folder.is_empty() {
+        let p = std::path::PathBuf::from(folder);
+        if let Ok(validated) = validate_workspace_path(&p) {
+            return validated;
+        }
+    }
+
+    // Priority 2: Persistent agent configuration (if agent_id is provided)
+    if !agent_id.is_empty() {
+        if let Some(home) = get_wardian_home() {
+            if let Ok(data) = std::fs::read_to_string(home.join("wardian_state.json")) {
+                if let Ok(configs) = serde_json::from_str::<Vec<crate::models::AgentConfig>>(&data) {
+                    if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
+                        if !cfg.folder.is_empty() {
+                            let p = std::path::PathBuf::from(&cfg.folder);
+                            if let Ok(validated) = validate_workspace_path(&p) {
+                                return validated;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    get_default_user_dir()
+}
+
 pub fn provider_uses_projected_workspace(provider: &str) -> bool {
     provider == "codex"
 }
@@ -462,6 +504,18 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
     };
 
     let canonical = absolute.canonicalize().map_err(|e| format!("Path does not exist or is invalid: {}", e))?;
+
+    // On Windows, canonicalize() produces extended-length paths with \\?\ prefix
+    // which breaks CLI tools. Strip it to get a normal path.
+    #[cfg(windows)]
+    let canonical = {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            std::path::PathBuf::from(stripped)
+        } else {
+            canonical
+        }
+    };
     
     // For now, we allow paths that exist and are not in sensitive system directories
     // A more strict implementation would check against a whitelist of project roots.

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useConfirm } from './ConfirmDialog';
 
 interface ValidatedInputProps {
   value: string;
@@ -51,15 +52,16 @@ interface ListEditorProps {
   onSystemValueDelete?: (idx: number) => void;
 }
 
-export const ListEditor: React.FC<ListEditorProps> = ({ 
-  label, 
-  values = [], 
+export const ListEditor: React.FC<ListEditorProps> = ({
+  label,
+  values = [],
   systemValues = [],
-  placeholder, 
-  onChange, 
+  placeholder,
+  onChange,
   validate,
   onSystemValueDelete
 }) => {
+  const confirm = useConfirm();
   const safeValues = values || [];
   const safeSystemValues = systemValues || [];
 
@@ -77,8 +79,8 @@ export const ListEditor: React.FC<ListEditorProps> = ({
             />
             <button
               type="button"
-              onClick={() => {
-                if (confirm("This is a system-managed directory. Are you sure you want to remove it?")) {
+              onClick={async () => {
+                if (await confirm("This is a system-managed directory. Are you sure you want to remove it?")) {
                   onSystemValueDelete?.(idx);
                 }
               }}
