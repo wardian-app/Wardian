@@ -66,6 +66,10 @@ pub fn prepare_provider_habitat(
         return Ok(None);
     }
 
+    let Some(session_id) = session_id.filter(|sid| !sid.trim().is_empty()) else {
+        return Ok(None);
+    };
+
     let habitat_root = prepare_habitat_workspace(workspace_root, class_name, session_id)?;
     if provider == "codex" {
         ensure_codex_home_projection(&habitat_root)?;
@@ -146,26 +150,30 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
     dirs
 }
 
+fn habitat_root_for_session(
+    wardian_home: &std::path::Path,
+    session_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        return Err("Provider session ID is required for agent habitat projection".to_string());
+    }
+
+    Ok(wardian_home.join("agents").join(trimmed).join("habitat"))
+}
+
 fn prepare_habitat_workspace(
     workspace_root: &std::path::Path,
     class_name: &str,
-    session_id: Option<&str>,
+    session_id: &str,
 ) -> Result<std::path::PathBuf, String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let habitat_root = if let Some(session_id) = session_id.filter(|sid| !sid.trim().is_empty()) {
-        wardian_home.join("agents").join(session_id).join("habitat")
-    } else {
-        wardian_home
-            .join("runtime")
-            .join("bootstrap")
-            .join(uuid::Uuid::new_v4().to_string())
-            .join("habitat")
-    };
+    let habitat_root = habitat_root_for_session(&wardian_home, session_id)?;
 
     std::fs::create_dir_all(&habitat_root).map_err(|e| e.to_string())?;
 
-    write_habitat_instruction_files(&wardian_home, &habitat_root, class_name, session_id)?;
-    build_habitat_skill_projection(&wardian_home, &habitat_root, class_name, session_id)?;
+    write_habitat_instruction_files(&wardian_home, &habitat_root, class_name, Some(session_id))?;
+    build_habitat_skill_projection(&wardian_home, &habitat_root, class_name, Some(session_id))?;
 
     let workspace_link = habitat_root.join("workspace");
     if workspace_link.exists() {
@@ -539,4 +547,32 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
     // If it's outside both, we check if it's a known development path
     // For Wardian, we'll be liberal but protective.
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::habitat_root_for_session;
+    use std::path::Path;
+
+    #[test]
+    fn habitat_root_uses_provider_session_id_under_agents() {
+        let root = habitat_root_for_session(Path::new("C:/Users/test/.wardian"), "provider-session-123")
+            .expect("expected provider session path");
+
+        assert_eq!(
+            root,
+            Path::new("C:/Users/test/.wardian")
+                .join("agents")
+                .join("provider-session-123")
+                .join("habitat")
+        );
+    }
+
+    #[test]
+    fn habitat_root_rejects_missing_session_id() {
+        let err = habitat_root_for_session(Path::new("C:/Users/test/.wardian"), "   ")
+            .expect_err("expected missing session id to be rejected");
+
+        assert!(err.contains("Provider session ID is required"));
+    }
 }
