@@ -50,10 +50,30 @@ pub fn run() {
             app.listen_any("terminal-input", move |event| {
                 let raw = event.payload();
                 if let Ok(payload) = serde_json::from_str::<TerminalInputPayload>(raw) {
+                    let is_interrupt = payload.input.contains('\u{3}');
                     if let Ok(senders) = event_handle.state::<AppState>().input_senders.try_read() {
                         if let Some(tx) = senders.get(&payload.session_id) {
                             let _ = tx.try_send(payload.input);
                         }
+                    }
+                    if is_interrupt {
+                        let app_handle = event_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app_handle.state::<AppState>();
+                            let agents = state.agents.lock().await;
+                            if let Some(agent) = agents.get(&payload.session_id) {
+                                if let Ok(mut status) = agent.current_status.lock() {
+                                    *status = "Idle".to_string();
+                                }
+                                let _ = app_handle.emit(
+                                    "agent-status-updated",
+                                    serde_json::json!({
+                                        "session_id": payload.session_id,
+                                        "current_status": "Idle",
+                                    }),
+                                );
+                            }
+                        });
                     }
                 }
             });

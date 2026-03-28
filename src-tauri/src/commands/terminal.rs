@@ -1,14 +1,17 @@
 use tauri::State;
 use crate::state::AppState;
 use crate::manager;
+use tauri::{AppHandle, Emitter};
 
 #[tauri::command]
 pub async fn send_input_to_agent(
     session_id: String,
     input: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<(), String> {
-    let senders = match state.input_senders.try_read() {
+    let is_interrupt = input.contains('\u{3}');
+    let tx = match state.input_senders.try_read() {
         Ok(s) => s,
         Err(_) => {
             manager::log_debug(&format!(
@@ -17,10 +20,29 @@ pub async fn send_input_to_agent(
             ));
             return Err("Input channel temporarily locked".to_string());
         }
-    };
-    if let Some(tx) = senders.get(&session_id) {
+    }
+    .get(&session_id)
+    .cloned();
+    if let Some(tx) = tx {
         match tx.try_send(input) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if is_interrupt {
+                    let agents = state.agents.lock().await;
+                    if let Some(agent) = agents.get(&session_id) {
+                        if let Ok(mut status) = agent.current_status.lock() {
+                            *status = "Idle".to_string();
+                        }
+                        let _ = app.emit(
+                            "agent-status-updated",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "current_status": "Idle",
+                            }),
+                        );
+                    }
+                }
+                Ok(())
+            }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 manager::log_debug(&format!(
                     "[Wardian] [{}] send_input_to_agent: channel FULL (writer thread likely blocked on ConPTY write_all)",
