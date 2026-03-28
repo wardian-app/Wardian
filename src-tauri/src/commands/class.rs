@@ -54,7 +54,7 @@ pub async fn create_agent_class(
             let _ = std::fs::write(agents_md_path, content);
         }
 
-        // Create provider stubs
+        // Create provider stubs for providers that do not read AGENTS.md directly
         for stub_name in &["GEMINI.md", "CLAUDE.md"] {
             let stub_path = role_dir.join(stub_name);
             if !stub_path.exists() {

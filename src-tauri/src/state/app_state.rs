@@ -44,8 +44,7 @@ mod tests {
     #[test]
     fn app_state_constructs_without_panic() {
         let state = AppState::new();
-        // If we get here, construction succeeded
-        assert!(true, "AppState::new() succeeded");
+        assert!(state.agent_order.blocking_lock().is_empty());
         drop(state);
     }
 }

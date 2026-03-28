@@ -14,6 +14,35 @@ impl ClaudeProvider {
     pub fn new() -> Self {
         ClaudeProvider
     }
+
+    fn is_real_user_query(parsed: &serde_json::Value) -> bool {
+        let Some(message) = parsed.get("message") else {
+            return true;
+        };
+        let Some(content) = message.get("content") else {
+            return true;
+        };
+
+        let Some(items) = content.as_array() else {
+            return true;
+        };
+
+        !items.iter().any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+    }
+
+    fn assistant_event(parsed: &serde_json::Value) -> AgentEvent {
+        let stop_reason = parsed
+            .get("message")
+            .and_then(|v| v.get("stop_reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if stop_reason == "end_turn" || stop_reason == "stop_sequence" {
+            return AgentEvent::ModelResponse;
+        }
+
+        AgentEvent::Generating
+    }
 }
 
 impl AgentProvider for ClaudeProvider {
@@ -156,13 +185,22 @@ impl AgentProvider for ClaudeProvider {
                             .to_string();
                         Some(AgentEvent::ActionRequired { message })
                     }
+                    "turn_duration" => Some(AgentEvent::ModelResponse),
                     _ => Some(AgentEvent::Unknown),
                 }
             }
-            // User input is sent via stdin; Claude echoes it on stdout when received
-            "user" => Some(AgentEvent::UserQuery),
+            // Only count real user prompts as queries. Tool results are part of the same turn.
+            "user" => {
+                if Self::is_real_user_query(&parsed) {
+                    Some(AgentEvent::UserQuery)
+                } else {
+                    Some(AgentEvent::Generating)
+                }
+            }
             // Claude is actively streaming a response
-            "assistant" | "message_stream" => Some(AgentEvent::Generating),
+            "assistant" => Some(Self::assistant_event(&parsed)),
+            "message_stream" => Some(AgentEvent::Generating),
+            "progress" => Some(AgentEvent::Generating),
             // Claude finished the full response turn
             "result" => Some(AgentEvent::ModelResponse),
             _ => Some(AgentEvent::Unknown),
@@ -245,6 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_output_assistant_end_turn_is_idle() {
+        let p = make_provider();
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+    }
+
+    #[test]
+    fn parse_output_assistant_tool_use_is_generating() {
+        let p = make_provider();
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"tool-1","input":{"command":"git status"}}],"stop_reason":"tool_use"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
     fn parse_output_result_is_idle() {
         let p = make_provider();
         let line = r#"{"type":"result","subtype":"success","result":"done"}"#;
@@ -256,6 +308,20 @@ mod tests {
         let p = make_provider();
         let line = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#;
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::UserQuery);
+    }
+
+    #[test]
+    fn parse_output_user_tool_result_is_generating() {
+        let p = make_provider();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
+    fn parse_output_turn_duration_is_idle() {
+        let p = make_provider();
+        let line = r#"{"type":"system","subtype":"turn_duration","durationMs":1234}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
     }
 
     #[test]

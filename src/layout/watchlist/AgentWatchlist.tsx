@@ -11,7 +11,7 @@ import {
   getListsContainingAgent,
   getListsNotContainingAgent,
 } from "./watchlistUtils";
-import { deriveCurrentThought, getStatusColorClass } from "../../utils/statusUtils";
+import { deriveCurrentThought, getStatusColorClass, getStatusLabel } from "../../utils/statusUtils";
 
 interface AgentWatchlistProps {
   agents: AgentConfig[];
@@ -344,7 +344,7 @@ export default function AgentWatchlist({
           {displayedAgents.map((agent) => {
             const agentId = agent.session_id;
             const isSelected = selectedAgentIds.has(agentId);
-            const { thought, status } = getAgentStatus(agentId);
+            const { status } = getAgentStatus(agentId);
             const statusColor = getStatusColorClass(status);
             const metrics = telemetry[agentId];
             const isDragTarget = dragOverAgentId === agentId && draggedAgentId !== null && draggedAgentId !== agentId;
@@ -447,7 +447,7 @@ export default function AgentWatchlist({
                   </p>
                 </div>
                 <span className={`text-[9px] truncate max-w-[60px] ${status === "Processing..." ? "text-[var(--color-wardian-accent)]" : status === "Action Needed" ? "text-wardian-warning" : "text-muted-neutral"}`}>
-                  {status === "Processing..." ? thought.substring(0, 12) : status === "Action Needed" ? "Action" : status === "Off" ? "Off" : "Idle"}
+                  {getStatusLabel(status)}
                 </span>
                 <span className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
                   {metrics?.query_count ?? "–"}

@@ -50,17 +50,20 @@ pub async fn spawn_agent(
             std::path::PathBuf::from(&folder)
         };
 
-        let provider_name = config_override.as_ref().map(|c| c.provider.clone()).unwrap_or_else(|| "gemini".to_string());
-        if let Some(real_sid) = manager::obtain_session_id(&cwd, &provider_name).await {
-            manager::log_debug(&format!(
-                "[WARDIAN] Intercepted stream-json session ID for {}: {}",
-                provider_name, real_sid
-            ));
-            // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
-            session_id = Some(real_sid.clone());
-            actual_resume = Some(real_sid);
-        } else {
-            return Err("Failed to obtain session ID headlessly. Ensure the prompt \"Introduce yourself\" can execute.".to_string());
+        let provider_name = config_override.as_ref().map(|c| c.provider.clone()).unwrap_or_else(|| "claude".to_string());
+        match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
+            Ok(real_sid) => {
+                manager::log_debug(&format!(
+                    "[WARDIAN] Intercepted stream-json session ID for {}: {}",
+                    provider_name, real_sid
+                ));
+                // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
+                session_id = Some(real_sid.clone());
+                actual_resume = Some(real_sid);
+            }
+            Err(e) => {
+                return Err(format!("Failed to initialize the provider session: {}", e));
+            }
         }
     }
 

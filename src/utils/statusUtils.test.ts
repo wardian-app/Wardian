@@ -5,6 +5,7 @@ import {
   deriveCurrentThought,
   classifyJsonEvent,
   getStatusColorClass,
+  getStatusLabel,
 } from "./statusUtils";
 import type { AgentTelemetry } from "../types";
 
@@ -32,15 +33,19 @@ describe("deriveEffectiveStatus", () => {
   });
 
   it("returns Processing when title contains Working", () => {
-    expect(deriveEffectiveStatus("Working on task", undefined, "Idle")).toBe("Processing...");
+    expect(deriveEffectiveStatus("Working on task", undefined, "Pending...")).toBe("Processing...");
   });
 
   it("returns Processing when title contains Executing", () => {
-    expect(deriveEffectiveStatus("Executing command", undefined, "Idle")).toBe("Processing...");
+    expect(deriveEffectiveStatus("Executing command", undefined, "Pending...")).toBe("Processing...");
   });
 
   it("returns Processing when title contains ✦ star", () => {
-    expect(deriveEffectiveStatus("✦ Running", undefined, "Idle")).toBe("Processing...");
+    expect(deriveEffectiveStatus("✦ Running", undefined, "Pending...")).toBe("Processing...");
+  });
+
+  it("does not let a stale Working title override backend Idle", () => {
+    expect(deriveEffectiveStatus("Working on task", undefined, "Idle")).toBe("Idle");
   });
 
   it("overrides to Processing when a live thought is present", () => {
@@ -121,7 +126,7 @@ describe("deriveCurrentThought", () => {
   });
 
   it("falls back to title when no live thought", () => {
-    const result = deriveCurrentThought("✦ Running tests", undefined, baseMetrics);
+    const result = deriveCurrentThought("✦ Running tests", undefined, { ...baseMetrics, current_status: "Pending..." });
     expect(result.thought).toBe("Running tests");
     expect(result.status).toBe("Processing...");
   });
@@ -260,8 +265,62 @@ describe("classifyJsonEvent", () => {
     expect(result).toEqual({ type: "progress", thought: "Responding..." });
   });
 
+  it("classifies Claude permission request as notification", () => {
+    const result = classifyJsonEvent({
+      type: "system",
+      subtype: "permission_request",
+      tool_name: "Bash",
+    });
+    expect(result).toEqual({ type: "notification", message: "Bash", level: "warning" });
+  });
+
+  it("classifies Claude turn duration as clear_thought", () => {
+    const result = classifyJsonEvent({
+      type: "system",
+      subtype: "turn_duration",
+      durationMs: 1234,
+    });
+    expect(result).toEqual({ type: "clear_thought" });
+  });
+
   it("classifies Claude result event as clear_thought", () => {
     expect(classifyJsonEvent({ type: "result", subtype: "success" })).toEqual({ type: "clear_thought" });
+  });
+
+  it("classifies Codex turn.started as progress", () => {
+    expect(classifyJsonEvent({ type: "turn.started" })).toEqual({ type: "progress", thought: "Working..." });
+  });
+
+  it("classifies Codex turn.completed as clear_thought", () => {
+    expect(classifyJsonEvent({ type: "turn.completed" })).toEqual({ type: "clear_thought" });
+  });
+
+  it("classifies Codex agent_message payload as progress", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "agent_message", message: "Inspecting the repository now" },
+    })).toEqual({ type: "progress", thought: "Inspecting the repository now" });
+  });
+
+  it("classifies Codex exec command payload as progress", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "exec_command", command: "cargo test --all" },
+    })).toEqual({ type: "progress", thought: "cargo test --all" });
+  });
+
+  it("classifies Codex approval request as warning notification", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "exec_approval_request", command: "git status" },
+    })).toEqual({ type: "notification", message: "git status", level: "warning" });
+  });
+
+  it("classifies Codex task_complete as clear_thought", () => {
+    expect(classifyJsonEvent({
+      type: "event_msg",
+      payload: { type: "task_complete" },
+    })).toEqual({ type: "clear_thought" });
   });
 });
 
@@ -289,5 +348,27 @@ describe("getStatusColorClass", () => {
 
   it("returns gray for unknown status", () => {
     expect(getStatusColorClass("Something Else")).toContain("bg-wardian-off");
+  });
+});
+
+describe("getStatusLabel", () => {
+  it("maps Processing to Working", () => {
+    expect(getStatusLabel("Processing...")).toBe("Working");
+  });
+
+  it("maps Action Needed to Action", () => {
+    expect(getStatusLabel("Action Needed")).toBe("Action");
+  });
+
+  it("maps Idle to Idle", () => {
+    expect(getStatusLabel("Idle")).toBe("Idle");
+  });
+
+  it("maps Off to Off", () => {
+    expect(getStatusLabel("Off")).toBe("Off");
+  });
+
+  it("maps unknown values to Pending", () => {
+    expect(getStatusLabel("Something Else")).toBe("Pending");
   });
 });
