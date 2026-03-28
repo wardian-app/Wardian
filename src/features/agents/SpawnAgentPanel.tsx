@@ -32,12 +32,14 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
     setIsSpawning(true);
     try {
       await invoke<AgentConfig>("spawn_agent", {
-        sessionName: newSessionName,
-        agentClass: newAgentClass,
-        folder: newFolder,
-        resumeSession: resumeSession || null,
-        isOff: false,
-        configOverride: spawnAdvancedConfig,
+        req: {
+          sessionName: newSessionName,
+          agentClass: newAgentClass,
+          folder: newFolder,
+          resumeSession: resumeSession || null,
+          isOff: false,
+          configOverride: spawnAdvancedConfig,
+        },
       });
       setNewSessionName("");
       setNewAgentClass("Generalist");
@@ -134,11 +136,12 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
           </label>
           <select
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-            value={spawnAdvancedConfig.provider || "gemini"}
+            value={spawnAdvancedConfig.provider || "claude"}
             onChange={(e) => setSpawnAdvancedConfig(prev => ({ ...prev, provider: e.target.value }))}
           >
-            <option value="gemini">Gemini</option>
             <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+            <option value="gemini">Gemini</option>
           </select>
         </div>
         <div>

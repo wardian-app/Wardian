@@ -132,9 +132,10 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             <select
               disabled
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] opacity-60 cursor-not-allowed transition-colors"
-              value={config.provider || "gemini"}
+              value={config.provider || "claude"}
               onChange={(e) => updateField("provider", e.target.value)}
             >
+              <option value="codex">Codex</option>
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
             </select>

@@ -54,7 +54,7 @@ pub async fn create_agent_class(
             let _ = std::fs::write(agents_md_path, content);
         }
 
-        // Create provider stubs
+        // Create provider stubs for providers that do not read AGENTS.md directly
         for stub_name in &["GEMINI.md", "CLAUDE.md"] {
             let stub_path = role_dir.join(stub_name);
             if !stub_path.exists() {
@@ -94,4 +94,61 @@ pub async fn delete_agent_class(
     }
 
     Ok(manager::get_all_agent_classes(&app))
+}
+
+#[tauri::command]
+pub async fn get_default_class_instruction(
+    name: String,
+    app: AppHandle,
+) -> Result<String, String> {
+    manager::get_agent_class_default_instruction(&app, &name)
+        .ok_or_else(|| format!("Default instruction for '{}' not found", name))
+}
+
+#[tauri::command]
+pub async fn reset_class_to_default(
+    name: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    manager::log_debug(&format!("[WARDIAN] reset_class_to_default called: {}", name));
+
+    let all = manager::get_all_agent_classes(&app);
+    let found = all.iter().find(|c| c.name == name)
+        .ok_or_else(|| format!("Class '{}' not found", name))?;
+
+    if !found.is_default {
+        return Err(format!("'{}' is not a default class and cannot be reset.", name));
+    }
+
+    let default_content = manager::get_agent_class_default_instruction(&app, &name)
+        .ok_or_else(|| format!("System default for '{}' not found", name))?;
+
+    if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
+        let agents_md_path = app_dir.join("classes").join(&name).join("AGENTS.md");
+        std::fs::write(agents_md_path, default_content).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Could not locate Wardian home directory".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn reset_all_class_prompts(
+    app: AppHandle,
+) -> Result<(), String> {
+    manager::log_debug("[WARDIAN] reset_all_class_prompts called");
+
+    let all = manager::get_all_agent_classes(&app);
+    let app_dir = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home directory")?;
+
+    for cls in all {
+        if cls.is_default {
+            if let Some(default_content) = manager::get_agent_class_default_instruction(&app, &cls.name) {
+                let agents_md_path = app_dir.join("classes").join(&cls.name).join("AGENTS.md");
+                let _ = std::fs::write(agents_md_path, default_content);
+            }
+        }
+    }
+
+    Ok(())
 }

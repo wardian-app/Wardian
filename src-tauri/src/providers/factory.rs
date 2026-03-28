@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crate::models::provider::AgentProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::claude::ClaudeProvider;
+use crate::providers::codex::CodexProvider;
 
 /// Resolves the correct `AgentProvider` implementation based on the provider name
 /// stored in `AgentConfig`.
@@ -16,9 +17,10 @@ impl ProviderFactory {
         let lower = provider_name.to_lowercase();
         match lower.as_str() {
             "gemini" => Ok(Arc::new(GeminiProvider::new())),
-            "claude" => Ok(Arc::new(ClaudeProvider::new())), // Added Claude provider
+            "claude" => Ok(Arc::new(ClaudeProvider::new())),
+            "codex" => Ok(Arc::new(CodexProvider::new())),
             other => Err(format!(
-                "Unknown provider '{}'. Supported providers: gemini, claude", // Updated error message
+                "Unknown provider '{}'. Supported providers: gemini, claude, codex",
                 other
             )),
         }
@@ -51,6 +53,13 @@ mod tests {
     }
 
     #[test]
+    fn resolve_codex_succeeds() {
+        let provider = ProviderFactory::resolve("codex");
+        assert!(provider.is_ok());
+        assert_eq!(provider.unwrap().name(), "Codex");
+    }
+
+    #[test]
     fn resolve_unknown_returns_error() {
         let result = ProviderFactory::resolve("invalid_provider_name");
         assert!(result.is_err());
@@ -76,5 +85,11 @@ mod tests {
         assert_eq!(provider.get_instruction_filename(), "GEMINI.md");
         let (bin, _) = provider.get_executable();
         assert!(!bin.is_empty());
+    }
+
+    #[test]
+    fn resolved_codex_provider_uses_agents_md() {
+        let provider = ProviderFactory::resolve("codex").unwrap();
+        assert_eq!(provider.get_instruction_filename(), "AGENTS.md");
     }
 }

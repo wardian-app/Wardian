@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentClassDefinition } from "../../types";
+import { useConfirm } from "../../components/ConfirmDialog";
 
 import { ManageSkills } from "../library/ManageSkills";
 
@@ -13,6 +14,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   agentClasses,
   onClassesUpdated,
 }) => {
+  const confirm = useConfirm();
   const [newClassName, setNewClassName] = useState("");
   const [newClassDesc, setNewClassDesc] = useState("");
   const [newClassInstruction, setNewClassInstruction] = useState("");
@@ -40,12 +42,23 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   };
 
   const deleteAgentClass = async (name: string) => {
-    if (!confirm(`Delete custom class "${name}"? This will also remove its directory.`)) return;
+    if (!await confirm(`Delete custom class "${name}"? This will also remove its directory.`)) return;
     try {
       await invoke("delete_agent_class", { name });
       onClassesUpdated();
     } catch (error) {
       alert(`Failed to delete class: ${error}`);
+    }
+  };
+  
+  const resetAllPrompts = async () => {
+    if (!confirm("Reset ALL default agent prompts to system defaults? This will overwrite your current AGENTS.md instructions for all default classes.")) return;
+    try {
+      await invoke("reset_all_class_prompts");
+      alert("All default agent prompts have been reset to system defaults.");
+      onClassesUpdated();
+    } catch (error) {
+      alert(`Failed to reset all prompts: ${error}`);
     }
   };
 
@@ -126,6 +139,18 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
               <ManageSkills targetType="class" targetId={cls.name} />
             </div>
           ))}
+        </div>
+
+        <div className="px-1 mt-4">
+            <button
+                onClick={resetAllPrompts}
+                className="w-full text-[9px] font-bold text-muted hover:text-[var(--color-wardian-accent)] uppercase tracking-[0.2em] py-3 border border-dashed border-wardian-light/20 rounded-lg transition-all hover:border-[var(--color-wardian-accent)]/30 group/reset"
+            >
+                Reset All Default Prompts
+            </button>
+            <p className="text-[9px] text-muted-neutral text-center mt-2 opacity-50 italic">
+                This will overwrite AGENTS.md for all default roles.
+            </p>
         </div>
       </div>
     </div>

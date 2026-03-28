@@ -22,27 +22,53 @@ impl AgentProvider for GeminiProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        if cfg!(target_os = "windows") {
-            let appdata = std::env::var("APPDATA").unwrap_or_default();
-            let target = std::path::Path::new(&appdata)
-                .join("npm")
-                .join("node_modules")
-                .join("@google")
-                .join("gemini-cli")
-                .join("dist")
-                .join("index.js");
+        let exe_name = if cfg!(target_os = "windows") { "gemini.cmd" } else { "gemini" };
 
-            if target.exists() {
-                (
-                    "node".to_string(),
-                    vec![target.to_string_lossy().to_string()],
-                )
-            } else {
-                ("gemini.cmd".to_string(), vec![])
+        // 1. Try bare command in PATH
+        if let Some(paths) = std::env::var_os("PATH") {
+            for path in std::env::split_paths(&paths) {
+                let full_path = path.join(exe_name);
+                if full_path.exists() {
+                    return (exe_name.to_string(), vec![]);
+                }
+            }
+        }
+
+        // 2. Robust Fallback
+        if cfg!(target_os = "windows") {
+            if let Some(appdata) = dirs::data_dir() {
+                let npm_gemini = appdata.join("npm").join("gemini.cmd");
+                if npm_gemini.exists() {
+                    return (npm_gemini.to_string_lossy().to_string(), vec![]);
+                }
+                
+                // Legacy index.js lookup
+                let index_js = appdata.join("npm")
+                    .join("node_modules")
+                    .join("@google")
+                    .join("gemini-cli")
+                    .join("dist")
+                    .join("index.js");
+                if index_js.exists() {
+                    return ("node".to_string(), vec![index_js.to_string_lossy().to_string()]);
+                }
             }
         } else {
-            ("gemini".to_string(), vec![])
+            let home = dirs::home_dir().unwrap_or_default();
+            let fallbacks = vec![
+                home.join(".npm-global/bin/gemini"),
+                std::path::PathBuf::from("/usr/local/bin/gemini"),
+                std::path::PathBuf::from("/opt/homebrew/bin/gemini"),
+            ];
+            for path in fallbacks {
+                if path.exists() {
+                    return (path.to_string_lossy().to_string(), vec![]);
+                }
+            }
         }
+
+        // 3. Ultimate Fallback
+        (exe_name.to_string(), vec![])
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {

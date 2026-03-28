@@ -4,6 +4,7 @@ import { WorkflowLibrary } from './WorkflowLibrary';
 import { ActiveMonitoring } from './ActiveMonitoring';
 import { RunPayloadModal, getManualTriggerSchema, getWorkflowRoles } from './RunPayloadModal';
 import type { WorkflowDefinition } from '../../types/workflow';
+import { useConfirm } from '../../components/ConfirmDialog';
 
 // Icons
 const StopAllIcon = () => <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M5 5h10v10H5z" /></svg>;
@@ -33,6 +34,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
     deleteScheduledRun,
   } = useWorkflowStore();
   
+  const confirm = useConfirm();
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingRunWorkflow, setPendingRunWorkflow] = useState<WorkflowDefinition | null>(null);
 
@@ -63,7 +65,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
   [availableWorkflows]);
 
   const handleStopAll = async () => {
-    if (confirm('STOP ALL: Immediately terminate all active runs and triggers?')) {
+    if (await confirm('STOP ALL: Immediately terminate all active runs and triggers?')) {
       await stopAllTriggers();
       fetchWorkflows();
     }

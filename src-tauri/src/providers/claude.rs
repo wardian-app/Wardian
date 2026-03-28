@@ -14,6 +14,35 @@ impl ClaudeProvider {
     pub fn new() -> Self {
         ClaudeProvider
     }
+
+    fn is_real_user_query(parsed: &serde_json::Value) -> bool {
+        let Some(message) = parsed.get("message") else {
+            return true;
+        };
+        let Some(content) = message.get("content") else {
+            return true;
+        };
+
+        let Some(items) = content.as_array() else {
+            return true;
+        };
+
+        !items.iter().any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+    }
+
+    fn assistant_event(parsed: &serde_json::Value) -> AgentEvent {
+        let stop_reason = parsed
+            .get("message")
+            .and_then(|v| v.get("stop_reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if stop_reason == "end_turn" || stop_reason == "stop_sequence" {
+            return AgentEvent::ModelResponse;
+        }
+
+        AgentEvent::Generating
+    }
 }
 
 impl AgentProvider for ClaudeProvider {
@@ -22,19 +51,52 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        ("claude".to_string(), vec![])
+        let exe_name = if cfg!(target_os = "windows") { "claude.cmd" } else { "claude" };
+
+        // 1. Try bare command in PATH
+        if let Some(paths) = std::env::var_os("PATH") {
+            for path in std::env::split_paths(&paths) {
+                let full_path = path.join(exe_name);
+                if full_path.exists() {
+                    return (exe_name.to_string(), vec![]);
+                }
+            }
+        }
+
+        // 2. Robust Fallback
+        if cfg!(target_os = "windows") {
+            if let Some(appdata) = dirs::data_dir() {
+                let npm_claude = appdata.join("npm").join("claude.cmd");
+                if npm_claude.exists() {
+                    return (npm_claude.to_string_lossy().to_string(), vec![]);
+                }
+            }
+        } else {
+            let home = dirs::home_dir().unwrap_or_default();
+            let fallbacks = vec![
+                home.join(".npm-global/bin/claude"),
+                std::path::PathBuf::from("/usr/local/bin/claude"),
+                std::path::PathBuf::from("/opt/homebrew/bin/claude"),
+            ];
+            for path in fallbacks {
+                if path.exists() {
+                    return (path.to_string_lossy().to_string(), vec![]);
+                }
+            }
+        }
+
+        // 3. Ultimate Fallback
+        (exe_name.to_string(), vec![])
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
-        let mut args: Vec<String> = Vec::new();
-
-        // Persistent PTY session: use streaming JSON I/O without --print
-        // so Claude stays alive and processes multiple turns from stdin.
-        args.push("--verbose".into());
-        args.push("--input-format".into());
-        args.push("stream-json".into());
-        args.push("--output-format".into());
-        args.push("stream-json".into());
+        let mut args: Vec<String> = vec![
+            "--verbose".into(),
+            "--input-format".into(),
+            "stream-json".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+        ];
 
         if let Some(ref model) = config.model {
             args.push("--model".into());
@@ -158,13 +220,22 @@ impl AgentProvider for ClaudeProvider {
                             .to_string();
                         Some(AgentEvent::ActionRequired { message })
                     }
+                    "turn_duration" => Some(AgentEvent::ModelResponse),
                     _ => Some(AgentEvent::Unknown),
                 }
             }
-            // User input is sent via stdin; Claude echoes it on stdout when received
-            "user" => Some(AgentEvent::UserQuery),
+            // Only count real user prompts as queries. Tool results are part of the same turn.
+            "user" => {
+                if Self::is_real_user_query(&parsed) {
+                    Some(AgentEvent::UserQuery)
+                } else {
+                    Some(AgentEvent::Generating)
+                }
+            }
             // Claude is actively streaming a response
-            "assistant" | "message_stream" => Some(AgentEvent::Generating),
+            "assistant" => Some(Self::assistant_event(&parsed)),
+            "message_stream" => Some(AgentEvent::Generating),
+            "progress" => Some(AgentEvent::Generating),
             // Claude finished the full response turn
             "result" => Some(AgentEvent::TurnCompleted),
             _ => Some(AgentEvent::Unknown),
@@ -247,6 +318,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_output_assistant_end_turn_is_idle() {
+        let p = make_provider();
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+    }
+
+    #[test]
+    fn parse_output_assistant_tool_use_is_generating() {
+        let p = make_provider();
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"tool-1","input":{"command":"git status"}}],"stop_reason":"tool_use"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
     fn parse_output_result_is_turn_completed() {
         let p = make_provider();
         let line = r#"{"type":"result","subtype":"success","result":"done"}"#;
@@ -258,6 +343,20 @@ mod tests {
         let p = make_provider();
         let line = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#;
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::UserQuery);
+    }
+
+    #[test]
+    fn parse_output_user_tool_result_is_generating() {
+        let p = make_provider();
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
+    fn parse_output_turn_duration_is_idle() {
+        let p = make_provider();
+        let line = r#"{"type":"system","subtype":"turn_duration","durationMs":1234}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
     }
 
     #[test]

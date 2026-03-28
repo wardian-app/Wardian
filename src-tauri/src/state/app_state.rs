@@ -21,6 +21,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
         let mut sys = sysinfo::System::new_all();
         sys.refresh_all();
         Self {
@@ -43,8 +49,7 @@ mod tests {
     #[test]
     fn app_state_constructs_without_panic() {
         let state = AppState::new();
-        // If we get here, construction succeeded
-        assert!(true, "AppState::new() succeeded");
+        assert!(state.agent_order.blocking_lock().is_empty());
         drop(state);
     }
 }

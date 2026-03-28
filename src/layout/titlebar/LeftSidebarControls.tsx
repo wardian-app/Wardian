@@ -1,6 +1,8 @@
 import React from "react";
 import type { AgentTelemetry, AgentConfig } from "../../types";
 
+const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+
 interface LeftSidebarControlsProps {
   leftCollapsed: boolean;
   setLeftCollapsed: (collapsed: boolean) => void;
@@ -16,7 +18,7 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
   agents,
   offAgentIds,
 }) => (
-  <div className="titlebar-zone titlebar-left">
+  <div className="titlebar-zone titlebar-left" style={isMac ? { paddingLeft: "72px" } : undefined}>
     <button
       onClick={() => setLeftCollapsed(!leftCollapsed)}
       className={`titlebar-toggle ${!leftCollapsed ? "active" : ""}`}

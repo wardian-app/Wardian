@@ -22,6 +22,7 @@ const LIGHT_TERM_THEME = {
 
 const terminalMap = new Map<string, Terminal>();
 const fitAddonMap = new Map<string, FitAddon>();
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 export const AgentTerminal = memo(function AgentTerminal({ 
   sessionId, 
@@ -68,11 +69,13 @@ export const AgentTerminal = memo(function AgentTerminal({
     const term = xtermRef.current;
     const fitAddon = fitAddonRef.current;
     if (!term || !fitAddon || !terminalRef.current) return;
-    if (terminalRef.current.offsetParent === null) return;
+    const rect = terminalRef.current.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
 
     try {
       fitAddon.fit();
       if (term.cols > 10 && term.rows > 3) {
+        term.refresh(0, Math.max(term.rows - 1, 0));
         if (forceInvoke) {
           invoke("resize_agent_terminal", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
         }
@@ -92,10 +95,12 @@ export const AgentTerminal = memo(function AgentTerminal({
     try {
       term = new Terminal({
         theme: termTheme,
-        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 1000,
+        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 5000,
         allowProposedApi: true,
         convertEol: true,
-        disableStdin: false
+        disableStdin: false,
+        reflowCursorLine: true,
+        windowsPty: IS_WINDOWS ? { backend: 'conpty', buildNumber: 22621 } : undefined,
       });
       if (term.options) {
         term.options.scrollOnUserInput = false;
@@ -135,7 +140,9 @@ export const AgentTerminal = memo(function AgentTerminal({
       const checkSizingAndStart = () => {
         if (!isMounted || !fitAddon || !term || pollStartedRef.current) return;
         const el = terminalRef.current;
-        if (!el || el.offsetParent === null || el.clientWidth < 10) return;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10) return;
         
         try {
           fitAddon.fit();
@@ -145,7 +152,6 @@ export const AgentTerminal = memo(function AgentTerminal({
             invoke("resize_agent_terminal", { sessionId, cols: term.cols, rows: term.rows })
               .then(() => { if (isMounted) requestAnimationFrame(pollPty); })
               .catch(() => { if (isMounted) requestAnimationFrame(pollPty); });
-            term.focus();
           }
         } catch { /* ignore */ }
       };
@@ -156,7 +162,6 @@ export const AgentTerminal = memo(function AgentTerminal({
 
       term.onData((data) => {
         if (data === '\x1b[I' || data === '\x1b[O') return;
-        term!.scrollToBottom();
         emit('terminal-input', { sessionId, input: data });
       });
 
@@ -178,6 +183,15 @@ export const AgentTerminal = memo(function AgentTerminal({
         }, 16);
       });
       resizeObserver.observe(terminalRef.current);
+      if (terminalRef.current.parentElement) {
+        resizeObserver.observe(terminalRef.current.parentElement);
+      }
+
+      const handleWindowResize = () => {
+        if (!isMounted) return;
+        requestAnimationFrame(() => performFit(true));
+      };
+      window.addEventListener("resize", handleWindowResize);
 
       let ptyResizeTimeout: ReturnType<typeof setTimeout> | null = null;
       let lastCols = term.cols;
@@ -200,6 +214,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         pollStartedRef.current = false;
         if (resizeTimeout) clearTimeout(resizeTimeout);
         if (ptyResizeTimeout) clearTimeout(ptyResizeTimeout);
+        window.removeEventListener("resize", handleWindowResize);
         resizeObserver?.disconnect();
         terminalMap.delete(sessionId);
         fitAddonMap.delete(sessionId);
@@ -226,6 +241,8 @@ export const AgentTerminal = memo(function AgentTerminal({
       setTimeout(() => isMounted && performFit(true), 50),
       setTimeout(() => isMounted && performFit(true), 150),
       setTimeout(() => isMounted && performFit(true), 400),
+      setTimeout(() => isMounted && performFit(true), 900),
+      setTimeout(() => isMounted && performFit(true), 1500),
     ];
     return () => {
       isMounted = false;

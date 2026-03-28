@@ -13,7 +13,8 @@ This document serves as the historical ledger for all strategic and technical sp
 | [005](./005-modernized-navigation.md) | Modernized Top-Bar & Sidebar Navigation | Implemented | 2026-03-17 |
 | [006](./006-explorer-view.md) | Explorer Left Sidebar | Implemented | 2026-03-22 |
 | [007](./007-workflow-engine.md) | Reliable Workflow Execution Engine | Proposed | 2026-03-25 |
-
+| [008](./008-continuous-integration.md) | Continuous Integration & Quality Gates | Proposed | 2026-03-25 |
+| [009](./009-codex-provider.md) | Codex Provider Support | Implemented | 2026-03-27 |
 
 ## How to use Specs
 Every significant feature must begin with a Spec that defines:

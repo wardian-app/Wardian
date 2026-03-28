@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 fn default_provider() -> String {
-    "gemini".to_string()
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -61,6 +61,22 @@ pub struct AgentConfig {
     pub append_system_prompt: Option<String>,
     #[serde(default)]
     pub mcp_config: Option<String>,
+
+    // Codex-specific fields
+    #[serde(default)]
+    pub codex_sandbox_mode: Option<String>,
+    #[serde(default)]
+    pub codex_approval_policy: Option<String>,
+    #[serde(default)]
+    pub codex_profile: Option<String>,
+    #[serde(default)]
+    pub codex_full_auto: Option<bool>,
+    #[serde(default)]
+    pub codex_search: Option<bool>,
+    #[serde(default)]
+    pub codex_skip_git_repo_check: Option<bool>,
+    #[serde(default)]
+    pub codex_ephemeral: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

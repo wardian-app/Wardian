@@ -344,7 +344,7 @@ export default function AgentWatchlist({
           {displayedAgents.map((agent) => {
             const agentId = agent.session_id;
             const isSelected = selectedAgentIds.has(agentId);
-            const { thought, status } = getAgentStatus(agentId);
+            const { status, thought } = getAgentStatus(agentId);
             const statusColor = getStatusColorClass(status);
             const metrics = telemetry[agentId];
             const isDragTarget = dragOverAgentId === agentId && draggedAgentId !== null && draggedAgentId !== agentId;

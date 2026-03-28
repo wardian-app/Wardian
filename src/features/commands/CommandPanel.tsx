@@ -2,6 +2,7 @@ import React, { useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useLibraryStore } from "../../store/useLibraryStore";
 import { LibraryFolder, LibraryPrompt } from "../../types";
+import { useConfirm } from "../../components/ConfirmDialog";
 
 interface CommandPanelProps {
   selectedAgentIds: Set<string>;
@@ -16,6 +17,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   setBroadcastMessage,
   onBroadcast,
 }) => {
+  const confirm = useConfirm();
   const { promptTree, fetchLibraryTree } = useLibraryStore();
 
   useEffect(() => {
@@ -52,7 +54,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
           await invoke("send_input_to_agent", { sessionId: id, input: flattenedPrompt });
         }
       } else {
-        if (window.confirm("No agents selected. This will broadcast the prompt to ALL agents. Are you sure?")) {
+        if (await confirm("No agents selected. This will broadcast the prompt to ALL agents. Are you sure?")) {
           await invoke("broadcast_input", { input: flattenedPrompt });
         }
       }
@@ -61,10 +63,10 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
     }
   };
 
-  const handleBroadcastSubmit = (e: React.FormEvent) => {
+  const handleBroadcastSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedAgentIds.size === 0) {
-      if (!window.confirm("No agents selected. This will broadcast to ALL agents. Are you sure?")) {
+      if (!await confirm("No agents selected. This will broadcast to ALL agents. Are you sure?")) {
         return;
       }
     }

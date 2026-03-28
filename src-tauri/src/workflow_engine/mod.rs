@@ -41,40 +41,8 @@ fn flatten_headless_response(mut data: Value) -> Value {
 
 /// Resolves the current working directory for a node.
 fn resolve_cwd(node_config: &Value, agent_id: &str) -> PathBuf {
-    let cwd = std::env::var("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("C:\\"));
-
-    // Priority 1: Explicitly provided folder in node config
-    if let Some(folder) = node_config.get("folder").and_then(|v| v.as_str()) {
-        if !folder.is_empty() {
-            let p = PathBuf::from(folder);
-            if let Ok(validated) = validate_workspace_path(&p) {
-                return validated;
-            }
-        }
-    }
-
-    // Priority 2: Persistent agent configuration (if agent_id is provided)
-    if !agent_id.is_empty() {
-        if let Some(home) = get_wardian_home() {
-            if let Ok(data) = std::fs::read_to_string(home.join("wardian_state.json")) {
-                if let Ok(configs) = serde_json::from_str::<Vec<crate::models::AgentConfig>>(&data)
-                {
-                    if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
-                        if !cfg.folder.is_empty() {
-                            let p = PathBuf::from(&cfg.folder);
-                            if let Ok(validated) = validate_workspace_path(&p) {
-                                return validated;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    cwd
+    let folder = node_config.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+    crate::utils::fs::resolve_cwd(folder, agent_id)
 }
 
 /// Executes a command headlessly and returns the result in the mandatory schema.
@@ -359,7 +327,7 @@ pub async fn init_triggers(app: AppHandle) {
     migrate::migrate_workflows_if_needed();
     let workflows = list_workflows().unwrap_or_default();
     for wf in workflows {
-        start_workflow_triggers(app.clone(), wf).await;
+        start_workflow_triggers(app.clone(), wf, false).await;
     }
     // Start the unified scheduler
     start_scheduler(app).await;
@@ -432,7 +400,15 @@ pub async fn start_scheduler(app: AppHandle) {
             }
 
             if modified {
-                let _ = save_scheduled_runs(&runs);
+                // Re-read from disk to avoid resurrecting entries deleted during this tick.
+                let mut fresh = load_scheduled_runs();
+                for fresh_run in fresh.iter_mut() {
+                    if let Some(updated) = runs.iter().find(|r| r.id == fresh_run.id) {
+                        fresh_run.next_run_epoch_ms = updated.next_run_epoch_ms;
+                        fresh_run.schedule.active = updated.schedule.active;
+                    }
+                }
+                let _ = save_scheduled_runs(&fresh);
             }
         }
     });
@@ -579,7 +555,7 @@ pub fn resume_all_triggers(app: AppHandle) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
-pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
+pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, register_schedules: bool) {
     // 1. Clean up existing triggers for this workflow
     stop_workflow_triggers(app.clone(), &wf.id).await;
 
@@ -595,6 +571,7 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
             // --- Scheduled Trigger ---
             // Register a ScheduledRun entry. The unified heartbeat scheduler
             // (30s loop) handles all timed execution from scheduled_runs.json.
+            if register_schedules {
             if let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) {
                 let interval = config.get("interval").and_then(|v| v.as_str()).unwrap_or("");
                 let time = config.get("time").and_then(|v| v.as_str()).unwrap_or("00:00");
@@ -657,6 +634,7 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition) {
 
                 let _ = save_scheduled_runs(&runs);
             }
+            } // end register_schedules
 
             // --- File Watcher Trigger ---
             if let Some(path_str) = config.get("path").and_then(|v| v.as_str()) {
@@ -735,7 +713,7 @@ pub async fn save_workflow(app: AppHandle, wf: WorkflowDefinition) -> Result<(),
     fs::write(path, content).map_err(|e| e.to_string())?;
 
     // Restart triggers
-    start_workflow_triggers(app, wf).await;
+    start_workflow_triggers(app, wf, true).await;
     Ok(())
 }
 
@@ -828,9 +806,7 @@ pub async fn run_workflow(
                 if !deps.is_empty() {
                     // Check if there is AT LEAST ONE unconsumed pulse
                     let mut is_satisfied = false;
-                    let node_consumed = consumed_pulses
-                        .entry(node.id.clone())
-                        .or_default();
+                    let node_consumed = consumed_pulses.entry(node.id.clone()).or_default();
 
                     if node.r#type == "wait" {
                         // Wait nodes: ALL dependent ports must have pulsed_count > consumed_count
@@ -1086,36 +1062,8 @@ pub async fn run_workflow(
                         ));
 
                         // 1. Resolve CWD logic (Shared between modes)
-                        let mut cwd = std::env::var("USERPROFILE")
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|_| PathBuf::from("C:\\"));
-
-                        // Priority 1: Explicitly provided folder in node config
-                        if let Some(folder) = node.config.get("folder").and_then(|v| v.as_str()) {
-                            if !folder.is_empty() {
-                                cwd = PathBuf::from(folder);
-                            }
-                        } else {
-                            // Priority 2: Persistent agent configuration
-                            if let Some(home) = get_wardian_home() {
-                                if let Ok(data) =
-                                    std::fs::read_to_string(home.join("wardian_state.json"))
-                                {
-                                    if let Ok(configs) = serde_json::from_str::<
-                                        Vec<crate::models::AgentConfig>,
-                                    >(&data)
-                                    {
-                                        if let Some(cfg) =
-                                            configs.iter().find(|c| c.session_id == agent_id)
-                                        {
-                                            if !cfg.folder.is_empty() {
-                                                cwd = PathBuf::from(&cfg.folder);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        let folder = node.config.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+                        let cwd = crate::utils::fs::resolve_cwd(folder, agent_id);
 
                         if output_format == "json" {
                             // --- HEADLESS JSON MODE (Always kills PTY for clean structured output) ---
