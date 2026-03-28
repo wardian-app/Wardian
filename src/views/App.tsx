@@ -77,7 +77,6 @@ function AppBody() {
     setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
   }, []);
   const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
-  const [notifications, setNotifications] = useState<{ id: string; session_id: string; message: string; type: string }[]>([]);
   const [broadcastMessage, setBroadcastMessage] = useState("");
 
   const [activeTab, setActiveTab] = useState<SidebarTab>("agent-config");
@@ -260,15 +259,6 @@ function AppBody() {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: effect.thought }));
       } else if (effect.type === "clear_thought") {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
-      } else if (effect.type === "notification") {
-        const id = Math.random().toString(36).substring(7);
-        setNotifications(prev => [{
-          id,
-          session_id,
-          message: effect.message,
-          type: effect.level
-        }, ...prev]);
-        setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), 10000);
       }
     });
     const unlistenUpdate = listen("agents-updated", () => fetchAgents());
@@ -292,6 +282,9 @@ function AppBody() {
     });
     const unlistenStatus = listen<AgentStatusUpdate>("agent-status-updated", (event) => {
       const { session_id, current_status } = event.payload;
+      if (current_status === "Idle" || current_status === "Off" || current_status === "Action Needed") {
+        setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
+      }
       setTelemetry(prev => ({
         ...prev,
         [session_id]: {
@@ -419,22 +412,6 @@ function AppBody() {
             className="flex-1 overflow-y-auto p-2 flex flex-col"
             onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
           >
-            {notifications.length > 0 && (
-              <div className="fixed top-[calc(var(--topbar-height)+0.5rem)] right-[calc(var(--sidebar-secondary-width)+2rem)] z-50 flex flex-col gap-2 max-w-md pointer-events-none">
-                {notifications.map(n => (
-                  <div key={n.id} className="bg-wardian-card border-l-4 border-wardian-accent p-4 shadow-2xl animate-in slide-in-from-right rounded-r pointer-events-auto">
-                    <div className="flex justify-between items-start gap-4">
-                      <div>
-                        <p className="text-xs font-bold text-wardian-accent mb-1">{agents.find(a => a.session_id === n.session_id)?.session_name || "Unknown Agent"}</p>
-                        <p className="text-sm text-primary">{n.message}</p>
-                      </div>
-                      <button onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))} className="text-muted hover:text-primary">&times;</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
             {viewMode === "workflow-builder" && (
               <div className="flex-1 min-h-0 bg-wardian-bg">
                 <WorkflowBuilderView theme={theme} />

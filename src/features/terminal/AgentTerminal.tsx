@@ -22,6 +22,7 @@ const LIGHT_TERM_THEME = {
 
 const terminalMap = new Map<string, Terminal>();
 const fitAddonMap = new Map<string, FitAddon>();
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 export const AgentTerminal = memo(function AgentTerminal({ 
   sessionId, 
@@ -94,10 +95,12 @@ export const AgentTerminal = memo(function AgentTerminal({
     try {
       term = new Terminal({
         theme: termTheme,
-        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 1000,
+        fontFamily: 'monospace', fontSize: 14, cursorBlink: true, scrollback: 5000,
         allowProposedApi: true,
         convertEol: true,
-        disableStdin: false
+        disableStdin: false,
+        reflowCursorLine: true,
+        windowsPty: IS_WINDOWS ? { backend: 'conpty', buildNumber: 22621 } : undefined,
       });
       if (term.options) {
         term.options.scrollOnUserInput = false;

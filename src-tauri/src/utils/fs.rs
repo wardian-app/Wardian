@@ -1,6 +1,11 @@
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+pub struct ClaudePermissionHookPaths {
+    pub settings_arg: String,
+    pub event_log_path: std::path::PathBuf,
+}
+
 pub fn get_wardian_home() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
@@ -33,6 +38,43 @@ pub fn habitat_workspace_cwd(habitat_root: &std::path::Path) -> std::path::PathB
 
 pub fn habitat_codex_home(habitat_root: &std::path::Path) -> std::path::PathBuf {
     habitat_root.join(".codex")
+}
+
+pub fn ensure_claude_permission_hook(
+    session_id: &str,
+) -> Result<ClaudePermissionHookPaths, String> {
+    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let hook_root = wardian_home.join("agents").join(session_id).join("claude");
+    std::fs::create_dir_all(&hook_root).map_err(|e| e.to_string())?;
+
+    let event_log_path = hook_root.join("permission-requests.jsonl");
+    if !event_log_path.exists() {
+        std::fs::write(&event_log_path, "").map_err(|e| e.to_string())?;
+    }
+
+    let script_path = write_claude_permission_hook_script(&hook_root, &event_log_path)?;
+    let command = claude_permission_hook_command(&script_path);
+    let settings_arg = serde_json::json!({
+        "hooks": {
+            "PermissionRequest": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                        }
+                    ]
+                }
+            ]
+        }
+    })
+    .to_string();
+
+    Ok(ClaudePermissionHookPaths {
+        settings_arg,
+        event_log_path,
+    })
 }
 
 pub fn resolve_system_include_directories(class_name: &str, session_id: &str) -> Vec<String> {
@@ -265,6 +307,62 @@ fn build_habitat_skill_projection(
     }
 
     Ok(())
+}
+
+fn write_claude_permission_hook_script(
+    hook_root: &std::path::Path,
+    event_log_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let script_path = hook_root.join("permission-request-hook.ps1");
+        let script = format!(
+            "$payload = [Console]::In.ReadToEnd()\nif ([string]::IsNullOrWhiteSpace($payload)) {{ exit 0 }}\nAdd-Content -LiteralPath '{}' -Value $payload -Encoding utf8\n",
+            escape_powershell_single_quoted(&event_log_path.to_string_lossy())
+        );
+        std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
+        Ok(script_path)
+    }
+    #[cfg(not(windows))]
+    {
+        let script_path = hook_root.join("permission-request-hook.sh");
+        let script = format!(
+            "#!/bin/sh\nset -eu\npayload=$(cat)\nif [ -z \"$payload\" ]; then\n  exit 0\nfi\nprintf '%s\\n' \"$payload\" >> '{}'\n",
+            escape_posix_single_quoted(&event_log_path.to_string_lossy())
+        );
+        std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script_path)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).map_err(|e| e.to_string())?;
+        Ok(script_path)
+    }
+}
+
+fn claude_permission_hook_command(script_path: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+            script_path.to_string_lossy()
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!("sh \"{}\"", script_path.to_string_lossy())
+    }
+}
+
+#[cfg(windows)]
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(not(windows))]
+fn escape_posix_single_quoted(value: &str) -> String {
+    value.replace('\'', "'\"'\"'")
 }
 
 fn create_directory_link(target: &std::path::Path, link: &std::path::Path) -> Result<(), String> {

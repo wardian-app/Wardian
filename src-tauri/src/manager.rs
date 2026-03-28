@@ -62,6 +62,26 @@ fn apply_agent_event(
     }
 }
 
+fn apply_agent_status_event(
+    app: &AppHandle,
+    session_id: &str,
+    event: AgentEvent,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    match event {
+        AgentEvent::UserQuery | AgentEvent::Generating => {
+            set_agent_status(app, session_id, current_status, "Processing...");
+        }
+        AgentEvent::ModelResponse => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::ActionRequired { .. } => {
+            set_agent_status(app, session_id, current_status, "Action Needed");
+        }
+        AgentEvent::Init { .. } | AgentEvent::Unknown => {}
+    }
+}
+
 pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
     let mut configs: Vec<AgentConfig> = Vec::new();
     for id in order {
@@ -139,6 +159,11 @@ pub async fn spawn_agent(
     for arg in base_args {
         cmd.arg(arg);
     }
+    let claude_hook = if config.provider == "claude" {
+        Some(ensure_claude_permission_hook(&config.session_id)?)
+    } else {
+        None
+    };
     let habitat_root = prepare_provider_habitat(
         &config.provider,
         &cwd,
@@ -155,6 +180,10 @@ pub async fn spawn_agent(
     // class/common/agent instruction files are loaded natively.
     if config.provider == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+        if let Some(hook) = claude_hook.as_ref() {
+            cmd.arg("--settings");
+            cmd.arg(&hook.settings_arg);
+        }
     } else if config.provider == "codex" {
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
@@ -226,6 +255,7 @@ pub async fn spawn_agent(
     });
 
     let sid_out = config.session_id.clone();
+    let provider_name_for_pty = config.provider.clone();
     let output_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let output_buffer_clone = output_buffer.clone();
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
@@ -263,14 +293,22 @@ pub async fn spawn_agent(
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
-                                        apply_agent_event(
-                                            &pty_app,
-                                            &sid_for_pty,
-                                            event,
-                                            &query_count_clone,
-                                            &init_timestamp_clone,
-                                            &current_status_clone,
-                                        );
+                                        if provider_name_for_pty == "claude" {
+                                            if let AgentEvent::Init { timestamp, .. } = event {
+                                                if let Ok(mut ts) = init_timestamp_clone.lock() {
+                                                    *ts = timestamp;
+                                                }
+                                            }
+                                        } else {
+                                            apply_agent_event(
+                                                &pty_app,
+                                                &sid_for_pty,
+                                                event,
+                                                &query_count_clone,
+                                                &init_timestamp_clone,
+                                                &current_status_clone,
+                                            );
+                                        }
                                     }
                                     let _ = pty_emit_app.emit("agent-json-event", serde_json::json!({ "session_id": sid_out, "data": parsed }));
                                     let consumed = stream.byte_offset();
@@ -370,6 +408,200 @@ pub async fn spawn_agent(
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
         });
+    } else if config.provider == "claude" {
+        let watcher_app = app.clone();
+        let watcher_provider = provider.clone();
+        let watcher_session = config.session_id.clone();
+        let watcher_current_status = current_status.clone();
+        let watcher_log_path = log_path.clone();
+        let watcher_folder = expected_folder.clone();
+        let hook_event_log = claude_hook.as_ref().map(|hook| hook.event_log_path.clone());
+        let waiting_for_permission = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let log_waiting_for_permission = waiting_for_permission.clone();
+
+        std::thread::spawn(move || {
+            let mut offset: u64 = 0;
+            loop {
+                let current = watcher_current_status
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
+                if current == "Off" {
+                    break;
+                }
+
+                let path = {
+                    let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
+                    if lock.is_none() {
+                        if let Some(home) = dirs::home_dir() {
+                            let candidate = home
+                                .join(".claude")
+                                .join("projects")
+                                .join(claude_project_dir_name(&watcher_folder))
+                                .join(format!("{}.jsonl", watcher_session));
+                            if candidate.exists() {
+                                *lock = Some(candidate);
+                            }
+                        }
+                    }
+                    lock.clone()
+                };
+
+                if let Some(path) = path {
+                    if let Ok(mut out) = watcher_log_path.lock() {
+                        *out = Some(path.clone());
+                    }
+                    if let Ok(mut file) = std::fs::File::open(&path) {
+                        if let Ok(metadata) = file.metadata() {
+                            if metadata.len() < offset {
+                                offset = 0;
+                            }
+                        }
+                        if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
+                            let mut reader = std::io::BufReader::new(file);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                let read = reader.read_line(&mut line).unwrap_or(0);
+                                if read == 0 {
+                                    break;
+                                }
+                                offset += read as u64;
+                                if let Some(event) = watcher_provider.parse_output(line.trim()) {
+                                    let mut waiting = log_waiting_for_permission
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    if *waiting {
+                                        match event {
+                                            AgentEvent::UserQuery | AgentEvent::Generating => {
+                                                if let Ok(parsed) =
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        line.trim(),
+                                                    )
+                                                {
+                                                    let is_tool_result = parsed
+                                                        .get("type")
+                                                        .and_then(|v| v.as_str())
+                                                        == Some("user")
+                                                        && !claude_is_real_user_query(&parsed);
+                                                    if is_tool_result {
+                                                        *waiting = false;
+                                                        apply_agent_status_event(
+                                                            &watcher_app,
+                                                            &watcher_session,
+                                                            event,
+                                                            &watcher_current_status,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            AgentEvent::ModelResponse => {
+                                                *waiting = false;
+                                                apply_agent_status_event(
+                                                    &watcher_app,
+                                                    &watcher_session,
+                                                    event,
+                                                    &watcher_current_status,
+                                                );
+                                            }
+                                            AgentEvent::ActionRequired { .. } => {
+                                                apply_agent_status_event(
+                                                    &watcher_app,
+                                                    &watcher_session,
+                                                    event,
+                                                    &watcher_current_status,
+                                                );
+                                            }
+                                            AgentEvent::Init { .. } | AgentEvent::Unknown => {}
+                                        }
+                                    } else {
+                                        apply_agent_status_event(
+                                            &watcher_app,
+                                            &watcher_session,
+                                            event,
+                                            &watcher_current_status,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+
+        if let Some(hook_event_log) = hook_event_log {
+            let hook_app = app.clone();
+            let hook_session = config.session_id.clone();
+            let hook_current_status = current_status.clone();
+            let hook_waiting_for_permission = waiting_for_permission.clone();
+
+            std::thread::spawn(move || {
+                let mut offset = 0;
+                loop {
+                    let current = hook_current_status
+                        .lock()
+                        .map(|s| s.clone())
+                        .unwrap_or_else(|e| e.into_inner().clone());
+                    if current == "Off" {
+                        break;
+                    }
+
+                    if let Ok(mut file) = std::fs::File::open(&hook_event_log) {
+                        if let Ok(metadata) = file.metadata() {
+                            if metadata.len() < offset {
+                                offset = 0;
+                            }
+                        }
+                        if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
+                            let mut reader = std::io::BufReader::new(file);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                let read = reader.read_line(&mut line).unwrap_or(0);
+                                if read == 0 {
+                                    break;
+                                }
+                                offset += read as u64;
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                                    if let Ok(mut waiting) = hook_waiting_for_permission.lock() {
+                                        *waiting = true;
+                                    }
+                                    let tool_name = parsed
+                                        .get("tool_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Tool approval required")
+                                        .to_string();
+                                    apply_agent_status_event(
+                                        &hook_app,
+                                        &hook_session,
+                                        AgentEvent::ActionRequired {
+                                            message: tool_name.clone(),
+                                        },
+                                        &hook_current_status,
+                                    );
+                                    let _ = hook_app.emit(
+                                        "agent-json-event",
+                                        serde_json::json!({
+                                            "session_id": hook_session,
+                                            "data": {
+                                                "type": "system",
+                                                "subtype": "permission_request",
+                                                "tool_name": tool_name,
+                                            }
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            });
+        }
     }
 
     Ok(ActiveAgent {
@@ -458,8 +690,11 @@ pub async fn run_headless(
                 .arg(prompt);
         }
         "claude" => {
-            cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
-                .arg("--print")
+            cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+            if let Ok(hook) = ensure_claude_permission_hook(session_id) {
+                cmd.arg("--settings").arg(hook.settings_arg);
+            }
+            cmd.arg("--print")
                 .arg("--output-format")
                 .arg(output_format)
                 .arg("--resume")
@@ -808,6 +1043,55 @@ fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     None
 }
 
+fn claude_is_real_user_query(line: &serde_json::Value) -> bool {
+    let Some(message) = line.get("message") else {
+        return true;
+    };
+    let Some(content) = message.get("content") else {
+        return true;
+    };
+
+    let Some(items) = content.as_array() else {
+        return true;
+    };
+
+    !items.iter().any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+}
+
+fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
+    for line in lines.iter().rev() {
+        match line.get("type").and_then(|v| v.as_str()) {
+            Some("system") => {
+                if let Some("permission_request") =
+                    line.get("subtype").and_then(|v| v.as_str())
+                {
+                    return Some("Action Needed".to_string());
+                }
+            }
+            Some("assistant") => {
+                let stop_reason = line
+                    .get("message")
+                    .and_then(|v| v.get("stop_reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if stop_reason == "end_turn" || stop_reason == "stop_sequence" {
+                    return Some("Idle".to_string());
+                }
+                return Some("Processing...".to_string());
+            }
+            Some("progress") => return Some("Processing...".to_string()),
+            Some("user") => {
+                if claude_is_real_user_query(line) {
+                    return Some("Processing...".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     struct AgentSnapshot {
         session_id: String,
@@ -1000,6 +1284,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 
                             q_count = lines.iter().filter(|l| {
                                 l.get("type").and_then(|v| v.as_str()) == Some("user")
+                                    && claude_is_real_user_query(l)
                             }).count();
 
                             if let Some(first) = lines.first() {
@@ -1008,6 +1293,13 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 }
                             }
 
+                            let current_status =
+                                snap.current_status.lock().unwrap().clone();
+                            if current_status != "Action Needed" {
+                                if let Some(status) = claude_status_from_log(&lines) {
+                                    *snap.current_status.lock().unwrap() = status;
+                                }
+                            }
                         }
                         _ => {
                             // Gemini logs are a single JSON object with a messages array

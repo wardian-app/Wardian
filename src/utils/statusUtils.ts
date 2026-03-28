@@ -23,7 +23,9 @@ export function deriveEffectiveStatus(
       effectiveStatus = "Idle";
     }
   } else if (rawTitle.includes("Working") || rawTitle.includes("Executing") || rawTitle.includes("✦")) {
-    effectiveStatus = "Processing...";
+    if (effectiveStatus === "Pending...") {
+      effectiveStatus = "Processing...";
+    }
   }
 
   // A live thought signals activity, but must not override an explicit "Action Needed".
@@ -86,6 +88,21 @@ export function deriveCurrentThought(
   return { thought: currentThought, status: effectiveStatus };
 }
 
+export function getStatusLabel(status: string): "Idle" | "Working" | "Action" | "Pending" | "Off" {
+  switch (status) {
+    case "Processing...":
+      return "Working";
+    case "Action Needed":
+      return "Action";
+    case "Idle":
+      return "Idle";
+    case "Off":
+      return "Off";
+    default:
+      return "Pending";
+  }
+}
+
 /**
  * Classifies a JSON event from the agent stream for notification/state handling.
  */
@@ -122,6 +139,16 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
   // Claude + Gemini: user turn or result → clear thought
   if (data.type === "user" || data.type === "result") {
     return { type: "clear_thought" };
+  }
+  if (data.type === "system") {
+    const subtype = data.subtype as string | undefined;
+    if (subtype === "permission_request") {
+      const toolName = (data.tool_name as string) || "Tool approval required";
+      return { type: "notification", message: toolName, level: "warning" };
+    }
+    if (subtype === "turn_duration") {
+      return { type: "clear_thought" };
+    }
   }
   // Codex: top-level turn lifecycle
   if (data.type === "turn.started") {
