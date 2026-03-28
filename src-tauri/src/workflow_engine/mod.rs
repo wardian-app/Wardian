@@ -2,7 +2,7 @@ mod migrate;
 
 use crate::manager::log_debug;
 use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
-use crate::utils::fs::{get_wardian_home, validate_workspace_path};
+use crate::utils::{get_wardian_home, new_headless_command, validate_workspace_path};
 use chrono::{Datelike, TimeZone, Utc};
 use notify::{Event, RecursiveMode, Watcher};
 use regex::Regex;
@@ -13,7 +13,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Listener, Manager};
-use tokio::process::Command;
 
 // ... (interpolate_string, get_registry_value, evaluate_logic remain above)
 
@@ -53,7 +52,7 @@ async fn run_command_headless(
     env: Option<&Value>,
     timeout_ms: u64,
 ) -> Result<Value, String> {
-    let mut cmd = Command::new(executable);
+    let mut cmd = new_headless_command(executable);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())

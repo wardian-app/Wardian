@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub use crate::utils::fs::*;
 pub use crate::utils::logging::log_debug;
+pub use crate::utils::process::new_headless_command;
 
 fn set_agent_status(
     app: &AppHandle,
@@ -693,13 +694,7 @@ pub async fn run_headless(
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider = ProviderFactory::resolve(provider_name)?;
     let (bin, base_args) = provider.get_executable();
-    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/c").arg(&bin);
-        c
-    } else {
-        tokio::process::Command::new(&bin)
-    };
+    let mut cmd = new_headless_command(&bin);
     for arg in base_args {
         cmd.arg(arg);
     }
@@ -738,9 +733,6 @@ pub async fn run_headless(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    // On Windows, prevent spawning a visible console window for headless runs.
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
     log_debug(&format!(
         "[Wardian] run_headless: provider={}, session_id={}, cwd={}, prompt_len={}, output_format={}",
@@ -862,13 +854,7 @@ pub async fn obtain_session_id(
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
     let (bin, base_args) = provider.get_executable();
-    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/c").arg(&bin);
-        c
-    } else {
-        tokio::process::Command::new(&bin)
-    };
+    let mut cmd = new_headless_command(&bin);
     let class_name = agent_class
         .filter(|name| !name.trim().is_empty())
         .or_else(|| {
