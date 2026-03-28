@@ -33,6 +33,7 @@
   --color-wardian-input-bg: rgba(255, 255, 255, 0.9);
   --color-wardian-input-bg-rgb: 255, 255, 255;
   --color-wardian-card-bg-muted: rgba(0, 0, 0, 0.04);
+  --color-wardian-overlay: rgba(0, 0, 0, 0.4);
 
   /* Sidebar Widths */
   --sidebar-primary-width: 64px;
@@ -290,6 +291,7 @@
   --color-wardian-input-bg: rgba(31, 41, 55, 0.5);
   --color-wardian-input-bg-rgb: 31, 41, 55;
   --color-wardian-card-bg-muted: rgba(31, 41, 55, 0.3);
+  --color-wardian-overlay: rgba(0, 0, 0, 0.55);
 
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
 }
