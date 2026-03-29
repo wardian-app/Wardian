@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { RenderableInput } from '../../components/RenderableInput';
 import type { WorkflowDefinition } from '../../types/workflow';
+import { getWorkflowRoleTargets } from './workflowLaunch';
 
 /**
  * Inspects a workflow for a Manual Trigger node with an input_schema.
@@ -33,13 +34,7 @@ export function getManualTriggerSchema(
 export function getWorkflowRoles(
   workflow: WorkflowDefinition
 ): { role: string; defaultAgentId: string; nodeName: string }[] {
-  return workflow.nodes
-    .filter((n) => n.type === 'agent' && n.config?.role)
-    .map((n) => ({
-      role: n.config.role as string,
-      defaultAgentId: (n.config.agent_id as string) || '',
-      nodeName: n.name || n.id,
-    }));
+  return getWorkflowRoleTargets(workflow);
 }
 
 /** Coerce string form values back to their declared JSON schema types. */
@@ -247,3 +242,5 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
     </div>
   );
 };
+
+

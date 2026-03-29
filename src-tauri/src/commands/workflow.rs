@@ -84,7 +84,6 @@ pub fn create_scheduled_run(run: ScheduledRun) -> Result<(), String> {
 
 #[tauri::command]
 pub fn delete_scheduled_run(run_id: String) -> Result<(), String> {
-    workflow_engine::disable_scheduled_trigger(&run_id)?;
     let runs: Vec<ScheduledRun> = workflow_engine::load_scheduled_runs()
         .into_iter()
         .filter(|r| r.id != run_id)
@@ -97,9 +96,4 @@ pub fn toggle_scheduled_run(run_id: String) -> Result<(), String> {
     let _ = workflow_engine::toggle_scheduled_run_state(&run_id)?;
     Ok(())
 }
-
-
-
-
-
 

@@ -86,6 +86,7 @@ export interface ScheduledRun {
   /** Human-readable description (e.g. "Every 5m", "Daily at 09:00") */
   description?: string;
   next_run_epoch_ms: number | null;
+  paused_remaining_ms?: number | null;
   is_paused: boolean;
 }
 
@@ -97,3 +98,4 @@ export interface ActiveRunTracker {
   total_steps: number;
   active_node_name: string;
 }
+

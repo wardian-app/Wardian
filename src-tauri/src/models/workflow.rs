@@ -62,6 +62,9 @@ pub struct ScheduledRun {
     pub description: String,
     /// Epoch ms of next scheduled execution (computed by scheduler)
     pub next_run_epoch_ms: Option<u64>,
+    /// Remaining delay when paused, in ms. Used to resume without resetting the timer.
+    #[serde(default)]
+    pub paused_remaining_ms: Option<u64>,
     pub is_paused: bool,
 }
 
@@ -73,3 +76,4 @@ pub struct WorkflowTelemetryEvent {
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
 }
+

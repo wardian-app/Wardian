@@ -128,7 +128,10 @@ pub fn hydrate_scheduled_runs() -> Result<Vec<crate::models::ScheduledRun>, Stri
         }
 
         if run.next_run_epoch_ms.is_none() {
-            run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+            run.next_run_epoch_ms = match run.paused_remaining_ms.take() {
+                Some(remaining_ms) => Some(now_ms.saturating_add(remaining_ms)),
+                None => compute_next_run(&run.schedule, now_ms),
+            };
             modified = true;
         }
     }
@@ -147,10 +150,21 @@ pub fn toggle_scheduled_run_state(
     let now_ms = Utc::now().timestamp_millis() as u64;
 
     if let Some(run) = runs.iter_mut().find(|r| r.id == run_id) {
-        run.is_paused = !run.is_paused;
+        if run.is_paused {
+            run.is_paused = false;
 
-        if !run.is_paused && run.schedule.active {
-            run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+            if run.schedule.active {
+                run.next_run_epoch_ms = match run.paused_remaining_ms.take() {
+                    Some(remaining_ms) => Some(now_ms.saturating_add(remaining_ms)),
+                    None => compute_next_run(&run.schedule, now_ms),
+                };
+            }
+        } else {
+            run.paused_remaining_ms = run
+                .next_run_epoch_ms
+                .map(|next_run| next_run.saturating_sub(now_ms));
+            run.next_run_epoch_ms = None;
+            run.is_paused = true;
         }
     }
 
@@ -229,6 +243,11 @@ fn sync_scheduled_runs_for_workflow(wf: &WorkflowDefinition, existing_runs: &[cr
             description,
             next_run_epoch_ms: if schedule_unchanged {
                 previous.and_then(|run| run.next_run_epoch_ms)
+            } else {
+                None
+            },
+            paused_remaining_ms: if schedule_unchanged {
+                previous.and_then(|run| run.paused_remaining_ms)
             } else {
                 None
             },
@@ -488,15 +507,18 @@ pub async fn start_scheduler(app: AppHandle) {
             let mut runs = load_scheduled_runs();
             let now_ms = Utc::now().timestamp_millis() as u64;
             let mut modified = false;
+            let mut completed_one_time_run_ids = Vec::new();
 
             for run in runs.iter_mut() {
                 if run.is_paused || !run.schedule.active {
                     continue;
                 }
 
-                // Compute next_run if missing
                 if run.next_run_epoch_ms.is_none() {
-                    run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+                    run.next_run_epoch_ms = match run.paused_remaining_ms.take() {
+                        Some(remaining_ms) => Some(now_ms.saturating_add(remaining_ms)),
+                        None => compute_next_run(&run.schedule, now_ms),
+                    };
                     modified = true;
                 }
 
@@ -507,10 +529,12 @@ pub async fn start_scheduler(app: AppHandle) {
                             run.id, run.workflow_id
                         ));
 
-                        // Advance next_run before dispatch so the UI stops presenting this run as overdue
-                        // while the workflow is actively executing.
+                        let is_one_time = run.schedule.schedule_type == "one_time";
+                        let completed_run_id = run.id.clone();
+
                         run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
-                        if run.schedule.schedule_type == "one_time" {
+                        run.paused_remaining_ms = None;
+                        if is_one_time {
                             run.schedule.active = false;
                         }
                         modified = true;
@@ -524,16 +548,23 @@ pub async fn start_scheduler(app: AppHandle) {
                         let _ =
                             run_workflow(app_clone.clone(), run.workflow_id.clone(), Some(payload))
                                 .await;
+
+                        if is_one_time {
+                            completed_one_time_run_ids.push(completed_run_id);
+                        }
                     }
                 }
             }
 
             if modified {
-                // Re-read from disk to avoid resurrecting entries deleted during this tick.
                 let mut fresh = load_scheduled_runs();
+                if !completed_one_time_run_ids.is_empty() {
+                    fresh.retain(|run| !completed_one_time_run_ids.iter().any(|id| id == &run.id));
+                }
                 for fresh_run in fresh.iter_mut() {
                     if let Some(updated) = runs.iter().find(|r| r.id == fresh_run.id) {
                         fresh_run.next_run_epoch_ms = updated.next_run_epoch_ms;
+                        fresh_run.paused_remaining_ms = updated.paused_remaining_ms;
                         fresh_run.schedule.active = updated.schedule.active;
                     }
                 }
@@ -791,6 +822,7 @@ pub async fn run_scheduled_workflow_now(app: AppHandle, run_id: String) -> Resul
 
     if run.schedule.active && !run.is_paused {
         run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+        run.paused_remaining_ms = None;
     }
 
     let payload = serde_json::json!({
@@ -814,7 +846,7 @@ pub async fn save_workflow(app: AppHandle, wf: WorkflowDefinition) -> Result<(),
     fs::write(path, content).map_err(|e| e.to_string())?;
 
     // Restart triggers
-    start_workflow_triggers(app, wf, true).await;
+    start_workflow_triggers(app, wf, false).await;
     Ok(())
 }
 
@@ -914,6 +946,7 @@ mod tests {
             role_mappings: HashMap::new(),
             description: "Daily at 09:00".to_string(),
             next_run_epoch_ms: Some(1234),
+            paused_remaining_ms: None,
             is_paused: true,
         }];
 
@@ -943,6 +976,7 @@ mod tests {
             role_mappings: HashMap::new(),
             description: "Daily at 08:00".to_string(),
             next_run_epoch_ms: Some(1234),
+            paused_remaining_ms: None,
             is_paused: false,
         }];
 
@@ -968,6 +1002,7 @@ mod tests {
             role_mappings: HashMap::new(),
             description: "Daily at 09:00".to_string(),
             next_run_epoch_ms: Some(1234),
+            paused_remaining_ms: None,
             is_paused: false,
         }];
 
@@ -1855,6 +1890,12 @@ pub async fn run_workflow(
 
     Ok(())
 }
+
+
+
+
+
+
 
 
 

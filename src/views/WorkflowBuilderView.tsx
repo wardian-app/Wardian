@@ -17,8 +17,16 @@ import { BLOCK_LIBRARY, BlockDefinition } from '../features/workflows/blockLibra
 import { SchemaEditor } from '../components/SchemaEditor';
 import { RenderableInput } from '../components/RenderableInput';
 import { VariableAssistant } from '../features/workflows/VariableAssistant';
-import { RunPayloadModal, getManualTriggerSchema, getWorkflowRoles } from '../features/workflows/RunPayloadModal';
+import { RunPayloadModal, getManualTriggerSchema } from '../features/workflows/RunPayloadModal';
 import type { WorkflowDefinition, WorkflowNode as WorkflowNodeDefinition } from '../types/workflow';
+import {
+  buildScheduledRunFromWorkflow,
+  getWorkflowLaunchKind,
+  normalizeWorkflowForLaunch,
+  setWorkflowTriggerStatus,
+  workflowNeedsRunConfig,
+  type WorkflowLaunchKind,
+} from '../features/workflows/workflowLaunch';
 
 const nodeTypes = {
   trigger: WorkflowNode,
@@ -77,11 +85,11 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     setNodes,
     setEdges,
     saveWorkflow,
+    createScheduledRun,
     deleteWorkflow,
     updateActiveWorkflowName,
     duplicateNode,
     isSaving,
-    loadScheduledRuns
   } = useWorkflowStore();
 
   const confirm = useConfirm();
@@ -94,6 +102,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   const [tempWfName, setTempWfName] = React.useState("");
 
   const [isRunModalOpen, setIsRunModalOpen] = React.useState(false);
+  const [pendingLaunch, setPendingLaunch] = React.useState<{ workflow: WorkflowDefinition; kind: WorkflowLaunchKind } | null>(null);
 
   const [contextMenu, setContextMenu] = React.useState<{
     visible: boolean;
@@ -176,10 +185,6 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     if (!activeWorkflowId || !activeWorkflow) return null;
 
     const updatedNodes: WorkflowNodeDefinition[] = nodes.map(n => {
-      const isScheduledTrigger =
-        n.type === 'trigger' &&
-        ((typeof n.data.blockName === 'string' && n.data.blockName === 'Scheduled Trigger') ||
-          (typeof n.data.label === 'string' && n.data.label === 'Scheduled Trigger'));
       const existingConfig =
         typeof n.data.config === 'object' && n.data.config !== null ? n.data.config : {};
 
@@ -187,7 +192,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         id: n.id,
         type: (n.type || 'agent') as WorkflowNodeDefinition['type'],
         name: typeof n.data.label === 'string' ? n.data.label : n.id,
-        config: isScheduledTrigger ? { ...existingConfig, status: 'active' } : existingConfig,
+        config: existingConfig,
         position: n.position,
         dependencies: edges
           .filter(e => e.target === n.id)
@@ -198,11 +203,11 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       };
     });
 
-    return {
+    return normalizeWorkflowForLaunch({
       ...activeWorkflow,
       name: tempWfName,
       nodes: updatedNodes,
-    };
+    });
   };
 
   const handleSave = async () => {
@@ -212,26 +217,54 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     return true;
   };
 
+  const executeWorkflowLaunch = async (
+    workflowToRun: WorkflowDefinition,
+    kind: WorkflowLaunchKind,
+    payload?: Record<string, any>,
+  ) => {
+    const mergedRoleMappings = payload?.role_mappings && typeof payload.role_mappings === 'object'
+      ? { ...(workflowToRun.role_mappings || {}), ...payload.role_mappings }
+      : workflowToRun.role_mappings || {};
+
+    const configuredWorkflow = normalizeWorkflowForLaunch({
+      ...workflowToRun,
+      role_mappings: mergedRoleMappings,
+    });
+
+    if (kind === 'listener') {
+      await saveWorkflow(setWorkflowTriggerStatus(configuredWorkflow, 'active'));
+      await fetchWorkflows();
+      return;
+    }
+
+    if (kind === 'scheduled') {
+      const scheduledRun = buildScheduledRunFromWorkflow(configuredWorkflow);
+      if (scheduledRun) {
+        await createScheduledRun(scheduledRun);
+      }
+      return;
+    }
+
+    await runActiveWorkflow(payload);
+  };
+
   const handleRun = async () => {
     const workflowToRun = buildCurrentWorkflow();
     if (!workflowToRun) return;
 
     await saveWorkflow(workflowToRun);
 
-    const triggerNode = workflowToRun.nodes.find((n) => n.type === 'trigger');
-    if (triggerNode?.name === 'Scheduled Trigger') {
-      loadScheduledRuns();
-      return;
-    }
+    const launchKind = getWorkflowLaunchKind(workflowToRun);
+    const requiresConfig = workflowNeedsRunConfig(workflowToRun, Boolean(getManualTriggerSchema(workflowToRun)));
 
-    if (getManualTriggerSchema(workflowToRun) || getWorkflowRoles(workflowToRun).length > 0) {
+    if (requiresConfig) {
+      setPendingLaunch({ workflow: workflowToRun, kind: launchKind });
       setIsRunModalOpen(true);
       return;
     }
 
-    runActiveWorkflow();
+    await executeWorkflowLaunch(workflowToRun, launchKind);
   };
-
   const deleteNode = (id: string) => {
     setNodes(nodes.filter(n => n.id !== id));
     setEdges(edges.filter(e => e.source !== id && e.target !== id));
@@ -782,18 +815,30 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             </div>
         </div>
       </div>
-      {activeWorkflow && (
+      {pendingLaunch && (
         <RunPayloadModal
-          workflow={activeWorkflow}
+          workflow={pendingLaunch.workflow}
           isOpen={isRunModalOpen}
           agents={agents.map(a => ({ session_id: a.session_id, session_name: a.session_name }))}
-          onRun={(payload) => {
-            runActiveWorkflow(payload);
+          onRun={async (payload) => {
+            await executeWorkflowLaunch(pendingLaunch.workflow, pendingLaunch.kind, payload);
             setIsRunModalOpen(false);
+            setPendingLaunch(null);
           }}
-          onCancel={() => setIsRunModalOpen(false)}
+          onCancel={() => {
+            setIsRunModalOpen(false);
+            setPendingLaunch(null);
+          }}
         />
       )}
     </div>
   );
 };
+
+
+
+
+
+
+
+
