@@ -239,7 +239,20 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                         <span className="truncate">{targetSummary}</span>
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--color-wardian-accent)]/80">
-                        <span>{status === 'Running' ? 'Running now' : `Next in ${formatNextRun(schedule.next_run_epoch_ms)}`}</span>
+                        <span>
+                          {status === 'Running'
+                            ? 'Running now'
+                            : (() => {
+                                const label = formatNextRun(schedule.next_run_epoch_ms);
+                                if (label === 'Due') {
+                                  return 'Due';
+                                }
+                                if (label === '—') {
+                                  return 'No next run';
+                                }
+                                return `Next in ${label}`;
+                              })()}
+                        </span>
                         <ChevronRightIcon expanded={isExpanded} />
                       </div>
                     </button>
@@ -341,9 +354,4 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
     </div>
   );
 };
-
-
-
-
-
 

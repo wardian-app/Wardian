@@ -686,8 +686,10 @@ pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: &str) {
 pub async fn stop_workflow_run(app: AppHandle, workflow_id: &str) {
     let state = app.state::<crate::state::AppState>();
     let mut runs = state.workflow_runs.lock().await;
-    if let Some(handle) = runs.remove(workflow_id) {
-        handle.abort();
+    if let Some(handles) = runs.remove(workflow_id) {
+        for handle in handles {
+            handle.abort();
+        }
     }
 }
 
@@ -736,7 +738,7 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, reg
 
             // --- Scheduled Trigger ---
             // Register a ScheduledRun entry. The unified heartbeat scheduler
-            // (30s loop) handles all timed execution from scheduled_runs.json.
+            // (5s loop) handles all timed execution from scheduled_runs.json.
             if register_schedules
                 && config
                     .get("status")
@@ -1885,19 +1887,10 @@ pub async fn run_workflow(
     {
         let state = app_for_handle.state::<crate::state::AppState>();
         let mut runs = state.workflow_runs.lock().await;
-        runs.insert(wf_id_for_handle, handle);
+        let handles = runs.entry(wf_id_for_handle).or_default();
+        handles.push(handle);
     }
 
     Ok(())
 }
-
-
-
-
-
-
-
-
-
-
 

@@ -256,7 +256,10 @@ export function getAgentStatusLabel(status: string, thought: string, maxLength: 
   if (status === "Off") {
     return "Off";
   }
-  return "Idle";
+  if (status === "Pending...") {
+    return "Pending";
+  }
+  return status || "Idle";
 }
 
 /**
@@ -287,3 +290,4 @@ export function getStatusColorClass(effectiveStatus: string): string {
   }
   return "bg-wardian-off flex-shrink-0";
 }
+

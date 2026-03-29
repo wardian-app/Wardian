@@ -1,6 +1,41 @@
-use crate::workflow_engine::{get_workflows_dir, list_workflows};
 use crate::manager::log_debug;
+use crate::workflow_engine::{get_workflows_dir, list_workflows};
 use std::collections::HashMap;
+
+fn synthesize_role_name(base: &str, node_id: &str, existing: &HashMap<String, String>) -> String {
+    let sanitized = base
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+
+    let base_role = if sanitized.is_empty() {
+        format!("agent_{}", node_id)
+    } else {
+        sanitized
+    };
+
+    if !existing.contains_key(&base_role) {
+        return base_role;
+    }
+
+    let node_suffix_role = format!("{}_{}", base_role, node_id);
+    if !existing.contains_key(&node_suffix_role) {
+        return node_suffix_role;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{}_{}", base_role, counter);
+        if !existing.contains_key(&candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
 
 /// Migrates workflow files that lack `role_mappings`.
 /// For each agent node with a direct `agent_id` but no `role`,
@@ -15,7 +50,7 @@ pub fn migrate_workflows_if_needed() {
 
     for mut wf in workflows {
         if !wf.role_mappings.is_empty() {
-            continue; // Already migrated
+            continue;
         }
 
         let mut mappings: HashMap<String, String> = HashMap::new();
@@ -26,7 +61,9 @@ pub fn migrate_workflows_if_needed() {
                 continue;
             }
 
-            let has_role = node.config.get("role")
+            let has_role = node
+                .config
+                .get("role")
                 .and_then(|v| v.as_str())
                 .is_some_and(|r| !r.is_empty());
 
@@ -34,7 +71,9 @@ pub fn migrate_workflows_if_needed() {
                 continue;
             }
 
-            let agent_id = node.config.get("agent_id")
+            let agent_id = node
+                .config
+                .get("agent_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -43,11 +82,11 @@ pub fn migrate_workflows_if_needed() {
                 continue;
             }
 
-            // Synthesize a role name from the node's display name or ID
-            let role_name = node.name.clone()
-                .unwrap_or_else(|| format!("agent_{}", node.id))
-                .to_lowercase()
-                .replace(' ', "_");
+            let base_name = node
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("agent_{}", node.id));
+            let role_name = synthesize_role_name(&base_name, &node.id, &mappings);
 
             if let Some(obj) = node.config.as_object_mut() {
                 obj.insert("role".to_string(), serde_json::json!(role_name));
