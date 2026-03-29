@@ -12,9 +12,11 @@ const PauseAllIcon = () => <svg className="w-5 h-5" fill="currentColor" viewBox=
 const PlayAllIcon = () => <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4l12 6-12 6z" /></svg>;
 const SearchIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>;
 
-interface WorkflowSidebarProps {}
+interface WorkflowSidebarProps {
+  onOpenWorkflowBuilder?: () => void;
+}
 
-export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
+export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflowBuilder }) => {
   const { 
     availableWorkflows, 
     fetchWorkflows, 
@@ -32,6 +34,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
     loadScheduledRuns,
     toggleScheduledRun,
     deleteScheduledRun,
+    runScheduledWorkflowNow,
   } = useWorkflowStore();
   
   const confirm = useConfirm();
@@ -68,6 +71,13 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
     if (await confirm('STOP ALL: Immediately terminate all active runs and triggers?')) {
       await stopAllTriggers();
       fetchWorkflows();
+    }
+  };
+
+  const handleDeleteSchedule = async (id: string) => {
+    if (await confirm('Delete this schedule? This disables the scheduled trigger until it is reactivated from the workflow builder.')) {
+      await deleteScheduledRun(id);
+      await fetchWorkflows();
     }
   };
 
@@ -128,11 +138,18 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
           activeRuns={activeRuns}
           schedules={scheduledRuns}
           activeWorkflows={activeWorkflows}
+          availableWorkflows={availableWorkflows}
+          agents={agents}
           onStopRun={(id) => stopWorkflowRun(id)}
           onStopTrigger={(id) => { stopWorkflowTriggers(id); fetchWorkflows(); }}
           onToggleSchedule={(id) => toggleScheduledRun(id)}
-          onDeleteSchedule={(id) => deleteScheduledRun(id)}
-          onRunNow={(workflowId) => { runWorkflowById(workflowId); loadScheduledRuns(); }}
+          onDeleteSchedule={handleDeleteSchedule}
+          onRunNow={(scheduleId) => { runScheduledWorkflowNow(scheduleId); }}
+          onOpenWorkflow={(workflowId) => {
+            const wf = availableWorkflows.find(w => w.id === workflowId);
+            if (wf) loadWorkflow(wf);
+            onOpenWorkflowBuilder?.();
+          }}
         />
 
         <div className="my-4 border-t border-wardian-border/20" />
@@ -159,6 +176,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
             onEdit={(id) => {
               const wf = availableWorkflows.find(w => w.id === id);
               if (wf) loadWorkflow(wf);
+              onOpenWorkflowBuilder?.();
             }}
             onDelete={deleteWorkflow}
           />
@@ -180,3 +198,5 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = () => {
     </div>
   );
 };
+
+

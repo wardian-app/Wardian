@@ -162,6 +162,7 @@ pub fn run() {
             commands::workflow::stop_all_triggers,
             commands::workflow::stop_workflow_triggers,
             commands::workflow::stop_workflow_run,
+            commands::workflow::run_scheduled_workflow_now,
             commands::workflow::pause_all_triggers,
             commands::workflow::resume_all_triggers,
             commands::workflow::load_workflow_library,
@@ -183,4 +184,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 

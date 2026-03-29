@@ -52,6 +52,10 @@ function AppBody() {
     });
     const unlistenStatus = listen<any>("workflow-status-updated", (event) => {
       handleWorkflowStatusUpdate(event.payload);
+      const status = event.payload?.status;
+      if (status === "running" || status === "completed" || status === "failed") {
+        loadScheduledRuns();
+      }
     });
     
     return () => { 
@@ -59,7 +63,7 @@ function AppBody() {
       unlistenProgress.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
-  }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate]);
+  }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate, loadScheduledRuns]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -415,6 +419,10 @@ function AppBody() {
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
+          onOpenWorkflowBuilder={() => {
+            setActiveTab("workflows");
+            setViewMode("workflow-builder");
+          }}
         />
 
         <main className="flex-1 h-full flex flex-col overflow-hidden relative">

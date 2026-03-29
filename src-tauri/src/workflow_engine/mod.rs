@@ -117,6 +117,135 @@ pub fn save_scheduled_runs(runs: &[crate::models::ScheduledRun]) -> Result<(), S
     Ok(())
 }
 
+pub fn hydrate_scheduled_runs() -> Result<Vec<crate::models::ScheduledRun>, String> {
+    let mut runs = load_scheduled_runs();
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    let mut modified = false;
+
+    for run in runs.iter_mut() {
+        if run.is_paused || !run.schedule.active {
+            continue;
+        }
+
+        if run.next_run_epoch_ms.is_none() {
+            run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+            modified = true;
+        }
+    }
+
+    if modified {
+        save_scheduled_runs(&runs)?;
+    }
+
+    Ok(runs)
+}
+
+pub fn toggle_scheduled_run_state(
+    run_id: &str,
+) -> Result<Vec<crate::models::ScheduledRun>, String> {
+    let mut runs = load_scheduled_runs();
+    let now_ms = Utc::now().timestamp_millis() as u64;
+
+    if let Some(run) = runs.iter_mut().find(|r| r.id == run_id) {
+        run.is_paused = !run.is_paused;
+
+        if !run.is_paused && run.schedule.active {
+            run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+        }
+    }
+
+    save_scheduled_runs(&runs)?;
+    Ok(runs)
+}
+
+fn sync_scheduled_runs_for_workflow(wf: &WorkflowDefinition, existing_runs: &[crate::models::ScheduledRun]) -> Vec<crate::models::ScheduledRun> {
+    let mut synced_runs: Vec<crate::models::ScheduledRun> = existing_runs
+        .iter()
+        .filter(|run| run.workflow_id != wf.id)
+        .cloned()
+        .collect();
+
+    for node in &wf.nodes {
+        if node.r#type != "trigger" || node.name.as_deref() != Some("Scheduled Trigger") {
+            continue;
+        }
+
+        let config = &node.config;
+        if config
+            .get("status")
+            .and_then(|value| value.as_str())
+            .is_some_and(|status| status == "off")
+        {
+            continue;
+        }
+
+        let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let interval = config.get("interval").and_then(|v| v.as_str()).unwrap_or("");
+        let time = config.get("time").and_then(|v| v.as_str()).unwrap_or("00:00");
+        let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
+        let datetime = config.get("datetime").and_then(|v| v.as_str()).unwrap_or("");
+
+        let (model_type, value) = match sched_type {
+            "Minutes" => ("minutes".to_string(), interval.to_string()),
+            "Hours" => ("hours".to_string(), interval.to_string()),
+            "Daily" => ("daily".to_string(), time.to_string()),
+            "Weekly" => ("weekly".to_string(), format!("{}@{}", days, time)),
+            "One-Time" => ("one_time".to_string(), datetime.to_string()),
+            _ => continue,
+        };
+
+        let description = match sched_type {
+            "Minutes" => format!("Every {}m", interval),
+            "Hours" => format!("Every {}h", interval),
+            "Daily" => format!("Daily at {}", time),
+            "Weekly" => format!("{} at {}", days, time),
+            "One-Time" => format!("Once at {}", datetime),
+            _ => value.clone(),
+        };
+
+        let run_id = format!("{}-{}", wf.id, node.id);
+        let previous = existing_runs.iter().find(|run| run.id == run_id);
+        let schedule_unchanged = previous.is_some_and(|run| {
+            run.schedule.schedule_type == model_type && run.schedule.value == value
+        });
+
+        synced_runs.push(crate::models::ScheduledRun {
+            id: run_id.clone(),
+            workflow_id: wf.id.clone(),
+            workflow_name: wf.name.clone(),
+            schedule: crate::models::ScheduleDefinition {
+                schedule_type: model_type,
+                value,
+                active: if schedule_unchanged {
+                    previous.map(|run| run.schedule.active).unwrap_or(true)
+                } else {
+                    true
+                },
+            },
+            role_mappings: wf.role_mappings.clone(),
+            description,
+            next_run_epoch_ms: if schedule_unchanged {
+                previous.and_then(|run| run.next_run_epoch_ms)
+            } else {
+                None
+            },
+            is_paused: previous.map(|run| run.is_paused).unwrap_or(false),
+        });
+
+        if previous.is_none() {
+            log_debug(&format!(
+                "[Wardian] Registered scheduled run {} for workflow '{}'",
+                run_id, wf.name
+            ));
+        }
+    }
+
+    synced_runs
+}
+
 pub fn get_logs_dir(workflow_id: &str) -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflow_logs").join(workflow_id))
 }
@@ -346,7 +475,7 @@ pub async fn start_scheduler(app: AppHandle) {
     let app_clone = app.clone();
     let handle = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
             let state = app_clone.state::<crate::state::AppState>();
             if state
@@ -378,6 +507,14 @@ pub async fn start_scheduler(app: AppHandle) {
                             run.id, run.workflow_id
                         ));
 
+                        // Advance next_run before dispatch so the UI stops presenting this run as overdue
+                        // while the workflow is actively executing.
+                        run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+                        if run.schedule.schedule_type == "one_time" {
+                            run.schedule.active = false;
+                        }
+                        modified = true;
+
                         let payload = serde_json::json!({
                             "timestamp": Utc::now().to_rfc3339(),
                             "scheduled_run_id": run.id,
@@ -387,13 +524,6 @@ pub async fn start_scheduler(app: AppHandle) {
                         let _ =
                             run_workflow(app_clone.clone(), run.workflow_id.clone(), Some(payload))
                                 .await;
-
-                        // Advance next_run
-                        run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
-                        if run.schedule.schedule_type == "one_time" {
-                            run.schedule.active = false;
-                        }
-                        modified = true;
                     }
                 }
             }
@@ -558,6 +688,12 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, reg
     // 1. Clean up existing triggers for this workflow
     stop_workflow_triggers(app.clone(), &wf.id).await;
 
+    if register_schedules {
+        let runs = load_scheduled_runs();
+        let synced_runs = sync_scheduled_runs_for_workflow(&wf, &runs);
+        let _ = save_scheduled_runs(&synced_runs);
+    }
+
     let mut handles = Vec::new();
 
     // 2. Identify trigger nodes
@@ -570,70 +706,14 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, reg
             // --- Scheduled Trigger ---
             // Register a ScheduledRun entry. The unified heartbeat scheduler
             // (30s loop) handles all timed execution from scheduled_runs.json.
-            if register_schedules {
-            if let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) {
-                let interval = config.get("interval").and_then(|v| v.as_str()).unwrap_or("");
-                let time = config.get("time").and_then(|v| v.as_str()).unwrap_or("00:00");
-                let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
-                let datetime = config.get("datetime").and_then(|v| v.as_str()).unwrap_or("");
-
-                // Map UI schedule_type to internal model type + value
-                let (model_type, value) = match sched_type {
-                    "Minutes" => ("minutes".to_string(), interval.to_string()),
-                    "Hours" => ("hours".to_string(), interval.to_string()),
-                    "Daily" => ("daily".to_string(), time.to_string()),
-                    "Weekly" => ("weekly".to_string(), format!("{}@{}", days, time)),
-                    "One-Time" => ("one_time".to_string(), datetime.to_string()),
-                    _ => continue,
-                };
-
-                // Build a human-readable description
-                let description = match sched_type {
-                    "Minutes" => format!("Every {}m", interval),
-                    "Hours" => format!("Every {}h", interval),
-                    "Daily" => format!("Daily at {}", time),
-                    "Weekly" => format!("{} at {}", days, time),
-                    "One-Time" => format!("Once at {}", datetime),
-                    _ => value.clone(),
-                };
-
-                let mut runs = load_scheduled_runs();
-                let run_id = format!("{}-{}", wf.id, node.id);
-                let existing = runs.iter_mut().find(|r| r.id == run_id);
-
-                if let Some(existing_run) = existing {
-                    existing_run.schedule.schedule_type = model_type;
-                    existing_run.schedule.value = value;
-                    existing_run.schedule.active = true;
-                    existing_run.workflow_name = wf.name.clone();
-                    existing_run.description = description;
-                    existing_run.role_mappings = wf.role_mappings.clone();
-                    existing_run.next_run_epoch_ms = None;
-                } else {
-                    runs.push(crate::models::ScheduledRun {
-                        id: run_id.clone(),
-                        workflow_id: wf.id.clone(),
-                        workflow_name: wf.name.clone(),
-                        schedule: crate::models::ScheduleDefinition {
-                            schedule_type: model_type,
-                            value,
-                            active: true,
-                        },
-                        role_mappings: wf.role_mappings.clone(),
-                        description,
-                        next_run_epoch_ms: None,
-                        is_paused: false,
-                    });
-
-                    log_debug(&format!(
-                        "[Wardian] Registered scheduled run {} for workflow '{}'",
-                        run_id, wf.name
-                    ));
-                }
-
-                let _ = save_scheduled_runs(&runs);
+            if register_schedules
+                && config
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|status| status == "off")
+            {
+                continue;
             }
-            } // end register_schedules
 
             // --- File Watcher Trigger ---
             if let Some(path_str) = config.get("path").and_then(|v| v.as_str()) {
@@ -701,6 +781,28 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, reg
     }
 }
 
+pub async fn run_scheduled_workflow_now(app: AppHandle, run_id: String) -> Result<(), String> {
+    let mut runs = load_scheduled_runs();
+    let now_ms = Utc::now().timestamp_millis() as u64;
+
+    let Some(run) = runs.iter_mut().find(|scheduled_run| scheduled_run.id == run_id) else {
+        return Err(format!("Scheduled run {} not found", run_id));
+    };
+
+    if run.schedule.active && !run.is_paused {
+        run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
+    }
+
+    let payload = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "scheduled_run_id": run.id,
+        "role_mappings": run.role_mappings,
+    });
+    let workflow_id = run.workflow_id.clone();
+
+    save_scheduled_runs(&runs)?;
+    run_workflow(app, workflow_id, Some(payload)).await
+}
 pub async fn save_workflow(app: AppHandle, wf: WorkflowDefinition) -> Result<(), String> {
     let dir = get_workflows_dir().ok_or("Could not find Wardian home")?;
     if !dir.exists() {
@@ -728,6 +830,153 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
+    let Some(run) = load_scheduled_runs().into_iter().find(|scheduled_run| scheduled_run.id == run_id) else {
+        return Ok(());
+    };
+
+    let dir = get_workflows_dir().ok_or("Could not find Wardian home")?;
+    let path = dir.join(format!("{}.json", run.workflow_id));
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut workflow = serde_json::from_str::<WorkflowDefinition>(&content).map_err(|e| e.to_string())?;
+
+    for node in workflow.nodes.iter_mut() {
+        if node.r#type != "trigger" || node.name.as_deref() != Some("Scheduled Trigger") {
+            continue;
+        }
+
+        let expected_run_id = format!("{}-{}", workflow.id, node.id);
+        if expected_run_id != run_id {
+            continue;
+        }
+
+        match node.config.as_object_mut() {
+            Some(config) => {
+                config.insert("status".to_string(), serde_json::Value::String("off".to_string()));
+            }
+            None => {
+                node.config = serde_json::json!({ "status": "off" });
+            }
+        }
+    }
+
+    let content = serde_json::to_string_pretty(&workflow).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_scheduled_runs_for_workflow;
+    use crate::models::{ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn workflow_with_schedule(status: &str) -> WorkflowDefinition {
+        WorkflowDefinition {
+            id: "wf-1".to_string(),
+            name: "Morning Sync".to_string(),
+            settings: WorkflowSettings {
+                max_iterations: 10,
+                on_limit_reached: "pause".to_string(),
+            },
+            nodes: vec![WorkflowNode {
+                id: "trigger-1".to_string(),
+                r#type: "trigger".to_string(),
+                name: Some("Scheduled Trigger".to_string()),
+                config: json!({
+                    "schedule_type": "Daily",
+                    "time": "09:00",
+                    "status": status,
+                }),
+                dependencies: None,
+                position: None,
+            }],
+            role_mappings: HashMap::from([("analyst".to_string(), "agent-1".to_string())]),
+        }
+    }
+
+    #[test]
+    fn sync_scheduled_runs_preserves_pause_state_for_active_schedule() {
+        let workflow = workflow_with_schedule("active");
+        let existing_runs = vec![ScheduledRun {
+            id: "wf-1-trigger-1".to_string(),
+            workflow_id: "wf-1".to_string(),
+            workflow_name: "Morning Sync".to_string(),
+            schedule: ScheduleDefinition {
+                schedule_type: "daily".to_string(),
+                value: "09:00".to_string(),
+                active: true,
+            },
+            role_mappings: HashMap::new(),
+            description: "Daily at 09:00".to_string(),
+            next_run_epoch_ms: Some(1234),
+            is_paused: true,
+        }];
+
+        let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "wf-1-trigger-1");
+        assert_eq!(runs[0].workflow_name, "Morning Sync");
+        assert_eq!(runs[0].schedule.schedule_type, "daily");
+        assert_eq!(runs[0].schedule.value, "09:00");
+        assert!(runs[0].is_paused);
+        assert_eq!(runs[0].next_run_epoch_ms, Some(1234));
+    }
+
+    #[test]
+    fn sync_scheduled_runs_resets_next_run_when_schedule_changes() {
+        let workflow = workflow_with_schedule("active");
+        let existing_runs = vec![ScheduledRun {
+            id: "wf-1-trigger-1".to_string(),
+            workflow_id: "wf-1".to_string(),
+            workflow_name: "Morning Sync".to_string(),
+            schedule: ScheduleDefinition {
+                schedule_type: "daily".to_string(),
+                value: "08:00".to_string(),
+                active: true,
+            },
+            role_mappings: HashMap::new(),
+            description: "Daily at 08:00".to_string(),
+            next_run_epoch_ms: Some(1234),
+            is_paused: false,
+        }];
+
+        let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].schedule.value, "09:00");
+        assert_eq!(runs[0].next_run_epoch_ms, None);
+    }
+
+    #[test]
+    fn sync_scheduled_runs_removes_disabled_schedule_entries() {
+        let workflow = workflow_with_schedule("off");
+        let existing_runs = vec![ScheduledRun {
+            id: "wf-1-trigger-1".to_string(),
+            workflow_id: "wf-1".to_string(),
+            workflow_name: "Morning Sync".to_string(),
+            schedule: ScheduleDefinition {
+                schedule_type: "daily".to_string(),
+                value: "09:00".to_string(),
+                active: true,
+            },
+            role_mappings: HashMap::new(),
+            description: "Daily at 09:00".to_string(),
+            next_run_epoch_ms: Some(1234),
+            is_paused: false,
+        }];
+
+        let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
+
+        assert!(runs.is_empty());
+    }
+}
+
 pub async fn run_workflow(
     app: AppHandle,
     wf_id: String,
@@ -752,6 +1001,11 @@ pub async fn run_workflow(
 
     let log_dir = get_logs_dir(&wf_id).ok_or("Could not find log path")?;
     fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
+
+    let _ = app.emit("workflow-status-updated", serde_json::json!({
+        "workflow_id": wf_id,
+        "status": "running",
+    }));
 
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let log_path = log_dir.join(format!("{}.json", timestamp));
@@ -1601,3 +1855,8 @@ pub async fn run_workflow(
 
     Ok(())
 }
+
+
+
+
+

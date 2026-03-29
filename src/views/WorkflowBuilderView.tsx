@@ -18,6 +18,7 @@ import { SchemaEditor } from '../components/SchemaEditor';
 import { RenderableInput } from '../components/RenderableInput';
 import { VariableAssistant } from '../features/workflows/VariableAssistant';
 import { RunPayloadModal, getManualTriggerSchema, getWorkflowRoles } from '../features/workflows/RunPayloadModal';
+import type { WorkflowDefinition, WorkflowNode as WorkflowNodeDefinition } from '../types/workflow';
 
 const nodeTypes = {
   trigger: WorkflowNode,
@@ -171,13 +172,22 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
 
 
-  const handleSave = () => {
-    if (activeWorkflowId && activeWorkflow) {
-      const updatedNodes = nodes.map(n => ({
+  const buildCurrentWorkflow = (): WorkflowDefinition | null => {
+    if (!activeWorkflowId || !activeWorkflow) return null;
+
+    const updatedNodes: WorkflowNodeDefinition[] = nodes.map(n => {
+      const isScheduledTrigger =
+        n.type === 'trigger' &&
+        ((typeof n.data.blockName === 'string' && n.data.blockName === 'Scheduled Trigger') ||
+          (typeof n.data.label === 'string' && n.data.label === 'Scheduled Trigger'));
+      const existingConfig =
+        typeof n.data.config === 'object' && n.data.config !== null ? n.data.config : {};
+
+      return {
         id: n.id,
-        type: n.type,
-        name: n.data.label,
-        config: n.data.config || {},
+        type: (n.type || 'agent') as WorkflowNodeDefinition['type'],
+        name: typeof n.data.label === 'string' ? n.data.label : n.id,
+        config: isScheduledTrigger ? { ...existingConfig, status: 'active' } : existingConfig,
         position: n.position,
         dependencies: edges
           .filter(e => e.target === n.id)
@@ -185,24 +195,36 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             node_id: e.source,
             port: e.sourceHandle || 'default'
           }))
-      }));
-      saveWorkflow({ ...activeWorkflow, name: tempWfName, nodes: updatedNodes as any });
-      return true;
-    }
-    return false;
+      };
+    });
+
+    return {
+      ...activeWorkflow,
+      name: tempWfName,
+      nodes: updatedNodes,
+    };
+  };
+
+  const handleSave = async () => {
+    const workflowToSave = buildCurrentWorkflow();
+    if (!workflowToSave) return false;
+    await saveWorkflow(workflowToSave);
+    return true;
   };
 
   const handleRun = async () => {
-    handleSave();
+    const workflowToRun = buildCurrentWorkflow();
+    if (!workflowToRun) return;
 
-    // Scheduled triggers: save registers the schedule; don't execute immediately
-    const triggerNode = activeWorkflow?.nodes.find(n => n.type === 'trigger');
+    await saveWorkflow(workflowToRun);
+
+    const triggerNode = workflowToRun.nodes.find((n) => n.type === 'trigger');
     if (triggerNode?.name === 'Scheduled Trigger') {
       loadScheduledRuns();
       return;
     }
 
-    if (activeWorkflow && (getManualTriggerSchema(activeWorkflow) || getWorkflowRoles(activeWorkflow).length > 0)) {
+    if (getManualTriggerSchema(workflowToRun) || getWorkflowRoles(workflowToRun).length > 0) {
       setIsRunModalOpen(true);
       return;
     }

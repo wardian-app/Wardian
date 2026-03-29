@@ -46,6 +46,7 @@ interface WorkflowState {
   handleTelemetry: (event: WorkflowTelemetryEvent) => void;
   runActiveWorkflow: (payload?: any) => Promise<void>;
   runWorkflowById: (id: string, payload?: any) => Promise<void>;
+  runScheduledWorkflowNow: (runId: string) => Promise<void>;
   stopAllTriggers: () => Promise<void>;
   stopWorkflowTriggers: (workflowId: string) => Promise<void>;
   stopWorkflowRun: (workflowId: string) => Promise<void>;
@@ -306,6 +307,29 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   handleStatusUpdate: (event) => {
     const { workflow_id, status } = event;
+    if (status === 'running') {
+      set((state) => {
+        if (state.activeRuns.some(run => run.workflow_id === workflow_id)) {
+          return state;
+        }
+
+        return {
+          activeRuns: [
+            ...state.activeRuns,
+            {
+              run_id: workflow_id,
+              workflow_id,
+              workflow_name: state.availableWorkflows.find(w => w.id === workflow_id)?.name || 'Unknown',
+              current_step: 0,
+              total_steps: 1,
+              active_node_name: 'Starting',
+            },
+          ],
+        };
+      });
+      return;
+    }
+
     if (status === 'completed' || status === 'failed') {
       set((state) => ({
         activeRuns: state.activeRuns.filter(r => r.workflow_id !== workflow_id)
@@ -337,6 +361,16 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       await invoke("run_workflow", { id, payload: payload || null });
     } catch (err) {
       console.error("Failed to run workflow by id:", err);
+    }
+  },
+
+  runScheduledWorkflowNow: async (runId: string) => {
+    try {
+      await invoke("run_scheduled_workflow_now", { runId });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to run scheduled workflow:", err);
+      await get().loadScheduledRuns();
     }
   },
 
@@ -412,7 +446,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   deleteScheduledRun: async (runId) => {
     try {
-      await invoke("delete_scheduled_run", { run_id: runId });
+      await invoke("delete_scheduled_run", { runId });
       await get().loadScheduledRuns();
     } catch (err) {
       console.error("Failed to delete scheduled run:", err);
@@ -421,10 +455,22 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   toggleScheduledRun: async (runId) => {
     try {
-      await invoke("toggle_scheduled_run", { run_id: runId });
+      set((state) => ({
+        scheduledRuns: state.scheduledRuns.map((run) =>
+          run.id === runId ? { ...run, is_paused: !run.is_paused } : run
+        ),
+      }));
+      await invoke("toggle_scheduled_run", { runId });
       await get().loadScheduledRuns();
     } catch (err) {
       console.error("Failed to toggle scheduled run:", err);
+      await get().loadScheduledRuns();
     }
   },
 }));
+
+
+
+
+
+
