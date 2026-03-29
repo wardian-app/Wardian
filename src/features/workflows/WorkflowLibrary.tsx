@@ -5,9 +5,10 @@ import { useConfirm } from '../../components/ConfirmDialog';
 
 // Icons
 
-const CronIcon = () => (
+const ScheduleIcon = () => (
   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    <circle cx="12" cy="12" r="9" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 7v5l3 2" />
   </svg>
 );
 
@@ -20,6 +21,12 @@ const WatcherIcon = () => (
 const ManualIcon = () => (
   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+  </svg>
+);
+
+const WebhookIcon = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
   </svg>
 );
 
@@ -132,13 +139,14 @@ export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onR
 
     const getGlyph = () => {
       switch (triggerType) {
-        case 'cron': return <CronIcon />;
+        case 'scheduled': return <ScheduleIcon />;
         case 'watcher': return <WatcherIcon />;
+        case 'webhook': return <WebhookIcon />;
         default: return <ManualIcon />;
       }
     };
 
-    const statusColorClass = status === 'active' ? 'text-emerald-500' : status === 'muted' ? 'text-amber-500' : 'text-gray-500';
+    const statusColorClass = triggerType === 'scheduled' ? 'text-cyan-400' : status === 'active' ? 'text-emerald-500' : status === 'muted' ? 'text-amber-500' : 'text-gray-500';
     const isDragTarget = dragOverWorkflowId === wf.id && draggedWorkflowId !== null && draggedWorkflowId !== wf.id;
     const isBeingDragged = draggedWorkflowId === wf.id;
 
@@ -254,3 +262,4 @@ export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onR
     </div>
   );
 };
+

@@ -63,22 +63,20 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
       { name: 'debounce_ms', label: 'Debounce', type: 'text', placeholder: '500' }
     ]
   },
-  { 
-    type: 'trigger', 
-    name: 'Cron Schedule', 
-    category: 'TRIGGER', 
-    description: 'Runs on a temporal interval.', 
-    inputs: 'Cron String', 
-    outputs: 'Trigger Context', 
+  {
+    type: 'trigger',
+    name: 'Scheduled Trigger',
+    category: 'TRIGGER',
+    description: 'Runs on a scheduled interval or at a specific time.',
+    inputs: 'Schedule Config',
+    outputs: 'Trigger Context',
     ports: { inputs: 0, outputs: ['default'] },
     fields: [
-      { name: 'schedule_type', label: 'Frequency', type: 'select', options: ['Minutes', 'Hours', 'Daily', 'Weekly', 'Custom'] },
+      { name: 'schedule_type', label: 'Frequency', type: 'select', options: ['Minutes', 'Hours', 'Daily', 'Weekly', 'One-Time'] },
       { name: 'interval', label: 'Interval Value', type: 'text', placeholder: '5' },
       { name: 'time', label: 'Time', type: 'text', placeholder: '09:00' },
-      { name: 'days', label: 'Days', type: 'text', placeholder: 'Mon,Tue,Wed' }
-    ],
-    advancedFields: [
-      { name: 'cron', label: 'Raw Cron Expression', type: 'text', placeholder: '0 * * * * *' }
+      { name: 'days', label: 'Days', type: 'text', placeholder: 'Mon,Tue,Wed' },
+      { name: 'datetime', label: 'Date & Time', type: 'text', placeholder: '2026-03-27T09:00' }
     ]
   },
   

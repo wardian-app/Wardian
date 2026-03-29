@@ -1,25 +1,41 @@
-# Spec 002: Internal Rust Heartbeat (Scheduler)
+# Spec 002: Unified Workflow Scheduler
 
 * **Status:** Proposed
-* **Date:** 2026-03-15
+* **Date:** 2026-03-25
 * **Decider:** Architect
 
 ## Context and Problem Statement
-Wardian currently uses multiple ad-hoc `tokio::spawn` loops for metrics and basic triggers. This is difficult to monitor and doesn't scale well for complex "Scheduled Task" logic or "Agent-to-Agent" synchronization.
+Wardian's current scheduler is split between a hardcoded "Cron" trigger in the engine and an experimental sidebar UI. We need a unified system that allows users to instantiate workflow templates into "Scheduled Runs" with specific agent mappings.
 
 ## Proposed Decision
-We will consolidate all periodic logic into a single **Internal Rust Heartbeat Thread** with a precision of 1 second.
 
-1. **The Loop**: A single `tokio::spawn` loop in `lib.rs` that ticks every 1 second.
-2. **The Registry**: A `Vec<Arc<dyn HeartbeatTask>>` in `AppState`.
-3. **Dispatch Logic**: On every tick, the Heartbeat iterates over its tasks.
-    - **Fast (High-Frequency)**: Metrics collection (every 5s).
-    - **Scheduled (Cron)**: Workflow triggers (evaluated via the `cron` crate).
-    - **Lifecycle (Health Check)**: PTY status verification and auto-hibernation.
-4. **Non-Blocking**: Heavy tasks (like file-system scans or agent spawns) MUST be delegated back to `tokio::spawn` to avoid stalling the Heartbeat.
+### 1. The Scheduled Trigger (Replaces Cron)
+We will move away from a single "Cron" string to a structured **Schedule Definition**:
+```json
+{
+  "type": "one_time" | "recurring" | "cron",
+  "value": "2026-04-01T12:00:00Z" | "60m" | "0 0 * * *",
+  "active": true
+}
+```
+
+### 2. Workflow "Templates" vs "Runs"
+*   **Template**: The static JSON definition of the workflow nodes and logic.
+*   **Run (Instance)**: A specific execution of a template.
+    *   Stores **Agent Mappings**: (e.g., Template Role "Worker" -> Agent ID "agent-123").
+    *   Stores **State**: The current registry and pulse history.
+
+### 3. Unified Sidebar Logic
+The Workflow Sidebar will be refactored to handle two primary tabs:
+*   **Library**: Browse and edit templates.
+*   **Monitoring (Scheduler)**: 
+    *   Displays all "Active Runs" (Scheduled or currently executing).
+    *   Allows "Quick-Start" of a template by picking an agent from a dropdown.
+
+### 4. Implementation (Rust)
+The **Internal Heartbeat Thread** (from the original Spec 002) will remain the driver, but it will now query a `scheduled_runs.json` store instead of individual workflow files.
 
 ## Consequences
-* **Positive**: Centralized control over all background automation.
-* **Positive**: Reduced overhead from multiple active loops.
-* **Positive**: Easier to implement global "Pause All Triggers" (Panic Button).
-* **Negative**: A crash in the Heartbeat loop could stall all background automation.
+* **Positive**: Allows starting multiple runs of the same workflow with different agents.
+* **Positive**: Centralized management of all automation via the sidebar.
+* **Negative**: Requires a migration of existing "Cron" trigger configurations.

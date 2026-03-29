@@ -22,8 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent stores
 .gemini/*
 .claude/*
+.superpowers/*
 
 # Backup and test files
 *.bak
@@ -55,3 +58,4 @@ Icon
 src-tauri/*.log
 src-tauri/target/
 src-tauri/gen/
+

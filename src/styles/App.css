@@ -19,6 +19,7 @@
   --color-wardian-warning: #d97706;
   --color-wardian-error: #dc2626;
   --color-wardian-off: #4b5563;
+  --color-wardian-headless: #8b5cf6;
 
   /* Workflow Node Semantics */
   --color-workflow-agent: #3b82f6;
@@ -284,6 +285,7 @@
   --color-wardian-warning: #f59e0b;
   --color-wardian-error: #ef4444;
   --color-wardian-off: #4b5563;
+  --color-wardian-headless: #a78bfa;
 
   /* Structural Components for Dark Mode */
   --color-wardian-sidebar-primary: #111827;

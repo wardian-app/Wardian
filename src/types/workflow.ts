@@ -40,6 +40,8 @@ export interface WorkflowDefinition {
   name: string;
   settings: WorkflowSettings;
   nodes: WorkflowNode[];
+  /** Maps role names to agent session IDs. Set before execution. */
+  role_mappings?: Record<string, string>;
 }
 
 export interface WorkflowExecutionState {
@@ -60,7 +62,7 @@ export interface WorkflowTelemetryEvent {
 }
 
 export type WorkflowTriggerStatus = 'active' | 'muted' | 'off';
-export type WorkflowTriggerType = 'cron' | 'webhook' | 'watcher' | 'manual';
+export type WorkflowTriggerType = 'scheduled' | 'webhook' | 'watcher' | 'manual';
 
 export interface WorkflowSummary {
   id: string;
@@ -69,12 +71,22 @@ export interface WorkflowSummary {
   trigger_status: WorkflowTriggerStatus;
 }
 
+export interface ScheduleDefinition {
+  schedule_type: "one_time" | "minutes" | "hours" | "daily" | "weekly";
+  value: string;
+  active: boolean;
+}
+
 export interface ScheduledRun {
   id: string;
   workflow_id: string;
   workflow_name: string;
-  next_run_epoch_ms: number;
-  frequency: string;
+  schedule: ScheduleDefinition;
+  role_mappings: Record<string, string>;
+  /** Human-readable description (e.g. "Every 5m", "Daily at 09:00") */
+  description?: string;
+  next_run_epoch_ms: number | null;
+  paused_remaining_ms?: number | null;
   is_paused: boolean;
 }
 
@@ -86,3 +98,4 @@ export interface ActiveRunTracker {
   total_steps: number;
   active_node_name: string;
 }
+

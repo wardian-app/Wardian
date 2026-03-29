@@ -21,6 +21,7 @@ import { PlaceholderView } from "./PlaceholderView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
 import { LibraryView } from "./LibraryView";
 import { useWorkflowStore } from "../store/useWorkflowStore";
+import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 
 function App() {
@@ -38,6 +39,9 @@ function AppBody() {
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
   const handleWorkflowProgress = useWorkflowStore(s => s.handleProgress);
   const handleWorkflowStatusUpdate = useWorkflowStore(s => s.handleStatusUpdate);
+  const fetchWorkflows = useWorkflowStore(s => s.fetchWorkflows);
+  const loadScheduledRuns = useWorkflowStore(s => s.loadScheduledRuns);
+  const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
 
   useEffect(() => {
     const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
@@ -48,6 +52,10 @@ function AppBody() {
     });
     const unlistenStatus = listen<any>("workflow-status-updated", (event) => {
       handleWorkflowStatusUpdate(event.payload);
+      const status = event.payload?.status;
+      if (status === "running" || status === "completed" || status === "failed") {
+        loadScheduledRuns();
+      }
     });
     
     return () => { 
@@ -55,7 +63,7 @@ function AppBody() {
       unlistenProgress.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
-  }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate]);
+  }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate, loadScheduledRuns]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -254,6 +262,10 @@ function AppBody() {
   useEffect(() => {
     fetchAgents();
     fetchAgentClasses();
+    fetchWorkflows();
+    loadScheduledRuns();
+    fetchLibraryTree("prompts");
+    fetchLibraryTree("skills");
     const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
       const { session_id, data } = event.payload;
       const effect = classifyJsonEvent(data as Record<string, unknown>);
@@ -268,7 +280,7 @@ function AppBody() {
       unlistenJson.then(fn => fn());
       unlistenUpdate.then(fn => fn());
     };
-  }, []);
+  }, [fetchLibraryTree, fetchWorkflows, loadScheduledRuns]);
 
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
@@ -407,6 +419,10 @@ function AppBody() {
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
+          onOpenWorkflowBuilder={() => {
+            setActiveTab("workflows");
+            setViewMode("workflow-builder");
+          }}
         />
 
         <main className="flex-1 h-full flex flex-col overflow-hidden relative">

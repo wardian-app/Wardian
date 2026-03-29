@@ -22,6 +22,7 @@ interface SidebarContentPaneProps {
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
+  onOpenWorkflowBuilder: () => void;
   }
 
   export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
@@ -37,6 +38,7 @@ interface SidebarContentPaneProps {
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
+  onOpenWorkflowBuilder,
   }) => {
     return (
       <aside className={`h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
@@ -94,7 +96,7 @@ interface SidebarContentPaneProps {
         )}
 
         {activeTab === "workflows" && (
-          <WorkflowSidebar />
+          <WorkflowSidebar onOpenWorkflowBuilder={onOpenWorkflowBuilder} />
         )}
 
         {activeTab === "settings" && (

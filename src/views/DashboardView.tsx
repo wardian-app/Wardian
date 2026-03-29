@@ -1,5 +1,6 @@
 import React from "react";
 import { AgentConfig, AgentTelemetry } from "../types";
+import { getAgentStatusLabel, getAgentStatusTextClass } from "../utils/statusUtils";
 
 interface DashboardViewProps {
   filteredAgents: AgentConfig[];
@@ -111,7 +112,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </div>
                 <div className="flex flex-col flex-2 min-w-[200px]">
                   <span className="label-small mb-0.5">Current Status</span>
-                  <span className={`text-xs truncate ${effectiveStatus !== 'Idle' ? 'text-primary italic' : 'text-muted-neutral'}`}>{currentThought}</span>
+                  <span className={`text-xs truncate ${getAgentStatusTextClass(effectiveStatus)}`}>
+                    {getAgentStatusLabel(effectiveStatus, currentThought, 40)}
+                  </span>
                 </div>
               </div>
 

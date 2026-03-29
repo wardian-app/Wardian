@@ -58,6 +58,10 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return null;
       case "list_workflows":
         return [];
+      case "list_scheduled_runs":
+        return [];
+      case "get_library_tree":
+        return { type: "Folder", path: "", name: "Root", children: [] };
       case "load_workflow_library":
         return { folders: [], rootWorkflowIds: [] };
       default:
@@ -126,6 +130,19 @@ describe("Agent List Management", () => {
     render(<App />);
     await screen.findByText("No Active Instances");
     expect(mockInvoke).toHaveBeenCalledWith("list_agent_classes");
+  });
+
+  it("preloads workflows and library data on mount", async () => {
+    setupDefaultMocks([], defaultClasses);
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("list_workflows");
+      expect(mockInvoke).toHaveBeenCalledWith("list_scheduled_runs");
+      expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "prompts" });
+      expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "skills" });
+    });
   });
 });
 

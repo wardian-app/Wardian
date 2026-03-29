@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub use crate::utils::fs::*;
 pub use crate::utils::logging::log_debug;
+pub use crate::utils::process::new_headless_command;
 
 fn set_agent_status(
     app: &AppHandle,
@@ -55,6 +56,9 @@ fn apply_agent_event(
         AgentEvent::ModelResponse => {
             set_agent_status(app, session_id, current_status, "Idle");
         }
+        AgentEvent::TurnCompleted => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
         AgentEvent::ActionRequired { .. } => {
             set_agent_status(app, session_id, current_status, "Action Needed");
         }
@@ -73,6 +77,9 @@ fn apply_agent_status_event(
             set_agent_status(app, session_id, current_status, "Processing...");
         }
         AgentEvent::ModelResponse => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::TurnCompleted => {
             set_agent_status(app, session_id, current_status, "Idle");
         }
         AgentEvent::ActionRequired { .. } => {
@@ -265,7 +272,9 @@ pub async fn spawn_agent(
     let output_buffer_clone = output_buffer.clone();
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
     let query_count_clone = query_count.clone();
-    let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    )));
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
@@ -517,6 +526,15 @@ pub async fn spawn_agent(
                                                     &watcher_current_status,
                                                 );
                                             }
+                                            AgentEvent::TurnCompleted => {
+                                                *waiting = false;
+                                                apply_agent_status_event(
+                                                    &watcher_app,
+                                                    &watcher_session,
+                                                    event,
+                                                    &watcher_current_status,
+                                                );
+                                            }
                                             AgentEvent::Init { .. } | AgentEvent::Unknown => {}
                                         }
                                     } else {
@@ -676,13 +694,7 @@ pub async fn run_headless(
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider = ProviderFactory::resolve(provider_name)?;
     let (bin, base_args) = provider.get_executable();
-    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/c").arg(&bin);
-        c
-    } else {
-        tokio::process::Command::new(&bin)
-    };
+    let mut cmd = new_headless_command(&bin);
     for arg in base_args {
         cmd.arg(arg);
     }
@@ -701,40 +713,82 @@ pub async fn run_headless(
             }
             cmd.arg("--print")
                 .arg("--output-format")
-                .arg(output_format)
-                .arg("--resume")
-                .arg(session_id)
-                .arg(prompt);
+                .arg(output_format);
+            if !session_id.is_empty() {
+                cmd.arg("--resume").arg(session_id);
+            }
+            cmd.arg(prompt);
         }
         _ => {
             cmd.arg("-p")
                 .arg(prompt)
                 .arg("--output-format")
-                .arg(output_format)
-                .arg("--resume")
-                .arg(session_id);
+                .arg(output_format);
+            if !session_id.is_empty() {
+                cmd.arg("--resume").arg(session_id);
+            }
         }
     }
     cmd.current_dir(cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
+
+
+    log_debug(&format!(
+        "[Wardian] run_headless: provider={}, session_id={}, cwd={}, prompt_len={}, output_format={}",
+        provider_name,
+        if session_id.is_empty() { "<none>" } else { session_id },
+        cwd.display(),
+        prompt.len(),
+        output_format
+    ));
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let mut output = String::new();
 
-    if let Some(stdout) = child.stdout.take() {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 {
-                break;
+    // Read stdout and stderr concurrently to avoid deadlock when stderr buffer fills.
+    let stdout_handle = {
+        let stdout = child.stdout.take();
+        tokio::spawn(async move {
+            let mut out = String::new();
+            if let Some(stream) = stdout {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 { break; }
+                    out.push_str(&line);
+                    line.clear();
+                }
             }
-            output.push_str(&line);
-            line.clear();
-        }
-    }
+            out
+        })
+    };
+
+    let stderr_handle = {
+        let stderr = child.stderr.take();
+        tokio::spawn(async move {
+            let mut err = String::new();
+            if let Some(stream) = stderr {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 { break; }
+                    err.push_str(&line);
+                    line.clear();
+                }
+            }
+            err
+        })
+    };
+
+    let (output, err_output) = tokio::join!(stdout_handle, stderr_handle);
+    let output = output.unwrap_or_default();
+    let err_output = err_output.unwrap_or_default();
 
     let _ = child.wait().await;
+
+    if !err_output.is_empty() {
+        log_debug(&format!("[Wardian] Headless stderr: {}", err_output.trim()));
+    }
 
     if provider_name == "codex" {
         let mut last_message = None;
@@ -800,13 +854,7 @@ pub async fn obtain_session_id(
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
     let (bin, base_args) = provider.get_executable();
-    let mut cmd = if cfg!(target_os = "windows") && bin.ends_with(".cmd") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/c").arg(&bin);
-        c
-    } else {
-        tokio::process::Command::new(&bin)
-    };
+    let mut cmd = new_headless_command(&bin);
     let class_name = agent_class
         .filter(|name| !name.trim().is_empty())
         .or_else(|| {
@@ -1323,6 +1371,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             if let Some(first) = lines.first() {
                                 if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
                                     i_ts = Some(ts.to_string());
+                                } else if let Some(ts_num) = first.get("timestamp").and_then(|v| v.as_i64()) {
+                                    // Fallback if timestamp is an epoch number
+                                    if let Some(dt) = chrono::DateTime::from_timestamp_millis(ts_num) {
+                                        i_ts = Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                                    }
                                 }
                             }
 

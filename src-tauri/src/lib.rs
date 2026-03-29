@@ -25,7 +25,7 @@ pub fn run() {
     {
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
         use windows::core::PCWSTR;
-        let aumid: Vec<u16> = "org.wardian.app"
+        let aumid: Vec<u16> = "org.wardian.desktop"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -160,10 +160,17 @@ pub fn run() {
             commands::workflow::delete_workflow,
             commands::workflow::run_workflow,
             commands::workflow::stop_all_triggers,
+            commands::workflow::stop_workflow_triggers,
+            commands::workflow::stop_workflow_run,
+            commands::workflow::run_scheduled_workflow_now,
             commands::workflow::pause_all_triggers,
             commands::workflow::resume_all_triggers,
             commands::workflow::load_workflow_library,
             commands::workflow::save_workflow_library,
+            commands::workflow::list_scheduled_runs,
+            commands::workflow::create_scheduled_run,
+            commands::workflow::delete_scheduled_run,
+            commands::workflow::toggle_scheduled_run,
             commands::library::get_library_tree,
             commands::library::save_library_item,
             commands::library::update_library_metadata,
@@ -177,4 +184,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 

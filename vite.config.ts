@@ -1,13 +1,20 @@
+import fs from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+const workspaceRoot = process.cwd();
+const realWorkspaceRoot = fs.realpathSync.native(workspaceRoot);
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
+  root: workspaceRoot,
   plugins: [react(), tailwindcss()],
+  resolve: {
+    preserveSymlinks: true,
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -18,6 +25,9 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    fs: {
+      allow: [workspaceRoot, realWorkspaceRoot],
+    },
     hmr: host
       ? {
         protocol: "ws",

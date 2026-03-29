@@ -10,7 +10,7 @@ import {
   addEdge,
 } from '@xyflow/react';
 import { invoke } from '@tauri-apps/api/core';
-import { WorkflowDefinition, NodeStatus, WorkflowTelemetryEvent } from '../types/workflow';
+import { WorkflowDefinition, NodeStatus, WorkflowTelemetryEvent, ScheduledRun, ActiveRunTracker } from '../types/workflow';
 import { AgentConfig, AgentClassDefinition } from '../types';
 import { BLOCK_LIBRARY } from '../features/workflows/blockLibrary';
 
@@ -23,8 +23,8 @@ interface WorkflowState {
   agents: AgentConfig[];
   agentClasses: AgentClassDefinition[];
   isSaving: boolean;
-  activeRuns: any[];
-  schedules: any[];
+  activeRuns: ActiveRunTracker[];
+  scheduledRuns: ScheduledRun[];
   
   // Actions
   onNodesChange: OnNodesChange;
@@ -46,12 +46,19 @@ interface WorkflowState {
   handleTelemetry: (event: WorkflowTelemetryEvent) => void;
   runActiveWorkflow: (payload?: any) => Promise<void>;
   runWorkflowById: (id: string, payload?: any) => Promise<void>;
+  runScheduledWorkflowNow: (runId: string) => Promise<void>;
   stopAllTriggers: () => Promise<void>;
+  stopWorkflowTriggers: (workflowId: string) => Promise<void>;
+  stopWorkflowRun: (workflowId: string) => Promise<void>;
   pauseAllTriggers: () => Promise<void>;
   resumeAllTriggers: () => Promise<void>;
   clearActiveWorkflow: () => void;
   handleProgress: (event: any) => void;
   handleStatusUpdate: (event: any) => void;
+  loadScheduledRuns: () => Promise<void>;
+  createScheduledRun: (run: ScheduledRun) => Promise<void>;
+  deleteScheduledRun: (runId: string) => Promise<void>;
+  toggleScheduledRun: (runId: string) => Promise<void>;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -64,7 +71,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   agentClasses: [],
   isSaving: false,
   activeRuns: [],
-  schedules: [],
+  scheduledRuns: [],
 
   onNodesChange: (changes) => {
     set({
@@ -269,7 +276,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   handleTelemetry: (event) => {
-    const { node_id, status, output } = event;
+    const { workflow_id, node_id, status, output } = event;
+    if (workflow_id !== get().activeWorkflowId) return;
     const firedPorts = output?.fired_ports;
     get().updateNodeStatus(node_id, status, firedPorts);
   },
@@ -299,6 +307,29 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   handleStatusUpdate: (event) => {
     const { workflow_id, status } = event;
+    if (status === 'running') {
+      set((state) => {
+        if (state.activeRuns.some(run => run.workflow_id === workflow_id)) {
+          return state;
+        }
+
+        return {
+          activeRuns: [
+            ...state.activeRuns,
+            {
+              run_id: workflow_id,
+              workflow_id,
+              workflow_name: state.availableWorkflows.find(w => w.id === workflow_id)?.name || 'Unknown',
+              current_step: 0,
+              total_steps: 1,
+              active_node_name: 'Starting',
+            },
+          ],
+        };
+      });
+      return;
+    }
+
     if (status === 'completed' || status === 'failed') {
       set((state) => ({
         activeRuns: state.activeRuns.filter(r => r.workflow_id !== workflow_id)
@@ -333,11 +364,40 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }
   },
 
+  runScheduledWorkflowNow: async (runId: string) => {
+    try {
+      await invoke("run_scheduled_workflow_now", { runId });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to run scheduled workflow:", err);
+      await get().loadScheduledRuns();
+    }
+  },
+
   stopAllTriggers: async () => {
     try {
       await invoke("stop_all_triggers");
     } catch (err) {
       console.error("Failed to stop all triggers:", err);
+    }
+  },
+
+  stopWorkflowTriggers: async (workflowId: string) => {
+    try {
+      await invoke("stop_workflow_triggers", { workflowId });
+    } catch (err) {
+      console.error("Failed to stop workflow triggers:", err);
+    }
+  },
+
+  stopWorkflowRun: async (workflowId: string) => {
+    try {
+      await invoke("stop_workflow_run", { workflowId });
+      set((state) => ({
+        activeRuns: state.activeRuns.filter(r => r.workflow_id !== workflowId)
+      }));
+    } catch (err) {
+      console.error("Failed to stop workflow run:", err);
     }
   },
 
@@ -364,5 +424,53 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       edges: [],
       nodeStatuses: {}
     });
-  }
+  },
+
+  loadScheduledRuns: async () => {
+    try {
+      const runs = await invoke<ScheduledRun[]>("list_scheduled_runs");
+      set({ scheduledRuns: runs });
+    } catch (err) {
+      console.error("Failed to load scheduled runs:", err);
+    }
+  },
+
+  createScheduledRun: async (run) => {
+    try {
+      await invoke("create_scheduled_run", { run });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to create scheduled run:", err);
+    }
+  },
+
+  deleteScheduledRun: async (runId) => {
+    try {
+      await invoke("delete_scheduled_run", { runId });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to delete scheduled run:", err);
+    }
+  },
+
+  toggleScheduledRun: async (runId) => {
+    try {
+      set((state) => ({
+        scheduledRuns: state.scheduledRuns.map((run) =>
+          run.id === runId ? { ...run, is_paused: !run.is_paused } : run
+        ),
+      }));
+      await invoke("toggle_scheduled_run", { runId });
+      await get().loadScheduledRuns();
+    } catch (err) {
+      console.error("Failed to toggle scheduled run:", err);
+      await get().loadScheduledRuns();
+    }
+  },
 }));
+
+
+
+
+
+

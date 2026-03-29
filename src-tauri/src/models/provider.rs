@@ -15,6 +15,9 @@ pub enum AgentEvent {
     ModelResponse,
     /// The model is actively generating a response (agent is processing).
     Generating,
+    /// The agent's full turn is complete (response + all tool calls finished).
+    /// This is the definitive signal the workflow engine waits for.
+    TurnCompleted,
     /// The agent requires user intervention.
     ActionRequired { message: String },
     /// An unrecognized event type.

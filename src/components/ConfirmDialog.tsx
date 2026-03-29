@@ -32,7 +32,7 @@ export const ConfirmProvider: React.FC<{ children: React.ReactNode }> = ({ child
       {state.open && (
         <div
           id="confirm-dialog-overlay"
-          className="fixed inset-0 z-[200] flex items-center justify-center"
+          className="fixed inset-0 z-[11000] flex items-center justify-center"
           style={{ backgroundColor: "var(--color-wardian-overlay)" }}
           onClick={() => settle(false)}
         >
@@ -76,3 +76,4 @@ export const ConfirmProvider: React.FC<{ children: React.ReactNode }> = ({ child
     </ConfirmContext.Provider>
   );
 };
+

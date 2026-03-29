@@ -30,5 +30,7 @@ You can automate your workflows using built-in triggers:
 - **Cron**: Schedule workflows to run at specific times (e.g., `0 0 * * *` for every midnight).
 - **File Watcher**: Trigger a workflow whenever a file in your project changes (perfect for auto-testing).
 
+Scheduled tasks now appear in the workflow sidebar as interactive cards. Click a scheduled task card to pause or resume it instantly. Use the details affordance on the right side of the card to inspect the schedule, run it immediately, open the workflow in the builder, or delete the schedule.
+
 ## 📊 Monitoring
 During execution, nodes will change color to indicate their status (Processing, Success, or Error). You can monitor the real-time registry values to see the data being passed between nodes.

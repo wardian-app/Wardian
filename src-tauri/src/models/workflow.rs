@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodePosition {
@@ -34,6 +35,37 @@ pub struct WorkflowDefinition {
     pub name: String,
     pub settings: WorkflowSettings,
     pub nodes: Vec<WorkflowNode>,
+    /// Maps template role names to live agent session IDs.
+    /// Example: {"primary_coder": "abc-123-session-id"}
+    #[serde(default)]
+    pub role_mappings: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScheduleDefinition {
+    /// "one_time" | "minutes" | "hours" | "daily" | "weekly"
+    pub schedule_type: String,
+    /// ISO8601 for one_time, interval number for minutes/hours, HH:MM for daily, "Mon,Wed@09:00" for weekly
+    pub value: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScheduledRun {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub schedule: ScheduleDefinition,
+    pub role_mappings: HashMap<String, String>,
+    /// Human-readable description (e.g. "Every 5m", "Daily at 09:00")
+    #[serde(default)]
+    pub description: String,
+    /// Epoch ms of next scheduled execution (computed by scheduler)
+    pub next_run_epoch_ms: Option<u64>,
+    /// Remaining delay when paused, in ms. Used to resume without resetting the timer.
+    #[serde(default)]
+    pub paused_remaining_ms: Option<u64>,
+    pub is_paused: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -44,3 +76,4 @@ pub struct WorkflowTelemetryEvent {
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
 }
+
