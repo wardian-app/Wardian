@@ -15,6 +15,21 @@ impl ClaudeProvider {
         ClaudeProvider
     }
 
+    #[cfg(not(target_os = "windows"))]
+    fn find_unix_claude_in_paths<I>(paths: I) -> Option<String>
+    where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        for path in paths {
+            let full_path = path.join("claude");
+            if full_path.exists() {
+                return Some(full_path.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
     fn is_real_user_query(parsed: &serde_json::Value) -> bool {
         let Some(message) = parsed.get("message") else {
             return true;
@@ -103,11 +118,8 @@ impl AgentProvider for ClaudeProvider {
         #[cfg(not(target_os = "windows"))]
         {
             if let Some(paths) = std::env::var_os("PATH") {
-                for path in std::env::split_paths(&paths) {
-                    let full_path = path.join("claude");
-                    if full_path.exists() {
-                        ("claude".to_string(), vec![])
-                    }
+                if let Some(executable) = Self::find_unix_claude_in_paths(std::env::split_paths(&paths)) {
+                    return (executable, vec![]);
                 }
             }
 
@@ -506,6 +518,18 @@ mod tests {
         let args_resume = p.get_spawn_args(&config, true);
         assert!(!args_resume.contains(&"--name".to_string()));
         assert!(args_resume.contains(&"--resume".to_string()));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_path_lookup_prefers_discovered_claude_binary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let claude_path = temp.path().join("claude");
+        std::fs::write(&claude_path, "").expect("create fake claude");
+
+        let resolved = ClaudeProvider::find_unix_claude_in_paths(vec![temp.path().to_path_buf()]);
+
+        assert_eq!(resolved, Some(claude_path.to_string_lossy().to_string()));
     }
 
     #[test]

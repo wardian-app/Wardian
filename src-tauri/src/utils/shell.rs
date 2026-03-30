@@ -173,12 +173,17 @@ pub fn build_program_launch_with_settings(
     }
 
     let shell = resolve_shell(settings, available)?;
-    let command_text = build_program_command_text(&shell.id, program, program_args);
     let mut args = shell.default_args;
     if args.is_empty() {
         return Err("Selected shell does not define how to execute a command string".to_string());
     }
-    args.push(command_text);
+
+    if uses_positional_program_forwarding(&shell.id) {
+        args.extend(build_forwarded_program_args(&shell.id, program, program_args));
+    } else {
+        let command_text = build_program_command_text(&shell.id, program, program_args);
+        args.push(command_text);
+    }
 
     Ok(ShellLaunchSpec {
         executable: shell.executable,
@@ -251,6 +256,28 @@ fn inferred_custom_args(
     Ok(default_shell_args(&shell_id_from_executable(Path::new(
         executable,
     ))))
+}
+
+fn uses_positional_program_forwarding(shell_id: &str) -> bool {
+    matches!(shell_id, "bash" | "git-bash" | "zsh" | "sh" | "dash" | "ksh")
+}
+
+fn build_forwarded_program_args(
+    shell_id: &str,
+    program: &str,
+    program_args: &[String],
+) -> Vec<String> {
+    let mut args = vec!["exec \"$@\"".to_string(), "wardian-shell".to_string()];
+
+    if shell_id != "wsl" && is_windows_cmd_shim(program) {
+        args.push("cmd.exe".to_string());
+        args.push("/d".to_string());
+        args.push("/c".to_string());
+    }
+
+    args.push(program.to_string());
+    args.extend(program_args.iter().cloned());
+    args
 }
 
 fn build_program_command_text(shell_id: &str, program: &str, program_args: &[String]) -> String {
@@ -843,9 +870,51 @@ mod tests {
         assert_eq!(spec.executable, "C:/Program Files/Git/bin/bash.exe");
         assert_eq!(spec.args[0], "-lc");
         if cfg!(windows) {
-            assert!(spec.args[1].starts_with("exec cmd.exe /c "));
+            assert_eq!(spec.args[1], "exec \"$@\"");
+            assert_eq!(spec.args[2], "wardian-shell");
+            assert_eq!(spec.args[3], "cmd.exe");
+            assert_eq!(spec.args[4], "/d");
+            assert_eq!(spec.args[5], "/c");
+            assert_eq!(spec.args[6], "claude.cmd");
+            assert_eq!(spec.args[7], "--verbose");
         } else {
             assert!(spec.args[1].starts_with("exec 'claude.cmd'"));
+        }
+    }
+
+    #[test]
+    fn git_bash_preserves_json_arguments_without_flattening() {
+        let available = vec![ShellOption {
+            id: "git-bash".to_string(),
+            label: "Git Bash".to_string(),
+            executable: "C:/Program Files/Git/bin/bash.exe".to_string(),
+            default_args: vec!["-lc".to_string()],
+        }];
+        let args = vec![
+            "--settings".to_string(),
+            "{\"hooks\":{\"PermissionRequest\":[{\"matcher\":\"*\"}]}}".to_string(),
+        ];
+
+        let spec = build_program_launch_with_settings(
+            "claude.exe",
+            &args,
+            &ShellSettings {
+                shell_id: "git-bash".to_string(),
+                custom_executable: None,
+                custom_args: None,
+            },
+            &available,
+        )
+        .expect("build program launch");
+
+        assert_eq!(spec.executable, "C:/Program Files/Git/bin/bash.exe");
+        assert_eq!(spec.args[0], "-lc");
+        if cfg!(windows) {
+            assert_eq!(spec.args[1], "exec \"$@\"");
+            assert_eq!(spec.args[2], "wardian-shell");
+            assert_eq!(spec.args[3], "claude.exe");
+            assert_eq!(spec.args[4], "--settings");
+            assert_eq!(spec.args[5], "{\"hooks\":{\"PermissionRequest\":[{\"matcher\":\"*\"}]}}");
         }
     }
     #[test]
