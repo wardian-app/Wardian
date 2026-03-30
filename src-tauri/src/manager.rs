@@ -183,10 +183,14 @@ pub async fn spawn_agent(
         &config.agent_class,
         Some(&config.session_id),
     )?;
-    let provider_cwd = habitat_root
-        .as_ref()
-        .map(|root| habitat_workspace_cwd(root))
-        .unwrap_or_else(|| cwd.clone());
+    let provider_cwd = if config.provider == "codex" {
+        cwd.clone()
+    } else {
+        habitat_root
+            .as_ref()
+            .map(|root| habitat_workspace_cwd(root))
+            .unwrap_or_else(|| cwd.clone())
+    };
     cmd.cwd(&provider_cwd);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
@@ -201,6 +205,8 @@ pub async fn spawn_agent(
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
+        cmd.arg("--cd");
+        cmd.arg(&provider_cwd);
     }
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
@@ -684,6 +690,73 @@ pub async fn resize_pty(
     Ok(())
 }
 
+fn codex_bootstrap_launch_context(
+    wardian_home: &std::path::Path,
+    workspace_cwd: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before epoch")
+        .as_nanos();
+    let bootstrap_home = wardian_home
+        .join("provider-bootstrap")
+        .join("codex")
+        .join(format!("session-{stamp}"))
+        .join(".codex");
+    (workspace_cwd.to_path_buf(), bootstrap_home)
+}
+
+fn migrate_codex_bootstrap_home(
+    bootstrap_home: &std::path::Path,
+    final_home: &std::path::Path,
+) -> Result<(), String> {
+    if !bootstrap_home.exists() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(final_home).map_err(|e| e.to_string())?;
+
+    let entries = std::fs::read_dir(bootstrap_home).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let source = entry.path();
+        let name = entry.file_name();
+        let target = final_home.join(&name);
+        let name_str = name.to_string_lossy();
+
+        if matches!(name_str.as_ref(), "auth.json" | "config.toml" | "cap_sid") {
+            continue;
+        }
+
+        if name_str == "skills" {
+            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+            let skill_entries = std::fs::read_dir(&source).map_err(|e| e.to_string())?;
+            for skill_entry in skill_entries.flatten() {
+                let skill_source = skill_entry.path();
+                let skill_target = target.join(skill_entry.file_name());
+                if skill_target.exists() || skill_target.symlink_metadata().is_ok() {
+                    continue;
+                }
+                std::fs::rename(&skill_source, &skill_target).map_err(|e| e.to_string())?;
+            }
+            let _ = std::fs::remove_dir_all(&source);
+            continue;
+        }
+
+        if target.exists() || target.symlink_metadata().is_ok() {
+            continue;
+        }
+
+        std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    }
+
+    let _ = std::fs::remove_dir_all(bootstrap_home);
+    if let Some(parent) = bootstrap_home.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+
+    Ok(())
+}
+
 pub async fn run_headless(
     cwd: &std::path::PathBuf,
     prompt: &str,
@@ -693,6 +766,8 @@ pub async fn run_headless(
 ) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider = ProviderFactory::resolve(provider_name)?;
+    let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(session_id))?;
+    let provider_cwd = cwd.clone();
     let (bin, base_args) = provider.get_executable();
     let mut cmd = new_headless_command(&bin);
     for arg in base_args {
@@ -700,7 +775,12 @@ pub async fn run_headless(
     }
     match provider_name {
         "codex" => {
-            cmd.arg("exec")
+            if let Some(root) = habitat_root.as_ref() {
+                cmd.env("CODEX_HOME", habitat_codex_home(root));
+            }
+            cmd.arg("--cd")
+                .arg(&provider_cwd)
+                .arg("exec")
                 .arg("resume")
                 .arg(session_id)
                 .arg("--json")
@@ -729,7 +809,7 @@ pub async fn run_headless(
             }
         }
     }
-    cmd.current_dir(cwd)
+    cmd.current_dir(&provider_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -863,17 +943,34 @@ pub async fn obtain_session_id(
         })
         .unwrap_or("");
     let habitat_root = prepare_provider_habitat(provider_name, cwd, class_name, None)?;
-    let provider_cwd = habitat_root
-        .as_ref()
-        .map(|root| habitat_workspace_cwd(root))
-        .unwrap_or_else(|| cwd.clone());
+    let codex_bootstrap = if provider_name == "codex" {
+        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+        Some(codex_bootstrap_launch_context(&wardian_home, cwd))
+    } else {
+        None
+    };
+    let provider_cwd = if let Some((provider_cwd, _)) = codex_bootstrap.as_ref() {
+        provider_cwd.clone()
+    } else {
+        habitat_root
+            .as_ref()
+            .map(|root| habitat_workspace_cwd(root))
+            .unwrap_or_else(|| cwd.clone())
+    };
     for arg in base_args {
         cmd.arg(arg);
     }
     if provider_name == "codex" {
-        if let Some(root) = habitat_root.as_ref() {
+        if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {
+            let real_codex_home = dirs::home_dir()
+                .ok_or("Could not find user home directory")?
+                .join(".codex");
+            sync_codex_agent_home(&real_codex_home, bootstrap_home, std::path::Path::new(""))?;
+            cmd.env("CODEX_HOME", bootstrap_home);
+        } else if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
+        cmd.arg("--cd").arg(&provider_cwd);
         cmd.arg("exec");
 
         if let Some(config) = config {
@@ -1027,6 +1124,13 @@ pub async fn obtain_session_id(
                     "[WARDIAN-DEBUG] obtain_session_id stderr: {}",
                     stderr_output.trim()
                 ));
+            }
+            if provider_name == "codex" {
+                if let (Some(session_id), Some((_, bootstrap_home))) = (session_id_res.as_ref(), codex_bootstrap.as_ref()) {
+                    if let Some(final_habitat_root) = prepare_provider_habitat(provider_name, cwd, class_name, Some(session_id))? {
+                        migrate_codex_bootstrap_home(bootstrap_home, &habitat_codex_home(&final_habitat_root))?;
+                    }
+                }
             }
             log_debug(&format!("[WARDIAN-DEBUG] Returning session_id: {:?}", session_id_res));
             session_id_res.ok_or_else(|| {
@@ -1552,4 +1656,22 @@ pub async fn kill_all_agents(state: &AppState) {
         }
     }
     state.agent_order.lock().await.clear();
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::codex_bootstrap_launch_context;
+    use std::path::Path;
+
+    #[test]
+    fn codex_bootstrap_launch_context_uses_real_workspace_cwd() {
+        let wardian_home = Path::new("C:/Users/test/.wardian");
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+        let (provider_cwd, bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+
+        assert_eq!(provider_cwd, workspace_cwd);
+        assert!(bootstrap_home.starts_with(wardian_home.join("provider-bootstrap").join("codex")));
+        assert_ne!(bootstrap_home, workspace_cwd);
+    }
 }

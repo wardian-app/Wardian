@@ -39,18 +39,27 @@ pub async fn spawn_agent(
         let cwd = crate::utils::fs::resolve_cwd(&folder, "");
 
         let provider_name = config_override.as_ref().map(|c| c.provider.clone()).unwrap_or_else(|| "claude".to_string());
-        match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
-            Ok(real_sid) => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Intercepted stream-json session ID for {}: {}",
-                    provider_name, real_sid
-                ));
-                // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
-                session_id = Some(real_sid.clone());
-                actual_resume = Some(real_sid);
-            }
-            Err(e) => {
-                return Err(format!("Failed to initialize the provider session: {}", e));
+        if provider_name == "claude" {
+            let fresh_sid = uuid::Uuid::new_v4().to_string();
+            manager::log_debug(&format!(
+                "[WARDIAN] Using explicit Claude session ID in target workspace: {}",
+                fresh_sid
+            ));
+            session_id = Some(fresh_sid);
+        } else {
+            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
+                Ok(real_sid) => {
+                    manager::log_debug(&format!(
+                        "[WARDIAN] Intercepted stream-json session ID for {}: {}",
+                        provider_name, real_sid
+                    ));
+                    // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
+                    session_id = Some(real_sid.clone());
+                    actual_resume = Some(real_sid);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to initialize the provider session: {}", e));
+                }
             }
         }
     }

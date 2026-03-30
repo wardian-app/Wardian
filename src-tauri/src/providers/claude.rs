@@ -103,7 +103,11 @@ impl AgentProvider for ClaudeProvider {
             args.push(model.clone());
         }
 
-        // Only set --name on fresh sessions; skip on resume to avoid conflicts with --resume
+        // Only set fresh-session identity on non-resume launches.
+        if !is_resume && !config.session_id.trim().is_empty() {
+            args.push("--session-id".into());
+            args.push(config.session_id.clone());
+        }
         if !is_resume && !config.session_name.trim().is_empty() {
             args.push("--name".into());
             args.push(config.session_name.clone());
@@ -459,5 +463,17 @@ mod tests {
         let args_resume = p.get_spawn_args(&config, true);
         assert!(!args_resume.contains(&"--name".to_string()));
         assert!(args_resume.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn fresh_spawn_uses_explicit_session_id() {
+        let p = make_provider();
+        let config = AgentConfig {
+            session_id: "019d331a-0500-7592-969f-8f437886f42b".into(),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(args.contains(&"019d331a-0500-7592-969f-8f437886f42b".to_string()));
     }
 }
