@@ -50,6 +50,20 @@ fn resolve_cwd(node_config: &Value, agent_id: &str) -> PathBuf {
 }
 
 /// Executes a command headlessly and returns the result in the mandatory schema.
+fn resolve_command_node_launch<F>(
+    command: &str,
+    resolver: F,
+) -> Result<crate::utils::ShellLaunchSpec, String>
+where
+    F: FnOnce(&str) -> Result<crate::utils::ShellLaunchSpec, String>,
+{
+    if command.trim().is_empty() {
+        Err("Missing command string".to_string())
+    } else {
+        resolver(command)
+    }
+}
+
 async fn run_command_headless(
     executable: &str,
     args: Vec<String>,
@@ -970,10 +984,11 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::sync_scheduled_runs_for_workflow;
+    use super::{resolve_command_node_launch, sync_scheduled_runs_for_workflow};
     use crate::models::{
         ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
     };
+    use crate::utils::ShellLaunchSpec;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -999,6 +1014,41 @@ mod tests {
             }],
             role_mappings: HashMap::from([("analyst".to_string(), "agent-1".to_string())]),
         }
+    }
+
+    #[test]
+    fn resolve_command_node_launch_returns_shell_spec() {
+        let spec = resolve_command_node_launch("echo hi", |_| {
+            Ok(ShellLaunchSpec {
+                executable: "pwsh".to_string(),
+                args: vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "echo hi".to_string(),
+                ],
+            })
+        })
+        .expect("shell spec");
+
+        assert_eq!(spec.executable, "pwsh");
+        assert_eq!(spec.args[2], "echo hi");
+    }
+
+    #[test]
+    fn resolve_command_node_launch_surfaces_shell_resolution_errors() {
+        let err =
+            resolve_command_node_launch("echo hi", |_| Err("No compatible shell".to_string()))
+                .expect_err("shell resolution should fail");
+
+        assert_eq!(err, "No compatible shell");
+    }
+
+    #[test]
+    fn resolve_command_node_launch_rejects_empty_commands() {
+        let err = resolve_command_node_launch("   ", |_| unreachable!("resolver should not run"))
+            .expect_err("empty commands should fail");
+
+        assert_eq!(err, "Missing command string");
     }
 
     #[test]
@@ -1716,37 +1766,33 @@ pub async fn run_workflow(
                         })
                         .unwrap_or(30000);
 
-                    if interpolated_cmd.is_empty() {
-                        node_error = Some("Missing command string".to_string());
-                    } else {
-                        match build_shell_command(&interpolated_cmd) {
-                            Ok(spec) => match run_command_headless(
-                                &spec.executable,
-                                spec.args,
-                                &cwd,
-                                env,
-                                timeout_ms,
-                            )
-                            .await
-                            {
-                                Ok(res) => {
-                                    let exit_code =
-                                        res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
-                                    if exit_code != 0 {
-                                        node_error = Some(format!(
-                                            "Exit code {}: {}",
-                                            exit_code,
-                                            res.get("stderr")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("Unknown error")
-                                        ));
-                                    }
-                                    output_payload = res;
+                    match resolve_command_node_launch(&interpolated_cmd, build_shell_command) {
+                        Ok(spec) => match run_command_headless(
+                            &spec.executable,
+                            spec.args,
+                            &cwd,
+                            env,
+                            timeout_ms,
+                        )
+                        .await
+                        {
+                            Ok(res) => {
+                                let exit_code =
+                                    res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if exit_code != 0 {
+                                    node_error = Some(format!(
+                                        "Exit code {}: {}",
+                                        exit_code,
+                                        res.get("stderr")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Unknown error")
+                                    ));
                                 }
-                                Err(e) => node_error = Some(e),
-                            },
+                                output_payload = res;
+                            }
                             Err(e) => node_error = Some(e),
-                        }
+                        },
+                        Err(e) => node_error = Some(e),
                     }
                 }
                 "script" => {

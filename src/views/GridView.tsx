@@ -55,12 +55,14 @@ export const GridView: React.FC<GridViewProps> = ({
   draggedAgentId,
   dragOverAgentId,
 }) => {
-  const visibleAgents = maximizedAgentId
+  const maximizedAgents = maximizedAgentId
     ? filteredAgents.filter((agent: AgentConfig) => agent.session_id.toString() === maximizedAgentId)
-    : filteredAgents;
+    : [];
+  const hasVisibleMaximizedAgent = maximizedAgents.length > 0;
+  const visibleAgents = hasVisibleMaximizedAgent ? maximizedAgents : filteredAgents;
 
   return (
-    <div className={`flex-1 min-h-full ${maximizedAgentId ? 'relative overflow-hidden' : 'flex gap-2 flex-row flex-wrap content-start pb-[200px]'}`}>
+    <div className={`flex-1 min-h-full ${hasVisibleMaximizedAgent ? 'relative overflow-hidden' : 'flex gap-2 flex-row flex-wrap content-start pb-[200px]'}`}>
       {visibleAgents.map((agent: AgentConfig) => {
         const agentId = agent.session_id.toString();
         const isMaximized = maximizedAgentId === agentId;

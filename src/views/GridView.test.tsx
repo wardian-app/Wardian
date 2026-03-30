@@ -14,10 +14,10 @@ const agents: AgentConfig[] = [
 
 const telemetry: Record<string, AgentTelemetry> = {};
 
-function renderGrid(maximizedAgentId: string | null) {
+function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig[] = agents) {
   return render(
     <GridView
-      filteredAgents={agents}
+      filteredAgents={filteredAgents}
       telemetry={telemetry}
       terminalTitles={{}}
       currentThoughts={{}}
@@ -58,5 +58,15 @@ describe('GridView maximize behavior', () => {
     expect(card?.className).not.toContain('fixed');
     expect(card?.className).not.toContain('h-screen');
     expect(card?.className).not.toContain('w-screen');
+  });
+
+  it('falls back to the filtered grid when the maximized agent is no longer visible', () => {
+    const visibleSubset = agents.filter((agent) => agent.session_id !== 'agent-1');
+    const { container } = renderGrid('agent-1', visibleSubset);
+
+    const root = container.firstElementChild;
+    expect(root?.className).toContain('flex gap-2');
+    expect(root?.className).not.toContain('relative overflow-hidden');
+    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
 });
