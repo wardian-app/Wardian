@@ -585,7 +585,10 @@ fn system_executable(relative_path: &str) -> Option<PathBuf> {
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
     let mut candidate_names = vec![name.to_string()];
+    #[cfg(not(windows))]
+    let candidate_names = vec![name.to_string()];
 
     #[cfg(windows)]
     {

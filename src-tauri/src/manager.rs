@@ -1746,6 +1746,7 @@ pub fn get_agent_class_default_instruction(app: &AppHandle, class_name: &str) ->
 
 pub async fn kill_all_agents(state: &AppState) {
     let mut agents = state.agents.lock().await;
+    #[allow(unused_mut)]
     for (sid, mut agent) in agents.drain() {
         log_debug(&format!("[Wardian] Killing session {}", sid));
         if let Some(mut child) = agent.child_process {
