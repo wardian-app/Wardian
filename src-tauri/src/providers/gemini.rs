@@ -22,7 +22,11 @@ impl AgentProvider for GeminiProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        let exe_name = if cfg!(target_os = "windows") { "gemini.cmd" } else { "gemini" };
+        let exe_name = if cfg!(target_os = "windows") {
+            "gemini.cmd"
+        } else {
+            "gemini"
+        };
 
         // 1. Try bare command in PATH
         if let Some(paths) = std::env::var_os("PATH") {
@@ -41,16 +45,20 @@ impl AgentProvider for GeminiProvider {
                 if npm_gemini.exists() {
                     return (npm_gemini.to_string_lossy().to_string(), vec![]);
                 }
-                
+
                 // Legacy index.js lookup
-                let index_js = appdata.join("npm")
+                let index_js = appdata
+                    .join("npm")
                     .join("node_modules")
                     .join("@google")
                     .join("gemini-cli")
                     .join("dist")
                     .join("index.js");
                 if index_js.exists() {
-                    return ("node".to_string(), vec![index_js.to_string_lossy().to_string()]);
+                    return (
+                        "node".to_string(),
+                        vec![index_js.to_string_lossy().to_string()],
+                    );
                 }
             }
         } else {
@@ -238,7 +246,11 @@ mod tests {
         let config = AgentConfig::default();
         let args = p.get_spawn_args(&config, false);
         // No flags should be added for a default config
-        assert!(args.is_empty(), "Default config should produce no args, got: {:?}", args);
+        assert!(
+            args.is_empty(),
+            "Default config should produce no args, got: {:?}",
+            args
+        );
     }
 
     #[test]
@@ -297,7 +309,10 @@ mod tests {
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--include-directories".to_string()));
         // Should be comma-joined
-        let idx = args.iter().position(|a| a == "--include-directories").unwrap();
+        let idx = args
+            .iter()
+            .position(|a| a == "--include-directories")
+            .unwrap();
         assert_eq!(args[idx + 1], "/sys/dir,/user/dir");
     }
 
@@ -346,7 +361,10 @@ mod tests {
         };
         let args = p.get_spawn_args(&config, false);
         // Each server name gets its own --allowed-mcp-server-names flag
-        let count = args.iter().filter(|a| *a == "--allowed-mcp-server-names").count();
+        let count = args
+            .iter()
+            .filter(|a| *a == "--allowed-mcp-server-names")
+            .count();
         assert_eq!(count, 2);
     }
 
@@ -410,7 +428,7 @@ mod tests {
         let line = r#"{"type":"user","content":"hello"}"#;
         let event = p.parse_output(line).unwrap();
         assert_eq!(event, AgentEvent::UserQuery);
-        
+
         let line_msg = r#"{"type":"message","role":"user","content":"hello"}"#;
         assert_eq!(p.parse_output(line_msg).unwrap(), AgentEvent::UserQuery);
     }
@@ -421,12 +439,20 @@ mod tests {
         for msg_type in &["gemini", "model", "info"] {
             let line = format!(r#"{{"type":"{}","content":"response"}}"#, msg_type);
             let event = p.parse_output(&line).unwrap();
-            assert_eq!(event, AgentEvent::ModelResponse, "Failed for type: {}", msg_type);
+            assert_eq!(
+                event,
+                AgentEvent::ModelResponse,
+                "Failed for type: {}",
+                msg_type
+            );
         }
-        
+
         let line_result = r#"{"type":"result","status":"success"}"#;
-        assert_eq!(p.parse_output(line_result).unwrap(), AgentEvent::TurnCompleted);
-        
+        assert_eq!(
+            p.parse_output(line_result).unwrap(),
+            AgentEvent::TurnCompleted
+        );
+
         let line_gen = r#"{"type":"message","role":"assistant","content":"hello"}"#;
         assert_eq!(p.parse_output(line_gen).unwrap(), AgentEvent::Generating);
     }

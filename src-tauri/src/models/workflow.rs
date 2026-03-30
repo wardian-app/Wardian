@@ -76,4 +76,3 @@ pub struct WorkflowTelemetryEvent {
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
 }
-

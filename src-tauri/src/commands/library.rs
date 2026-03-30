@@ -3,24 +3,27 @@ use std::fs;
 use std::path::Path;
 use tauri::AppHandle;
 
+use crate::manager::log_debug;
 use crate::models::{LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt};
 use crate::utils::fs::get_wardian_home;
-use crate::manager::log_debug;
 
 const LIBRARY_PROMPTS_DIR: &str = "library/prompts";
 const LIBRARY_SKILLS_DIR: &str = "library/skills";
 const LIBRARY_METADATA_FILE: &str = "library/library.json";
 
 #[tauri::command]
-pub async fn get_library_tree(_app: AppHandle, library_type: String) -> Result<LibraryFolder, String> {
+pub async fn get_library_tree(
+    _app: AppHandle,
+    library_type: String,
+) -> Result<LibraryFolder, String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    
+
     let target_dir = if library_type == "skills" {
         wardian_home.join(LIBRARY_SKILLS_DIR)
     } else {
         wardian_home.join(LIBRARY_PROMPTS_DIR)
     };
-    
+
     let metadata_path = wardian_home.join(LIBRARY_METADATA_FILE);
 
     if !target_dir.exists() {
@@ -38,29 +41,54 @@ pub async fn get_library_tree(_app: AppHandle, library_type: String) -> Result<L
         }
     }
 
-    fn build_tree(dir: &Path, base_dir: &Path, metadata_map: &HashMap<String, LibraryItemMetadata>, is_skills: bool) -> LibraryFolder {
+    fn build_tree(
+        dir: &Path,
+        base_dir: &Path,
+        metadata_map: &HashMap<String, LibraryItemMetadata>,
+        is_skills: bool,
+    ) -> LibraryFolder {
         let mut children = Vec::new();
-        let rel_path = dir.strip_prefix(base_dir).unwrap_or(dir).to_string_lossy().replace('\\', "/");
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let rel_path = dir
+            .strip_prefix(base_dir)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                
+
                 if path.is_dir() {
                     // For skills, check if it's an actual skill (e.g. contains SKILL.md)
                     let is_skill_node = is_skills && path.join("SKILL.md").exists();
-                    
+
                     if is_skill_node {
-                        let file_rel_path = path.strip_prefix(base_dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-                        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        let metadata = metadata_map.get(&file_rel_path).cloned().unwrap_or_else(|| LibraryItemMetadata {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            tags: vec![],
-                            is_starred: false,
-                            last_used: None,
-                        });
-                        
+                        let file_rel_path = path
+                            .strip_prefix(base_dir)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        let file_name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let metadata =
+                            metadata_map
+                                .get(&file_rel_path)
+                                .cloned()
+                                .unwrap_or_else(|| LibraryItemMetadata {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    tags: vec![],
+                                    is_starred: false,
+                                    last_used: None,
+                                });
+
                         let content = fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
                         let description = content.lines().next().unwrap_or("").to_string();
 
@@ -76,16 +104,27 @@ pub async fn get_library_tree(_app: AppHandle, library_type: String) -> Result<L
                         children.push(LibraryNode::Folder(folder));
                     }
                 } else if !is_skills && path.extension().is_some_and(|e| e == "md") {
-                    let file_rel_path = path.strip_prefix(base_dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-                    let file_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let file_rel_path = path
+                        .strip_prefix(base_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let file_name = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     let content = fs::read_to_string(&path).unwrap_or_default();
-                    
-                    let metadata = metadata_map.get(&file_rel_path).cloned().unwrap_or_else(|| LibraryItemMetadata {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        tags: vec![],
-                        is_starred: false,
-                        last_used: None,
-                    });
+
+                    let metadata = metadata_map
+                        .get(&file_rel_path)
+                        .cloned()
+                        .unwrap_or_else(|| LibraryItemMetadata {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            tags: vec![],
+                            is_starred: false,
+                            last_used: None,
+                        });
 
                     children.push(LibraryNode::Prompt(LibraryPrompt {
                         path: file_rel_path,
@@ -99,24 +138,39 @@ pub async fn get_library_tree(_app: AppHandle, library_type: String) -> Result<L
 
         LibraryFolder {
             path: rel_path,
-            name: if name.is_empty() { "Root".to_string() } else { name },
+            name: if name.is_empty() {
+                "Root".to_string()
+            } else {
+                name
+            },
             children,
         }
     }
 
-    Ok(build_tree(&target_dir, &target_dir, &metadata_map, library_type == "skills"))
+    Ok(build_tree(
+        &target_dir,
+        &target_dir,
+        &metadata_map,
+        library_type == "skills",
+    ))
 }
 
 #[tauri::command]
-pub async fn save_library_item(_app: AppHandle, library_type: String, path: String, content: String, metadata: LibraryItemMetadata) -> Result<(), String> {
+pub async fn save_library_item(
+    _app: AppHandle,
+    library_type: String,
+    path: String,
+    content: String,
+    metadata: LibraryItemMetadata,
+) -> Result<(), String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    
+
     let base_dir = if library_type == "skills" {
         wardian_home.join(LIBRARY_SKILLS_DIR)
     } else {
         wardian_home.join(LIBRARY_PROMPTS_DIR)
     };
-    
+
     let mut file_path = base_dir.join(&path);
     if library_type == "skills" {
         file_path = file_path.join("SKILL.md");
@@ -149,10 +203,14 @@ pub async fn save_library_item(_app: AppHandle, library_type: String, path: Stri
 }
 
 #[tauri::command]
-pub async fn update_library_metadata(_app: AppHandle, path: String, metadata: LibraryItemMetadata) -> Result<(), String> {
+pub async fn update_library_metadata(
+    _app: AppHandle,
+    path: String,
+    metadata: LibraryItemMetadata,
+) -> Result<(), String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let metadata_path = wardian_home.join(LIBRARY_METADATA_FILE);
-    
+
     let mut metadata_map: HashMap<String, LibraryItemMetadata> = HashMap::new();
     if metadata_path.exists() {
         if let Ok(data) = fs::read_to_string(&metadata_path) {
@@ -172,15 +230,19 @@ pub async fn update_library_metadata(_app: AppHandle, path: String, metadata: Li
 }
 
 #[tauri::command]
-pub async fn open_library_folder(_app: AppHandle, library_type: String, path: Option<String>) -> Result<(), String> {
+pub async fn open_library_folder(
+    _app: AppHandle,
+    library_type: String,
+    path: Option<String>,
+) -> Result<(), String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    
+
     let base_dir = if library_type == "skills" {
         LIBRARY_SKILLS_DIR
     } else {
         LIBRARY_PROMPTS_DIR
     };
-    
+
     let mut target_dir = wardian_home.join(base_dir);
     if let Some(p) = path {
         if !p.is_empty() {
@@ -247,12 +309,20 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 }
 
 #[tauri::command]
-pub async fn deploy_skill(_app: AppHandle, source_path: String, target_type: String, target_id: String) -> Result<(), String> {
+pub async fn deploy_skill(
+    _app: AppHandle,
+    source_path: String,
+    target_type: String,
+    target_id: String,
+) -> Result<(), String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let src_dir = home.join(LIBRARY_SKILLS_DIR).join(&source_path);
 
     if !src_dir.exists() || !src_dir.is_dir() {
-        return Err(format!("Skill source not found or is not a directory: {:?}", src_dir));
+        return Err(format!(
+            "Skill source not found or is not a directory: {:?}",
+            src_dir
+        ));
     }
 
     let target_skills_dir = get_target_skills_dir(&target_type, &target_id)?;
@@ -273,7 +343,12 @@ pub async fn deploy_skill(_app: AppHandle, source_path: String, target_type: Str
 }
 
 #[tauri::command]
-pub async fn remove_deployed_skill(_app: AppHandle, target_type: String, target_id: String, skill_name: String) -> Result<(), String> {
+pub async fn remove_deployed_skill(
+    _app: AppHandle,
+    target_type: String,
+    target_id: String,
+    skill_name: String,
+) -> Result<(), String> {
     let target_skills_dir = get_target_skills_dir(&target_type, &target_id)?;
     let dst_dir = target_skills_dir.join(&skill_name);
 
@@ -285,7 +360,11 @@ pub async fn remove_deployed_skill(_app: AppHandle, target_type: String, target_
 }
 
 #[tauri::command]
-pub async fn list_deployed_skills(_app: AppHandle, target_type: String, target_id: String) -> Result<Vec<String>, String> {
+pub async fn list_deployed_skills(
+    _app: AppHandle,
+    target_type: String,
+    target_id: String,
+) -> Result<Vec<String>, String> {
     let target_skills_dir = get_target_skills_dir(&target_type, &target_id)?;
     let mut skills = Vec::new();
 
@@ -305,12 +384,19 @@ pub async fn list_deployed_skills(_app: AppHandle, target_type: String, target_i
 }
 
 #[tauri::command]
-pub async fn list_skill_deployments(_app: AppHandle, skill_name: String) -> Result<Vec<crate::models::SkillDeployment>, String> {
+pub async fn list_skill_deployments(
+    _app: AppHandle,
+    skill_name: String,
+) -> Result<Vec<crate::models::SkillDeployment>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let mut deployments = Vec::new();
 
     // Check user (global)
-    let user_target = home.join("common").join(".agents").join("skills").join(&skill_name);
+    let user_target = home
+        .join("common")
+        .join(".agents")
+        .join("skills")
+        .join(&skill_name);
     if user_target.exists() && user_target.is_dir() {
         deployments.push(crate::models::SkillDeployment {
             target_type: "user".to_string(),
@@ -326,7 +412,11 @@ pub async fn list_skill_deployments(_app: AppHandle, skill_name: String) -> Resu
                 if let Ok(ty) = entry.file_type() {
                     if ty.is_dir() {
                         let class_name = entry.file_name().to_string_lossy().to_string();
-                        let class_target = entry.path().join(".agents").join("skills").join(&skill_name);
+                        let class_target = entry
+                            .path()
+                            .join(".agents")
+                            .join("skills")
+                            .join(&skill_name);
                         if class_target.exists() && class_target.is_dir() {
                             deployments.push(crate::models::SkillDeployment {
                                 target_type: "class".to_string(),
@@ -347,7 +437,11 @@ pub async fn list_skill_deployments(_app: AppHandle, skill_name: String) -> Resu
                 if let Ok(ty) = entry.file_type() {
                     if ty.is_dir() {
                         let agent_id = entry.file_name().to_string_lossy().to_string();
-                        let agent_target = entry.path().join(".agents").join("skills").join(&skill_name);
+                        let agent_target = entry
+                            .path()
+                            .join(".agents")
+                            .join("skills")
+                            .join(&skill_name);
                         if agent_target.exists() && agent_target.is_dir() {
                             deployments.push(crate::models::SkillDeployment {
                                 target_type: "agent".to_string(),

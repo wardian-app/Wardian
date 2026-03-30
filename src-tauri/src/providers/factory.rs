@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use crate::models::provider::AgentProvider;
-use crate::providers::gemini::GeminiProvider;
 use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
+use crate::providers::gemini::GeminiProvider;
+use std::sync::Arc;
 
 /// Resolves the correct `AgentProvider` implementation based on the provider name
 /// stored in `AgentConfig`.

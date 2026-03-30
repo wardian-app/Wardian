@@ -33,9 +33,12 @@ pub async fn get_explorer_root(
 pub async fn get_directory_tree(path: String) -> Result<Vec<FileNode>, String> {
     let mut nodes = Vec::new();
     let dir_path = Path::new(&path);
-    
+
     if !dir_path.exists() || !dir_path.is_dir() {
-        return Err(format!("Path does not exist or is not a directory: {}", path));
+        return Err(format!(
+            "Path does not exist or is not a directory: {}",
+            path
+        ));
     }
 
     let entries = fs::read_dir(dir_path).map_err(|e| e.to_string())?;
@@ -44,8 +47,11 @@ pub async fn get_directory_tree(path: String) -> Result<Vec<FileNode>, String> {
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
         let is_dir = metadata.is_dir();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let extension = entry.path().extension().map(|s| s.to_string_lossy().into_owned());
-        
+        let extension = entry
+            .path()
+            .extension()
+            .map(|s| s.to_string_lossy().into_owned());
+
         nodes.push(FileNode {
             name,
             path: entry.path().to_string_lossy().into_owned(),
@@ -53,11 +59,9 @@ pub async fn get_directory_tree(path: String) -> Result<Vec<FileNode>, String> {
             extension,
         });
     }
-    
+
     // Sort directories first, then alphabetically
-    nodes.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
-    });
+    nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
 
     Ok(nodes)
 }

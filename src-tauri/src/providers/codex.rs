@@ -126,7 +126,11 @@ impl AgentProvider for CodexProvider {
 
         if is_resume {
             args.push("resume".into());
-            if let Some(resume_id) = config.resume_session.as_ref().filter(|s| !s.trim().is_empty()) {
+            if let Some(resume_id) = config
+                .resume_session
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+            {
                 args.push(resume_id.clone());
             }
         }
@@ -176,7 +180,10 @@ impl AgentProvider for CodexProvider {
                 let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match payload_type {
                     "function_call" => {
-                        let arguments = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+                        let arguments = payload
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         Self::parse_action_required_from_arguments(arguments)
                             .map(|message| AgentEvent::ActionRequired { message })
                             .or(Some(AgentEvent::Unknown))
@@ -352,7 +359,8 @@ mod tests {
     #[test]
     fn parse_output_function_call_output_resumes_processing() {
         let p = make_provider();
-        let line = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"abc"}}"#;
+        let line =
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"abc"}}"#;
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
     }
 

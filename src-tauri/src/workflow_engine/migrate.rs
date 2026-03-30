@@ -101,7 +101,10 @@ pub fn migrate_workflows_if_needed() {
             let path = dir.join(format!("{}.json", wf.id));
             if let Ok(content) = serde_json::to_string_pretty(&wf) {
                 let _ = std::fs::write(&path, content);
-                log_debug(&format!("[Wardian] Migrated workflow '{}' with role_mappings", wf.name));
+                log_debug(&format!(
+                    "[Wardian] Migrated workflow '{}' with role_mappings",
+                    wf.name
+                ));
             }
         }
     }

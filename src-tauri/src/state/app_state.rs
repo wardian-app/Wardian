@@ -1,7 +1,7 @@
+use crate::state::active_agent::ActiveAgent;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
-use crate::state::active_agent::ActiveAgent;
 
 pub struct AppState {
     // Map of session_id to ActiveAgent
@@ -53,4 +53,3 @@ mod tests {
         drop(state);
     }
 }
-

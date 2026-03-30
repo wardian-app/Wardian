@@ -1,21 +1,31 @@
-use tauri::{AppHandle, Manager};
-use std::process::Command;
 use crate::manager::log_debug;
+use std::process::Command;
+use tauri::{AppHandle, Manager};
 
 #[tauri::command]
 pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
     log_debug("[Wardian] Attempting to run Gemini CLI skill patch");
-    
-    let resource_dir = app.path()
+
+    let resource_dir = app
+        .path()
         .resource_dir()
         .map_err(|e| format!("Failed to resolve resource directory: {}", e))?;
 
     // Try a few possible locations based on Tauri resource bundling behavior and dev mode
     let possible_paths = vec![
-        resource_dir.join("_up_").join("scripts").join("gemini-patch-skills.cjs"), // Bundled via "../scripts/*"
-        resource_dir.join("scripts").join("gemini-patch-skills.cjs"),              // If it was moved
-        std::env::current_dir().unwrap_or_default().join("scripts").join("gemini-patch-skills.cjs"), // Dev mode fallback from project root
-        std::env::current_dir().unwrap_or_default().join("../scripts").join("gemini-patch-skills.cjs"), // Dev mode fallback from src-tauri
+        resource_dir
+            .join("_up_")
+            .join("scripts")
+            .join("gemini-patch-skills.cjs"), // Bundled via "../scripts/*"
+        resource_dir.join("scripts").join("gemini-patch-skills.cjs"), // If it was moved
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("scripts")
+            .join("gemini-patch-skills.cjs"), // Dev mode fallback from project root
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("../scripts")
+            .join("gemini-patch-skills.cjs"), // Dev mode fallback from src-tauri
     ];
 
     let mut found_path = None;
@@ -28,10 +38,18 @@ pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
 
     let resource_path = match found_path {
         Some(p) => p,
-        None => return Err(format!("Patch script not found in any expected location. Base resource dir was: {:?}", resource_dir)),
+        None => {
+            return Err(format!(
+                "Patch script not found in any expected location. Base resource dir was: {:?}",
+                resource_dir
+            ))
+        }
     };
 
-    log_debug(&format!("[Wardian] Executing node script: {:?}", resource_path));
+    log_debug(&format!(
+        "[Wardian] Executing node script: {:?}",
+        resource_path
+    ));
 
     let output = Command::new("node")
         .arg(&resource_path)
@@ -46,6 +64,9 @@ pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
         Ok(stdout)
     } else {
         log_debug(&format!("[Wardian] Patch failed. Stderr: {}", stderr));
-        Err(format!("Script exited with status: {}. Stderr: {}", output.status, stderr))
+        Err(format!(
+            "Script exited with status: {}. Stderr: {}",
+            output.status, stderr
+        ))
     }
 }

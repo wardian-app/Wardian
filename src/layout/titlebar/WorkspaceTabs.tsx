@@ -6,10 +6,10 @@ const VIEW_TABS: { label: string; mode: ViewMode }[] = [
   { label: "Grid", mode: "grid" },
   { label: "Dashboard", mode: "dashboard" },
   { label: "Queue", mode: "queue" },
-  { label: "Library", mode: "library" },
-  { label: "Workflows", mode: "workflow-builder" },
   { label: "Graph", mode: "graph" },
   { label: "Garden", mode: "garden" },
+  { label: "Library", mode: "library" },
+  { label: "Workflows", mode: "workflow-builder" },
 ];
 
 interface WorkspaceTabsProps {

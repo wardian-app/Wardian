@@ -1,7 +1,7 @@
-pub mod gemini;
-pub mod factory;
 pub mod claude;
 pub mod codex;
-pub use gemini::GeminiProvider;
+pub mod factory;
+pub mod gemini;
 pub use codex::CodexProvider;
 pub use factory::ProviderFactory;
+pub use gemini::GeminiProvider;

@@ -1,7 +1,7 @@
-use crate::models::{WorkflowDefinition, ScheduledRun};
+use crate::models::{ScheduledRun, WorkflowDefinition};
 use crate::workflow_engine;
-use tauri::AppHandle;
 use serde_json::Value;
+use tauri::AppHandle;
 
 #[tauri::command]
 pub async fn list_workflows() -> Result<Vec<WorkflowDefinition>, String> {
@@ -19,7 +19,11 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn run_workflow(app: AppHandle, id: String, payload: Option<Value>) -> Result<(), String> {
+pub async fn run_workflow(
+    app: AppHandle,
+    id: String,
+    payload: Option<Value>,
+) -> Result<(), String> {
     workflow_engine::run_workflow(app, id, payload).await
 }
 
@@ -96,4 +100,3 @@ pub fn toggle_scheduled_run(run_id: String) -> Result<(), String> {
     let _ = workflow_engine::toggle_scheduled_run_state(&run_id)?;
     Ok(())
 }
-

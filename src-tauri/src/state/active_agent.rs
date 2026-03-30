@@ -1,12 +1,11 @@
 use crate::models::AgentConfig;
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub struct ActiveAgent {
     pub config: AgentConfig,
     pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
-    pub pty_master:
-        Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
+    pub pty_master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     pub stdin_tx: Option<tokio::sync::mpsc::Sender<String>>,
     /// Drain-on-read output buffer. The reader thread pushes PTY output here;
     /// the frontend polls via `read_agent_pty` which takes and clears it.
@@ -19,4 +18,3 @@ pub struct ActiveAgent {
     #[cfg(windows)]
     pub job_object: Option<win32job::Job>,
 }
-
