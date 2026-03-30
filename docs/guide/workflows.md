@@ -1,36 +1,41 @@
-# Visual Workflows
+# Workflow View
 
-Wardian includes a deterministic, event-driven execution engine that allows you to automate complex multi-agent sequences through a visual node-based canvas.
+The Workflow view is Wardian's canvas for building and testing automations.
 
-## 🧱 Core Concepts
+Use this page as a quick manual for the view itself. For the full workflow reference, start at [Workflows](../workflows/index.md).
 
-### 1. The Canvas
-The Workflow view provides a grid-based workspace where you can drag and drop functional "Nodes" and connect them with "Edges" to define the flow of execution.
+## What You Can Do Here
 
-### 2. Node Types
-- **Agent Node**: Injects a prompt into a live agent session or runs a headless command.
-- **Logic Node**: Branches the flow based on a condition (e.g., "If the test passed, continue").
-- **Loop Node**: Repeats a sequence of actions a specific number of times or until a condition is met.
-- **Trigger Node**: The entry point for the workflow (e.g., a Cron schedule or File Watcher).
+- open an existing workflow
+- create a new workflow
+- add nodes from the block library
+- wire nodes together on the canvas
+- edit node settings
+- save changes
+- launch the workflow according to its trigger type
 
-### 3. Execution (The Pulse Model)
-Wardian uses a unique "Pulse" model for execution. A node only triggers when it has received an unconsumed pulse from all of its upstream dependencies. This allows for complex cycles and loops that are impossible in traditional DAG engines.
+## Main Areas
 
-## 🚀 Creating a Workflow
+- **Top action bar**: select, save, reset, duplicate, delete, or run the active workflow
+- **Canvas**: place and connect nodes
+- **Block Library**: add new blocks to the workflow
+- **Node Settings drawer**: edit the selected node
+- **Variable Assistant**: inspect upstream values and interpolation paths
 
-1. Click **WORKFLOWS** in the top bar.
-2. Drag nodes from the **Workflow Library** sidebar onto the canvas.
-3. Connect the output port of one node to the input port of another.
-4. **Configure Node**: Click a node to open its settings (e.g., selecting the target agent or writing the prompt).
-5. **Save & Run**: Click the **Run** button in the top header to execute the sequence manually.
+## Running From This View
 
-## 🕰️ Automation & Triggers
+The **Run Workflow** button saves the current canvas first, then launches based on the workflow's trigger:
 
-You can automate your workflows using built-in triggers:
-- **Cron**: Schedule workflows to run at specific times (e.g., `0 0 * * *` for every midnight).
-- **File Watcher**: Trigger a workflow whenever a file in your project changes (perfect for auto-testing).
+- manual workflows run immediately
+- scheduled workflows create scheduled task instances
+- file-watcher or webhook-style workflows activate as live listeners
 
-Scheduled tasks now appear in the workflow sidebar as interactive cards. Click a scheduled task card to pause or resume it instantly. Use the details affordance on the right side of the card to inspect the schedule, run it immediately, open the workflow in the builder, or delete the schedule.
+If the workflow needs agent assignment or manual input parameters, Wardian opens the run modal before launching.
 
-## 📊 Monitoring
-During execution, nodes will change color to indicate their status (Processing, Success, or Error). You can monitor the real-time registry values to see the data being passed between nodes.
+## Where to Learn More
+
+- [Workflows](../workflows/index.md)
+- [Building Workflows](../workflows/building-workflows.md)
+- [Triggers](../workflows/triggers.md)
+- [Scheduled Runs](../workflows/scheduled-runs.md)
+- [Node Reference](../workflows/node-reference.md)

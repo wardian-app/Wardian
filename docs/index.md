@@ -20,6 +20,7 @@ Wardian provides a professional-grade interface for managing, monitoring, and au
 Whether you are a user looking to manage your daily agent operations or a developer looking to extend the ecosystem, we have you covered:
 
 - **[User Guide](./guide/getting-started.md)**: Install Wardian, spawn your first agent, and learn the UI.
+- **[Workflows](./workflows/index.md)**: Learn how to build, launch, schedule, assign, and troubleshoot workflows.
 - **[Developer Docs](./developer/architecture.md)**: Explore the Rust backend, PTY lifecycle, and state management.
 - **[Provider Runtime Notes](./developer/provider-runtimes.md)**: Understand the Gemini, Claude, and Codex runtime differences Wardian has to manage.
 - **[Agent Roles](./agents/roles.md)**: Understand the specialized missions of Architect, Coder, and more.
