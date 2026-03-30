@@ -390,21 +390,6 @@
 .xterm-cursor-layer {
   display: none !important;
 }
-/* Maximized Mode Utility */
-.maximized-mode {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: 100;
-  background: var(--color-wardian-bg);
-}
-
-.maximized-mode .terminal-container {
-  height: calc(100vh - 40px);
-}
-
 /* Inline Edit Style */
 .inline-edit-input {
   background: transparent;

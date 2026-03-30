@@ -27,7 +27,9 @@ impl ClaudeProvider {
             return true;
         };
 
-        !items.iter().any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+        !items
+            .iter()
+            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
     }
 
     fn assistant_event(parsed: &serde_json::Value) -> AgentEvent {
@@ -51,27 +53,64 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        let exe_name = if cfg!(target_os = "windows") { "claude.cmd" } else { "claude" };
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(paths) = std::env::var_os("PATH") {
+                let path_exts = std::env::var("PATHEXT")
+                    .ok()
+                    .map(|value| {
+                        value
+                            .split(';')
+                            .filter_map(|segment| {
+                                let trimmed = segment.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(trimmed.to_ascii_lowercase())
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|exts| !exts.is_empty())
+                    .unwrap_or_else(|| {
+                        vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()]
+                    });
 
-        // 1. Try bare command in PATH
-        if let Some(paths) = std::env::var_os("PATH") {
-            for path in std::env::split_paths(&paths) {
-                let full_path = path.join(exe_name);
-                if full_path.exists() {
-                    return (exe_name.to_string(), vec![]);
+                for path in std::env::split_paths(&paths) {
+                    let direct = path.join("claude");
+                    if direct.exists() {
+                        return (direct.to_string_lossy().to_string(), vec![]);
+                    }
+                    for ext in &path_exts {
+                        let candidate = path.join(format!("claude{ext}"));
+                        if candidate.exists() {
+                            return (candidate.to_string_lossy().to_string(), vec![]);
+                        }
+                    }
                 }
             }
-        }
 
-        // 2. Robust Fallback
-        if cfg!(target_os = "windows") {
             if let Some(appdata) = dirs::data_dir() {
                 let npm_claude = appdata.join("npm").join("claude.cmd");
                 if npm_claude.exists() {
                     return (npm_claude.to_string_lossy().to_string(), vec![]);
                 }
             }
-        } else {
+
+            ("claude".to_string(), vec![])
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(paths) = std::env::var_os("PATH") {
+                for path in std::env::split_paths(&paths) {
+                    let full_path = path.join("claude");
+                    if full_path.exists() {
+                        ("claude".to_string(), vec![])
+                    }
+                }
+            }
+
             let home = dirs::home_dir().unwrap_or_default();
             let fallbacks = vec![
                 home.join(".npm-global/bin/claude"),
@@ -83,10 +122,9 @@ impl AgentProvider for ClaudeProvider {
                     return (path.to_string_lossy().to_string(), vec![]);
                 }
             }
-        }
 
-        // 3. Ultimate Fallback
-        (exe_name.to_string(), vec![])
+            ("claude".to_string(), vec![])
+        }
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
@@ -213,7 +251,10 @@ impl AgentProvider for ClaudeProvider {
                             .get("timestamp")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
-                        Some(AgentEvent::Init { session_id, timestamp })
+                        Some(AgentEvent::Init {
+                            session_id,
+                            timestamp,
+                        })
                     }
                     // Claude Code emits this when a tool call needs explicit permission
                     "permission_request" => {
@@ -310,7 +351,9 @@ mod tests {
         let event = p.parse_output(line).unwrap();
         assert_eq!(
             event,
-            AgentEvent::ActionRequired { message: "bash".into() }
+            AgentEvent::ActionRequired {
+                message: "bash".into()
+            }
         );
     }
 

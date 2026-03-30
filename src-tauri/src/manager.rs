@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub use crate::utils::fs::*;
 pub use crate::utils::logging::log_debug;
 pub use crate::utils::process::new_headless_command;
+pub use crate::utils::shell::build_program_launch;
 
 fn set_agent_status(
     app: &AppHandle,
@@ -167,11 +168,7 @@ pub async fn spawn_agent(
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let (bin, base_args) = provider.get_executable();
-    let mut cmd = CommandBuilder::new(bin);
-    for arg in base_args {
-        cmd.arg(arg);
-    }
+    let (bin, mut provider_args) = provider.get_executable();
     let claude_hook = if config.provider == "claude" {
         Some(ensure_claude_permission_hook(&config.session_id)?)
     } else {
@@ -184,43 +181,57 @@ pub async fn spawn_agent(
         Some(&config.session_id),
     )?;
     let provider_cwd = if config.provider == "codex" {
-        cwd.clone()
+        cwd.to_path_buf()
     } else {
         habitat_root
             .as_ref()
             .map(|root| habitat_workspace_cwd(root))
-            .unwrap_or_else(|| cwd.clone())
+            .unwrap_or_else(|| cwd.to_path_buf())
     };
+
+    if config.provider == "claude" {
+        if let Some(hook) = claude_hook.as_ref() {
+            provider_args.push("--settings".to_string());
+            provider_args.push(hook.settings_arg.clone());
+        }
+    } else if config.provider == "codex" {
+        provider_args.push("--cd".to_string());
+        provider_args.push(provider_cwd.to_string_lossy().to_string());
+    }
+
+    let is_resume = config
+        .resume_session
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    let spawn_args = provider.get_spawn_args(&config, is_resume);
+    provider_args.extend(spawn_args);
+
+    let launch_spec = build_program_launch(&bin, &provider_args)?;
+    let mut cmd = CommandBuilder::new(&launch_spec.executable);
+    for arg in launch_spec.args {
+        cmd.arg(arg);
+    }
     cmd.cwd(&provider_cwd);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
     // class/common/agent instruction files are loaded natively.
     if config.provider == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
-        if let Some(hook) = claude_hook.as_ref() {
-            cmd.arg("--settings");
-            cmd.arg(&hook.settings_arg);
-        }
     } else if config.provider == "codex" {
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
-        cmd.arg("--cd");
-        cmd.arg(&provider_cwd);
     }
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
 
-    let is_resume = config.resume_session.as_deref().is_some_and(|s| !s.is_empty());
-    let spawn_args = provider.get_spawn_args(&config, is_resume);
-    for arg in &spawn_args {
-        cmd.arg(arg);
-    }
-
     let resume_id = config.resume_session.as_deref().unwrap_or("");
     log_debug(&format!(
         "[Wardian] Spawning {} agent. Session: {}, Resume ID: {}, Restored: {}",
-        provider.name(), config.session_id, resume_id, is_restored
+        provider.name(),
+        config.session_id,
+        resume_id,
+        is_restored
     ));
 
     let child = pair
@@ -279,7 +290,7 @@ pub async fn spawn_agent(
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
     let query_count_clone = query_count.clone();
     let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(Some(
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     )));
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
@@ -378,7 +389,8 @@ pub async fn spawn_agent(
                 let path = {
                     let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
                     if lock.is_none() {
-                        *lock = codex_session_file_path(&watcher_session, wardian_agent_dir.as_deref());
+                        *lock =
+                            codex_session_file_path(&watcher_session, wardian_agent_dir.as_deref());
                     }
                     lock.clone()
                 };
@@ -403,7 +415,9 @@ pub async fn spawn_agent(
                                     break;
                                 }
                                 offset += read as u64;
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(line.trim())
+                                {
                                     let raw_line = parsed.to_string();
                                     if let Some(event) = watcher_provider.parse_output(&raw_line) {
                                         apply_agent_event(
@@ -499,11 +513,10 @@ pub async fn spawn_agent(
                                                         line.trim(),
                                                     )
                                                 {
-                                                    let is_tool_result = parsed
-                                                        .get("type")
-                                                        .and_then(|v| v.as_str())
-                                                        == Some("user")
-                                                        && !claude_is_real_user_query(&parsed);
+                                                    let is_tool_result =
+                                                        parsed.get("type").and_then(|v| v.as_str())
+                                                            == Some("user")
+                                                            && !claude_is_real_user_query(&parsed);
                                                     if is_tool_result {
                                                         *waiting = false;
                                                         apply_agent_status_event(
@@ -594,7 +607,9 @@ pub async fn spawn_agent(
                                     break;
                                 }
                                 offset += read as u64;
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(line.trim())
+                                {
                                     if let Ok(mut waiting) = hook_waiting_for_permission.lock() {
                                         *waiting = true;
                                     }
@@ -758,7 +773,7 @@ fn migrate_codex_bootstrap_home(
 }
 
 pub async fn run_headless(
-    cwd: &std::path::PathBuf,
+    cwd: &std::path::Path,
     prompt: &str,
     session_id: &str,
     output_format: &str,
@@ -767,52 +782,64 @@ pub async fn run_headless(
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider = ProviderFactory::resolve(provider_name)?;
     let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(session_id))?;
-    let provider_cwd = cwd.clone();
-    let (bin, base_args) = provider.get_executable();
-    let mut cmd = new_headless_command(&bin);
-    for arg in base_args {
-        cmd.arg(arg);
-    }
+    let provider_cwd = cwd.to_path_buf();
+    let (bin, mut provider_args) = provider.get_executable();
+    let claude_hook = if provider_name == "claude" {
+        ensure_claude_permission_hook(session_id).ok()
+    } else {
+        None
+    };
     match provider_name {
         "codex" => {
-            if let Some(root) = habitat_root.as_ref() {
-                cmd.env("CODEX_HOME", habitat_codex_home(root));
-            }
-            cmd.arg("--cd")
-                .arg(&provider_cwd)
-                .arg("exec")
-                .arg("resume")
-                .arg(session_id)
-                .arg("--json")
-                .arg(prompt);
+            provider_args.push("--cd".to_string());
+            provider_args.push(provider_cwd.to_string_lossy().to_string());
+            provider_args.push("exec".to_string());
+            provider_args.push("resume".to_string());
+            provider_args.push(session_id.to_string());
+            provider_args.push("--json".to_string());
+            provider_args.push(prompt.to_string());
         }
         "claude" => {
-            cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
-            if let Ok(hook) = ensure_claude_permission_hook(session_id) {
-                cmd.arg("--settings").arg(hook.settings_arg);
+            if let Some(hook) = claude_hook.as_ref() {
+                provider_args.push("--settings".to_string());
+                provider_args.push(hook.settings_arg.clone());
             }
-            cmd.arg("--print")
-                .arg("--output-format")
-                .arg(output_format);
+            provider_args.push("--print".to_string());
+            provider_args.push("--output-format".to_string());
+            provider_args.push(output_format.to_string());
             if !session_id.is_empty() {
-                cmd.arg("--resume").arg(session_id);
+                provider_args.push("--resume".to_string());
+                provider_args.push(session_id.to_string());
             }
-            cmd.arg(prompt);
+            provider_args.push(prompt.to_string());
         }
         _ => {
-            cmd.arg("-p")
-                .arg(prompt)
-                .arg("--output-format")
-                .arg(output_format);
+            provider_args.push("-p".to_string());
+            provider_args.push(prompt.to_string());
+            provider_args.push("--output-format".to_string());
+            provider_args.push(output_format.to_string());
             if !session_id.is_empty() {
-                cmd.arg("--resume").arg(session_id);
+                provider_args.push("--resume".to_string());
+                provider_args.push(session_id.to_string());
             }
         }
+    }
+
+    let launch_spec = build_program_launch(&bin, &provider_args)?;
+    let mut cmd = new_headless_command(&launch_spec.executable);
+    for arg in launch_spec.args {
+        cmd.arg(arg);
+    }
+    if provider_name == "codex" {
+        if let Some(root) = habitat_root.as_ref() {
+            cmd.env("CODEX_HOME", habitat_codex_home(root));
+        }
+    } else if provider_name == "claude" {
+        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
     }
     cmd.current_dir(&provider_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-
 
     log_debug(&format!(
         "[Wardian] run_headless: provider={}, session_id={}, cwd={}, prompt_len={}, output_format={}",
@@ -834,7 +861,9 @@ pub async fn run_headless(
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
                 while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     out.push_str(&line);
                     line.clear();
                 }
@@ -851,7 +880,9 @@ pub async fn run_headless(
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
                 while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     err.push_str(&line);
                     line.clear();
                 }
@@ -926,20 +957,20 @@ pub async fn run_headless(
 }
 
 pub async fn obtain_session_id(
-    cwd: &std::path::PathBuf,
+    cwd: &std::path::Path,
     agent_class: Option<&str>,
     config: Option<&AgentConfig>,
 ) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
-    let (bin, base_args) = provider.get_executable();
-    let mut cmd = new_headless_command(&bin);
+    let (bin, mut provider_args) = provider.get_executable();
     let class_name = agent_class
         .filter(|name| !name.trim().is_empty())
         .or_else(|| {
-            config
-                .and_then(|cfg| (!cfg.agent_class.trim().is_empty()).then_some(cfg.agent_class.as_str()))
+            config.and_then(|cfg| {
+                (!cfg.agent_class.trim().is_empty()).then_some(cfg.agent_class.as_str())
+            })
         })
         .unwrap_or("");
     let habitat_root = prepare_provider_habitat(provider_name, cwd, class_name, None)?;
@@ -955,49 +986,42 @@ pub async fn obtain_session_id(
         habitat_root
             .as_ref()
             .map(|root| habitat_workspace_cwd(root))
-            .unwrap_or_else(|| cwd.clone())
+            .unwrap_or_else(|| cwd.to_path_buf())
     };
-    for arg in base_args {
-        cmd.arg(arg);
-    }
+
     if provider_name == "codex" {
-        if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {
-            let real_codex_home = dirs::home_dir()
-                .ok_or("Could not find user home directory")?
-                .join(".codex");
-            sync_codex_agent_home(&real_codex_home, bootstrap_home, std::path::Path::new(""))?;
-            cmd.env("CODEX_HOME", bootstrap_home);
-        } else if let Some(root) = habitat_root.as_ref() {
-            cmd.env("CODEX_HOME", habitat_codex_home(root));
-        }
-        cmd.arg("--cd").arg(&provider_cwd);
-        cmd.arg("exec");
+        provider_args.push("--cd".to_string());
+        provider_args.push(provider_cwd.to_string_lossy().to_string());
+        provider_args.push("exec".to_string());
 
         if let Some(config) = config {
             if let Some(ref model) = config.model {
-                cmd.arg("--model").arg(model);
+                provider_args.push("--model".to_string());
+                provider_args.push(model.clone());
             }
             if let Some(ref profile) = config.codex_profile {
                 if !profile.trim().is_empty() {
-                    cmd.arg("--profile").arg(profile);
+                    provider_args.push("--profile".to_string());
+                    provider_args.push(profile.clone());
                 }
             }
             if let Some(ref sandbox_mode) = config.codex_sandbox_mode {
                 if !sandbox_mode.trim().is_empty() {
-                    cmd.arg("--sandbox").arg(sandbox_mode);
+                    provider_args.push("--sandbox".to_string());
+                    provider_args.push(sandbox_mode.clone());
                 }
             }
             if config.codex_full_auto.unwrap_or(false) {
-                cmd.arg("--full-auto");
+                provider_args.push("--full-auto".to_string());
             }
             if config.codex_search.unwrap_or(false) {
-                cmd.arg("--search");
+                provider_args.push("--search".to_string());
             }
             if config.codex_skip_git_repo_check.unwrap_or(true) {
-                cmd.arg("--skip-git-repo-check");
+                provider_args.push("--skip-git-repo-check".to_string());
             }
             if config.codex_ephemeral.unwrap_or(false) {
-                cmd.arg("--ephemeral");
+                provider_args.push("--ephemeral".to_string());
             }
 
             let mut final_includes = config
@@ -1012,49 +1036,72 @@ pub async fn obtain_session_id(
                 }
             }
             for dir in final_includes {
-                cmd.arg("--add-dir").arg(dir);
+                provider_args.push("--add-dir".to_string());
+                provider_args.push(dir);
             }
 
             if let Some(ref custom) = config.custom_args {
                 if let Some(parsed) = shlex::split(custom) {
-                    for arg in parsed {
-                        cmd.arg(arg);
-                    }
+                    provider_args.extend(parsed);
                 }
             }
         }
 
-        cmd.arg("--json")
-            .arg("Introduce yourself")
-            .current_dir(&provider_cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        provider_args.push("--json".to_string());
+        provider_args.push("Introduce yourself".to_string());
     } else if provider_name == "claude" {
-        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1")
-            .arg("--print")
-            .arg("--verbose")
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("Introduce yourself")
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        provider_args.push("--print".to_string());
+        provider_args.push("--verbose".to_string());
+        provider_args.push("--output-format".to_string());
+        provider_args.push("stream-json".to_string());
+        provider_args.push("Introduce yourself".to_string());
     } else {
-        cmd.arg("-p")
-            .arg("Introduce yourself")
-            .arg("-o")
-            .arg("stream-json")
-            .current_dir(&provider_cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        provider_args.push("-p".to_string());
+        provider_args.push("Introduce yourself".to_string());
+        provider_args.push("-o".to_string());
+        provider_args.push("stream-json".to_string());
     }
+
+    let launch_spec = build_program_launch(&bin, &provider_args)?;
+    let mut cmd = new_headless_command(&launch_spec.executable);
+    for arg in launch_spec.args {
+        cmd.arg(arg);
+    }
+
+    if provider_name == "codex" {
+        if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {
+            let real_codex_home = dirs::home_dir()
+                .ok_or("Could not find user home directory")?
+                .join(".codex");
+            sync_codex_agent_home(&real_codex_home, bootstrap_home, std::path::Path::new(""))?;
+            cmd.env("CODEX_HOME", bootstrap_home);
+        } else if let Some(root) = habitat_root.as_ref() {
+            cmd.env("CODEX_HOME", habitat_codex_home(root));
+        }
+    } else if provider_name == "claude" {
+        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+        cmd.stdin(std::process::Stdio::null());
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
+
+    let command_cwd = if provider_name == "claude" {
+        cwd.to_path_buf()
+    } else {
+        provider_cwd.clone()
+    };
+
+    cmd.current_dir(&command_cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
 
-    log_debug(&format!("[WARDIAN-DEBUG] Running obtain_session_id for provider {}", provider_name));
+    log_debug(&format!(
+        "[WARDIAN-DEBUG] Running obtain_session_id for provider {}",
+        provider_name
+    ));
     match cmd.spawn() {
         Ok(mut child) => {
             log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
@@ -1077,14 +1124,21 @@ pub async fn obtain_session_id(
                             let json_part = &trimmed[start..];
                             if let Some(evt) = provider.parse_output(json_part) {
                                 match evt {
-                                    AgentEvent::Init { session_id: sid, .. } if !sid.is_empty() => {
-                                        log_debug(&format!("[WARDIAN-DEBUG] Found session_id: {}", sid));
+                                    AgentEvent::Init {
+                                        session_id: sid, ..
+                                    } if !sid.is_empty() => {
+                                        log_debug(&format!(
+                                            "[WARDIAN-DEBUG] Found session_id: {}",
+                                            sid
+                                        ));
                                         session_id = Some(sid);
                                     }
                                     // ModelResponse means the prompt completed and the session
                                     // has been persisted to disk — safe to stop reading.
                                     AgentEvent::ModelResponse => {
-                                        log_debug("[WARDIAN-DEBUG] Prompt complete, session saved.");
+                                        log_debug(
+                                            "[WARDIAN-DEBUG] Prompt complete, session saved.",
+                                        );
                                         break;
                                     }
                                     _ => {}
@@ -1098,8 +1152,14 @@ pub async fn obtain_session_id(
             };
 
             let timed_out = match tokio::time::timeout(timeout, read_future).await {
-                Ok(sid) => { session_id_res = sid; false }
-                Err(_) => { log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id."); true }
+                Ok(sid) => {
+                    session_id_res = sid;
+                    false
+                }
+                Err(_) => {
+                    log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id.");
+                    true
+                }
             };
 
             // Only force-kill if we timed out; otherwise let the process exit naturally
@@ -1126,13 +1186,23 @@ pub async fn obtain_session_id(
                 ));
             }
             if provider_name == "codex" {
-                if let (Some(session_id), Some((_, bootstrap_home))) = (session_id_res.as_ref(), codex_bootstrap.as_ref()) {
-                    if let Some(final_habitat_root) = prepare_provider_habitat(provider_name, cwd, class_name, Some(session_id))? {
-                        migrate_codex_bootstrap_home(bootstrap_home, &habitat_codex_home(&final_habitat_root))?;
+                if let (Some(session_id), Some((_, bootstrap_home))) =
+                    (session_id_res.as_ref(), codex_bootstrap.as_ref())
+                {
+                    if let Some(final_habitat_root) =
+                        prepare_provider_habitat(provider_name, cwd, class_name, Some(session_id))?
+                    {
+                        migrate_codex_bootstrap_home(
+                            bootstrap_home,
+                            &habitat_codex_home(&final_habitat_root),
+                        )?;
                     }
                 }
             }
-            log_debug(&format!("[WARDIAN-DEBUG] Returning session_id: {:?}", session_id_res));
+            log_debug(&format!(
+                "[WARDIAN-DEBUG] Returning session_id: {:?}",
+                session_id_res
+            ));
             session_id_res.ok_or_else(|| {
                 if stderr_output.trim().is_empty() {
                     format!(
@@ -1146,7 +1216,10 @@ pub async fn obtain_session_id(
         }
         Err(e) => {
             log_debug(&format!("[WARDIAN-DEBUG] Failed to spawn cmd: {:?}", e));
-            Err(format!("Failed to spawn {} bootstrap command: {}", provider_name, e))
+            Err(format!(
+                "Failed to spawn {} bootstrap command: {}",
+                provider_name, e
+            ))
         }
     }
 }
@@ -1164,7 +1237,10 @@ fn claude_project_dir_name(workspace: &str) -> String {
         .collect()
 }
 
-fn codex_session_file_path_in(base: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
+fn codex_session_file_path_in(
+    base: &std::path::Path,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let base = base.join("sessions");
     let years = std::fs::read_dir(base).ok()?;
 
@@ -1200,9 +1276,14 @@ fn codex_session_file_path_in(base: &std::path::Path, session_id: &str) -> Optio
     None
 }
 
-fn codex_session_file_path(session_id: &str, wardian_agent_dir: Option<&str>) -> Option<std::path::PathBuf> {
+fn codex_session_file_path(
+    session_id: &str,
+    wardian_agent_dir: Option<&str>,
+) -> Option<std::path::PathBuf> {
     if let Some(agent_dir) = wardian_agent_dir {
-        let projected_home = std::path::Path::new(agent_dir).join("habitat").join(".codex");
+        let projected_home = std::path::Path::new(agent_dir)
+            .join("habitat")
+            .join(".codex");
         if let Some(path) = codex_session_file_path_in(&projected_home, session_id) {
             return Some(path);
         }
@@ -1240,16 +1321,16 @@ fn claude_is_real_user_query(line: &serde_json::Value) -> bool {
         return true;
     };
 
-    !items.iter().any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+    !items
+        .iter()
+        .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
 }
 
 fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     for line in lines.iter().rev() {
         match line.get("type").and_then(|v| v.as_str()) {
             Some("system") => {
-                if let Some("permission_request") =
-                    line.get("subtype").and_then(|v| v.as_str())
-                {
+                if let Some("permission_request") = line.get("subtype").and_then(|v| v.as_str()) {
                     return Some("Action Needed".to_string());
                 }
             }
@@ -1373,7 +1454,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             .map(|home| home.join("agents").join(&snap.session_id))
                             .filter(|path| path.exists())
                             .map(|path| path.to_string_lossy().to_string());
-                        if let Some(path) = codex_session_file_path(&snap.session_id, agent_home.as_deref()) {
+                        if let Some(path) =
+                            codex_session_file_path(&snap.session_id, agent_home.as_deref())
+                        {
                             *log_path_lock = Some(path);
                         }
                     }
@@ -1402,9 +1485,13 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     let chat_dir = entry.path().join("chats");
                                     if let Ok(chat_files) = std::fs::read_dir(chat_dir) {
                                         for chat_file in chat_files.flatten() {
-                                            if let Ok(content) = std::fs::read_to_string(chat_file.path()) {
+                                            if let Ok(content) =
+                                                std::fs::read_to_string(chat_file.path())
+                                            {
                                                 if let Ok(p) =
-                                                    serde_json::from_str::<serde_json::Value>(&content)
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        &content,
+                                                    )
                                                 {
                                                     if p.get("sessionId").and_then(|v| v.as_str())
                                                         == Some(&snap.session_id)
@@ -1436,13 +1523,16 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 .filter_map(|l| serde_json::from_str(l).ok())
                                 .collect();
 
-                            q_count = lines.iter().filter(|l| {
-                                l.get("type").and_then(|v| v.as_str()) == Some("event_msg")
-                                    && l.get("payload")
-                                        .and_then(|v| v.get("type"))
-                                        .and_then(|v| v.as_str())
-                                        == Some("user_message")
-                            }).count();
+                            q_count = lines
+                                .iter()
+                                .filter(|l| {
+                                    l.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+                                        && l.get("payload")
+                                            .and_then(|v| v.get("type"))
+                                            .and_then(|v| v.as_str())
+                                            == Some("user_message")
+                                })
+                                .count();
 
                             if let Some(meta) = lines.iter().find(|l| {
                                 l.get("type").and_then(|v| v.as_str()) == Some("session_meta")
@@ -1467,24 +1557,32 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 .filter_map(|l| serde_json::from_str(l).ok())
                                 .collect();
 
-                            q_count = lines.iter().filter(|l| {
-                                l.get("type").and_then(|v| v.as_str()) == Some("user")
-                                    && claude_is_real_user_query(l)
-                            }).count();
+                            q_count = lines
+                                .iter()
+                                .filter(|l| {
+                                    l.get("type").and_then(|v| v.as_str()) == Some("user")
+                                        && claude_is_real_user_query(l)
+                                })
+                                .count();
 
                             if let Some(first) = lines.first() {
                                 if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
                                     i_ts = Some(ts.to_string());
-                                } else if let Some(ts_num) = first.get("timestamp").and_then(|v| v.as_i64()) {
+                                } else if let Some(ts_num) =
+                                    first.get("timestamp").and_then(|v| v.as_i64())
+                                {
                                     // Fallback if timestamp is an epoch number
-                                    if let Some(dt) = chrono::DateTime::from_timestamp_millis(ts_num) {
-                                        i_ts = Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                                    if let Some(dt) =
+                                        chrono::DateTime::from_timestamp_millis(ts_num)
+                                    {
+                                        i_ts = Some(
+                                            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                        );
                                     }
                                 }
                             }
 
-                            let current_status =
-                                snap.current_status.lock().unwrap().clone();
+                            let current_status = snap.current_status.lock().unwrap().clone();
                             if current_status != "Action Needed" {
                                 if let Some(status) = claude_status_from_log(&lines) {
                                     *snap.current_status.lock().unwrap() = status;
@@ -1495,9 +1593,14 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             // Gemini logs are a single JSON object with a messages array
                             if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
-                                    q_count = msgs.iter().filter(|m| {
-                                        m.get("type").and_then(|v| v.as_str()) == Some("user") || m.get("role").and_then(|v| v.as_str()) == Some("user")
-                                    }).count();
+                                    q_count = msgs
+                                        .iter()
+                                        .filter(|m| {
+                                            m.get("type").and_then(|v| v.as_str()) == Some("user")
+                                                || m.get("role").and_then(|v| v.as_str())
+                                                    == Some("user")
+                                        })
+                                        .count();
                                 }
                                 if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
                                     i_ts = Some(st.to_string());
@@ -1550,10 +1653,7 @@ pub fn get_all_agent_classes(_app: &AppHandle) -> Vec<AgentClassDefinition> {
     Vec::new()
 }
 
-pub fn save_classes(
-    _app: &AppHandle,
-    classes: &[AgentClassDefinition],
-) -> Result<(), String> {
+pub fn save_classes(_app: &AppHandle, classes: &[AgentClassDefinition]) -> Result<(), String> {
     let app_dir = get_wardian_home().ok_or("No home dir")?;
     let json = serde_json::to_string_pretty(classes).map_err(|e| e.to_string())?;
     std::fs::write(app_dir.join("classes.json"), json).map_err(|e| e.to_string())?;
@@ -1571,7 +1671,7 @@ pub fn init_agent_classes(app: &AppHandle) {
         ensure_claude_skills_link(&app_dir.join("common"));
 
         let classes_path = app_dir.join("classes.json");
-        
+
         // Migration and Initialization
         if !classes_path.exists() {
             let mut defaults: Vec<AgentClassDefinition> =
@@ -1583,7 +1683,8 @@ pub fn init_agent_classes(app: &AppHandle) {
             let custom_path = app_dir.join("custom_classes.json");
             if custom_path.exists() {
                 if let Ok(data) = std::fs::read_to_string(&custom_path) {
-                    let mut custom = serde_json::from_str::<Vec<AgentClassDefinition>>(&data).unwrap_or_default();
+                    let mut custom = serde_json::from_str::<Vec<AgentClassDefinition>>(&data)
+                        .unwrap_or_default();
                     for c in custom.iter_mut() {
                         c.is_default = false;
                     }
@@ -1600,7 +1701,7 @@ pub fn init_agent_classes(app: &AppHandle) {
         for cls in &classes {
             let role_dir = classes_dir.join(&cls.name);
             let _ = std::fs::create_dir_all(&role_dir);
-            
+
             // 1. Create AGENTS.md master file
             let agents_md_path = role_dir.join("AGENTS.md");
             if !agents_md_path.exists() {
@@ -1658,7 +1759,6 @@ pub async fn kill_all_agents(state: &AppState) {
     state.agent_order.lock().await.clear();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::codex_bootstrap_launch_context;
@@ -1668,7 +1768,8 @@ mod tests {
     fn codex_bootstrap_launch_context_uses_real_workspace_cwd() {
         let wardian_home = Path::new("C:/Users/test/.wardian");
         let workspace_cwd = Path::new("D:/Development/Wardian");
-        let (provider_cwd, bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+        let (provider_cwd, bootstrap_home) =
+            codex_bootstrap_launch_context(wardian_home, workspace_cwd);
 
         assert_eq!(provider_cwd, workspace_cwd);
         assert!(bootstrap_home.starts_with(wardian_home.join("provider-bootstrap").join("codex")));

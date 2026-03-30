@@ -55,9 +55,13 @@ export const GridView: React.FC<GridViewProps> = ({
   draggedAgentId,
   dragOverAgentId,
 }) => {
+  const visibleAgents = maximizedAgentId
+    ? filteredAgents.filter((agent: AgentConfig) => agent.session_id.toString() === maximizedAgentId)
+    : filteredAgents;
+
   return (
-    <div className="flex-1 flex gap-2 min-h-full flex-row flex-wrap content-start pb-[200px]">
-      {filteredAgents.map((agent: AgentConfig) => {
+    <div className={`flex-1 min-h-full ${maximizedAgentId ? 'relative overflow-hidden' : 'flex gap-2 flex-row flex-wrap content-start pb-[200px]'}`}>
+      {visibleAgents.map((agent: AgentConfig) => {
         const agentId = agent.session_id.toString();
         const isMaximized = maximizedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
@@ -84,7 +88,7 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg ${isMaximized ? 'fixed inset-0 z-[100] h-screen w-screen rounded-none m-0 border-none transition-none' : 'relative transition-all rounded-xl border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent' : 'border-wardian-border')} ${draggedAgentId === agentId && !isMaximized ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId && !isMaximized ? 'translate-y-[-2px]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg ${isMaximized ? 'absolute inset-0 z-20 rounded-xl border border-wardian-border transition-none' : 'relative transition-all rounded-xl border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent' : 'border-wardian-border')} ${draggedAgentId === agentId && !isMaximized ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId && !isMaximized ? 'translate-y-[-2px]' : ''}`}
           >
             <div 
               onMouseEnter={() => onMouseEnterCard(agentId)}

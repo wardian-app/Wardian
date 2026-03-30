@@ -21,7 +21,7 @@ The Left Sidebar provides the "Context" for your work. It consists of:
     - **Explorer**: Browse the physical files of the selected agent or the Wardian home.
     - **Agent Configuration**: Quick settings for spawning and tuning agents.
     - **Command Center**: Broadcast prompts to multiple agents simultaneously.
-    - **Settings**: System-wide preferences and theme engine.
+    - **Settings**: System-wide preferences, theme engine, and the default runtime shell used by agents and shell-based workflows.
 - **Content Pane**: Displays the detailed menu or tree for the active rail icon.
 
 ### 3. Right Sidebar (The Roster)

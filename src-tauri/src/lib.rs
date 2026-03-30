@@ -1,14 +1,14 @@
+pub mod commands;
 pub mod manager;
 pub mod models;
 pub mod providers;
 pub mod state;
 pub mod utils;
-pub mod commands;
 pub mod workflow_engine;
 
-use tauri::{Emitter, Listener, Manager};
 use crate::models::AgentConfig;
 use crate::state::AppState;
+use tauri::{Emitter, Listener, Manager};
 
 #[derive(serde::Deserialize, Clone)]
 struct TerminalInputPayload {
@@ -23,8 +23,8 @@ struct TerminalInputPayload {
 pub fn run() {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
         use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
         let aumid: Vec<u16> = "org.wardian.desktop"
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -92,7 +92,7 @@ pub fn run() {
             // Restore agents from state
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
-                
+
                 // Initialize Workflow Triggers
                 workflow_engine::init_triggers(app_handle.clone()).await;
 
@@ -104,12 +104,16 @@ pub fn run() {
                             let mut order_map = state.agent_order.lock().await;
                             for mut config in configs {
                                 // Retroactively ensure the private agent directory is included
-                                config.system_include_directories = Some(utils::fs::resolve_system_include_directories(
-                                    &config.agent_class,
-                                    &config.session_id,
-                                ));
+                                config.system_include_directories =
+                                    Some(utils::fs::resolve_system_include_directories(
+                                        &config.agent_class,
+                                        &config.session_id,
+                                    ));
 
-                                if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true).await {
+                                if let Ok(agent) =
+                                    manager::spawn_agent(app_handle.clone(), config.clone(), true)
+                                        .await
+                                {
                                     if let Some(ref tx) = agent.stdin_tx {
                                         if let Ok(mut senders) = state.input_senders.write() {
                                             senders.insert(config.session_id.clone(), tx.clone());
@@ -179,11 +183,11 @@ pub fn run() {
             commands::library::remove_deployed_skill,
             commands::library::list_deployed_skills,
             commands::library::list_skill_deployments,
-            commands::patch::run_gemini_patch
+            commands::patch::run_gemini_patch,
+            commands::settings::list_available_shells,
+            commands::settings::load_shell_settings,
+            commands::settings::save_shell_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
-
-
