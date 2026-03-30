@@ -133,6 +133,21 @@ npm run tauri build
 
 ---
 
+## 🛠️ Troubleshooting
+
+### ⚠️ Common Build Issues
+
+If you encounter a large number of TypeScript errors (e.g., `TS7006: Parameter implicitly has an 'any' type`) or missing module errors during `npm run build` or `npm run tauri build`, your local `node_modules` may be out of sync or corrupted.
+
+**Solution:**
+```bash
+# Force a clean dependency sync
+npm install
+```
+This synchronizes your local environment with the `package.json` manifest and ensures all required type definitions (Zustand, Lucide, etc.) are correctly linked.
+
+---
+
 ## 📄 License
 
 [MIT](LICENSE) — Created by [Tan Gemicioglu](https://github.com/tangemicioglu).
