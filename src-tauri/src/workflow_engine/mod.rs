@@ -2,7 +2,9 @@ mod migrate;
 
 use crate::manager::log_debug;
 use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
-use crate::utils::{get_wardian_home, new_headless_command, validate_workspace_path};
+use crate::utils::{
+    build_shell_command, get_wardian_home, new_headless_command, validate_workspace_path,
+};
 use chrono::{Datelike, TimeZone, Utc};
 use notify::{Event, RecursiveMode, Watcher};
 use regex::Regex;
@@ -40,11 +42,28 @@ fn flatten_headless_response(mut data: Value) -> Value {
 
 /// Resolves the current working directory for a node.
 fn resolve_cwd(node_config: &Value, agent_id: &str) -> PathBuf {
-    let folder = node_config.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+    let folder = node_config
+        .get("folder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     crate::utils::fs::resolve_cwd(folder, agent_id)
 }
 
 /// Executes a command headlessly and returns the result in the mandatory schema.
+fn resolve_command_node_launch<F>(
+    command: &str,
+    resolver: F,
+) -> Result<crate::utils::ShellLaunchSpec, String>
+where
+    F: FnOnce(&str) -> Result<crate::utils::ShellLaunchSpec, String>,
+{
+    if command.trim().is_empty() {
+        Err("Missing command string".to_string())
+    } else {
+        resolver(command)
+    }
+}
+
 async fn run_command_headless(
     executable: &str,
     args: Vec<String>,
@@ -172,7 +191,10 @@ pub fn toggle_scheduled_run_state(
     Ok(runs)
 }
 
-fn sync_scheduled_runs_for_workflow(wf: &WorkflowDefinition, existing_runs: &[crate::models::ScheduledRun]) -> Vec<crate::models::ScheduledRun> {
+fn sync_scheduled_runs_for_workflow(
+    wf: &WorkflowDefinition,
+    existing_runs: &[crate::models::ScheduledRun],
+) -> Vec<crate::models::ScheduledRun> {
     let mut synced_runs: Vec<crate::models::ScheduledRun> = existing_runs
         .iter()
         .filter(|run| run.workflow_id != wf.id)
@@ -197,10 +219,19 @@ fn sync_scheduled_runs_for_workflow(wf: &WorkflowDefinition, existing_runs: &[cr
             continue;
         };
 
-        let interval = config.get("interval").and_then(|v| v.as_str()).unwrap_or("");
-        let time = config.get("time").and_then(|v| v.as_str()).unwrap_or("00:00");
+        let interval = config
+            .get("interval")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let time = config
+            .get("time")
+            .and_then(|v| v.as_str())
+            .unwrap_or("00:00");
         let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
-        let datetime = config.get("datetime").and_then(|v| v.as_str()).unwrap_or("");
+        let datetime = config
+            .get("datetime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let (model_type, value) = match sched_type {
             "Minutes" => ("minutes".to_string(), interval.to_string()),
@@ -583,27 +614,47 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
             // Try ISO8601/RFC3339 first, then "YYYY-MM-DDTHH:MM" local time
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&schedule.value) {
                 let ms = dt.timestamp_millis() as u64;
-                if ms > now_ms { Some(ms) } else { None }
-            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&schedule.value, "%Y-%m-%dT%H:%M") {
+                if ms > now_ms {
+                    Some(ms)
+                } else {
+                    None
+                }
+            } else if let Ok(dt) =
+                chrono::NaiveDateTime::parse_from_str(&schedule.value, "%Y-%m-%dT%H:%M")
+            {
                 let local = chrono::Local.from_local_datetime(&dt).earliest()?;
                 let ms = local.timestamp_millis() as u64;
-                if ms > now_ms { Some(ms) } else { None }
+                if ms > now_ms {
+                    Some(ms)
+                } else {
+                    None
+                }
             } else {
                 None
             }
         }
         "minutes" => {
             let mins: u64 = schedule.value.parse().unwrap_or(0);
-            if mins > 0 { Some(now_ms + mins * 60_000) } else { None }
+            if mins > 0 {
+                Some(now_ms + mins * 60_000)
+            } else {
+                None
+            }
         }
         "hours" => {
             let hours: u64 = schedule.value.parse().unwrap_or(0);
-            if hours > 0 { Some(now_ms + hours * 3_600_000) } else { None }
+            if hours > 0 {
+                Some(now_ms + hours * 3_600_000)
+            } else {
+                None
+            }
         }
         "daily" => {
             // value = "HH:MM"
             let parts: Vec<&str> = schedule.value.split(':').collect();
-            if parts.len() != 2 { return None; }
+            if parts.len() != 2 {
+                return None;
+            }
             let hour: u32 = parts[0].parse().unwrap_or(0);
             let minute: u32 = parts[1].parse().unwrap_or(0);
 
@@ -611,7 +662,9 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
             let today = now_local.date_naive();
             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
             let target_naive = today.and_time(target_time);
-            let target_local = chrono::Local.from_local_datetime(&target_naive).earliest()?;
+            let target_local = chrono::Local
+                .from_local_datetime(&target_naive)
+                .earliest()?;
 
             let target_ms = target_local.timestamp_millis() as u64;
             if target_ms > now_ms {
@@ -624,10 +677,14 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
         "weekly" => {
             // value = "Mon,Wed@09:00"
             let parts: Vec<&str> = schedule.value.split('@').collect();
-            if parts.len() != 2 { return None; }
+            if parts.len() != 2 {
+                return None;
+            }
             let day_names: Vec<&str> = parts[0].split(',').map(|s| s.trim()).collect();
             let time_parts: Vec<&str> = parts[1].split(':').collect();
-            if time_parts.len() != 2 { return None; }
+            if time_parts.len() != 2 {
+                return None;
+            }
             let hour: u32 = time_parts[0].parse().unwrap_or(0);
             let minute: u32 = time_parts[1].parse().unwrap_or(0);
 
@@ -651,14 +708,20 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                 if let Some(target_day) = day_map(day_name) {
                     // Find next occurrence of this weekday
                     for offset in 0..8u32 {
-                        let candidate_date = (now_local + chrono::Duration::days(offset as i64)).date_naive();
+                        let candidate_date =
+                            (now_local + chrono::Duration::days(offset as i64)).date_naive();
                         if candidate_date.weekday() == target_day {
                             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
                             let candidate_naive = candidate_date.and_time(target_time);
-                            if let Some(candidate_local) = chrono::Local.from_local_datetime(&candidate_naive).earliest() {
+                            if let Some(candidate_local) = chrono::Local
+                                .from_local_datetime(&candidate_naive)
+                                .earliest()
+                            {
                                 let candidate_ms = candidate_local.timestamp_millis() as u64;
                                 if candidate_ms > now_ms {
-                                    best = Some(best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)));
+                                    best = Some(
+                                        best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)),
+                                    );
                                     break;
                                 }
                             }
@@ -717,7 +780,11 @@ pub fn resume_all_triggers(app: AppHandle) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
-pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, register_schedules: bool) {
+pub async fn start_workflow_triggers(
+    app: AppHandle,
+    wf: WorkflowDefinition,
+    register_schedules: bool,
+) {
     // 1. Clean up existing triggers for this workflow
     stop_workflow_triggers(app.clone(), &wf.id).await;
 
@@ -776,7 +843,10 @@ pub async fn start_workflow_triggers(app: AppHandle, wf: WorkflowDefinition, reg
                             })
                             .unwrap();
 
-                        if watcher.watch(&path_clone, RecursiveMode::NonRecursive).is_ok() {
+                        if watcher
+                            .watch(&path_clone, RecursiveMode::NonRecursive)
+                            .is_ok()
+                        {
                             while let Some(payload) = rx.recv().await {
                                 let state = app_file.state::<crate::state::AppState>();
                                 if state
@@ -818,7 +888,10 @@ pub async fn run_scheduled_workflow_now(app: AppHandle, run_id: String) -> Resul
     let mut runs = load_scheduled_runs();
     let now_ms = Utc::now().timestamp_millis() as u64;
 
-    let Some(run) = runs.iter_mut().find(|scheduled_run| scheduled_run.id == run_id) else {
+    let Some(run) = runs
+        .iter_mut()
+        .find(|scheduled_run| scheduled_run.id == run_id)
+    else {
         return Err(format!("Scheduled run {} not found", run_id));
     };
 
@@ -865,7 +938,10 @@ pub async fn delete_workflow(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
-    let Some(run) = load_scheduled_runs().into_iter().find(|scheduled_run| scheduled_run.id == run_id) else {
+    let Some(run) = load_scheduled_runs()
+        .into_iter()
+        .find(|scheduled_run| scheduled_run.id == run_id)
+    else {
         return Ok(());
     };
 
@@ -876,7 +952,8 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
     }
 
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut workflow = serde_json::from_str::<WorkflowDefinition>(&content).map_err(|e| e.to_string())?;
+    let mut workflow =
+        serde_json::from_str::<WorkflowDefinition>(&content).map_err(|e| e.to_string())?;
 
     for node in workflow.nodes.iter_mut() {
         if node.r#type != "trigger" || node.name.as_deref() != Some("Scheduled Trigger") {
@@ -890,7 +967,10 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 
         match node.config.as_object_mut() {
             Some(config) => {
-                config.insert("status".to_string(), serde_json::Value::String("off".to_string()));
+                config.insert(
+                    "status".to_string(),
+                    serde_json::Value::String("off".to_string()),
+                );
             }
             None => {
                 node.config = serde_json::json!({ "status": "off" });
@@ -904,8 +984,11 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::sync_scheduled_runs_for_workflow;
-    use crate::models::{ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings};
+    use super::{resolve_command_node_launch, sync_scheduled_runs_for_workflow};
+    use crate::models::{
+        ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
+    };
+    use crate::utils::ShellLaunchSpec;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -931,6 +1014,41 @@ mod tests {
             }],
             role_mappings: HashMap::from([("analyst".to_string(), "agent-1".to_string())]),
         }
+    }
+
+    #[test]
+    fn resolve_command_node_launch_returns_shell_spec() {
+        let spec = resolve_command_node_launch("echo hi", |_| {
+            Ok(ShellLaunchSpec {
+                executable: "pwsh".to_string(),
+                args: vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "echo hi".to_string(),
+                ],
+            })
+        })
+        .expect("shell spec");
+
+        assert_eq!(spec.executable, "pwsh");
+        assert_eq!(spec.args[2], "echo hi");
+    }
+
+    #[test]
+    fn resolve_command_node_launch_surfaces_shell_resolution_errors() {
+        let err =
+            resolve_command_node_launch("echo hi", |_| Err("No compatible shell".to_string()))
+                .expect_err("shell resolution should fail");
+
+        assert_eq!(err, "No compatible shell");
+    }
+
+    #[test]
+    fn resolve_command_node_launch_rejects_empty_commands() {
+        let err = resolve_command_node_launch("   ", |_| unreachable!("resolver should not run"))
+            .expect_err("empty commands should fail");
+
+        assert_eq!(err, "Missing command string");
     }
 
     #[test]
@@ -1039,10 +1157,13 @@ pub async fn run_workflow(
     let log_dir = get_logs_dir(&wf_id).ok_or("Could not find log path")?;
     fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
 
-    let _ = app.emit("workflow-status-updated", serde_json::json!({
-        "workflow_id": wf_id,
-        "status": "running",
-    }));
+    let _ = app.emit(
+        "workflow-status-updated",
+        serde_json::json!({
+            "workflow_id": wf_id,
+            "status": "running",
+        }),
+    );
 
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let log_path = log_dir.join(format!("{}.json", timestamp));
@@ -1149,13 +1270,16 @@ pub async fn run_workflow(
                 },
             );
 
-            let _ = app.emit("workflow-progress", serde_json::json!({
-                "workflow_id": wf.id,
-                "workflow_name": wf.name,
-                "current_step": global_step_count,
-                "total_steps": total_enqueued + queue.len(),
-                "active_node_name": node.name.clone().unwrap_or_else(|| node.id.clone()),
-            }));
+            let _ = app.emit(
+                "workflow-progress",
+                serde_json::json!({
+                    "workflow_id": wf.id,
+                    "workflow_name": wf.name,
+                    "current_step": global_step_count,
+                    "total_steps": total_enqueued + queue.len(),
+                    "active_node_name": node.name.clone().unwrap_or_else(|| node.id.clone()),
+                }),
+            );
 
             // --- NODE LOGIC ---
             let mut result_ports = vec!["default".to_string()];
@@ -1352,7 +1476,11 @@ pub async fn run_workflow(
                         ));
 
                         // 1. Resolve CWD logic (Shared between modes)
-                        let folder = node.config.get("folder").and_then(|v| v.as_str()).unwrap_or("");
+                        let folder = node
+                            .config
+                            .get("folder")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         let cwd = crate::utils::fs::resolve_cwd(folder, agent_id);
 
                         if output_format == "json" {
@@ -1638,16 +1766,16 @@ pub async fn run_workflow(
                         })
                         .unwrap_or(30000);
 
-                    if interpolated_cmd.is_empty() {
-                        node_error = Some("Missing command string".to_string());
-                    } else {
-                        // On Windows, we use cmd /C for better compatibility with built-ins
-                        #[cfg(windows)]
-                        let (executable, args) = ("cmd", vec!["/C".to_string(), interpolated_cmd]);
-                        #[cfg(not(windows))]
-                        let (executable, args) = ("sh", vec!["-c".to_string(), interpolated_cmd]);
-
-                        match run_command_headless(executable, args, &cwd, env, timeout_ms).await {
+                    match resolve_command_node_launch(&interpolated_cmd, build_shell_command) {
+                        Ok(spec) => match run_command_headless(
+                            &spec.executable,
+                            spec.args,
+                            &cwd,
+                            env,
+                            timeout_ms,
+                        )
+                        .await
+                        {
                             Ok(res) => {
                                 let exit_code =
                                     res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1663,7 +1791,8 @@ pub async fn run_workflow(
                                 output_payload = res;
                             }
                             Err(e) => node_error = Some(e),
-                        }
+                        },
+                        Err(e) => node_error = Some(e),
                     }
                 }
                 "script" => {
@@ -1872,10 +2001,13 @@ pub async fn run_workflow(
 
         // Emit workflow completion status
         let had_error = trace.iter().any(|e| e.status == "failed");
-        let _ = app.emit("workflow-status-updated", serde_json::json!({
-            "workflow_id": wf.id,
-            "status": if had_error { "failed" } else { "completed" },
-        }));
+        let _ = app.emit(
+            "workflow-status-updated",
+            serde_json::json!({
+                "workflow_id": wf.id,
+                "status": if had_error { "failed" } else { "completed" },
+            }),
+        );
 
         // Save the execution log
         if let Ok(json) = serde_json::to_string_pretty(&trace) {
@@ -1893,4 +2025,3 @@ pub async fn run_workflow(
 
     Ok(())
 }
-

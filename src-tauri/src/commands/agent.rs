@@ -38,7 +38,10 @@ pub async fn spawn_agent(
     if actual_resume.is_none() {
         let cwd = crate::utils::fs::resolve_cwd(&folder, "");
 
-        let provider_name = config_override.as_ref().map(|c| c.provider.clone()).unwrap_or_else(|| "claude".to_string());
+        let provider_name = config_override
+            .as_ref()
+            .map(|c| c.provider.clone())
+            .unwrap_or_else(|| "claude".to_string());
         if provider_name == "claude" {
             let fresh_sid = uuid::Uuid::new_v4().to_string();
             manager::log_debug(&format!(
@@ -47,7 +50,9 @@ pub async fn spawn_agent(
             ));
             session_id = Some(fresh_sid);
         } else {
-            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
+            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref())
+                .await
+            {
                 Ok(real_sid) => {
                     manager::log_debug(&format!(
                         "[WARDIAN] Intercepted stream-json session ID for {}: {}",
@@ -122,6 +127,7 @@ pub async fn kill_agent(
     ));
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
+    #[allow(unused_mut)]
     if let Some(mut agent) = agents.remove(&session_id) {
         // Remove from input_senders immediately
         if let Ok(mut senders) = state.input_senders.write() {
@@ -143,9 +149,15 @@ pub async fn kill_agent(
             let agent_dir = home.join("agents").join(&session_id);
             if agent_dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
-                    manager::log_debug(&format!("[WARDIAN] Failed to remove agent directory {:?}: {}", agent_dir, e));
+                    manager::log_debug(&format!(
+                        "[WARDIAN] Failed to remove agent directory {:?}: {}",
+                        agent_dir, e
+                    ));
                 } else {
-                    manager::log_debug(&format!("[WARDIAN] Successfully removed agent directory {:?}", agent_dir));
+                    manager::log_debug(&format!(
+                        "[WARDIAN] Successfully removed agent directory {:?}",
+                        agent_dir
+                    ));
                 }
             }
         }
@@ -291,9 +303,11 @@ pub async fn update_agent_config(
                 "[WARDIAN] Agent class changed from {} to {}. Updating system include directories.",
                 agent.config.agent_class, new_config.agent_class
             ));
-            new_config.system_include_directories = Some(
-                crate::utils::fs::resolve_system_include_directories(&new_config.agent_class, &new_config.session_id),
-            );
+            new_config.system_include_directories =
+                Some(crate::utils::fs::resolve_system_include_directories(
+                    &new_config.agent_class,
+                    &new_config.session_id,
+                ));
         }
 
         agent.config = new_config.clone();

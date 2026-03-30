@@ -15,6 +15,21 @@ impl ClaudeProvider {
         ClaudeProvider
     }
 
+    #[cfg(not(target_os = "windows"))]
+    fn find_unix_claude_in_paths<I>(paths: I) -> Option<String>
+    where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        for path in paths {
+            let full_path = path.join("claude");
+            if full_path.exists() {
+                return Some(full_path.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
     fn is_real_user_query(parsed: &serde_json::Value) -> bool {
         let Some(message) = parsed.get("message") else {
             return true;
@@ -27,7 +42,9 @@ impl ClaudeProvider {
             return true;
         };
 
-        !items.iter().any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+        !items
+            .iter()
+            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
     }
 
     fn assistant_event(parsed: &serde_json::Value) -> AgentEvent {
@@ -51,27 +68,61 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        let exe_name = if cfg!(target_os = "windows") { "claude.cmd" } else { "claude" };
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(paths) = std::env::var_os("PATH") {
+                let path_exts = std::env::var("PATHEXT")
+                    .ok()
+                    .map(|value| {
+                        value
+                            .split(';')
+                            .filter_map(|segment| {
+                                let trimmed = segment.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(trimmed.to_ascii_lowercase())
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|exts| !exts.is_empty())
+                    .unwrap_or_else(|| {
+                        vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()]
+                    });
 
-        // 1. Try bare command in PATH
-        if let Some(paths) = std::env::var_os("PATH") {
-            for path in std::env::split_paths(&paths) {
-                let full_path = path.join(exe_name);
-                if full_path.exists() {
-                    return (exe_name.to_string(), vec![]);
+                for path in std::env::split_paths(&paths) {
+                    let direct = path.join("claude");
+                    if direct.exists() {
+                        return (direct.to_string_lossy().to_string(), vec![]);
+                    }
+                    for ext in &path_exts {
+                        let candidate = path.join(format!("claude{ext}"));
+                        if candidate.exists() {
+                            return (candidate.to_string_lossy().to_string(), vec![]);
+                        }
+                    }
                 }
             }
-        }
 
-        // 2. Robust Fallback
-        if cfg!(target_os = "windows") {
             if let Some(appdata) = dirs::data_dir() {
                 let npm_claude = appdata.join("npm").join("claude.cmd");
                 if npm_claude.exists() {
                     return (npm_claude.to_string_lossy().to_string(), vec![]);
                 }
             }
-        } else {
+
+            ("claude".to_string(), vec![])
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(paths) = std::env::var_os("PATH") {
+                if let Some(executable) = Self::find_unix_claude_in_paths(std::env::split_paths(&paths)) {
+                    return (executable, vec![]);
+                }
+            }
+
             let home = dirs::home_dir().unwrap_or_default();
             let fallbacks = vec![
                 home.join(".npm-global/bin/claude"),
@@ -83,10 +134,9 @@ impl AgentProvider for ClaudeProvider {
                     return (path.to_string_lossy().to_string(), vec![]);
                 }
             }
-        }
 
-        // 3. Ultimate Fallback
-        (exe_name.to_string(), vec![])
+            ("claude".to_string(), vec![])
+        }
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
@@ -213,7 +263,10 @@ impl AgentProvider for ClaudeProvider {
                             .get("timestamp")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
-                        Some(AgentEvent::Init { session_id, timestamp })
+                        Some(AgentEvent::Init {
+                            session_id,
+                            timestamp,
+                        })
                     }
                     // Claude Code emits this when a tool call needs explicit permission
                     "permission_request" => {
@@ -310,7 +363,9 @@ mod tests {
         let event = p.parse_output(line).unwrap();
         assert_eq!(
             event,
-            AgentEvent::ActionRequired { message: "bash".into() }
+            AgentEvent::ActionRequired {
+                message: "bash".into()
+            }
         );
     }
 
@@ -463,6 +518,18 @@ mod tests {
         let args_resume = p.get_spawn_args(&config, true);
         assert!(!args_resume.contains(&"--name".to_string()));
         assert!(args_resume.contains(&"--resume".to_string()));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_path_lookup_prefers_discovered_claude_binary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let claude_path = temp.path().join("claude");
+        std::fs::write(&claude_path, "").expect("create fake claude");
+
+        let resolved = ClaudeProvider::find_unix_claude_in_paths(vec![temp.path().to_path_buf()]);
+
+        assert_eq!(resolved, Some(claude_path.to_string_lossy().to_string()));
     }
 
     #[test]

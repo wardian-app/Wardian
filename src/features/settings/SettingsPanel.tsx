@@ -1,13 +1,41 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "../../store/useSettingsStore";
 
 interface SettingsPanelProps {}
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
-  const { theme, setTheme, autoPatchGemini, setAutoPatchGemini } = useSettingsStore();
+  const {
+    theme,
+    setTheme,
+    autoPatchGemini,
+    setAutoPatchGemini,
+    shell_id,
+    custom_executable,
+    custom_args,
+    available_shells,
+    shell_settings_loaded,
+    shells_loaded,
+    setShellId,
+    setCustomExecutable,
+    setCustomArgs,
+    loadShellSettings,
+    loadAvailableShells,
+    saveShellSettings,
+  } = useSettingsStore();
   const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "success" | "error">("idle");
   const [patchMessage, setPatchMessage] = useState("");
+  const [shellStatus, setShellStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
+  const [shellMessage, setShellMessage] = useState("");
+
+  useEffect(() => {
+    if (!shell_settings_loaded) {
+      loadShellSettings();
+    }
+    if (!shells_loaded) {
+      loadAvailableShells();
+    }
+  }, [loadAvailableShells, loadShellSettings, shell_settings_loaded, shells_loaded]);
 
   const handleRunPatch = async () => {
     setPatchStatus("running");
@@ -20,11 +48,30 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
         setPatchStatus("idle");
         setPatchMessage("");
       }, 5000);
-    } catch (e: any) {
+    } catch (e: unknown) {
       setPatchStatus("error");
-      setPatchMessage(`Patch failed: ${e}`);
+      setPatchMessage(`Patch failed: ${String(e)}`);
     }
   };
+
+  const handleSaveShell = async () => {
+    setShellStatus("saving");
+    setShellMessage("");
+    try {
+      await saveShellSettings();
+      setShellStatus("success");
+      setShellMessage("Default shell updated.");
+      setTimeout(() => {
+        setShellStatus("idle");
+        setShellMessage("");
+      }, 4000);
+    } catch (e: unknown) {
+      setShellStatus("error");
+      setShellMessage(`Shell update failed: ${String(e)}`);
+    }
+  };
+
+  const selectedShell = available_shells.find((option) => option.id === shell_id);
 
   return (
     <div className="flex flex-col h-full">
@@ -36,7 +83,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
         <div className="bg-transparent">
           <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Theme</h3>
           <div className="grid grid-cols-3 gap-3">
-            {/* System Theme Card */}
             <button
               type="button"
               onClick={() => setTheme("system")}
@@ -49,7 +95,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
               <span className={`text-[11px] font-bold tracking-tight ${theme === 'system' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>System</span>
             </button>
 
-            {/* Dark Theme Card */}
             <button
               type="button"
               onClick={() => setTheme("dark")}
@@ -65,7 +110,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
               <span className={`text-[11px] font-bold tracking-tight ${theme === 'dark' ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral'}`}>Dark</span>
             </button>
 
-            {/* Light Theme Card */}
             <button
               type="button"
               onClick={() => setTheme("light")}
@@ -85,6 +129,95 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
             <p className="text-[10px] text-muted-neutral leading-relaxed">
               <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> For complete terminal synchronization, update the gemini CLI theme as well, and then restart the application.
             </p>
+          </div>
+        </div>
+
+        <div className="border-t border-wardian-border pt-6">
+          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Default Shell</h3>
+
+          <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
+            <label className="text-sm font-bold text-primary" htmlFor="default-shell-select">
+              Shell / Interpreter
+            </label>
+            <select
+              id="default-shell-select"
+              value={shell_id}
+              onChange={(e) => setShellId(e.target.value)}
+              className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+            >
+              <option value="auto">Auto</option>
+              {available_shells.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+              <option value="custom">Custom</option>
+            </select>
+
+            {shell_id === 'custom' ? (
+              <>
+                <label className="text-xs font-bold text-primary" htmlFor="custom-shell-executable">
+                  Custom executable
+                </label>
+                <input
+                  id="custom-shell-executable"
+                  type="text"
+                  value={custom_executable}
+                  onChange={(e) => setCustomExecutable(e.target.value)}
+                  placeholder={navigator.platform.toLowerCase().includes('win') ? 'C:/Program Files/PowerShell/7/pwsh.exe' : '/usr/local/bin/fish'}
+                  className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                />
+                <label className="text-xs font-bold text-primary" htmlFor="custom-shell-args">
+                  Command args
+                </label>
+                <input
+                  id="custom-shell-args"
+                  type="text"
+                  value={custom_args}
+                  onChange={(e) => setCustomArgs(e.target.value)}
+                  placeholder={navigator.platform.toLowerCase().includes('win') ? '-NoProfile -Command' : '-lc'}
+                  className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                />
+              </>
+            ) : (
+              <div className="rounded-lg border border-wardian-border bg-wardian-bg px-3 py-2">
+                <p className="text-[11px] font-bold text-primary">
+                  {shell_id === 'auto' ? 'Wardian will choose the best available shell for this system.' : selectedShell?.label ?? 'Loading shell details...'}
+                </p>
+                {shell_id !== 'auto' && selectedShell && (
+                  <p className="text-[10px] text-muted-neutral mt-1 break-all">
+                    {selectedShell.executable}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[10px] text-muted-neutral">
+                {shells_loaded ? `${available_shells.length} discovered shell${available_shells.length === 1 ? '' : 's'}` : 'Detecting installed shells...'}
+              </p>
+              <button
+                type="button"
+                onClick={handleSaveShell}
+                disabled={!shell_settings_loaded || shellStatus === 'saving'}
+                className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
+                  shellStatus === 'saving'
+                    ? 'bg-wardian-border text-muted border-transparent cursor-not-allowed'
+                    : 'bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
+                }`}
+              >
+                {shellStatus === 'saving' ? 'Saving...' : 'Save Shell'}
+              </button>
+            </div>
+
+            {shellMessage && (
+              <div className={`p-2 mt-1 rounded border text-xs font-medium text-left ${
+                shellStatus === 'success' ? 'bg-cyan-500/10 border-cyan-500/20 text-cyan-400' :
+                'bg-red-500/10 border-red-500/20 text-red-400'
+              }`}>
+                {shellMessage}
+              </div>
+            )}
           </div>
         </div>
 
@@ -115,9 +248,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
               </button>
             </div>
             
-            <p className="text-[10px] text-muted-neutral leading-relaxed text-left">
-              Applies a custom patch to enable skill discovery in included directories. Reruns on every launch.
-            </p>
 
             {patchMessage && (
               <div className={`p-2 mt-1 rounded border text-xs font-medium text-left ${
@@ -137,3 +267,4 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     </div>
   );
 };
+
