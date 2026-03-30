@@ -141,7 +141,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
       <div className="bg-[var(--color-wardian-card)] border border-wardian-border-heavy w-full max-w-lg rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
         <div className="p-6 border-b border-wardian-border flex items-center justify-between">
           <div className="flex flex-col">
-            <h3 className="text-xl font-bold text-[var(--color-wardian-text)] tracking-tight">Run Workflow</h3>
+            <h3 className="text-xl font-bold text-[var(--color-wardian-text)] tracking-tight">{workflow.name}</h3>
             <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">
               {hasInputs && hasRoles ? 'Configure Inputs & Agents' : hasRoles ? 'Assign Agents' : 'Provide Input Parameters'}
             </span>

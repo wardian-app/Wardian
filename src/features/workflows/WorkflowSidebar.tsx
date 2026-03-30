@@ -113,6 +113,27 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflow
     );
   }, [availableWorkflows, searchQuery]);
 
+  const scheduledStatusByWorkflow = useMemo(() => {
+    const statuses: Record<string, 'active' | 'muted'> = {};
+
+    for (const run of scheduledRuns) {
+      const nextStatus = run.is_paused ? 'muted' : 'active';
+      if (statuses[run.workflow_id] !== 'active') {
+        statuses[run.workflow_id] = nextStatus;
+      }
+    }
+
+    return statuses;
+  }, [scheduledRuns]);
+
+  const runningWorkflowIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const run of activeRuns) {
+      ids.add(run.workflow_id);
+    }
+    return ids;
+  }, [activeRuns]);
+
   const activeWorkflows = useMemo(() =>
     availableWorkflows.filter(wf => {
       const triggerNode = wf.nodes.find(n => n.type === 'trigger');
@@ -214,10 +235,17 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflow
               if (triggerNode?.name === 'Scheduled Trigger') trigger_type = 'scheduled';
               else if (triggerNode?.name === 'File Watcher') trigger_type = 'watcher';
               else if (triggerNode?.config?.type === 'Webhook') trigger_type = 'webhook';
+
+              const trigger_status = runningWorkflowIds.has(wf.id)
+                ? 'active'
+                : trigger_type === 'scheduled'
+                  ? scheduledStatusByWorkflow[wf.id] || 'off'
+                  : triggerNode?.config?.status || 'off';
+
               return {
                 ...wf,
                 trigger_type,
-                trigger_status: triggerNode?.config?.status || 'off'
+                trigger_status,
               };
             })}
             onRun={handleRunFromLibrary}

@@ -22,6 +22,26 @@ pub fn get_default_user_dir() -> std::path::PathBuf {
     })
 }
 
+pub fn prepare_provider_bootstrap_cwd(provider: &str) -> Result<std::path::PathBuf, String> {
+    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let safe_provider: String = provider
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect();
+    let provider_name = if safe_provider.is_empty() {
+        "default".to_string()
+    } else {
+        safe_provider
+    };
+    let bootstrap_cwd = wardian_home.join("provider-bootstrap").join(provider_name);
+    std::fs::create_dir_all(&bootstrap_cwd).map_err(|e| e.to_string())?;
+    Ok(bootstrap_cwd)
+}
+
 pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
     // Priority 1: Explicitly provided folder
     if !folder.is_empty() {
@@ -176,11 +196,14 @@ fn prepare_habitat_workspace(
     build_habitat_skill_projection(&wardian_home, &habitat_root, class_name, Some(session_id))?;
 
     let workspace_link = habitat_root.join("workspace");
-    if workspace_link.exists() {
-        let _ = std::fs::remove_dir_all(&workspace_link).or_else(|_| std::fs::remove_dir(&workspace_link));
+    if !projected_link_matches_target(&workspace_link, workspace_root) {
+        if workspace_link.exists() || workspace_link.symlink_metadata().is_ok() {
+            let _ = std::fs::remove_dir_all(&workspace_link)
+                .or_else(|_| std::fs::remove_dir(&workspace_link));
+        }
+        create_directory_link(workspace_root, &workspace_link)?;
     }
-    create_directory_link(workspace_root, &workspace_link)?;
-    if !workspace_link.exists() {
+    if !projected_link_matches_target(&workspace_link, workspace_root) {
         return Err(format!(
             "Failed to create habitat workspace link from {} to {}",
             workspace_link.to_string_lossy(),
@@ -191,74 +214,78 @@ fn prepare_habitat_workspace(
     Ok(habitat_root)
 }
 
+fn normalize_comparison_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\?") {
+            return Some(std::path::PathBuf::from(stripped));
+        }
+    }
+    Some(canonical)
+}
+
+fn projected_link_matches_target(link: &std::path::Path, target: &std::path::Path) -> bool {
+    if !(link.exists() || link.symlink_metadata().is_ok()) {
+        return false;
+    }
+
+    match (
+        normalize_comparison_path(link),
+        normalize_comparison_path(target),
+    ) {
+        (Some(link_path), Some(target_path)) => link_path == target_path,
+        _ => false,
+    }
+}
+
 fn ensure_codex_home_projection(habitat_root: &std::path::Path) -> Result<(), String> {
     let real_codex_home = dirs::home_dir()
         .ok_or("Could not find user home directory")?
         .join(".codex");
     let projected_home = habitat_codex_home(habitat_root);
-    std::fs::create_dir_all(&projected_home).map_err(|e| e.to_string())?;
+    let wardian_skills = habitat_root.join(".agents").join("skills");
+    sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)
+}
 
-    if real_codex_home.exists() {
-        let entries = std::fs::read_dir(&real_codex_home).map_err(|e| e.to_string())?;
-        for entry in entries.flatten() {
-            let source = entry.path();
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str == "skills" {
-                continue;
-            }
+pub(crate) fn sync_codex_agent_home(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+    wardian_skills: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(projected_home).map_err(|e| e.to_string())?;
 
-            let target = projected_home.join(&name);
-            if source.is_dir() {
-                if target.exists() || target.symlink_metadata().is_ok() {
-                    continue;
-                }
-                create_directory_link(&source, &target)?;
-            } else if source.is_file() {
-                project_file(&source, &target)?;
-            }
+    for shared_name in ["auth.json", "config.toml", "cap_sid"] {
+        let source = real_codex_home.join(shared_name);
+        if source.exists() && source.is_file() {
+            project_file(&source, &projected_home.join(shared_name))?;
         }
     }
 
     let projected_skills = projected_home.join("skills");
-    if projected_skills.exists() {
-        let _ = std::fs::remove_dir_all(&projected_skills);
-    }
     std::fs::create_dir_all(&projected_skills).map_err(|e| e.to_string())?;
 
-    let native_skills = real_codex_home.join("skills");
-    if native_skills.exists() {
-        let entries = std::fs::read_dir(&native_skills).map_err(|e| e.to_string())?;
-        for entry in entries.flatten() {
-            let source = entry.path();
-            let name = entry.file_name();
-            let target = projected_skills.join(&name);
-            if source.is_dir() {
-                create_directory_link(&source, &target)?;
-            } else if source.is_file() {
-                project_file(&source, &target)?;
-            }
-        }
+    if !wardian_skills.exists() {
+        return Ok(());
     }
 
-    let wardian_skills = habitat_root.join(".agents").join("skills");
-    if wardian_skills.exists() {
-        let entries = std::fs::read_dir(&wardian_skills).map_err(|e| e.to_string())?;
-        for entry in entries.flatten() {
-            let source = entry.path();
-            if !source.is_dir() {
-                continue;
-            }
-            let target = projected_skills.join(entry.file_name());
-            if target.exists() || target.symlink_metadata().is_ok() {
-                let _ = std::fs::remove_dir_all(&target).or_else(|_| std::fs::remove_file(&target));
-            }
-            create_directory_link(&source, &target)?;
+    let entries = std::fs::read_dir(wardian_skills).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let source = entry.path();
+        if !source.is_dir() {
+            continue;
         }
+        let target = projected_skills.join(entry.file_name());
+        if target.exists() || target.symlink_metadata().is_ok() {
+            let _ = std::fs::remove_dir_all(&target).or_else(|_| std::fs::remove_file(&target));
+        }
+        create_directory_link(&source, &target)?;
     }
 
     Ok(())
 }
+
 
 fn write_habitat_instruction_files(
     wardian_home: &std::path::Path,
@@ -551,8 +578,25 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 
 #[cfg(test)]
 mod tests {
-    use super::habitat_root_for_session;
-    use std::path::Path;
+    use super::{
+        create_directory_link,
+        get_wardian_home,
+        habitat_root_for_session,
+        prepare_provider_bootstrap_cwd,
+        projected_link_matches_target,
+        provider_uses_projected_workspace,
+        sync_codex_agent_home,
+    };
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wardian-{label}-{stamp}"))
+    }
 
     #[test]
     fn habitat_root_uses_provider_session_id_under_agents() {
@@ -575,4 +619,87 @@ mod tests {
 
         assert!(err.contains("Provider session ID is required"));
     }
+
+    #[test]
+    fn only_codex_uses_projected_workspaces() {
+        assert!(!provider_uses_projected_workspace("claude"));
+        assert!(provider_uses_projected_workspace("codex"));
+        assert!(!provider_uses_projected_workspace("gemini"));
+    }
+
+    #[test]
+    fn projected_link_match_detects_existing_workspace_projection() {
+        let root = unique_temp_dir("workspace-link-test");
+        let target = root.join("target");
+        let link = root.join("link");
+
+        std::fs::create_dir_all(&target).expect("create target dir");
+        create_directory_link(&target, &link).expect("create projected link");
+
+        assert!(projected_link_matches_target(&link, &target));
+
+        let _ = std::fs::remove_dir_all(&link).or_else(|_| std::fs::remove_dir(&link));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_only_seeds_shared_files() {
+        let root = unique_temp_dir("codex-home-shared-files");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+        let wardian_skills = root.join("wardian-skills");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&projected_home).expect("create projected codex home");
+        std::fs::create_dir_all(&wardian_skills).expect("create wardian skills");
+
+        std::fs::write(real_home.join("auth.json"), "auth").expect("write auth");
+        std::fs::write(real_home.join("config.toml"), "config").expect("write config");
+        std::fs::write(real_home.join("cap_sid"), "cap").expect("write cap sid");
+        std::fs::write(real_home.join("history.jsonl"), "history").expect("write unrelated file");
+
+        sync_codex_agent_home(&real_home, &projected_home, &wardian_skills)
+            .expect("sync codex agent home");
+
+        assert!(projected_home.join("auth.json").exists());
+        assert!(projected_home.join("config.toml").exists());
+        assert!(projected_home.join("cap_sid").exists());
+        assert!(!projected_home.join("history.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_preserves_system_skills_and_adds_wardian_skills() {
+        let root = unique_temp_dir("codex-home-skills");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+        let projected_system_skill = projected_home.join("skills").join(".system").join("marker-skill");
+        let wardian_skill = root.join("wardian-skills").join("role-skill");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&projected_system_skill).expect("create projected system skill");
+        std::fs::create_dir_all(&wardian_skill).expect("create wardian skill dir");
+        std::fs::write(wardian_skill.join("SKILL.md"), "wardian skill").expect("write wardian skill");
+
+        sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
+            .expect("sync codex agent home");
+
+        assert!(projected_system_skill.exists());
+        assert!(projected_home.join("skills").join("role-skill").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn provider_bootstrap_cwd_stays_under_wardian_home() {
+        let bootstrap = prepare_provider_bootstrap_cwd("claude").expect("bootstrap cwd");
+        let wardian_home = get_wardian_home().expect("wardian home");
+
+        assert!(bootstrap.starts_with(wardian_home.join("provider-bootstrap")));
+        assert!(bootstrap.ends_with("claude"));
+    }
 }
+
+
+

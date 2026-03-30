@@ -12,7 +12,15 @@ vi.mock('./WorkflowLibrary', () => ({
   WorkflowLibrary: ({ workflows, onRun }: any) => (
     <div data-testid="workflow-library">
       {workflows.map((wf: any) => (
-        <button key={wf.id} onClick={() => onRun(wf.id)}>{wf.name}</button>
+        <button
+          key={wf.id}
+          data-workflow-id={wf.id}
+          data-trigger-status={wf.trigger_status}
+          data-trigger-type={wf.trigger_type}
+          onClick={() => onRun(wf.id)}
+        >
+          {wf.name}
+        </button>
       ))}
     </div>
   ),
@@ -129,5 +137,64 @@ describe('WorkflowSidebar', () => {
   it('correctly identifies active workflows for monitoring', () => {
     renderWithProvider(<WorkflowSidebar />);
     expect(screen.getByTestId('active-monitoring')).toBeInTheDocument();
+  });
+
+
+  it('derives scheduled workflow status from scheduled runs instead of trigger node config', () => {
+    (useWorkflowStore as any).mockReturnValue({
+      ...defaultStoreValues,
+      availableWorkflows: [
+        {
+          id: 'wf-1',
+          name: 'Alpha Workflow',
+          settings: { max_iterations: 10, on_limit_reached: 'pause' },
+          role_mappings: {},
+          nodes: [{ id: 'trigger-1', type: 'trigger', name: 'Scheduled Trigger', config: { schedule_type: 'Hours', interval: '2', status: 'off' } }],
+        },
+      ],
+      scheduledRuns: [
+        {
+          id: 'schedule-1',
+          workflow_id: 'wf-1',
+          workflow_name: 'Alpha Workflow',
+          schedule: { schedule_type: 'hours', value: '2', active: true },
+          role_mappings: {},
+          next_run_epoch_ms: Date.now() + 1000,
+          is_paused: false,
+        },
+      ],
+    });
+
+    renderWithProvider(<WorkflowSidebar />);
+
+    expect(screen.getByRole('button', { name: 'Alpha Workflow' })).toHaveAttribute('data-trigger-status', 'active');
+  });
+
+  it('marks a workflow active in the library while it has an in-flight run', () => {
+    (useWorkflowStore as any).mockReturnValue({
+      ...defaultStoreValues,
+      availableWorkflows: [
+        {
+          id: 'wf-2',
+          name: 'Beta Workflow',
+          settings: { max_iterations: 10, on_limit_reached: 'pause' },
+          role_mappings: {},
+          nodes: [{ id: 'trigger-2', type: 'trigger', name: 'Manual Trigger', config: { type: 'manual', status: 'off' } }],
+        },
+      ],
+      activeRuns: [
+        {
+          workflow_id: 'wf-2',
+          node_id: 'agent-1',
+          node_name: 'Agent',
+          status: 'running',
+          output: null,
+        },
+      ],
+    });
+
+    renderWithProvider(<WorkflowSidebar />);
+
+    expect(screen.getByRole('button', { name: 'Beta Workflow' })).toHaveAttribute('data-trigger-status', 'active');
   });
 });

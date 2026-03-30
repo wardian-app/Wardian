@@ -146,7 +146,11 @@ export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onR
       }
     };
 
-    const statusColorClass = triggerType === 'scheduled' ? 'text-cyan-400' : status === 'active' ? 'text-emerald-500' : status === 'muted' ? 'text-amber-500' : 'text-gray-500';
+    const statusColorClass = status === 'active'
+      ? 'text-wardian-processing'
+      : status === 'muted'
+        ? 'text-wardian-warning'
+        : 'text-muted-neutral';
     const isDragTarget = dragOverWorkflowId === wf.id && draggedWorkflowId !== null && draggedWorkflowId !== wf.id;
     const isBeingDragged = draggedWorkflowId === wf.id;
 
@@ -262,4 +266,7 @@ export const WorkflowLibrary: React.FC<WorkflowLibraryProps> = ({ workflows, onR
     </div>
   );
 };
+
+
+
 

@@ -167,7 +167,7 @@ impl AgentProvider for CodexProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match item_type {
-                    "agent_message" => Some(AgentEvent::Generating),
+                    "agent_message" => Some(AgentEvent::Unknown),
                     _ => Some(AgentEvent::Unknown),
                 }
             }
@@ -185,7 +185,7 @@ impl AgentProvider for CodexProvider {
                     "message" => {
                         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                         match role {
-                            "assistant" => Some(AgentEvent::Generating),
+                            "assistant" => Some(AgentEvent::Unknown),
                             "user" => Some(AgentEvent::UserQuery),
                             _ => Some(AgentEvent::Unknown),
                         }
@@ -200,9 +200,11 @@ impl AgentProvider for CodexProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match inner_type {
-                    "task_started" => Some(AgentEvent::Generating),
+                    "task_started" | "exec_command_begin" | "exec_command_start" => {
+                        Some(AgentEvent::Generating)
+                    }
                     "user_message" => Some(AgentEvent::UserQuery),
-                    "agent_message" => Some(AgentEvent::Generating),
+                    "agent_message" => Some(AgentEvent::Unknown),
                     "task_complete" => Some(AgentEvent::ModelResponse),
                     "exec_approval_request" => {
                         let message = parsed
@@ -316,7 +318,7 @@ mod tests {
     fn parse_output_agent_message_event() {
         let p = make_provider();
         let line = r#"{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
     }
 
     #[test]
@@ -331,6 +333,27 @@ mod tests {
         let p = make_provider();
         let line = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"abc"}}"#;
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+    }
+
+    #[test]
+    fn parse_output_agent_message_does_not_change_status() {
+        let p = make_provider();
+        let line = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Waiting for approval"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_output_exec_command_begin_sets_generating() {
+        let p = make_provider();
+        let line = r#"{"type":"event_msg","payload":{"type":"exec_command_begin","command":"git status"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
+    fn parse_output_function_call_output_resumes_processing() {
+        let p = make_provider();
+        let line = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"abc"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
     }
 
     #[test]
