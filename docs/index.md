@@ -21,6 +21,7 @@ Whether you are a user looking to manage your daily agent operations or a develo
 
 - **[User Guide](./guide/getting-started.md)**: Install Wardian, spawn your first agent, and learn the UI.
 - **[Developer Docs](./developer/architecture.md)**: Explore the Rust backend, PTY lifecycle, and state management.
+- **[Provider Runtime Notes](./developer/provider-runtimes.md)**: Understand the Gemini, Claude, and Codex runtime differences Wardian has to manage.
 - **[Agent Roles](./agents/roles.md)**: Understand the specialized missions of Architect, Coder, and more.
 
 ## 🏛️ Architecture & Governance
