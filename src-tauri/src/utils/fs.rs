@@ -22,26 +22,6 @@ pub fn get_default_user_dir() -> std::path::PathBuf {
     })
 }
 
-pub fn prepare_provider_bootstrap_cwd(provider: &str) -> Result<std::path::PathBuf, String> {
-    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let safe_provider: String = provider
-        .trim()
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-            _ => '_',
-        })
-        .collect();
-    let provider_name = if safe_provider.is_empty() {
-        "default".to_string()
-    } else {
-        safe_provider
-    };
-    let bootstrap_cwd = wardian_home.join("provider-bootstrap").join(provider_name);
-    std::fs::create_dir_all(&bootstrap_cwd).map_err(|e| e.to_string())?;
-    Ok(bootstrap_cwd)
-}
-
 pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
     // Priority 1: Explicitly provided folder
     if !folder.is_empty() {
@@ -596,9 +576,8 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        create_directory_link, get_wardian_home, habitat_root_for_session,
-        prepare_provider_bootstrap_cwd, projected_link_matches_target,
-        provider_uses_projected_workspace, sync_codex_agent_home,
+        create_directory_link, habitat_root_for_session,
+        projected_link_matches_target, provider_uses_projected_workspace, sync_codex_agent_home,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -707,14 +686,5 @@ mod tests {
         assert!(projected_home.join("skills").join("role-skill").exists());
 
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn provider_bootstrap_cwd_stays_under_wardian_home() {
-        let bootstrap = prepare_provider_bootstrap_cwd("claude").expect("bootstrap cwd");
-        let wardian_home = get_wardian_home().expect("wardian home");
-
-        assert!(bootstrap.starts_with(wardian_home.join("provider-bootstrap")));
-        assert!(bootstrap.ends_with("claude"));
     }
 }

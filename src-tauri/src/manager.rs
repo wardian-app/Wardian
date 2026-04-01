@@ -1105,10 +1105,16 @@ pub async fn obtain_session_id(
         provider_args.push("--json".to_string());
         provider_args.push("Introduce yourself".to_string());
     } else if provider_name == "claude" {
+        if let Some(config) = config {
+            provider_args.extend(provider.get_spawn_args(config, false));
+        } else {
+            provider_args.push("--verbose".to_string());
+            provider_args.push("--input-format".to_string());
+            provider_args.push("stream-json".to_string());
+            provider_args.push("--output-format".to_string());
+            provider_args.push("stream-json".to_string());
+        }
         provider_args.push("--print".to_string());
-        provider_args.push("--verbose".to_string());
-        provider_args.push("--output-format".to_string());
-        provider_args.push("stream-json".to_string());
         provider_args.push("Introduce yourself".to_string());
     } else {
         provider_args.push("-p".to_string());
