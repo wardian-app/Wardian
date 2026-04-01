@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { Copy, Check } from "lucide-react";
 import { useLibraryStore } from "../../store/useLibraryStore";
 import { LibraryFolder, LibraryPrompt } from "../../types";
 import { useConfirm } from "../../components/ConfirmDialog";
@@ -19,6 +21,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
 }) => {
   const confirm = useConfirm();
   const { promptTree, fetchLibraryTree } = useLibraryStore();
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
 
   useEffect(() => {
     if (!promptTree) {
@@ -63,6 +66,17 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
     }
   };
 
+  const handleCopy = async (e: React.MouseEvent, content: string, path: string) => {
+    e.stopPropagation();
+    try {
+      await writeText(content);
+      setCopiedPath(path);
+      setTimeout(() => setCopiedPath(null), 2000);
+    } catch (e) {
+      console.error("Copy failed", e);
+    }
+  };
+
   const handleBroadcastSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedAgentIds.size === 0) {
@@ -86,16 +100,35 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
             <div className="text-xs text-muted-neutral italic">No quick prompts in Library.</div>
           ) : (
             quickPrompts.map((prompt, idx) => (
-              <button 
+              <div 
                 key={`starred-${prompt.path}-${idx}`}
-                onClick={() => handleInject(prompt.content)}
-                className="flex flex-col items-start p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-primary hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group"
+                className="relative group/card"
               >
-                <span className="text-xs font-bold truncate w-full">{prompt.name}</span>
-                <span className="text-[10px] text-muted-neutral mt-1 w-full line-clamp-1 whitespace-pre-wrap leading-relaxed group-hover:text-primary/70 transition-colors">
-                  {prompt.content}
-                </span>
-              </button>
+                <button 
+                  onClick={() => handleInject(prompt.content)}
+                  className="w-full flex flex-col items-start p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-primary hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group"
+                >
+                  <span className="text-xs font-bold truncate w-9/12">{prompt.name}</span>
+                  <span className="text-[10px] text-muted-neutral mt-1 w-full line-clamp-1 whitespace-pre-wrap leading-relaxed group-hover:text-primary/70 transition-colors">
+                    {prompt.content}
+                  </span>
+                </button>
+                <button
+                  onClick={(e) => handleCopy(e, prompt.content, prompt.path)}
+                  title="Copy to clipboard"
+                  className={`absolute top-2 right-2 p-1.5 rounded-md border transition-all active:scale-95 ${
+                    copiedPath === prompt.path 
+                      ? "bg-wardian-success/10 border-wardian-success/30 text-wardian-success" 
+                      : "bg-wardian-card-bg border-transparent text-muted-neutral hover:text-primary hover:border-wardian-light shadow-sm opacity-0 group-hover/card:opacity-100"
+                  }`}
+                >
+                  {copiedPath === prompt.path ? (
+                    <Check className="w-3 h-3" />
+                  ) : (
+                    <Copy className="w-3 h-3" />
+                  )}
+                </button>
+              </div>
             ))
           )}
         </div>
