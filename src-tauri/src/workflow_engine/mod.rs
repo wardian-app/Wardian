@@ -1596,9 +1596,9 @@ pub async fn run_workflow(
                                     }
                                 }
 
-                                let _ = tx.send(prompt.trim().to_string()).await;
+                                let _ = tx.send(prompt.trim().as_bytes().to_vec()).await;
                                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                let _ = tx.send("\r".to_string()).await;
+                                let _ = tx.send(b"\r".to_vec()).await;
 
                                 let (completion_tx, mut completion_rx) =
                                     tokio::sync::mpsc::channel::<Value>(1);

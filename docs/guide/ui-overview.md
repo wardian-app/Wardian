@@ -38,6 +38,9 @@ Wardian mirrors your local file system. Most items in the **Library** or **Explo
 ### Contextual Awareness
 The interface is reactive. Selecting an agent in the **Roster** (Right Sidebar) will automatically re-root the **Explorer** (Left Sidebar) to that agent's specific working directory.
 
+### Terminal Continuity
+Wardian preserves terminal state across grid remounts so interactive TUIs, including Codex, keep their visible screen and scrollback more faithfully when panes are resized, reordered, or reattached. The terminal layer also forwards xterm's raw binary mouse-report input to the PTY so alternate-screen TUIs can handle wheel-driven in-app scrolling the same way they do in native terminals.
+
 ### Keyboard Shortcuts
 - **Ctrl + Tab**: Cycle through main View Modes.
 - **Ctrl + Shift + Tab**: Cycle through main View Modes in reverse.

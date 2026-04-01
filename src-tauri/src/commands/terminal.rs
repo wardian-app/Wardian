@@ -24,7 +24,7 @@ pub async fn send_input_to_agent(
     .get(&session_id)
     .cloned();
     if let Some(tx) = tx {
-        match tx.try_send(input) {
+        match tx.try_send(input.into_bytes()) {
             Ok(()) => {
                 if is_interrupt {
                     let agents = state.agents.lock().await;
@@ -80,7 +80,7 @@ pub async fn inject_session_input(
         }
     };
     if let Some(tx) = senders.get(&session_id) {
-        match tx.try_send(text) {
+        match tx.try_send(text.into_bytes()) {
             Ok(()) => Ok(()),
             Err(e) => {
                 manager::log_debug(&format!(
@@ -102,9 +102,51 @@ pub async fn broadcast_input(input: String, state: State<'_, AppState>) -> Resul
         .read()
         .map_err(|e| format!("Lock poisoned: {}", e))?;
     for tx in senders.values() {
-        let _ = tx.try_send(input.clone());
+        let _ = tx.try_send(input.clone().into_bytes());
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn send_binary_input_to_agent(
+    session_id: String,
+    input: Vec<u8>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let tx = match state.input_senders.try_read() {
+        Ok(s) => s,
+        Err(_) => {
+            manager::log_debug(&format!(
+                "[Wardian] [{}] send_binary_input_to_agent: input_senders write-locked, dropping binary input",
+                session_id
+            ));
+            return Err("Input channel temporarily locked".to_string());
+        }
+    }
+    .get(&session_id)
+    .cloned();
+
+    if let Some(tx) = tx {
+        match tx.try_send(input) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                manager::log_debug(&format!(
+                    "[Wardian] [{}] send_binary_input_to_agent: channel FULL (writer thread likely blocked on ConPTY write_all)",
+                    session_id
+                ));
+                Err("Terminal input buffer full - PTY may be stalled".to_string())
+            }
+            Err(e) => {
+                manager::log_debug(&format!(
+                    "[Wardian] [{}] send_binary_input_to_agent: channel error: {}",
+                    session_id, e
+                ));
+                Err(format!("Failed to send binary input: {}", e))
+            }
+        }
+    } else {
+        Err(format!("Agent {} not found or is off", session_id))
+    }
 }
 
 #[tauri::command]

@@ -14,6 +14,7 @@ The UI invokes these functions via `invoke("command_name", { args })`.
 - **`pause_agent`**: Suspends the PTY (killing the process but keeping the config).
 - **`resume_agent`**: Restarts a paused PTY session.
 - **`send_input_to_agent`**: Routes raw keystrokes to an agent's `stdin`.
+- **`send_binary_input_to_agent`**: Routes raw byte sequences from xterm to an agent's `stdin` without UTF-8 re-encoding.
 
 ### Workflow Governance
 
@@ -48,6 +49,18 @@ Pushed whenever an agent's PTY output contains valid JSON (e.g., from Gemini CLI
 - **`type: "progress"`**: Used for the "Thought Stream" bubbles.
 - **`type: "alert"`**: Triggers floating UI notifications.
 - **`type: "info" | "model"`**: Signals the agent has finished a turn (Idle state).
+
+### `agent-pty-output-ready`
+
+Pushed when the PTY reader appends new plain terminal output into an agent's buffered `output_buffer`.
+
+```json
+{
+  "session_id": "uuid-1"
+}
+```
+
+The event does not carry terminal text directly. The UI should treat it as a readiness signal and immediately drain the buffer via `read_agent_pty` until that command returns `null`.
 
 ### `workflow-telemetry`
 

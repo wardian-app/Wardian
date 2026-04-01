@@ -15,6 +15,9 @@ build = "build.rs"
 name = "wardian_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+terminal-trace = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

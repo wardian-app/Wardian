@@ -7,9 +7,48 @@ use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub use crate::utils::fs::*;
-pub use crate::utils::logging::log_debug;
+pub use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 pub use crate::utils::process::new_headless_command;
+#[cfg(windows)]
+pub use crate::utils::process::{find_wardian_session_process_roots, force_kill_process_tree};
 pub use crate::utils::shell::build_program_launch;
+
+#[cfg(windows)]
+fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
+    for pid in find_wardian_session_process_roots(session_id, Some(std::process::id())) {
+        log_debug(&format!(
+            "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
+            provider, session_id, pid
+        ));
+        if let Err(err) = force_kill_process_tree(pid) {
+            log_debug(&format!(
+                "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
+                session_id, pid, err
+            ));
+        }
+    }
+}
+
+pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
+    if let Some(mut child) = agent.child_process.take() {
+        let _ = child.kill();
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = agent.job_object.take();
+        if let Some(pid) = agent.process_id {
+            if let Err(err) = force_kill_process_tree(pid) {
+                log_debug(&format!(
+                    "[Wardian] Failed to force-kill process tree for session {} via PID {}: {}",
+                    agent.config.session_id, pid, err
+                ));
+            }
+        }
+    }
+
+    agent.process_id = None;
+}
 
 fn set_agent_status(
     app: &AppHandle,
@@ -157,6 +196,9 @@ pub async fn spawn_agent(
         });
     }
 
+    #[cfg(windows)]
+    cleanup_stale_session_processes(&config.session_id, &config.provider);
+
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
@@ -233,6 +275,16 @@ pub async fn spawn_agent(
         resume_id,
         is_restored
     ));
+    log_terminal_trace_note(
+        &config.session_id,
+        &config.provider,
+        &format!(
+            "spawn cwd={} restored={} args={:?}",
+            provider_cwd.display(),
+            is_restored,
+            provider_args
+        ),
+    );
 
     let child = pair
         .slave
@@ -274,13 +326,17 @@ pub async fn spawn_agent(
     let pty_master = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     drop(pair.slave);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    let sid_for_input = config.session_id.clone();
+    let provider_name_for_input = config.provider.clone();
 
     std::thread::spawn(move || {
         while let Some(input) = rx.blocking_recv() {
-            let _ = writer.write_all(input.as_bytes());
+            log_terminal_trace_bytes(&sid_for_input, &provider_name_for_input, "IN", &input);
+            let _ = writer.write_all(&input);
             let _ = writer.flush();
         }
+        log_terminal_trace_note(&sid_for_input, &provider_name_for_input, "input channel closed");
     });
 
     let sid_out = config.session_id.clone();
@@ -307,11 +363,30 @@ pub async fn spawn_agent(
         let mut current_line = String::new();
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    log_terminal_trace_note(&sid_for_pty, &provider_name_for_pty, "pty EOF");
+                    break;
+                }
                 Ok(n) => {
+                    log_terminal_trace_bytes(
+                        &sid_for_pty,
+                        &provider_name_for_pty,
+                        "OUT",
+                        &buf[0..n],
+                    );
                     let text = String::from_utf8_lossy(&buf[0..n]).to_string();
-                    if let Ok(mut h) = output_buffer_clone.lock() {
+                    let should_emit_output_ready = if let Ok(mut h) = output_buffer_clone.lock() {
+                        let was_empty = h.is_empty();
                         h.push_str(&text);
+                        was_empty
+                    } else {
+                        false
+                    };
+                    if should_emit_output_ready {
+                        let _ = pty_emit_app.emit(
+                            "agent-pty-output-ready",
+                            serde_json::json!({ "session_id": sid_for_pty }),
+                        );
                     }
                     current_line.push_str(&text);
                     loop {
@@ -355,7 +430,14 @@ pub async fn spawn_agent(
                         current_line.clear();
                     }
                 }
-                Err(_) => break,
+                Err(err) => {
+                    log_terminal_trace_note(
+                        &sid_for_pty,
+                        &provider_name_for_pty,
+                        &format!("pty read error: {}", err),
+                    );
+                    break;
+                }
             }
         }
         // Process terminated (EOF or error) — mark status as Off
@@ -679,10 +761,13 @@ pub async fn resize_pty(
     let master_arc = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
-            agent
-                .pty_master
-                .clone()
-                .ok_or_else(|| format!("Agent {} is off", session_id))?
+            #[cfg(feature = "terminal-trace")]
+            log_terminal_trace_note(
+                &session_id,
+                &agent.config.provider,
+                &format!("resize cols={} rows={}", cols, rows),
+            );
+            agent.pty_master.clone().ok_or_else(|| format!("Agent {} is off", session_id))?
         } else {
             return Err(format!("Agent {} not found", session_id));
         }
@@ -705,18 +790,37 @@ pub async fn resize_pty(
     Ok(())
 }
 
+fn codex_bootstrap_workspace_key(workspace_cwd: &std::path::Path) -> String {
+    let normalized = workspace_cwd.to_string_lossy().to_ascii_lowercase();
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("workspace-{hash:016x}")
+}
+
+fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            let _ = iter.next();
+            continue;
+        }
+        stripped.push(arg);
+    }
+    stripped
+}
+
 fn codex_bootstrap_launch_context(
     wardian_home: &std::path::Path,
     workspace_cwd: &std::path::Path,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_nanos();
     let bootstrap_home = wardian_home
         .join("provider-bootstrap")
         .join("codex")
-        .join(format!("session-{stamp}"))
+        .join(codex_bootstrap_workspace_key(workspace_cwd))
         .join(".codex");
     (workspace_cwd.to_path_buf(), bootstrap_home)
 }
@@ -764,10 +868,7 @@ fn migrate_codex_bootstrap_home(
         std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
     }
 
-    let _ = std::fs::remove_dir_all(bootstrap_home);
-    if let Some(parent) = bootstrap_home.parent() {
-        let _ = std::fs::remove_dir(parent);
-    }
+    std::fs::create_dir_all(bootstrap_home).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -995,56 +1096,10 @@ pub async fn obtain_session_id(
         provider_args.push("exec".to_string());
 
         if let Some(config) = config {
-            if let Some(ref model) = config.model {
-                provider_args.push("--model".to_string());
-                provider_args.push(model.clone());
-            }
-            if let Some(ref profile) = config.codex_profile {
-                if !profile.trim().is_empty() {
-                    provider_args.push("--profile".to_string());
-                    provider_args.push(profile.clone());
-                }
-            }
-            if let Some(ref sandbox_mode) = config.codex_sandbox_mode {
-                if !sandbox_mode.trim().is_empty() {
-                    provider_args.push("--sandbox".to_string());
-                    provider_args.push(sandbox_mode.clone());
-                }
-            }
-            if config.codex_full_auto.unwrap_or(false) {
-                provider_args.push("--full-auto".to_string());
-            }
-            if config.codex_search.unwrap_or(false) {
-                provider_args.push("--search".to_string());
-            }
-            if config.codex_skip_git_repo_check.unwrap_or(true) {
-                provider_args.push("--skip-git-repo-check".to_string());
-            }
-            if config.codex_ephemeral.unwrap_or(false) {
-                provider_args.push("--ephemeral".to_string());
-            }
-
-            let mut final_includes = config
-                .system_include_directories
-                .clone()
-                .unwrap_or_default();
-            if let Some(ref user_dirs) = config.include_directories {
-                for dir in user_dirs {
-                    if !final_includes.contains(dir) {
-                        final_includes.push(dir.clone());
-                    }
-                }
-            }
-            for dir in final_includes {
-                provider_args.push("--add-dir".to_string());
-                provider_args.push(dir);
-            }
-
-            if let Some(ref custom) = config.custom_args {
-                if let Some(parsed) = shlex::split(custom) {
-                    provider_args.extend(parsed);
-                }
-            }
+            provider_args.extend(strip_flag_value_pairs(
+                provider.get_spawn_args(config, false),
+                "--add-dir",
+            ));
         }
 
         provider_args.push("--json".to_string());
@@ -1749,21 +1804,47 @@ pub async fn kill_all_agents(state: &AppState) {
     #[allow(unused_mut)]
     for (sid, mut agent) in agents.drain() {
         log_debug(&format!("[Wardian] Killing session {}", sid));
-        if let Some(mut child) = agent.child_process {
-            let _ = child.kill();
-        }
-        #[cfg(windows)]
-        {
-            let _ = agent.job_object.take();
-        }
+        terminate_active_agent_process(&mut agent);
     }
     state.agent_order.lock().await.clear();
 }
 
 #[cfg(test)]
 mod tests {
-    use super::codex_bootstrap_launch_context;
+    use super::{
+        codex_bootstrap_launch_context, migrate_codex_bootstrap_home, strip_flag_value_pairs,
+    };
     use std::path::Path;
+
+    #[test]
+    fn codex_bootstrap_launch_context_is_stable_for_same_workspace() {
+        let wardian_home = Path::new("C:/Users/test/.wardian");
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+
+        let (_, first_bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+        let (_, second_bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+
+        assert_eq!(first_bootstrap_home, second_bootstrap_home);
+    }
+
+    #[test]
+    fn migrate_codex_bootstrap_home_keeps_bootstrap_root_for_reuse() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_home = temp.path().join("bootstrap").join(".codex");
+        let final_home = temp.path().join("final").join(".codex");
+
+        std::fs::create_dir_all(&bootstrap_home).expect("create bootstrap home");
+        std::fs::write(bootstrap_home.join("config.toml"), "config").expect("write config");
+        std::fs::create_dir_all(bootstrap_home.join("sessions")).expect("create sessions dir");
+        std::fs::write(bootstrap_home.join("sessions").join("session.jsonl"), "session")
+            .expect("write session file");
+
+        migrate_codex_bootstrap_home(&bootstrap_home, &final_home).expect("migrate bootstrap home");
+
+        assert!(bootstrap_home.exists());
+        assert!(bootstrap_home.join("config.toml").exists());
+        assert!(final_home.join("sessions").join("session.jsonl").exists());
+    }
 
     #[test]
     fn codex_bootstrap_launch_context_uses_real_workspace_cwd() {
@@ -1776,4 +1857,28 @@ mod tests {
         assert!(bootstrap_home.starts_with(wardian_home.join("provider-bootstrap").join("codex")));
         assert_ne!(bootstrap_home, workspace_cwd);
     }
+    #[test]
+    fn strip_flag_value_pairs_removes_all_add_dir_arguments() {
+        let args = vec![
+            "--model".to_string(),
+            "gpt-5".to_string(),
+            "--add-dir".to_string(),
+            "C:/Users/test/.wardian/common".to_string(),
+            "--add-dir".to_string(),
+            "C:/Users/test/.wardian/classes/Coder".to_string(),
+            "--search".to_string(),
+        ];
+
+        let stripped = strip_flag_value_pairs(args, "--add-dir");
+
+        assert_eq!(
+            stripped,
+            vec![
+                "--model".to_string(),
+                "gpt-5".to_string(),
+                "--search".to_string(),
+            ]
+        );
+    }
 }
+

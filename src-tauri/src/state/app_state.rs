@@ -10,7 +10,7 @@ pub struct AppState {
     pub agent_order: Mutex<Vec<String>>,
     // Separate, lightweight map for stdin senders — completely independent from the
     // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
-    pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>,
+    pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
     // Map of workflow_id to a list of background trigger handles
     pub workflow_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     // Map of workflow_id to running execution handles

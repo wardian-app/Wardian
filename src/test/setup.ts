@@ -24,6 +24,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: vi.fn(),
   listen: vi.fn(() => Promise.resolve(() => {})),
 }));
 
@@ -43,6 +44,7 @@ vi.mock("@xterm/xterm", () => ({
     open: vi.fn(),
     write: vi.fn(),
     onData: vi.fn(),
+    onBinary: vi.fn(),
     onTitleChange: vi.fn(),
     onResize: vi.fn(),
     dispose: vi.fn(),

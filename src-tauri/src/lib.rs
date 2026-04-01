@@ -8,14 +8,7 @@ pub mod workflow_engine;
 
 use crate::models::AgentConfig;
 use crate::state::AppState;
-use tauri::{Emitter, Listener, Manager};
-
-#[derive(serde::Deserialize, Clone)]
-struct TerminalInputPayload {
-    #[serde(rename = "sessionId")]
-    session_id: String,
-    input: String,
-}
+use tauri::{Emitter, Manager};
 
 /// The main entry point for the Wardian Tauri application.
 /// Initializes plugins, state, and registers command handlers.
@@ -44,39 +37,6 @@ pub fn run() {
 
             // Generate Class Constraints globally inside AppData
             manager::init_agent_classes(&app_handle);
-
-            // Terminal input via Tauri events
-            let event_handle = app.handle().clone();
-            app.listen_any("terminal-input", move |event| {
-                let raw = event.payload();
-                if let Ok(payload) = serde_json::from_str::<TerminalInputPayload>(raw) {
-                    let is_interrupt = payload.input.contains('\u{3}');
-                    if let Ok(senders) = event_handle.state::<AppState>().input_senders.try_read() {
-                        if let Some(tx) = senders.get(&payload.session_id) {
-                            let _ = tx.try_send(payload.input);
-                        }
-                    }
-                    if is_interrupt {
-                        let app_handle = event_handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let state = app_handle.state::<AppState>();
-                            let agents = state.agents.lock().await;
-                            if let Some(agent) = agents.get(&payload.session_id) {
-                                if let Ok(mut status) = agent.current_status.lock() {
-                                    *status = "Idle".to_string();
-                                }
-                                let _ = app_handle.emit(
-                                    "agent-status-updated",
-                                    serde_json::json!({
-                                        "session_id": payload.session_id,
-                                        "current_status": "Idle",
-                                    }),
-                                );
-                            }
-                        });
-                    }
-                }
-            });
 
             // Metrics push task
             let metrics_handle = app.handle().clone();
@@ -140,6 +100,7 @@ pub fn run() {
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
             commands::terminal::send_input_to_agent,
+            commands::terminal::send_binary_input_to_agent,
             commands::terminal::inject_session_input,
             commands::terminal::broadcast_input,
             commands::terminal::resize_agent_terminal,

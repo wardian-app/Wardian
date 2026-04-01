@@ -56,14 +56,15 @@ impl CodexProvider {
             }
         }
 
-        let sandbox_mode = config
+        if let Some(sandbox_mode) = config
             .codex_sandbox_mode
             .as_ref()
             .filter(|mode| !mode.trim().is_empty())
             .cloned()
-            .unwrap_or_else(|| "workspace-write".to_string());
-        args.push("--sandbox".into());
-        args.push(sandbox_mode);
+        {
+            args.push("--sandbox".into());
+            args.push(sandbox_mode);
+        }
 
         if let Some(ref approval_policy) = config.codex_approval_policy {
             if !approval_policy.trim().is_empty() {
@@ -90,18 +91,15 @@ impl CodexProvider {
             }
         }
 
-        let mut final_includes = config
-            .system_include_directories
-            .clone()
-            .unwrap_or_default();
+        let mut explicit_includes = Vec::new();
         if let Some(ref user_dirs) = config.include_directories {
             for dir in user_dirs {
-                if !final_includes.contains(dir) {
-                    final_includes.push(dir.clone());
+                if !explicit_includes.contains(dir) {
+                    explicit_includes.push(dir.clone());
                 }
             }
         }
-        for dir in final_includes {
+        for dir in explicit_includes {
             args.push("--add-dir".into());
             args.push(dir);
         }
@@ -136,6 +134,7 @@ impl AgentProvider for CodexProvider {
         }
 
         self.append_common_args(&mut args, config, false);
+        args.push("--no-alt-screen".into());
 
         if let Some(ref custom) = config.custom_args {
             if let Some(parsed) = shlex::split(custom) {
@@ -278,10 +277,31 @@ mod tests {
         assert!(args.contains(&"--ask-for-approval".to_string()));
         assert!(args.contains(&"on-request".to_string()));
         assert!(args.contains(&"--search".to_string()));
+        assert!(args.contains(&"--no-alt-screen".to_string()));
     }
 
     #[test]
-    fn spawn_args_include_directories() {
+    fn spawn_args_enable_no_alt_screen_by_default() {
+        let p = make_provider();
+        let config = AgentConfig::default();
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(args.contains(&"--no-alt-screen".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_inherit_sandbox_when_not_overridden() {
+        let p = make_provider();
+        let config = AgentConfig::default();
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(!args.contains(&"--sandbox".to_string()));
+    }
+
+    #[test]
+    fn spawn_args_include_only_user_directories() {
         let p = make_provider();
         let config = AgentConfig {
             system_include_directories: Some(vec!["/sys/dir".into()]),
@@ -290,7 +310,9 @@ mod tests {
         };
         let args = p.get_spawn_args(&config, false);
         let count = args.iter().filter(|a| *a == "--add-dir").count();
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
+        assert!(args.contains(&"/user/dir".to_string()));
+        assert!(!args.contains(&"/sys/dir".to_string()));
     }
 
     #[test]
@@ -383,3 +405,4 @@ mod tests {
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
     }
 }
+

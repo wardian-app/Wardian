@@ -8,7 +8,7 @@ Located in `src-tauri/src/state/app_state.rs`, the `AppState` is managed as a Ta
 ### Key Fields:
 - **`agents: Mutex<HashMap<String, ActiveAgent>>`**: The core map of all active agent sessions. Protected by a `tokio::sync::Mutex` for safe async access.
 - **`agent_order: Mutex<Vec<String>>`**: Maintains the visual order of agents in the UI roster and grid.
-- **`input_senders: RwLock<HashMap<String, Sender<String>>>`**: A specialized, lightweight map for routing terminal input. Uses `std::sync::RwLock` to allow zero-contention reads by the terminal input event listener.
+- **`input_senders: RwLock<HashMap<String, Sender<Vec<u8>>>>`**: A specialized, lightweight map for routing terminal input. Uses `std::sync::RwLock` to allow low-contention reads for direct text and binary PTY input commands.
 - **`workflow_triggers: Mutex<HashMap<String, Vec<JoinHandle<()>>>>`**: Tracks active background tasks (like Cron jobs) for each workflow, allowing for surgical termination (Muting).
 
 ## 🤖 ActiveAgent (The Session Handle)
@@ -20,11 +20,13 @@ Located in `src-tauri/src/state/active_agent.rs`, this struct represents a singl
 - **`job_object` (Windows only)**: Ensures that if Wardian crashes, all child processes are immediately cleaned up by the OS.
 
 ### Logical Components:
-- **`output_buffer`**: A thread-safe string buffer that collects PTY output for the UI to poll.
+- **`output_buffer`**: A thread-safe string buffer that collects PTY output until the UI drains it.
 - **`current_status`**: Real-time status indicator (e.g., "Idle", "Processing", "Action Needed").
 - **`query_count`**: Tracks how many prompts have been sent to the agent in the current session.
 
 ## 📡 Data Flow
 1. **Push**: Agent telemetry (CPU, Memory) is gathered in a background thread and pushed to the UI via the `agent-metrics` event every 5 seconds.
-2. **Pull**: The UI polls for terminal output via the `read_agent_pty` command, which "drains" the `output_buffer` to minimize memory usage.
-3. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.
+2. **Output Ready Event**: When the PTY reader appends terminal bytes to `output_buffer`, it emits `agent-pty-output-ready` for that session.
+3. **Drain**: The UI responds by calling `read_agent_pty` until the command returns `null`, which drains the buffer in-order without a timer-based polling loop.
+4. **Live Terminal Host**: The frontend keeps a long-lived xterm instance per session and only detaches or reattaches its DOM host when panes remount, preserving parser and buffer state in memory.
+5. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.

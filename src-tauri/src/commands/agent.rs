@@ -14,6 +14,20 @@ pub struct SpawnAgentRequest {
     pub config_override: Option<AgentConfig>,
 }
 
+fn persisted_resume_session_for_provider(
+    provider_name: &str,
+    actual_resume: Option<String>,
+    session_id: &str,
+) -> Option<String> {
+    actual_resume.or_else(|| {
+        if provider_name == "claude" && !session_id.trim().is_empty() {
+            Some(session_id.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 #[tauri::command]
 pub async fn spawn_agent(
     req: SpawnAgentRequest,
@@ -76,14 +90,21 @@ pub async fn spawn_agent(
     config.session_name = session_name;
     config.agent_class = agent_class.clone();
     config.folder = folder;
-    config.resume_session = actual_resume;
+    config.resume_session = actual_resume.clone();
     config.is_off = is_off.unwrap_or(false);
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
         &agent_class,
         &session_id,
     ));
 
-    let active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
+    let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
+    let persisted_resume = persisted_resume_session_for_provider(
+        &config.provider,
+        actual_resume.clone(),
+        &session_id,
+    );
+    config.resume_session = persisted_resume.clone();
+    active_agent.config.resume_session = persisted_resume;
 
     // Register input sender BEFORE locking agents map
     if let Some(ref tx) = active_agent.stdin_tx {
@@ -135,14 +156,7 @@ pub async fn kill_agent(
         }
         order.retain(|id| id != &session_id);
         manager::save_state(&app, &agents, &order);
-        if let Some(mut child) = agent.child_process {
-            let _ = child.kill();
-        }
-        #[cfg(windows)]
-        {
-            // Explicitly drop the job object to ensure all processes in the tree (including PTY hosts) are killed.
-            let _ = agent.job_object.take();
-        }
+        manager::terminate_active_agent_process(&mut agent);
 
         // Cleanup: remove the agent's private directory
         if let Some(home) = crate::utils::fs::get_wardian_home() {
@@ -184,18 +198,10 @@ pub async fn pause_agent(
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
-        if let Some(mut child) = agent.child_process.take() {
-            let _ = child.kill();
-        }
-
-        #[cfg(windows)]
-        {
-            let _ = agent.job_object.take();
-        }
+        manager::terminate_active_agent_process(agent);
 
         agent.pty_master = None;
         agent.stdin_tx = None;
-        agent.process_id = None;
         agent.config.is_off = true;
         // Remove from input_senders
         if let Ok(mut status) = agent.current_status.lock() {
@@ -330,4 +336,25 @@ pub async fn reorder_agents(
     *order = session_ids;
     manager::save_state(&app, &agents, &order);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persisted_resume_session_for_provider;
+
+    #[test]
+    fn claude_persists_resume_session_after_initial_spawn() {
+        assert_eq!(
+            persisted_resume_session_for_provider("claude", None, "claude-session-1"),
+            Some("claude-session-1".to_string())
+        );
+    }
+
+    #[test]
+    fn non_claude_providers_leave_resume_session_unchanged() {
+        assert_eq!(
+            persisted_resume_session_for_provider("codex", None, "codex-session-1"),
+            None
+        );
+    }
 }

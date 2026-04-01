@@ -144,6 +144,7 @@ export const GridView: React.FC<GridViewProps> = ({
               >
                 <AgentTerminal 
                   sessionId={agentId} 
+                  provider={agent.provider}
                   isMaximized={isMaximized}
                   theme={theme}
                   onTitleChange={(title) => handleTitleChange(agentId, title)} 

@@ -6,7 +6,7 @@ pub struct ActiveAgent {
     pub config: AgentConfig,
     pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
     pub pty_master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
-    pub stdin_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    pub stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// Drain-on-read output buffer. The reader thread pushes PTY output here;
     /// the frontend polls via `read_agent_pty` which takes and clears it.
     pub output_buffer: Arc<Mutex<String>>,
