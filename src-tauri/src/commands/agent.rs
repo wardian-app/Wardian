@@ -56,10 +56,8 @@ pub async fn spawn_agent(
             .as_ref()
             .map(|c| c.provider.clone())
             .unwrap_or_else(|| "claude".to_string());
-            
-        match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref())
-            .await
-        {
+
+        match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
             Ok(real_sid) => {
                 manager::log_debug(&format!(
                     "[WARDIAN] Intercepted stream-json session ID for {}: {}",
@@ -90,11 +88,8 @@ pub async fn spawn_agent(
     ));
 
     let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
-    let persisted_resume = persisted_resume_session_for_provider(
-        &config.provider,
-        actual_resume.clone(),
-        &session_id,
-    );
+    let persisted_resume =
+        persisted_resume_session_for_provider(&config.provider, actual_resume.clone(), &session_id);
     config.resume_session = persisted_resume.clone();
     active_agent.config.resume_session = persisted_resume;
 

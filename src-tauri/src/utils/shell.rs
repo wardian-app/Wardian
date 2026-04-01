@@ -179,7 +179,11 @@ pub fn build_program_launch_with_settings(
     }
 
     if uses_positional_program_forwarding(&shell.id) {
-        args.extend(build_forwarded_program_args(&shell.id, program, program_args));
+        args.extend(build_forwarded_program_args(
+            &shell.id,
+            program,
+            program_args,
+        ));
     } else {
         let command_text = build_program_command_text(&shell.id, program, program_args);
         args.push(command_text);
@@ -259,7 +263,10 @@ fn inferred_custom_args(
 }
 
 fn uses_positional_program_forwarding(shell_id: &str) -> bool {
-    matches!(shell_id, "bash" | "git-bash" | "zsh" | "sh" | "dash" | "ksh")
+    matches!(
+        shell_id,
+        "bash" | "git-bash" | "zsh" | "sh" | "dash" | "ksh"
+    )
 }
 
 fn build_forwarded_program_args(
@@ -914,7 +921,10 @@ mod tests {
             assert_eq!(spec.args[2], "wardian-shell");
             assert_eq!(spec.args[3], "claude.exe");
             assert_eq!(spec.args[4], "--settings");
-            assert_eq!(spec.args[5], "{\"hooks\":{\"PermissionRequest\":[{\"matcher\":\"*\"}]}}");
+            assert_eq!(
+                spec.args[5],
+                "{\"hooks\":{\"PermissionRequest\":[{\"matcher\":\"*\"}]}}"
+            );
         }
     }
     #[test]

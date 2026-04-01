@@ -41,6 +41,12 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
       handleTitleChange={() => {}}
       deriveCurrentThought={() => ({ thought: '', status: 'Idle' })}
       getStatusColorClass={() => 'bg-wardian-success'}
+      watchlists={[]}
+      onAddToList={vi.fn()}
+      onRemoveFromList={vi.fn()}
+      onQuery={vi.fn()}
+      onPause={vi.fn()}
+      onRestart={vi.fn()}
     />
   );
 }

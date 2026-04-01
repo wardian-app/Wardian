@@ -60,6 +60,8 @@ describe('AgentWatchlist', () => {
     onPause: mockOnPause,
     onRestart: mockOnRestart,
     onDelete: mockOnDelete,
+    onAddToList: vi.fn(),
+    onRemoveFromList: vi.fn(),
     collapsed: false,
     watchlists: sampleWatchlists,
     activeListId: 'all',

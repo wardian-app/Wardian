@@ -51,8 +51,17 @@ pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
         resource_path
     ));
 
-    let output = Command::new("node")
-        .arg(&resource_path)
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("node");
+    cmd.arg(&resource_path);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to execute node process: {}", e))?;
 

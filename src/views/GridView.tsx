@@ -1,6 +1,8 @@
-import React from "react";
+import React, { useState } from "react";
 import { AgentConfig, AgentTelemetry } from "../types";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
+import type { Watchlist } from "../layout/watchlist/types";
+import { AgentContextMenu } from "../components/AgentContextMenu";
 
 interface GridViewProps {
   filteredAgents: AgentConfig[];
@@ -27,6 +29,12 @@ interface GridViewProps {
   onMouseUp: () => void;
   draggedAgentId: string | null;
   dragOverAgentId: string | null;
+  watchlists: Watchlist[];
+  onAddToList: (listId: string, agentId: string) => void;
+  onRemoveFromList: (listId: string, agentId: string) => void;
+  onQuery: (agentId: string) => void;
+  onPause: (agentId: string) => void;
+  onRestart: (agentId: string) => void;
 }
 
 export const GridView: React.FC<GridViewProps> = ({
@@ -54,7 +62,26 @@ export const GridView: React.FC<GridViewProps> = ({
   onMouseUp,
   draggedAgentId,
   dragOverAgentId,
+  watchlists,
+  onAddToList,
+  onRemoveFromList,
+  onQuery,
+  onPause,
+  onRestart,
 }) => {
+  const [contextMenu, setContextMenu] = useState<{ visible: boolean; x: number; y: number; agentId: string | null }>({
+    visible: false, x: 0, y: 0, agentId: null
+  });
+
+  const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuW = 200, menuH = 280;
+    const x = Math.min(e.clientX, window.innerWidth - menuW - 8);
+    const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
+    setContextMenu({ visible: true, x, y, agentId });
+  };
+
   const maximizedAgents = maximizedAgentId
     ? filteredAgents.filter((agent: AgentConfig) => agent.session_id.toString() === maximizedAgentId)
     : [];
@@ -96,6 +123,7 @@ export const GridView: React.FC<GridViewProps> = ({
               onMouseEnter={() => onMouseEnterCard(agentId)}
               onMouseDown={(e) => { if (e.button === 0) onMouseDown(agentId); }}
               onClick={(e) => { e.stopPropagation(); if (!isMaximized) onCardClick(e, agentId); }}
+              onContextMenu={(e) => { if (!isMaximized) handleContextMenu(e, agentId); }}
               className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none flex ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
             >
               <div className="flex items-center gap-3">
@@ -160,6 +188,24 @@ export const GridView: React.FC<GridViewProps> = ({
           <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
           <p className="text-sm font-bold tracking-normal">No Active Instances</p>
         </div>
+      )}
+
+      {contextMenu.visible && contextMenu.agentId && (
+        <AgentContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          agentId={contextMenu.agentId}
+          offAgentIds={offAgentIds}
+          watchlists={watchlists}
+          onInitiateRename={(id) => { setEditingAgentId(id); const a = filteredAgents.find(ag => ag.session_id === id); if (a) setTempName(a.session_name); }}
+          onQuery={onQuery}
+          onPause={onPause}
+          onRestart={onRestart}
+          onAddToList={onAddToList}
+          onRemoveFromList={onRemoveFromList}
+          onDelete={onDelete}
+          onClose={() => setContextMenu({ ...contextMenu, visible: false })}
+        />
       )}
     </div>
   );

@@ -6,7 +6,7 @@ import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
 import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
-import { getAgentsForList } from "../layout/watchlist/watchlistUtils";
+import { getAgentsForList, addAgentToList, removeAgentFromList } from "../layout/watchlist/watchlistUtils";
 import type { Watchlist } from "../layout/watchlist/types";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -123,6 +123,20 @@ function AppBody() {
       await invoke("save_watchlists", { watchlists: lists });
     } catch { /* non-critical */ }
   }, []);
+
+  const handleAddToList = async (listId: string, agentId: string) => {
+    const updated = watchlists.map((l) =>
+      l.id === listId ? addAgentToList(l, agentId) : l,
+    );
+    await persistWatchlists(updated);
+  };
+
+  const handleRemoveFromList = async (listId: string, agentId: string) => {
+    const updated = watchlists.map((l) =>
+      l.id === listId ? removeAgentFromList(l, agentId) : l,
+    );
+    await persistWatchlists(updated);
+  };
 
   const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
   const filteredAgents = getAgentsForList(agents, activeList);
@@ -460,6 +474,12 @@ function AppBody() {
                 editingAgentId={editingAgentId}
                 tempName={tempName}
                 theme={theme}
+                watchlists={watchlists}
+                onAddToList={handleAddToList}
+                onRemoveFromList={handleRemoveFromList}
+                onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
+                onPause={onPause}
+                onRestart={onRestart}
                 onMouseEnterCard={handleMouseEnterCard}
                 onMouseUp={handleMouseUp}
                 onMouseDown={handleMouseDown}
@@ -519,6 +539,8 @@ function AppBody() {
           onPause={onPause}
           onRestart={onRestart}
           onDelete={onDelete}
+          onAddToList={handleAddToList}
+          onRemoveFromList={handleRemoveFromList}
           collapsed={rightCollapsed}
           watchlists={watchlists}
           activeListId={activeListId}

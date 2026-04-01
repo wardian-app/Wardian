@@ -186,4 +186,3 @@ mod terminal_trace {
 
 #[cfg(feature = "terminal-trace")]
 pub use terminal_trace::{log_terminal_trace_bytes, log_terminal_trace_note};
-

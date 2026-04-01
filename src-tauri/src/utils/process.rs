@@ -107,10 +107,7 @@ pub fn is_wardian_session_process_candidate(
 }
 
 #[cfg(windows)]
-pub fn find_wardian_session_process_roots(
-    session_id: &str,
-    exclude_pid: Option<u32>,
-) -> Vec<u32> {
+pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<u32>) -> Vec<u32> {
     let mut sys = sysinfo::System::new_all();
     sys.refresh_all();
 

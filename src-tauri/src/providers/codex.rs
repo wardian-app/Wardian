@@ -405,4 +405,3 @@ mod tests {
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
     }
 }
-

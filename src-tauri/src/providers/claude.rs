@@ -118,7 +118,9 @@ impl AgentProvider for ClaudeProvider {
         #[cfg(not(target_os = "windows"))]
         {
             if let Some(paths) = std::env::var_os("PATH") {
-                if let Some(executable) = Self::find_unix_claude_in_paths(std::env::split_paths(&paths)) {
+                if let Some(executable) =
+                    Self::find_unix_claude_in_paths(std::env::split_paths(&paths))
+                {
                     return (executable, vec![]);
                 }
             }

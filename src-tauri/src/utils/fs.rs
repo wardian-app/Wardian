@@ -411,7 +411,7 @@ fn claude_permission_hook_command(script_path: &std::path::Path) -> String {
     #[cfg(windows)]
     {
         format!(
-            "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+            "powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
             script_path.to_string_lossy()
         )
     }
@@ -442,11 +442,11 @@ fn create_directory_link(target: &std::path::Path, link: &std::path::Path) -> Re
             link.to_string_lossy(),
             target.to_string_lossy()
         );
-        let output = std::process::Command::new("cmd")
-            .raw_arg("/c")
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.raw_arg("/c")
             .raw_arg(&command)
-            .output()
-            .map_err(|e| e.to_string())?;
+            .creation_flags(0x08000000);
+        let output = cmd.output().map_err(|e| e.to_string())?;
         if output.status.success() {
             Ok(())
         } else {
@@ -576,8 +576,8 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        create_directory_link, habitat_root_for_session,
-        projected_link_matches_target, provider_uses_projected_workspace, sync_codex_agent_home,
+        create_directory_link, habitat_root_for_session, projected_link_matches_target,
+        provider_uses_projected_workspace, sync_codex_agent_home,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};

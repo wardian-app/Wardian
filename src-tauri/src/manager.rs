@@ -336,7 +336,11 @@ pub async fn spawn_agent(
             let _ = writer.write_all(&input);
             let _ = writer.flush();
         }
-        log_terminal_trace_note(&sid_for_input, &provider_name_for_input, "input channel closed");
+        log_terminal_trace_note(
+            &sid_for_input,
+            &provider_name_for_input,
+            "input channel closed",
+        );
     });
 
     let sid_out = config.session_id.clone();
@@ -767,7 +771,10 @@ pub async fn resize_pty(
                 &agent.config.provider,
                 &format!("resize cols={} rows={}", cols, rows),
             );
-            agent.pty_master.clone().ok_or_else(|| format!("Agent {} is off", session_id))?
+            agent
+                .pty_master
+                .clone()
+                .ok_or_else(|| format!("Agent {} is off", session_id))?
         } else {
             return Err(format!("Agent {} not found", session_id));
         }
@@ -1828,7 +1835,8 @@ mod tests {
         let workspace_cwd = Path::new("D:/Development/Wardian");
 
         let (_, first_bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
-        let (_, second_bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+        let (_, second_bootstrap_home) =
+            codex_bootstrap_launch_context(wardian_home, workspace_cwd);
 
         assert_eq!(first_bootstrap_home, second_bootstrap_home);
     }
@@ -1842,8 +1850,11 @@ mod tests {
         std::fs::create_dir_all(&bootstrap_home).expect("create bootstrap home");
         std::fs::write(bootstrap_home.join("config.toml"), "config").expect("write config");
         std::fs::create_dir_all(bootstrap_home.join("sessions")).expect("create sessions dir");
-        std::fs::write(bootstrap_home.join("sessions").join("session.jsonl"), "session")
-            .expect("write session file");
+        std::fs::write(
+            bootstrap_home.join("sessions").join("session.jsonl"),
+            "session",
+        )
+        .expect("write session file");
 
         migrate_codex_bootstrap_home(&bootstrap_home, &final_home).expect("migrate bootstrap home");
 
@@ -1887,4 +1898,3 @@ mod tests {
         );
     }
 }
-
