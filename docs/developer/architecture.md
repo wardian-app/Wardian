@@ -21,7 +21,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Deterministic Execution**: Detailed in [Workflow Engine Architecture](./workflow-engine.md).
 - **Shared Registry**: A global Handlebars-based registry where agent outputs are stored for cross-agent referencing.
 - **Node Execution**: Deterministic execution of workflow nodes (loops, triggers, agent calls).
-- **Injection Logic**: Solves CLI input limits by writing prompts to temp files (`C:\Users\tgemi\.gemini\tmp\wardian-1`) and using `<` redirection.
+- **Injection Logic**: Solves CLI input limits by writing prompts to temp files (`~\.gemini\tmp\wardian-1`) and using `<` redirection.
 
 ### 3. The UI Layer (React Frontend)
 
