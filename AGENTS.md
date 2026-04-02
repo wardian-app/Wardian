@@ -61,6 +61,32 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
 - **Status Indicators**: Emerald (Idle), Cyan (Processing), Amber (Action Required), Gray (Off), Red (Error).
 - **Semantic Theming**: ALWAYS use theme variables (e.g., `var(--color-wardian-text-muted)`) or themed classes (`.text-muted`) instead of hardcoded Tailwind colors.
 
+## 🧪 Automated Testing & Verification
+
+Wardian has three test layers. Before marking a task as complete, run the appropriate ones:
+
+1. **Frontend Unit Tests**: `npm run test`
+   - Run after any TypeScript/React changes.
+2. **Backend Unit Tests**: `cd src-tauri && cargo test`
+   - Run after any Rust changes. Use `--test-threads=1` if tests involve env vars.
+3. **E2E Smoke Tests**: `npm run test:e2e`
+   - Run after UI or orchestration changes. Requires the Tauri dev server.
+   - Uses an isolated `WARDIAN_HOME` (temp directory) with seeded fixtures.
+
+### Mock Provider
+
+The `mock` provider (`scripts/mock-agent.cjs`) simulates deterministic agent behavior for offline testing. Configure via environment variables:
+- `WARDIAN_MOCK_SCENARIO`: `basic`, `resume`, `action_needed`, `failure`, `long_output`, `headless`, `multi_turn`
+- `WARDIAN_MOCK_DELAY_MS`: Delay between events (default `100`)
+
+### Isolated Test Home
+
+Set `WARDIAN_HOME` to redirect all state to an isolated directory:
+```bash
+WARDIAN_HOME=/tmp/wardian-test npm run tauri dev
+```
+This prevents test runs from interfering with production `~/.wardian` state.
+
 ## 🛠️ Workflow Rules
 - **Surgical Code Changes**: Use the `replace` tool for precise, context-aware edits. Avoid overwriting entire files unless scaffolding new modules.
 - **Verification-First**: A task is only complete once the behavioral correctness has been verified via the pre-commit checklist.

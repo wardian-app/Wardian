@@ -113,6 +113,7 @@ export const GridView: React.FC<GridViewProps> = ({
         return (
           <div
             id={`agent-card-${agentId}`}
+            data-testid="agent-card"
             key={agentId}
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}

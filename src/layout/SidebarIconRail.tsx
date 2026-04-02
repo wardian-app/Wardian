@@ -20,7 +20,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
   };
 
   return (
-    <aside className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
+    <aside data-testid="sidebar-icon-rail" className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
       <button
         onClick={() => handleTabClick("explorer")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "explorer" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}

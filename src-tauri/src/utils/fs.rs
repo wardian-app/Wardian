@@ -7,6 +7,11 @@ pub struct ClaudePermissionHookPaths {
 }
 
 pub fn get_wardian_home() -> Option<std::path::PathBuf> {
+    if let Ok(val) = std::env::var("WARDIAN_HOME") {
+        if !val.is_empty() {
+            return Some(std::path::PathBuf::from(val));
+        }
+    }
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
 
@@ -660,6 +665,39 @@ mod tests {
         assert!(!projected_home.join("history.jsonl").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn get_wardian_home_respects_env_override() {
+        let dir = unique_temp_dir("wardian-home-override");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("WARDIAN_HOME", dir.to_str().unwrap()) };
+        let result = super::get_wardian_home();
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+        assert_eq!(result.unwrap(), dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_wardian_home_falls_back_without_env() {
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+        let result = super::get_wardian_home();
+        assert!(result.is_some());
+        let path = result.unwrap();
+        assert!(
+            path.ends_with(".wardian"),
+            "Expected path to end with .wardian, got: {:?}",
+            path
+        );
+    }
+
+    #[test]
+    fn get_wardian_home_ignores_empty_env() {
+        unsafe { std::env::set_var("WARDIAN_HOME", "") };
+        let result = super::get_wardian_home();
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with(".wardian"));
     }
 
     #[test]

@@ -921,6 +921,10 @@ pub async fn run_headless(
             }
             provider_args.push(prompt.to_string());
         }
+        "mock" => {
+            provider_args.push("--print".to_string());
+            provider_args.push(prompt.to_string());
+        }
         _ => {
             provider_args.push("-p".to_string());
             provider_args.push(prompt.to_string());
@@ -944,6 +948,16 @@ pub async fn run_headless(
         }
     } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+    } else if provider_name == "mock" {
+        if let Ok(scenario) = std::env::var("WARDIAN_MOCK_SCENARIO") {
+            cmd.env("WARDIAN_MOCK_SCENARIO", scenario);
+        }
+        if let Ok(delay) = std::env::var("WARDIAN_MOCK_DELAY_MS") {
+            cmd.env("WARDIAN_MOCK_DELAY_MS", delay);
+        }
+        if let Ok(script) = std::env::var("WARDIAN_MOCK_SCRIPT") {
+            cmd.env("WARDIAN_MOCK_SCRIPT", script);
+        }
     }
     cmd.current_dir(&provider_cwd)
         .stdout(std::process::Stdio::piped())

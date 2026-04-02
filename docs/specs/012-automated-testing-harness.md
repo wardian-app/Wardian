@@ -1,6 +1,6 @@
 # Spec 012: Automated Testing Harness
 
-* **Status:** Proposed
+* **Status:** Accepted
 * **Date:** 2026-03-31
 * **Decider:** Architect
 
