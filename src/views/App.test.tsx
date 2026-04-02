@@ -307,25 +307,25 @@ describe("Spawn Form", () => {
 // ── Broadcast Form Tests ───────────────────────────────────────────────
 
 describe("Broadcast", () => {
-  it("renders broadcast textarea when Command Center tab is active", async () => {
+  it("renders broadcast textarea when Command tab is active", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
     
-    // Switch to Command Center tab
-    const commandTab = screen.getByTitle("Command Center");
+    // Switch to Command tab
+    const commandTab = screen.getByTitle("Command");
     fireEvent.click(commandTab);
 
     expect(await screen.findByPlaceholderText("Broadcast to all agents...")).toBeInTheDocument();
   });
 
-  it("renders Execute Broadcast button when Command Center tab is active", async () => {
+  it("renders Execute Broadcast button when Command tab is active", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
 
-    // Switch to Command Center tab
-    const commandTab = screen.getByTitle("Command Center");
+    // Switch to Command tab
+    const commandTab = screen.getByTitle("Command");
     fireEvent.click(commandTab);
 
     expect(await screen.getByText("Execute Broadcast")).toBeInTheDocument();
@@ -342,7 +342,7 @@ describe("Sidebar Navigation", () => {
     const buttons = screen.getAllByRole("button");
     const titles = buttons.map(b => b.getAttribute("title")).filter(Boolean);
     expect(titles).toContain("Agent Configuration");
-    expect(titles).toContain("Command Center");
+    expect(titles).toContain("Command");
     expect(titles).toContain("Application Settings");
   });
 });
