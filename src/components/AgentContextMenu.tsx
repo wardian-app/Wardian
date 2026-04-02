@@ -49,6 +49,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   return (
     <div
       ref={contextMenuRef}
+      data-testid="agent-context-menu"
       className="context-menu"
       style={{ top: y, left: x }}
       onClick={(e) => e.stopPropagation()}
@@ -78,6 +79,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       <div className="context-menu-divider" />
 
       <button
+        data-testid="context-pause"
         className={`context-menu-item ${offAgentIds.has(agentId) ? 'opacity-50 cursor-not-allowed' : ''}`}
         disabled={offAgentIds.has(agentId)}
         onClick={() => {
@@ -90,6 +92,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
         Pause
       </button>
       <button
+        data-testid="context-start"
         className="context-menu-item"
         onClick={() => {
           onRestart(agentId);

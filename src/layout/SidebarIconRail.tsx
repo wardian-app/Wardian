@@ -22,6 +22,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
   return (
     <aside data-testid="sidebar-icon-rail" className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
       <button
+        data-testid="sidebar-tab-explorer"
         onClick={() => handleTabClick("explorer")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "explorer" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
         title="File Explorer"
@@ -31,6 +32,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       </button>
 
       <button
+        data-testid="sidebar-tab-agent-config"
         onClick={() => handleTabClick("agent-config")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "agent-config" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
         title="Agent Configuration"
@@ -40,15 +42,17 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       </button>
 
       <button
+        data-testid="sidebar-tab-command"
         onClick={() => handleTabClick("command")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "command" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
-        title="Command Center"
+        title="Command"
       >
         {activeTab === "command" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
         <svg className="w-6 h-6 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
       </button>
 
       <button
+        data-testid="sidebar-tab-classes"
         onClick={() => handleTabClick("classes")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "classes" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
         title="Class Manager"
@@ -62,6 +66,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       </button>
 
       <button
+        data-testid="sidebar-tab-workflows"
         onClick={() => handleTabClick("workflows")}
         className={`relative p-3 rounded-xl transition-all group ${activeTab === "workflows" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
         title="Workflows"
@@ -81,6 +86,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
 
       <div className="mt-auto flex flex-col gap-4">
         <button
+          data-testid="sidebar-tab-settings"
           onClick={() => handleTabClick("settings")}
           className={`relative p-3 rounded-xl transition-all group ${activeTab === "settings" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
           title="Application Settings"

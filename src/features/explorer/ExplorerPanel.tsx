@@ -96,7 +96,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
   };
 
   return (
-    <div className="flex flex-col h-full w-full relative">
+    <div data-testid="explorer-panel" className="flex flex-col h-full w-full relative">
       <div className="flex flex-col mb-2">
         <h2 className="text-xl font-bold text-primary tracking-tight">Explorer</h2>
       </div>

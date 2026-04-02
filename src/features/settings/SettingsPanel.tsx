@@ -74,7 +74,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
   const selectedShell = available_shells.find((option) => option.id === shell_id);
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-testid="settings-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-bold text-primary tracking-tight">Settings</h2>
       </div>
@@ -84,6 +84,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
           <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Theme</h3>
           <div className="grid grid-cols-3 gap-3">
             <button
+              data-testid="theme-system"
               type="button"
               onClick={() => setTheme("system")}
               className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${theme === 'system' ? 'border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]/5 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border bg-wardian-card-bg-muted hover:border-wardian-border-heavy'}`}
@@ -96,6 +97,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
             </button>
 
             <button
+              data-testid="theme-dark"
               type="button"
               onClick={() => setTheme("dark")}
               className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${theme === 'dark' ? 'border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]/5 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border bg-wardian-card-bg-muted hover:border-wardian-border-heavy'}`}
@@ -111,6 +113,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
             </button>
 
             <button
+              data-testid="theme-light"
               type="button"
               onClick={() => setTheme("light")}
               className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${theme === 'light' ? 'border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]/5 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border bg-wardian-card-bg-muted hover:border-wardian-border-heavy'}`}
@@ -140,6 +143,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
               Shell / Interpreter
             </label>
             <select
+              data-testid="shell-select"
               id="default-shell-select"
               value={shell_id}
               onChange={(e) => setShellId(e.target.value)}
@@ -160,6 +164,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
                   Custom executable
                 </label>
                 <input
+                  data-testid="custom-shell-executable"
                   id="custom-shell-executable"
                   type="text"
                   value={custom_executable}

@@ -116,7 +116,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
     };
 
     return (
-        <div className="flex-1 h-full flex flex-col bg-wardian-bg text-primary overflow-hidden">
+        <div data-testid="library-view" className="flex-1 h-full flex flex-col bg-wardian-bg text-primary overflow-hidden">
             {/* Top Bar */}
             <div className="p-4 border-b border-wardian-border bg-wardian-sidebar-primary flex items-center gap-4">
                 
