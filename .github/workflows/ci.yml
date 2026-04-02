@@ -37,11 +37,13 @@ jobs:
       - name: Lint (TypeScript)
         run: npm run lint
       - name: Unit Tests
+        if: github.event_name == 'pull_request'
         run: npm run test
 
   backend-windows:
     name: Backend (Windows - Full Test)
     runs-on: windows-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -62,6 +64,7 @@ jobs:
   e2e-smoke:
     name: E2E Smoke Tests (Windows)
     runs-on: windows-latest
+    if: github.event_name == 'pull_request'
     needs: [frontend-quality, backend-windows]
     steps:
       - uses: actions/checkout@v4
