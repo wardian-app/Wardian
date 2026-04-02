@@ -405,7 +405,7 @@ function AppBody() {
   };
 
   return (
-    <div className="flex flex-col h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
+    <div data-testid="app-shell" className="flex flex-col h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
       <CustomTitleBar
         viewMode={viewMode}
         setViewMode={setViewMode}

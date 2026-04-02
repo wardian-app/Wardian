@@ -2,6 +2,7 @@ use crate::models::provider::AgentProvider;
 use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
 use crate::providers::gemini::GeminiProvider;
+use crate::providers::mock::MockProvider;
 use std::sync::Arc;
 
 /// Resolves the correct `AgentProvider` implementation based on the provider name
@@ -19,6 +20,7 @@ impl ProviderFactory {
             "gemini" => Ok(Arc::new(GeminiProvider::new())),
             "claude" => Ok(Arc::new(ClaudeProvider::new())),
             "codex" => Ok(Arc::new(CodexProvider::new())),
+            "mock" => Ok(Arc::new(MockProvider::new())),
             other => Err(format!(
                 "Unknown provider '{}'. Supported providers: gemini, claude, codex",
                 other

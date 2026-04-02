@@ -363,7 +363,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   }, [nodes, edges]);
 
   return (
-    <div className="flex-1 h-full w-full bg-[var(--color-wardian-bg)] relative overflow-hidden rounded-2xl border border-wardian-border shadow-2xl flex flex-col">
+    <div data-testid="workflow-builder" className="flex-1 h-full w-full bg-[var(--color-wardian-bg)] relative overflow-hidden rounded-2xl border border-wardian-border shadow-2xl flex flex-col">
       {/* Action Bar */}
       <div className="h-14 border-b border-wardian-border bg-[var(--color-wardian-card)] grid grid-cols-3 items-center px-6 z-10">
         
@@ -499,6 +499,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             {isSaving ? 'Saving...' : 'Save Changes'}
           </button>
           <button 
+            data-testid="run-workflow-button"
             onClick={handleRun}
             disabled={!activeWorkflowId || hasGraphErrors}
             className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer shadow-wardian-accent' : 'bg-wardian-error/10 text-wardian-error/50 cursor-not-allowed border border-wardian-error/20 shadow-none scale-100'}`}
@@ -511,8 +512,9 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
       <div className="flex-1 relative bg-[var(--color-wardian-bg)]">
         {/* Floating Add Block Button */}
-        <div className="absolute top-6 left-6 z-20">
+        <div data-testid="add-block-button-container" className="absolute top-6 left-6 z-20">
           <button 
+            data-testid="add-block-button"
             onClick={() => { setIsBlockLibraryOpen(true); }}
             className="group flex items-center gap-3 bg-[var(--color-wardian-card)] border border-wardian-border-heavy p-2 pr-4 rounded-xl hover:border-[var(--color-wardian-accent)] transition-all shadow-wardian-accent cursor-pointer"
           >

@@ -88,7 +88,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-testid="command-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-bold text-primary tracking-tight">Command</h2>
       </div>
@@ -101,6 +101,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
           ) : (
             quickPrompts.map((prompt, idx) => (
               <div 
+                data-testid={`quick-prompt-${idx}`}
                 key={`starred-${prompt.path}-${idx}`}
                 className="relative group/card"
               >
@@ -138,12 +139,14 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
         <h3 className="text-xs font-bold text-muted tracking-wide mb-4">Broadcast</h3>
         <form onSubmit={handleBroadcastSubmit} className="flex flex-col gap-2">
           <textarea
+            data-testid="broadcast-textarea"
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-primary text-xs focus:outline-none focus:border-[var(--color-wardian-accent)] h-32 resize-none"
             placeholder={selectedAgentIds.size > 0 ? `Message ${selectedAgentIds.size} selected...` : "Broadcast to all agents..."}
             value={broadcastMessage}
             onChange={(e) => setBroadcastMessage(e.currentTarget.value)}
           />
           <button
+            data-testid="broadcast-submit"
             type="submit"
             className="bg-wardian-success/20 hover:bg-wardian-success/40 border border-wardian-success/30 text-wardian-success font-bold py-2 rounded text-[10px] tracking-wide transition-colors"
           >

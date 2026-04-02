@@ -2,6 +2,8 @@ pub mod claude;
 pub mod codex;
 pub mod factory;
 pub mod gemini;
+pub mod mock;
 pub use codex::CodexProvider;
 pub use factory::ProviderFactory;
 pub use gemini::GeminiProvider;
+pub use mock::MockProvider;

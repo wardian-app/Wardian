@@ -63,7 +63,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-testid="class-manager-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-bold text-primary tracking-tight">Classes</h2>
       </div>
@@ -74,6 +74,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
           <div>
             <label className="block text-[10px] font-bold text-muted-neutral mb-1">Name</label>
             <input
+              data-testid="class-name-input"
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
               placeholder="e.g. DevOps"
               value={newClassName}
@@ -83,6 +84,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
           <div>
             <label className="block text-[10px] font-bold text-muted-neutral mb-1">Description</label>
             <textarea
+              data-testid="class-description-input"
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-20 resize-none"
               placeholder="Manages CI/CD pipelines and infrastructure..."
               value={newClassDesc}
@@ -92,6 +94,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
           <div>
             <label className="block text-[10px] font-bold text-muted-neutral mb-1">Instructions</label>
             <textarea
+              data-testid="class-instructions-input"
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-40 resize-none font-mono"
               placeholder={`# Role: ${newClassName || "Agent"}\n\nDefine the agent's system prompt...`}
 
@@ -100,6 +103,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
             />
           </div>
           <button
+            data-testid="class-create-button"
             type="submit"
             disabled={isCreatingClass || !newClassName.trim()}
             className="w-full bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-muted-neutral hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 py-2 font-bold text-xs tracking-wide transition-all flex items-center justify-center gap-2"

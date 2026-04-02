@@ -59,6 +59,38 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+  e2e-smoke:
+    name: E2E Smoke Tests (Windows)
+    runs-on: windows-latest
+    needs: [frontend-quality, backend-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install dependencies
+        run: npm install
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run E2E tests
+        run: npm run test:e2e
+        env:
+          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-test
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: e2e/test-results/
+
   backend-linux-check:
     name: Backend (Linux - Compile Check)
     runs-on: ubuntu-latest

@@ -59,3 +59,7 @@ src-tauri/*.log
 src-tauri/target/
 src-tauri/gen/
 
+# Playwright
+e2e/test-results/
+e2e/playwright-report/
+
