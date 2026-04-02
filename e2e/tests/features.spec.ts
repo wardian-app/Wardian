@@ -19,7 +19,7 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(page.locator('[data-testid="spawn-submit"]')).toBeVisible();
   });
 
-  test("3. Sidebar navigation - Command Center tab", async ({ page }) => {
+  test("3. Sidebar navigation - Command tab", async ({ page }) => {
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="command-panel"]')).toBeVisible();
