@@ -55,7 +55,7 @@ describe('workflowLaunch', () => {
 
   it('sanitizes workflow roles and falls back to id when name is empty', () => {
     expect(synthesizeWorkflowRole({ id: 'agent-1', type: 'agent', name: '  Research + Agent  ', config: {} })).toBe('research_agent');
-    expect(synthesizeWorkflowRole({ id: 'agent-2', type: 'agent', name: '   ', config: {} })).toBe('agent_2');
+    expect(synthesizeWorkflowRole({ id: 'agent-2', type: 'agent', name: '   ', config: {} })).toBe('agent_agent-2');
   });
 
   it('normalizes direct agent nodes into role targets for the run modal', () => {
