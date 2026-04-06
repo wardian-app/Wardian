@@ -223,7 +223,7 @@ pub async fn resume_agent(
         if agent.config.resume_session.is_none() {
             agent.config.resume_session = Some(agent.config.session_id.clone());
         }
-        let new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
+        let mut new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
 
         // Register new input sender
         if let Some(ref tx) = new_active.stdin_tx {
@@ -232,20 +232,14 @@ pub async fn resume_agent(
             }
         }
 
-        // Replace ALL fields so the reader/writer threads share state with the stored agent
-        agent.child_process = new_active.child_process;
-        agent.pty_master = new_active.pty_master;
-        agent.stdin_tx = new_active.stdin_tx;
-        agent.process_id = new_active.process_id;
-        agent.output_buffer = new_active.output_buffer;
-        agent.query_count = new_active.query_count;
-        agent.init_timestamp = new_active.init_timestamp;
-        agent.current_status = new_active.current_status;
-        agent.log_path = new_active.log_path;
-        #[cfg(windows)]
-        {
-            agent.job_object = new_active.job_object;
-        }
+        // Terminate the old agent's process tree before replacing it.
+        manager::terminate_active_agent_process(agent);
+
+        // Preserve the updated config on the new agent, then swap the entire struct.
+        // The old ActiveAgent is dropped here; its Drop impl is a no-op because
+        // terminate_active_agent_process already cleared process_id and child_process.
+        new_active.config = agent.config.clone();
+        let _ = std::mem::replace(agent, new_active);
         manager::save_state(&app, &agents, &order);
         Ok(())
     } else {

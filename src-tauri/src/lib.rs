@@ -149,6 +149,44 @@ pub fn run() {
             commands::settings::load_shell_settings,
             commands::settings::save_shell_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<AppState>();
+
+                // Terminate all agent process trees on app exit to prevent zombies.
+                {
+                    let mut agents = state.agents.blocking_lock();
+                    for (_sid, agent) in agents.iter_mut() {
+                        manager::terminate_active_agent_process(agent);
+                    }
+                    agents.clear();
+                }
+
+                // Abort all workflow triggers and running executions.
+                {
+                    let mut triggers = state.workflow_triggers.blocking_lock();
+                    for (_wf_id, handles) in triggers.drain() {
+                        for handle in handles {
+                            handle.abort();
+                        }
+                    }
+                }
+                {
+                    let mut runs = state.workflow_runs.blocking_lock();
+                    for (_wf_id, handles) in runs.drain() {
+                        for handle in handles {
+                            handle.abort();
+                        }
+                    }
+                }
+                {
+                    let mut scheduler = state.scheduler_handle.blocking_lock();
+                    if let Some(h) = scheduler.take() {
+                        h.abort();
+                    }
+                }
+            }
+        });
 }

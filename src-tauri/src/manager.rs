@@ -1,4 +1,5 @@
 use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentTelemetry};
+use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -30,13 +31,11 @@ fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
 }
 
 pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
-    if let Some(mut child) = agent.child_process.take() {
-        let _ = child.kill();
-    }
-
+    // IMPORTANT: Kill the process tree FIRST while the parent is still alive.
+    // If we kill the PTY child (cmd.exe) first, its children (claude.exe, node.exe,
+    // etc.) become orphaned and taskkill /T can no longer enumerate them via parent PID.
     #[cfg(windows)]
     {
-        let _ = agent.job_object.take();
         if let Some(pid) = agent.process_id {
             if let Err(err) = force_kill_process_tree(pid) {
                 log_debug(&format!(
@@ -45,6 +44,18 @@ pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
                 ));
             }
         }
+    }
+
+    // Now kill the direct PTY child (may already be dead from the tree kill above).
+    if let Some(mut child) = agent.child_process.take() {
+        let _ = child.kill();
+    }
+
+    // Drop the Job Object last as a final safety net — its KILL_ON_JOB_CLOSE flag
+    // will terminate any remaining processes still assigned to the job.
+    #[cfg(windows)]
+    {
+        let _ = agent.job_object.take();
     }
 
     agent.process_id = None;
@@ -263,6 +274,15 @@ pub async fn spawn_agent(
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
+    } else if config.provider == "opencode" {
+        if let Some(content) = opencode_runtime_config_content(
+            &config.agent_class,
+            Some(&config.session_id),
+            Some(&config),
+        ) {
+            cmd.env("OPENCODE_CONFIG_CONTENT", content);
+        }
+        cmd.env("COLORTERM", "truecolor");
     }
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
@@ -820,6 +840,39 @@ fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {
     stripped
 }
 
+fn persisted_agent_config(session_id: &str) -> Option<AgentConfig> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+
+    let wardian_home = get_wardian_home()?;
+    let state_path = wardian_home.join("wardian_state.json");
+    let contents = std::fs::read_to_string(state_path).ok()?;
+    let configs = serde_json::from_str::<Vec<AgentConfig>>(&contents).ok()?;
+    configs
+        .into_iter()
+        .find(|config| config.session_id == session_id)
+}
+
+fn opencode_runtime_config_content(
+    class_name: &str,
+    session_id: Option<&str>,
+    config: Option<&AgentConfig>,
+) -> Option<String> {
+    let roots = resolve_opencode_runtime_roots(
+        class_name,
+        session_id,
+        config.and_then(|cfg| cfg.system_include_directories.as_deref()),
+        config.and_then(|cfg| cfg.include_directories.as_deref()),
+    );
+    let runtime_config = build_opencode_runtime_config(&roots);
+    runtime_config
+        .as_object()
+        .filter(|map| !map.is_empty())
+        .map(|_| runtime_config.to_string())
+}
+
 fn codex_bootstrap_launch_context(
     wardian_home: &std::path::Path,
     workspace_cwd: &std::path::Path,
@@ -891,6 +944,11 @@ pub async fn run_headless(
     let provider = ProviderFactory::resolve(provider_name)?;
     let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(session_id))?;
     let provider_cwd = cwd.to_path_buf();
+    let persisted_opencode_config = if provider_name == "opencode" {
+        persisted_agent_config(session_id)
+    } else {
+        None
+    };
     let (bin, mut provider_args) = provider.get_executable();
     let claude_hook = if provider_name == "claude" {
         ensure_claude_permission_hook(session_id).ok()
@@ -925,6 +983,20 @@ pub async fn run_headless(
             provider_args.push("--print".to_string());
             provider_args.push(prompt.to_string());
         }
+        "opencode" => {
+            provider_args.push("run".to_string());
+            if let Some(config) = persisted_opencode_config.as_ref() {
+                provider_args.extend(provider.get_spawn_args(config, !session_id.is_empty()));
+            } else if !session_id.is_empty() {
+                provider_args.push("--session".to_string());
+                provider_args.push(session_id.to_string());
+            }
+            provider_args.push("--format".to_string());
+            provider_args.push("json".to_string());
+            provider_args.push("--dir".to_string());
+            provider_args.push(provider_cwd.to_string_lossy().to_string());
+            provider_args.push(prompt.to_string());
+        }
         _ => {
             provider_args.push("-p".to_string());
             provider_args.push(prompt.to_string());
@@ -948,6 +1020,19 @@ pub async fn run_headless(
         }
     } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
+    } else if provider_name == "opencode" {
+        let class_name = persisted_opencode_config
+            .as_ref()
+            .map(|config| config.agent_class.as_str())
+            .unwrap_or("");
+        if let Some(content) = opencode_runtime_config_content(
+            class_name,
+            (!session_id.is_empty()).then_some(session_id),
+            persisted_opencode_config.as_ref(),
+        ) {
+            cmd.env("OPENCODE_CONFIG_CONTENT", content);
+        }
+        cmd.env("COLORTERM", "truecolor");
     } else if provider_name == "mock" {
         if let Ok(scenario) = std::env::var("WARDIAN_MOCK_SCENARIO") {
             cmd.env("WARDIAN_MOCK_SCENARIO", scenario);
@@ -1070,6 +1155,18 @@ pub async fn run_headless(
         } else {
             Ok(serde_json::json!({ "text": last_message.unwrap_or(output) }))
         }
+    } else if provider_name == "opencode" {
+        let summary = OpenCodeProvider::summarize_run_output(&output);
+
+        if output_format == "json" {
+            Ok(serde_json::json!({
+                "session_id": summary.session_id.unwrap_or_else(|| session_id.to_string()),
+                "response": summary.last_text.clone().unwrap_or_default(),
+                "raw": output,
+            }))
+        } else {
+            Ok(serde_json::json!({ "text": summary.last_text.unwrap_or(output) }))
+        }
     } else if output_format == "json" {
         serde_json::from_str(&output)
             .map_err(|e| format!("Failed to parse JSON output: {}. Raw: {}", e, output))
@@ -1125,13 +1222,26 @@ pub async fn obtain_session_id(
 
         provider_args.push("--json".to_string());
         provider_args.push("Introduce yourself".to_string());
-    } else if provider_name == "claude" {
+    } else if provider_name == "opencode" {
+        provider_args.push("run".to_string());
         if let Some(config) = config {
             provider_args.extend(provider.get_spawn_args(config, false));
+        }
+        provider_args.push("--format".to_string());
+        provider_args.push("json".to_string());
+        provider_args.push("--dir".to_string());
+        provider_args.push(cwd.to_string_lossy().to_string());
+        provider_args.push("Introduce yourself".to_string());
+    } else if provider_name == "claude" {
+        // --print mode does not accept --input-format stream-json; strip it.
+        if let Some(config) = config {
+            let spawn_args = strip_flag_value_pairs(
+                provider.get_spawn_args(config, false),
+                "--input-format",
+            );
+            provider_args.extend(spawn_args);
         } else {
             provider_args.push("--verbose".to_string());
-            provider_args.push("--input-format".to_string());
-            provider_args.push("stream-json".to_string());
             provider_args.push("--output-format".to_string());
             provider_args.push("stream-json".to_string());
         }
@@ -1160,6 +1270,11 @@ pub async fn obtain_session_id(
         } else if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
+    } else if provider_name == "opencode" {
+        if let Some(content) = opencode_runtime_config_content(class_name, None, config) {
+            cmd.env("OPENCODE_CONFIG_CONTENT", content);
+        }
+        cmd.env("COLORTERM", "truecolor");
     } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
         cmd.stdin(std::process::Stdio::null());
@@ -1558,6 +1673,22 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             }
                         }
                     }
+                    "opencode" => {
+                        // OpenCode stores per-session diff snapshots at
+                        // ~/.local/share/opencode/storage/session_diff/<session_id>.json
+                        if let Some(home) = dirs::home_dir() {
+                            let candidate = home
+                                .join(".local")
+                                .join("share")
+                                .join("opencode")
+                                .join("storage")
+                                .join("session_diff")
+                                .join(format!("{}.json", snap.session_id));
+                            if candidate.exists() {
+                                *log_path_lock = Some(candidate);
+                            }
+                        }
+                    }
                     _ => {
                         // Gemini: scan ~/.gemini/tmp for chat log files
                         if let Some(home) = dirs::home_dir() {
@@ -1670,6 +1801,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     *snap.current_status.lock().unwrap() = status;
                                 }
                             }
+                        }
+                        "opencode" => {
+                            // OpenCode runtime status currently comes from live PTY parsing.
+                            // Keep log enrichment disabled until we add a stable session-file
+                            // mapping instead of falling through to Gemini parsing.
                         }
                         _ => {
                             // Gemini logs are a single JSON object with a messages array
@@ -1839,8 +1975,10 @@ pub async fn kill_all_agents(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_bootstrap_launch_context, migrate_codex_bootstrap_home, strip_flag_value_pairs,
+        codex_bootstrap_launch_context, migrate_codex_bootstrap_home,
+        opencode_runtime_config_content, strip_flag_value_pairs,
     };
+    use crate::models::AgentConfig;
     use std::path::Path;
 
     #[test]
@@ -1910,5 +2048,47 @@ mod tests {
                 "--search".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn opencode_runtime_config_content_uses_class_system_and_user_roots() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let wardian_home = temp.path().join(".wardian");
+        let common = wardian_home.join("common");
+        let class_dir = wardian_home.join("classes").join("Builder");
+        let user_dir = temp.path().join("user-root");
+
+        std::fs::create_dir_all(common.join(".agents").join("skills").join("common-skill"))
+            .expect("common skill dir");
+        std::fs::create_dir_all(class_dir.join(".agents").join("skills").join("class-skill"))
+            .expect("class skill dir");
+        std::fs::create_dir_all(user_dir.join(".agents").join("skills").join("user-skill"))
+            .expect("user skill dir");
+        std::fs::write(common.join("AGENTS.md"), "common").expect("common AGENTS");
+        std::fs::write(class_dir.join("AGENTS.md"), "class").expect("class AGENTS");
+        std::fs::write(user_dir.join("AGENTS.md"), "user").expect("user AGENTS");
+
+        unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
+
+        let config = AgentConfig {
+            include_directories: Some(vec![user_dir.to_string_lossy().to_string()]),
+            ..Default::default()
+        };
+
+        let content =
+            opencode_runtime_config_content("Builder", None, Some(&config)).expect("config");
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("json config");
+        let instructions = parsed["instructions"]
+            .as_array()
+            .expect("instructions array");
+        let skill_paths = parsed["skills"]["paths"]
+            .as_array()
+            .expect("skill paths array");
+
+        assert_eq!(instructions.len(), 3);
+        assert_eq!(skill_paths.len(), 3);
     }
 }

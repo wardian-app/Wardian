@@ -18,3 +18,24 @@ pub struct ActiveAgent {
     #[cfg(windows)]
     pub job_object: Option<win32job::Job>,
 }
+
+impl Drop for ActiveAgent {
+    fn drop(&mut self) {
+        // Safety net: if the agent is dropped without explicit termination
+        // (e.g. during a panic, or if someone clears the HashMap without calling
+        // terminate_active_agent_process first), force-kill the process tree.
+        // On macOS/Linux the PTY master drop sends SIGHUP, so this is mainly
+        // needed on Windows where ConPTY doesn't propagate termination.
+        #[cfg(windows)]
+        {
+            if let Some(pid) = self.process_id.take() {
+                let _ = crate::utils::process::force_kill_process_tree(pid);
+            }
+        }
+
+        // Kill the PTY child if it wasn't already taken.
+        if let Some(mut child) = self.child_process.take() {
+            let _ = child.kill();
+        }
+    }
+}
