@@ -63,15 +63,24 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
 
 ## 🧪 Automated Testing & Verification
 
-Wardian has three test layers. Before marking a task as complete, run the appropriate ones:
+Wardian has multiple test layers. Before marking a task as complete, run the appropriate ones:
 
 1. **Frontend Unit Tests**: `npm run test`
    - Run after any TypeScript/React changes.
 2. **Backend Unit Tests**: `cd src-tauri && cargo test`
    - Run after any Rust changes. Use `--test-threads=1` if tests involve env vars.
-3. **E2E Smoke Tests**: `npm run test:e2e`
-   - Run after UI or orchestration changes. Requires the Tauri dev server.
+3. **Browser E2E Smoke Tests**: `npm run test:e2e`
+   - Run after UI or orchestration changes.
    - Uses an isolated `WARDIAN_HOME` (temp directory) with seeded fixtures.
+   - Covers browser-level UI behavior only. It does **not** prove native Tauri IPC, PTY behavior, or real provider launch behavior.
+4. **Native Runtime E2E**: use the Tauri/WebDriver-native harness when validating PTY behavior, `invoke` commands, or provider spawning.
+   - This is the required layer for real terminal and provider-runtime claims.
+   - Windows setup: `npm run setup:e2e:native:windows`
+   - Run: `npm run test:e2e:native`
+   - Generated native driver artifacts live under `tools/e2e-native/` and are intentionally ignored by git.
+5. **Real Provider E2E**: run only when a change specifically depends on provider-specific native behavior and the native runtime harness is available.
+   - Keep these runs isolated and opt-in.
+   - Example: ``$env:WARDIAN_E2E_REAL_OPENCODE='1'; $env:WARDIAN_E2E_REAL_WORKSPACE='D:\Development\Wardian'; npm run test:e2e:native``
 
 ### Mock Provider
 

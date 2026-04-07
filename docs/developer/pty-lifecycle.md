@@ -38,5 +38,18 @@ Spawning an agent follows a deterministic sequence in `manager::spawn_agent`:
 - On Windows, `.cmd` and `.bat` provider shims may be re-routed through `cmd.exe` when the selected host shell is PowerShell, Git Bash, or WSL.
 - On Linux and macOS, Wardian resolves shells from the standard shell list and executes the provider command through that shell's command-string mode.
 
+## Testing Boundaries
+
+PTY behavior cannot be validated by browser-only UI tests.
+
+- Browser Playwright smoke tests are useful for layout, navigation, and non-native UI regressions.
+- Native Tauri runtime tests are required for:
+  - Tauri `invoke` behavior
+  - PTY-backed terminal rendering
+  - provider spawn and resume behavior
+  - shell-hosted process launch behavior
+
+When debugging or testing PTY issues, treat browser smoke results as insufficient evidence. Use the native runtime harness for any claim about terminal or provider behavior.
+
 ## 📐 Terminal Resizing
 Terminal resizing is handled asynchronously in `manager::resize_pty`. When the UI grid layout changes, it invokes a Tauri command that updates the PTY dimensions (`rows` and `cols`) via the `pty_master` handle, ensuring the agent's TUI renders correctly.
