@@ -937,7 +937,6 @@ fn interactive_provider_args(
             provider_args.push(provider_cwd.to_string_lossy().to_string());
         }
         "opencode" => {
-            provider_args.push("--dir".to_string());
             provider_args.push(provider_cwd.to_string_lossy().to_string());
         }
         _ => {}
@@ -2157,10 +2156,7 @@ mod tests {
 
         assert_eq!(
             args,
-            vec![
-                "--dir".to_string(),
-                "D:/Development/Wardian".to_string(),
-            ]
+            vec!["D:/Development/Wardian".to_string()]
         );
     }
     #[test]

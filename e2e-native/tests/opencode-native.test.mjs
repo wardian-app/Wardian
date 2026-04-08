@@ -71,6 +71,12 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
     );
     const title = await card.getText();
     assert.match(title, /Native OpenCode/);
+
+    const debugTail = await readDebugTail(harness);
+    assert.match(debugTail, /PTY spawn: provider=opencode/);
+    assert.match(debugTail, /'opencode' '--session'/);
+    assert.match(debugTail, new RegExp(workspacePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(debugTail, /provider=opencode[^\n]*'--dir'/);
   } catch (error) {
     const debugTail = await readDebugTail(harness);
     const tauriLogs = session.logs();
