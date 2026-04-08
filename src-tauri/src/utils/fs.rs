@@ -156,6 +156,118 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
     dirs
 }
 
+/// Convert a filesystem path to a forward-slash string safe for JSON/JSONC embedding.
+/// OpenCode is a Node.js app and accepts forward slashes on all platforms.
+/// Windows backslashes produce invalid JSONC escape sequences (e.g. `\U`, `\t`) that
+/// cause OpenCode to reject OPENCODE_CONFIG_CONTENT and exit silently.
+fn path_to_forward_slash(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+pub fn build_opencode_runtime_config(include_roots: &[std::path::PathBuf]) -> serde_json::Value {
+    let mut instructions = Vec::new();
+    let mut skill_paths = Vec::new();
+
+    for root in include_roots {
+        if root.as_os_str().is_empty() {
+            continue;
+        }
+
+        let instruction_file = root.join("AGENTS.md");
+        let skill_root = root.join(".agents").join("skills");
+
+        if instruction_file.is_file() {
+            let path = path_to_forward_slash(&instruction_file);
+            if !instructions.contains(&path) {
+                instructions.push(path);
+            }
+        }
+
+        if skill_root.is_dir() {
+            let path = path_to_forward_slash(&skill_root);
+            if !skill_paths.contains(&path) {
+                skill_paths.push(path);
+            }
+        }
+    }
+
+    let mut config = serde_json::Map::new();
+    if !instructions.is_empty() {
+        config.insert(
+            "instructions".to_string(),
+            serde_json::Value::Array(
+                instructions
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !skill_paths.is_empty() {
+        config.insert(
+            "skills".to_string(),
+            serde_json::json!({ "paths": skill_paths }),
+        );
+    }
+
+    serde_json::Value::Object(config)
+}
+
+pub fn resolve_opencode_runtime_roots(
+    class_name: &str,
+    session_id: Option<&str>,
+    system_include_directories: Option<&[String]>,
+    include_directories: Option<&[String]>,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+
+    let mut push_unique = |path: std::path::PathBuf| {
+        if !path.as_os_str().is_empty() && !roots.contains(&path) {
+            roots.push(path);
+        }
+    };
+
+    if let Some(system_dirs) = system_include_directories {
+        for dir in system_dirs {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                push_unique(std::path::PathBuf::from(trimmed));
+            }
+        }
+    } else if let Some(wardian_home) = get_wardian_home() {
+        let common_dir = wardian_home.join("common");
+        if common_dir.exists() {
+            push_unique(common_dir);
+        }
+
+        let trimmed_class = class_name.trim();
+        if !trimmed_class.is_empty() {
+            let class_dir = wardian_home.join("classes").join(trimmed_class);
+            if class_dir.exists() {
+                push_unique(class_dir);
+            }
+        }
+
+        if let Some(session_id) = session_id.map(str::trim).filter(|sid| !sid.is_empty()) {
+            let agent_dir = wardian_home.join("agents").join(session_id);
+            if agent_dir.exists() {
+                push_unique(agent_dir);
+            }
+        }
+    }
+
+    if let Some(user_dirs) = include_directories {
+        for dir in user_dirs {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                push_unique(std::path::PathBuf::from(trimmed));
+            }
+        }
+    }
+
+    roots
+}
+
 fn habitat_root_for_session(
     wardian_home: &std::path::Path,
     session_id: &str,
@@ -581,8 +693,9 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        create_directory_link, habitat_root_for_session, projected_link_matches_target,
-        provider_uses_projected_workspace, sync_codex_agent_home,
+        build_opencode_runtime_config, create_directory_link, habitat_root_for_session,
+        projected_link_matches_target, provider_uses_projected_workspace,
+        resolve_opencode_runtime_roots, sync_codex_agent_home,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -724,5 +837,128 @@ mod tests {
         assert!(projected_home.join("skills").join("role-skill").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn opencode_runtime_config_collects_instruction_files_and_skill_roots() {
+        let root = unique_temp_dir("opencode-runtime-config");
+        let common = root.join("common");
+        let class_dir = root.join("class");
+        let agent_dir = root.join("agent");
+
+        for dir in [&common, &class_dir, &agent_dir] {
+            std::fs::create_dir_all(dir.join(".agents").join("skills").join("skill-one"))
+                .expect("create skill dir");
+            std::fs::write(
+                dir.join("AGENTS.md"),
+                format!("instructions for {}", dir.display()),
+            )
+            .expect("write AGENTS");
+        }
+
+        let config: serde_json::Value = build_opencode_runtime_config(&[
+            common.clone(),
+            class_dir.clone(),
+            agent_dir.clone(),
+            common.clone(),
+        ]);
+
+        let instructions = config
+            .get("instructions")
+            .and_then(|v| v.as_array())
+            .expect("instructions array");
+        assert_eq!(instructions.len(), 3);
+        assert_eq!(
+            instructions[0].as_str(),
+            Some(
+                common
+                    .join("AGENTS.md")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            instructions[1].as_str(),
+            Some(
+                class_dir
+                    .join("AGENTS.md")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            instructions[2].as_str(),
+            Some(
+                agent_dir
+                    .join("AGENTS.md")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .as_str()
+            )
+        );
+
+        let skill_paths = config
+            .get("skills")
+            .and_then(|v| v.get("paths"))
+            .and_then(|v| v.as_array())
+            .expect("skills.paths array");
+        assert_eq!(skill_paths.len(), 3);
+        assert_eq!(
+            skill_paths[0].as_str(),
+            Some(
+                common
+                    .join(".agents")
+                    .join("skills")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            skill_paths[1].as_str(),
+            Some(
+                class_dir
+                    .join(".agents")
+                    .join("skills")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            skill_paths[2].as_str(),
+            Some(
+                agent_dir
+                    .join(".agents")
+                    .join("skills")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .as_str()
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn opencode_runtime_roots_fall_back_to_common_class_and_agent_dirs() {
+        let wardian_home = unique_temp_dir("opencode-runtime-roots");
+        let common = wardian_home.join("common");
+        let class_dir = wardian_home.join("classes").join("Builder");
+        let agent_dir = wardian_home.join("agents").join("ses_123");
+
+        std::fs::create_dir_all(&common).expect("create common dir");
+        std::fs::create_dir_all(&class_dir).expect("create class dir");
+        std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+
+        unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
+        let roots = resolve_opencode_runtime_roots("Builder", Some("ses_123"), None, None);
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        assert_eq!(roots, vec![common, class_dir, agent_dir]);
+
+        let _ = std::fs::remove_dir_all(&wardian_home);
     }
 }

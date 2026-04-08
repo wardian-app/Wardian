@@ -1,12 +1,26 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 
+fn debug_log_path() -> std::path::PathBuf {
+    // Write to ~/.wardian/wardian_debug.log so logs are reachable from any cwd,
+    // including production builds launched from read-only install directories.
+    std::env::var("WARDIAN_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| std::path::PathBuf::from(v).join("wardian_debug.log"))
+        .or_else(|| {
+            dirs::home_dir().map(|h| h.join(".wardian").join("wardian_debug.log"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("wardian_debug.log"))
+}
+
 pub fn log_debug(msg: &str) {
+    let path = debug_log_path();
     for _ in 0..5 {
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("wardian_debug.log")
+            .open(&path)
         {
             let _ = writeln!(file, "{}", msg);
             return;

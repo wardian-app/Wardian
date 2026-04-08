@@ -77,6 +77,10 @@ pub struct AgentConfig {
     pub codex_skip_git_repo_check: Option<bool>,
     #[serde(default)]
     pub codex_ephemeral: Option<bool>,
+
+    // OpenCode-specific fields
+    #[serde(default)]
+    pub opencode_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

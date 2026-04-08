@@ -233,23 +233,14 @@ pub async fn spawn_agent(
         &config.agent_class,
         Some(&config.session_id),
     )?;
-    let provider_cwd = if config.provider == "codex" {
-        cwd.to_path_buf()
-    } else {
-        habitat_root
-            .as_ref()
-            .map(|root| habitat_workspace_cwd(root))
-            .unwrap_or_else(|| cwd.to_path_buf())
-    };
+    let provider_cwd =
+        interactive_provider_cwd(&config.provider, &cwd, habitat_root.as_deref(), None);
 
     if config.provider == "claude" {
         if let Some(hook) = claude_hook.as_ref() {
             provider_args.push("--settings".to_string());
             provider_args.push(hook.settings_arg.clone());
         }
-    } else if config.provider == "codex" {
-        provider_args.push("--cd".to_string());
-        provider_args.push(provider_cwd.to_string_lossy().to_string());
     }
 
     let is_resume = config
@@ -258,10 +249,18 @@ pub async fn spawn_agent(
         .is_some_and(|s| !s.is_empty());
     let spawn_args = provider.get_spawn_args(&config, is_resume);
     provider_args.extend(spawn_args);
+    provider_args = interactive_provider_args(&config.provider, &provider_cwd, provider_args);
 
     let launch_spec = build_program_launch(&bin, &provider_args)?;
+    log_debug(&format!(
+        "[Wardian] PTY spawn: provider={} exe={} args={:?} cwd={}",
+        config.provider,
+        launch_spec.executable,
+        launch_spec.args,
+        provider_cwd.display()
+    ));
     let mut cmd = CommandBuilder::new(&launch_spec.executable);
-    for arg in launch_spec.args {
+    for arg in &launch_spec.args {
         cmd.arg(arg);
     }
     cmd.cwd(&provider_cwd);
@@ -275,13 +274,15 @@ pub async fn spawn_agent(
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
     } else if config.provider == "opencode" {
-        if let Some(content) = opencode_runtime_config_content(
-            &config.agent_class,
-            Some(&config.session_id),
-            Some(&config),
-        ) {
-            cmd.env("OPENCODE_CONFIG_CONTENT", content);
-        }
+        // OPENCODE_CONFIG_CONTENT is intentionally NOT set for interactive PTY sessions.
+        // When set, OpenCode's TUI exits silently with no output (blank terminal) in
+        // production builds, even with valid JSONC. The headless bootstrap (obtain_session_id)
+        // continues to inject this config so class/common instructions reach the model on
+        // first contact. OpenCode natively reads AGENTS.md from the workspace cwd, so
+        // the interactive session is still context-aware via the workspace file.
+        //
+        // TODO: Investigate the exact OPENCODE_CONFIG_CONTENT schema for interactive mode
+        // once the blank-terminal root cause is confirmed (skills.paths vs instructions).
         cmd.env("COLORTERM", "truecolor");
     }
     #[cfg(target_os = "macos")]
@@ -385,13 +386,34 @@ pub async fn spawn_agent(
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
+        let mut had_pty_output = false;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
                     log_terminal_trace_note(&sid_for_pty, &provider_name_for_pty, "pty EOF");
+                    // If the process exited immediately with no output, surface a
+                    // diagnostic message so the terminal is not silently blank.
+                    if !had_pty_output && provider_name_for_pty == "opencode" {
+                        let msg = concat!(
+                            "\r\n[Wardian] OpenCode exited without producing any output.\r\n",
+                            "Possible causes:\r\n",
+                            "  - OPENCODE_CONFIG_CONTENT schema mismatch (check ~/.wardian/wardian_debug.log)\r\n",
+                            "  - OpenCode binary not found or failed to start\r\n",
+                            "  - Authentication/config error in OpenCode\r\n",
+                            "Check ~/.wardian/wardian_debug.log for the exact command and config used.\r\n",
+                        );
+                        if let Ok(mut h) = output_buffer_clone.lock() {
+                            h.push_str(msg);
+                        }
+                        let _ = pty_emit_app.emit(
+                            "agent-pty-output-ready",
+                            serde_json::json!({ "session_id": sid_for_pty }),
+                        );
+                    }
                     break;
                 }
                 Ok(n) => {
+                    had_pty_output = true;
                     log_terminal_trace_bytes(
                         &sid_for_pty,
                         &provider_name_for_pty,
@@ -885,6 +907,78 @@ fn codex_bootstrap_launch_context(
     (workspace_cwd.to_path_buf(), bootstrap_home)
 }
 
+fn interactive_provider_cwd(
+    provider_name: &str,
+    workspace_cwd: &std::path::Path,
+    habitat_root: Option<&std::path::Path>,
+    codex_bootstrap: Option<&(std::path::PathBuf, std::path::PathBuf)>,
+) -> std::path::PathBuf {
+    if let Some((provider_cwd, _)) = codex_bootstrap {
+        return provider_cwd.clone();
+    }
+
+    if matches!(provider_name, "codex" | "opencode") {
+        workspace_cwd.to_path_buf()
+    } else {
+        habitat_root
+            .map(habitat_workspace_cwd)
+            .unwrap_or_else(|| workspace_cwd.to_path_buf())
+    }
+}
+
+fn interactive_provider_args(
+    provider_name: &str,
+    provider_cwd: &std::path::Path,
+    mut provider_args: Vec<String>,
+) -> Vec<String> {
+    match provider_name {
+        "codex" => {
+            provider_args.push("--cd".to_string());
+            provider_args.push(provider_cwd.to_string_lossy().to_string());
+        }
+        "opencode" => {
+            provider_args.push("--dir".to_string());
+            provider_args.push(provider_cwd.to_string_lossy().to_string());
+        }
+        _ => {}
+    }
+
+    provider_args
+}
+
+fn headless_provider_launch(
+    provider_name: &str,
+    bin: &str,
+    provider_args: &[String],
+) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
+    #[cfg(windows)]
+    if provider_name == "opencode" {
+        let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut fragments = vec![quote_cmd_arg(bin)];
+        fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
+        return Ok(crate::utils::shell::ShellLaunchSpec {
+            executable: cmd_host,
+            args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
+        });
+    }
+
+    build_program_launch(bin, provider_args)
+}
+
+#[cfg(windows)]
+fn quote_cmd_arg(value: &str) -> String {
+    let escaped = value.replace('"', r#"\""#);
+    if escaped.is_empty()
+        || escaped
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '^' | '&' | '|' | '<' | '>' | '(' | ')'))
+    {
+        format!("\"{}\"", escaped)
+    } else {
+        escaped
+    }
+}
+
 fn migrate_codex_bootstrap_home(
     bootstrap_home: &std::path::Path,
     final_home: &std::path::Path,
@@ -1009,7 +1103,7 @@ pub async fn run_headless(
         }
     }
 
-    let launch_spec = build_program_launch(&bin, &provider_args)?;
+    let launch_spec = headless_provider_launch(provider_name, &bin, &provider_args)?;
     let mut cmd = new_headless_command(&launch_spec.executable);
     for arg in launch_spec.args {
         cmd.arg(arg);
@@ -1033,6 +1127,7 @@ pub async fn run_headless(
             cmd.env("OPENCODE_CONFIG_CONTENT", content);
         }
         cmd.env("COLORTERM", "truecolor");
+        cmd.stdin(std::process::Stdio::null());
     } else if provider_name == "mock" {
         if let Ok(scenario) = std::env::var("WARDIAN_MOCK_SCENARIO") {
             cmd.env("WARDIAN_MOCK_SCENARIO", scenario);
@@ -1199,14 +1294,12 @@ pub async fn obtain_session_id(
     } else {
         None
     };
-    let provider_cwd = if let Some((provider_cwd, _)) = codex_bootstrap.as_ref() {
-        provider_cwd.clone()
-    } else {
-        habitat_root
-            .as_ref()
-            .map(|root| habitat_workspace_cwd(root))
-            .unwrap_or_else(|| cwd.to_path_buf())
-    };
+    let provider_cwd = interactive_provider_cwd(
+        provider_name,
+        cwd,
+        habitat_root.as_deref(),
+        codex_bootstrap.as_ref(),
+    );
 
     if provider_name == "codex" {
         provider_args.push("--cd".to_string());
@@ -1254,9 +1347,9 @@ pub async fn obtain_session_id(
         provider_args.push("stream-json".to_string());
     }
 
-    let launch_spec = build_program_launch(&bin, &provider_args)?;
+    let launch_spec = headless_provider_launch(provider_name, &bin, &provider_args)?;
     let mut cmd = new_headless_command(&launch_spec.executable);
-    for arg in launch_spec.args {
+    for arg in &launch_spec.args {
         cmd.arg(arg);
     }
 
@@ -1275,6 +1368,7 @@ pub async fn obtain_session_id(
             cmd.env("OPENCODE_CONFIG_CONTENT", content);
         }
         cmd.env("COLORTERM", "truecolor");
+        cmd.stdin(std::process::Stdio::null());
     } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
         cmd.stdin(std::process::Stdio::null());
@@ -1298,6 +1392,12 @@ pub async fn obtain_session_id(
     log_debug(&format!(
         "[WARDIAN-DEBUG] Running obtain_session_id for provider {}",
         provider_name
+    ));
+    log_debug(&format!(
+        "[WARDIAN-DEBUG] obtain_session_id launch: exe={} args={:?} cwd={}",
+        launch_spec.executable,
+        launch_spec.args,
+        command_cwd.display()
     ));
     match cmd.spawn() {
         Ok(mut child) => {
@@ -1975,8 +2075,9 @@ pub async fn kill_all_agents(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_bootstrap_launch_context, migrate_codex_bootstrap_home,
-        opencode_runtime_config_content, strip_flag_value_pairs,
+        codex_bootstrap_launch_context, headless_provider_launch, interactive_provider_args,
+        interactive_provider_cwd, migrate_codex_bootstrap_home, opencode_runtime_config_content,
+        strip_flag_value_pairs,
     };
     use crate::models::AgentConfig;
     use std::path::Path;
@@ -2025,6 +2126,42 @@ mod tests {
         assert_eq!(provider_cwd, workspace_cwd);
         assert!(bootstrap_home.starts_with(wardian_home.join("provider-bootstrap").join("codex")));
         assert_ne!(bootstrap_home, workspace_cwd);
+    }
+
+    #[test]
+    fn opencode_interactive_launch_uses_real_workspace_cwd() {
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+        let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
+
+        let provider_cwd = interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
+
+        assert_eq!(provider_cwd, workspace_cwd);
+    }
+
+    #[test]
+    fn opencode_interactive_launch_matches_bootstrap_workspace() {
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+        let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
+
+        let interactive_cwd =
+            interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
+
+        assert_eq!(interactive_cwd, workspace_cwd);
+    }
+
+    #[test]
+    fn opencode_interactive_args_include_dir_for_real_workspace_anchor() {
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+
+        let args = interactive_provider_args("opencode", workspace_cwd, Vec::new());
+
+        assert_eq!(
+            args,
+            vec![
+                "--dir".to_string(),
+                "D:/Development/Wardian".to_string(),
+            ]
+        );
     }
     #[test]
     fn strip_flag_value_pairs_removes_all_add_dir_arguments() {
@@ -2090,5 +2227,34 @@ mod tests {
 
         assert_eq!(instructions.len(), 3);
         assert_eq!(skill_paths.len(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opencode_headless_launch_uses_cmd_host_on_windows() {
+        let launch = headless_provider_launch(
+            "opencode",
+            "C:/nvm4w/nodejs/opencode",
+            &[
+                "run".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "--dir".to_string(),
+                "D:/Development/Wardian".to_string(),
+                "Introduce yourself".to_string(),
+            ],
+        )
+        .expect("headless launch spec");
+
+        assert!(
+            launch.executable.to_ascii_lowercase().ends_with("cmd.exe"),
+            "expected cmd.exe host, got {}",
+            launch.executable
+        );
+        assert_eq!(launch.args[0], "/d");
+        assert_eq!(launch.args[1], "/c");
+        assert!(launch.args[2].contains("opencode"));
+        assert!(launch.args[2].contains("--format"));
+        assert!(launch.args[2].contains("Introduce yourself"));
     }
 }

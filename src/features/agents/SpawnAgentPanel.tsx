@@ -146,6 +146,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
             <option value="gemini">Gemini</option>
+            <option value="opencode">OpenCode</option>
           </select>
         </div>
         <div>
