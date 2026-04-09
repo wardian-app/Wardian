@@ -216,4 +216,130 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("replies to OpenCode terminal capability probes before rendering the PTY output", async () => {
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          if (readCount === 1) {
+            return "\u001b[6n\u001b[>0q\u001b[?u\u001b[?1016$p\u001b[?1004$p\u001b[?2004$p\u001b[?2027$p\u001b[?2031$p\u001b[?2026$p\u001b[?996n\u001b[?1004h\u001b[14t\u001b]4;0;?\u0007";
+          }
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="opencode-1" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      const instance = mockTerminal.mock.results[0]?.value as any;
+      expect(instance.write).toHaveBeenCalledWith(
+        "\u001b[6n\u001b[>0q\u001b[?u\u001b[?996n\u001b[?1004h\u001b[14t\u001b]4;0;?\u0007",
+      );
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[1;1R",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001bP>|xterm.js 6.0.0\u001b\\",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?0u",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?1016;2$y",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?1004;2$y",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?2004;2$y",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?2027;0$y",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?2031;0$y",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?2026;0$y",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[?997;1n",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[4;600;900t",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b[I",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-1",
+      input: "\u001b]4;0;rgb:02/04/02\u001b\\",
+    });
+  });
+
+  it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          return readCount === 1 ? "\u001b[?2026hhello\u001b[?2026l" : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="opencode-sync" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      const instance = mockTerminal.mock.results[0]?.value as any;
+      expect(instance.write).toHaveBeenCalledWith("hello");
+    });
+  });
+
+  it("strips OpenCode DECRQM queries before writing to xterm", async () => {
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          return readCount === 1
+            ? "\u001b[?1016$ptest\u001b[?1004$p\u001b[?2026$p"
+            : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="opencode-decrqm" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      const instance = mockTerminal.mock.results[0]?.value as any;
+      expect(instance.write).toHaveBeenCalledWith("test");
+    });
+  });
+
 });

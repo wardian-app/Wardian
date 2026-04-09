@@ -957,3 +957,98 @@ mod tests {
         }
     }
 }
+
+pub fn get_opencode_tui_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|p| p.join("opencode").join("tui.json"))
+}
+
+pub fn get_opencode_config_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|p| p.join("opencode").join("opencode.json"))
+}
+
+fn wardian_theme_to_opencode_theme(theme: &str) -> &str {
+    match theme {
+        "dark" | "light" | "system" => "system",
+        other => other,
+    }
+}
+
+fn upsert_json_theme(path: &std::path::Path, schema: &str, theme: &str) -> Result<(), String> {
+    let mut config = if path.exists() {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    config.insert("$schema".to_string(), serde_json::Value::String(schema.to_string()));
+    config.insert(
+        "theme".to_string(),
+        serde_json::Value::String(theme.to_string()),
+    );
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let content = serde_json::to_string_pretty(&serde_json::Value::Object(config))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(path, content).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub fn save_opencode_theme(theme: &str) -> Result<(), String> {
+    let normalized = wardian_theme_to_opencode_theme(theme);
+    let tui_path = get_opencode_tui_path().ok_or("Could not find config directory")?;
+    upsert_json_theme(&tui_path, "https://opencode.ai/tui.json", normalized)?;
+
+    if let Some(config_path) = get_opencode_config_path() {
+        upsert_json_theme(&config_path, "https://opencode.ai/config.json", normalized)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod opencode_theme_tests {
+    use super::{upsert_json_theme, wardian_theme_to_opencode_theme};
+
+    #[test]
+    fn wardian_theme_maps_to_opencode_system_theme() {
+        assert_eq!(wardian_theme_to_opencode_theme("dark"), "system");
+        assert_eq!(wardian_theme_to_opencode_theme("light"), "system");
+        assert_eq!(wardian_theme_to_opencode_theme("system"), "system");
+    }
+
+    #[test]
+    fn non_wardian_theme_passthrough_is_preserved() {
+        assert_eq!(wardian_theme_to_opencode_theme("opencode"), "opencode");
+    }
+
+    #[test]
+    fn upsert_json_theme_preserves_existing_config_keys() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"$schema":"https://opencode.ai/config.json","provider":{"lmstudio":{"name":"LM Studio"}}}"#,
+        )
+        .expect("write initial config");
+
+        upsert_json_theme(&path, "https://opencode.ai/config.json", "system")
+            .expect("update theme");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read config"))
+                .expect("parse config");
+        assert_eq!(parsed.get("theme").and_then(|value| value.as_str()), Some("system"));
+        assert_eq!(
+            parsed["provider"]["lmstudio"]["name"].as_str(),
+            Some("LM Studio")
+        );
+    }
+}

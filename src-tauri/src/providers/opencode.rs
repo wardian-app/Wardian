@@ -22,24 +22,76 @@ impl OpenCodeProvider {
     }
 
     #[cfg(target_os = "windows")]
+    fn packaged_windows_binary_from_shim(base_dir: &std::path::Path) -> Option<String> {
+        [
+            base_dir
+                .join("node_modules")
+                .join("opencode-ai")
+                .join("node_modules")
+                .join("opencode-windows-x64")
+                .join("bin")
+                .join("opencode.exe"),
+            base_dir
+                .join("node_modules")
+                .join("opencode-ai")
+                .join("node_modules")
+                .join("opencode-windows-x64-baseline")
+                .join("bin")
+                .join("opencode.exe"),
+            base_dir
+                .join("node_modules")
+                .join("opencode-ai")
+                .join("node_modules")
+                .join("opencode-windows-arm64")
+                .join("bin")
+                .join("opencode.exe"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .map(|candidate| candidate.to_string_lossy().to_string())
+    }
+
+    #[cfg(target_os = "windows")]
     fn find_windows_opencode_in_paths<I>(paths: I, path_exts: &[String]) -> Option<String>
     where
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         for path in paths {
+            let direct_exe = path.join("opencode.exe");
+            if direct_exe.exists() {
+                return Some(direct_exe.to_string_lossy().to_string());
+            }
+
             let bare = path.join("opencode");
             if bare.exists() {
+                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
+                    return Some(executable);
+                }
                 return Some("opencode".to_string());
             }
 
             let powershell = path.join("opencode.ps1");
             if powershell.exists() {
+                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
+                    return Some(executable);
+                }
                 return Some("opencode".to_string());
             }
 
             for ext in path_exts {
                 let candidate = path.join(format!("opencode{ext}"));
                 if candidate.exists() {
+                    if candidate
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("exe"))
+                    {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
+
+                    if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
+                        return Some(executable);
+                    }
                     return Some("opencode".to_string());
                 }
             }
@@ -378,34 +430,52 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_path_lookup_prefers_shell_resolved_command_when_present() {
+    fn windows_path_lookup_prefers_packaged_executable_from_shim_dir() {
         let temp = tempfile::tempdir().expect("temp dir");
         let cmd = temp.path().join("opencode.cmd");
-        let bare = temp.path().join("opencode");
         std::fs::write(&cmd, "@echo off\r\n").expect("cmd shim");
-        std::fs::write(&bare, "").expect("bare shim");
+        let exe = temp
+            .path()
+            .join("node_modules")
+            .join("opencode-ai")
+            .join("node_modules")
+            .join("opencode-windows-x64")
+            .join("bin")
+            .join("opencode.exe");
+        std::fs::create_dir_all(exe.parent().expect("parent")).expect("create dirs");
+        std::fs::write(&exe, "").expect("exe");
 
         let resolved = OpenCodeProvider::find_windows_opencode_in_paths(
             vec![temp.path().to_path_buf()],
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some("opencode".to_string()));
+        assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_path_lookup_uses_shell_resolved_command_for_powershell_script() {
+    fn windows_path_lookup_uses_packaged_executable_for_powershell_script() {
         let temp = tempfile::tempdir().expect("temp dir");
         let ps1 = temp.path().join("opencode.ps1");
         std::fs::write(&ps1, "Write-Output hi\r\n").expect("ps1 shim");
+        let exe = temp
+            .path()
+            .join("node_modules")
+            .join("opencode-ai")
+            .join("node_modules")
+            .join("opencode-windows-x64")
+            .join("bin")
+            .join("opencode.exe");
+        std::fs::create_dir_all(exe.parent().expect("parent")).expect("create dirs");
+        std::fs::write(&exe, "").expect("exe");
 
         let resolved = OpenCodeProvider::find_windows_opencode_in_paths(
             vec![temp.path().to_path_buf()],
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some("opencode".to_string()));
+        assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
     }
 
     #[cfg(not(target_os = "windows"))]

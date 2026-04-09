@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 pub struct ActiveAgent {
     pub config: AgentConfig,
     pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
+    pub background_processes: Vec<std::process::Child>,
     pub pty_master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     pub stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// Drain-on-read output buffer. The reader thread pushes PTY output here;
@@ -35,6 +36,14 @@ impl Drop for ActiveAgent {
 
         // Kill the PTY child if it wasn't already taken.
         if let Some(mut child) = self.child_process.take() {
+            let _ = child.kill();
+        }
+
+        for mut child in self.background_processes.drain(..) {
+            #[cfg(windows)]
+            {
+                let _ = crate::utils::process::force_kill_process_tree(child.id());
+            }
             let _ = child.kill();
         }
     }

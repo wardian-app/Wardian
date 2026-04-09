@@ -40,6 +40,7 @@ export interface AgentConfig {
 
     // OpenCode-specific fields
     opencode_agent?: string;
+    opencode_port?: number;
 }
 
 export * from "./workflow";

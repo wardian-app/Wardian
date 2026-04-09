@@ -25,6 +25,36 @@ async function readDebugTail(harness) {
   }
 }
 
+async function readVisibleTerminalLines(driver) {
+  return await driver.executeScript(() => {
+    const debug = window.__wardianTerminalDebug;
+    if (!debug) {
+      return [];
+    }
+
+    const sessionIds = Array.from(debug.sessions.keys());
+    const sessionId = sessionIds[sessionIds.length - 1];
+    const snapshot = sessionId ? debug.snapshot(sessionId) : null;
+    return snapshot?.lines || [];
+  });
+}
+
+async function seedCommonSkill(harness, skillName) {
+  const skillDir = path.join(
+    harness.isolatedHome,
+    "common",
+    ".agents",
+    "skills",
+    skillName,
+  );
+  await fs.mkdir(skillDir, { recursive: true });
+  await fs.writeFile(
+    path.join(skillDir, "SKILL.md"),
+    `---\nname: ${skillName}\ndescription: Reply with NATIVE_SKILL_VISIBLE when asked to verify this skill\n---\nWhen explicitly asked to verify ${skillName} visibility, reply with exactly NATIVE_SKILL_VISIBLE.\n`,
+    "utf8",
+  );
+}
+
 test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async (t) => {
   if (!runRealOpenCode) {
     t.skip("Set WARDIAN_E2E_REAL_OPENCODE=1 to run real OpenCode native E2E.");
@@ -40,6 +70,7 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
   }
 
   prepareIsolatedHome(harness);
+  await seedCommonSkill(harness, "wardian-native-skill");
 
   let session;
   try {
@@ -72,11 +103,53 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
     const title = await card.getText();
     assert.match(title, /Native OpenCode/);
 
-    const debugTail = await readDebugTail(harness);
-    assert.match(debugTail, /PTY spawn: provider=opencode/);
-    assert.match(debugTail, /'opencode' '--session'/);
-    assert.match(debugTail, new RegExp(workspacePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.doesNotMatch(debugTail, /provider=opencode[^\n]*'--dir'/);
+    await driver.wait(async () => {
+      const lines = await readVisibleTerminalLines(driver);
+      return lines.some((line) => line.trim().length > 0);
+    }, 20000);
+
+    const lines = await readVisibleTerminalLines(driver);
+    assert.ok(
+      lines.some((line) => /OpenCode|MiniMax|█|▀|▄/.test(line)),
+      `Expected visible OpenCode terminal output, got: ${JSON.stringify(lines)}`,
+    );
+
+    const sessionId = await driver.executeScript(() => {
+      const debug = window.__wardianTerminalDebug;
+      if (!debug) {
+        return null;
+      }
+
+      const sessionIds = Array.from(debug.sessions.keys());
+      return sessionIds[sessionIds.length - 1] || null;
+    });
+    assert.ok(sessionId, "Expected an OpenCode terminal session id");
+
+    const submitResult = await driver.executeAsyncScript((sid, done) => {
+      window.__TAURI_INTERNALS__.invoke("submit_prompt_to_agent", {
+        sessionId: sid,
+        prompt:
+          "Verify whether wardian-native-skill is available. If yes, reply with exactly NATIVE_SKILL_VISIBLE. Otherwise reply with exactly NATIVE_SKILL_MISSING.",
+      }).then(
+        () => done({ ok: true }),
+        (error) => done({ ok: false, error: String(error) }),
+      );
+    }, sessionId);
+
+    assert.deepEqual(submitResult, { ok: true });
+
+    await driver.wait(async () => {
+      const lines = await readVisibleTerminalLines(driver);
+      return lines.some((line) =>
+        /NATIVE_SKILL_VISIBLE|NATIVE_SKILL_MISSING/.test(line),
+      );
+    }, 90000);
+
+    const finalLines = await readVisibleTerminalLines(driver);
+    assert.ok(
+      finalLines.some((line) => /NATIVE_SKILL_VISIBLE/.test(line)),
+      `Expected seeded Wardian skill to be available, got: ${JSON.stringify(finalLines)}`,
+    );
   } catch (error) {
     const debugTail = await readDebugTail(harness);
     const tauriLogs = session.logs();

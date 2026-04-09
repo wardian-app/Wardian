@@ -28,6 +28,31 @@ fn persisted_resume_session_for_provider(
     })
 }
 
+fn allocate_loopback_port() -> Result<u16, String> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Failed to allocate loopback port: {}", e))?
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| format!("Failed to read allocated loopback port: {}", e))
+}
+
+fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
+    config.is_off = false;
+
+    if config.resume_session.is_none() {
+        config.resume_session = Some(config.session_id.clone());
+    }
+
+    if config.provider == "opencode" {
+        // OpenCode interactive sessions are backed by a local sidecar server.
+        // Always rotate the loopback port on resume so a fresh attach cannot
+        // accidentally race against or reuse a stale server lifecycle.
+        config.opencode_port = Some(allocate_loopback_port()?);
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn spawn_agent(
     req: SpawnAgentRequest,
@@ -86,6 +111,9 @@ pub async fn spawn_agent(
         &agent_class,
         &session_id,
     ));
+    if config.provider == "opencode" && config.opencode_port.is_none() {
+        config.opencode_port = Some(allocate_loopback_port()?);
+    }
 
     let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
     let persisted_resume =
@@ -218,11 +246,7 @@ pub async fn resume_agent(
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
-        agent.config.is_off = false;
-        // Ensure resume_session is set so gemini CLI resumes the correct conversation
-        if agent.config.resume_session.is_none() {
-            agent.config.resume_session = Some(agent.config.session_id.clone());
-        }
+        prepare_resume_config(&mut agent.config)?;
         let mut new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
 
         // Register new input sender
@@ -321,7 +345,8 @@ pub async fn reorder_agents(
 
 #[cfg(test)]
 mod tests {
-    use super::persisted_resume_session_for_provider;
+    use super::{persisted_resume_session_for_provider, prepare_resume_config};
+    use crate::models::AgentConfig;
 
     #[test]
     fn claude_persists_resume_session_after_initial_spawn() {
@@ -337,5 +362,42 @@ mod tests {
             persisted_resume_session_for_provider("codex", None, "codex-session-1"),
             None
         );
+    }
+
+    #[test]
+    fn opencode_resume_rotates_loopback_port_and_sets_resume_session() {
+        let mut config = AgentConfig {
+            provider: "opencode".to_string(),
+            session_id: "ses_test".to_string(),
+            resume_session: None,
+            is_off: true,
+            opencode_port: Some(4100),
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("ses_test"));
+        assert!(!config.is_off);
+        assert_ne!(config.opencode_port, Some(4100));
+        assert!(config.opencode_port.is_some());
+    }
+
+    #[test]
+    fn non_opencode_resume_keeps_existing_port() {
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            opencode_port: Some(4100),
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        assert_eq!(config.opencode_port, Some(4100));
+        assert!(!config.is_off);
     }
 }

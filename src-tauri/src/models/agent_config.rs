@@ -81,6 +81,8 @@ pub struct AgentConfig {
     // OpenCode-specific fields
     #[serde(default)]
     pub opencode_agent: Option<String>,
+    #[serde(default)]
+    pub opencode_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

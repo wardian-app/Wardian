@@ -100,6 +100,7 @@ pub fn run() {
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
             commands::terminal::send_input_to_agent,
+            commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,
             commands::terminal::inject_session_input,
             commands::terminal::broadcast_input,
@@ -147,7 +148,8 @@ pub fn run() {
             commands::patch::run_gemini_patch,
             commands::settings::list_available_shells,
             commands::settings::load_shell_settings,
-            commands::settings::save_shell_settings
+            commands::settings::save_shell_settings,
+            commands::settings::save_opencode_theme
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

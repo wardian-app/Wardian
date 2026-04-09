@@ -1,5 +1,6 @@
 use crate::manager;
 use crate::state::AppState;
+use crate::utils::terminal_input::submit_prompt_via_sender;
 use tauri::State;
 use tauri::{AppHandle, Emitter};
 
@@ -96,6 +97,78 @@ pub async fn inject_session_input(
 }
 
 #[tauri::command]
+pub async fn submit_prompt_to_agent(
+    session_id: String,
+    prompt: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let (provider_name, folder, config, tx) = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(&session_id)
+            .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
+        let tx = state
+            .input_senders
+            .try_read()
+            .map_err(|_| "Input channel temporarily locked".to_string())?
+            .get(&session_id)
+            .cloned();
+        (
+            agent.config.provider.clone(),
+            agent.config.folder.clone(),
+            agent.config.clone(),
+            tx,
+        )
+    };
+
+    if provider_name == "opencode" {
+        let cwd = crate::utils::fs::resolve_cwd(&folder, &session_id);
+        let result = manager::run_headless_with_config(
+            &cwd,
+            &prompt,
+            &session_id,
+            "text",
+            &provider_name,
+            Some(&config),
+        )
+        .await?;
+        let response_text = result
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("");
+
+        if !response_text.is_empty() {
+            let agents = state.agents.lock().await;
+            if let Some(agent) = agents.get(&session_id) {
+                if let Ok(mut buf) = agent.output_buffer.lock() {
+                    if !buf.is_empty() && !buf.ends_with('\n') {
+                        buf.push_str("\r\n");
+                    }
+                    buf.push_str(response_text);
+                    buf.push_str("\r\n");
+                }
+            }
+            let _ = app.emit(
+                "agent-pty-output-ready",
+                serde_json::json!({ "session_id": session_id }),
+            );
+        }
+
+        return Ok(());
+    }
+
+    let tx = match tx {
+        Some(tx) => tx,
+        None => return Err(format!("Agent {} not found or is off", session_id)),
+    };
+
+    submit_prompt_via_sender(&tx, &prompt).await
+}
+
+#[tauri::command]
 pub async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
     let senders = state
         .input_senders
@@ -181,5 +254,28 @@ pub async fn read_agent_pty(
         }
     } else {
         Err(format!("Agent {} not found", session_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn terminal_prompt_normalization_flattens_newlines_for_submit() {
+        let normalized =
+            crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
+                "Line one\nLine two\r\nLine three",
+            );
+
+        assert_eq!(normalized, "Line one Line two Line three");
+    }
+
+    #[test]
+    fn terminal_prompt_normalization_trims_outer_whitespace() {
+        let normalized =
+            crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
+                "   hello world  \r\n",
+            );
+
+        assert_eq!(normalized, "hello world");
     }
 }

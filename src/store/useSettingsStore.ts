@@ -39,7 +39,9 @@ export const useSettingsStore = create<SettingsState>()(
       available_shells: [],
       shell_settings_loaded: false,
       shells_loaded: false,
-      setTheme: (theme) => set({ theme }),
+      setTheme: async (theme) => {
+        set({ theme });
+      },
       setAutoPatchGemini: (autoPatchGemini) => set({ autoPatchGemini }),
       setShellId: (shell_id) => set({ shell_id }),
       setCustomExecutable: (custom_executable) => set({ custom_executable }),

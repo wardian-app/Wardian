@@ -1,11 +1,11 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { LibraryGrid } from '../features/library/LibraryGrid';
 import { ItemEditorModal } from '../features/library/ItemEditorModal';
 import { AssignSkillModal } from '../features/library/AssignSkillModal';
 import { AssignPromptModal } from '../features/library/AssignPromptModal';
 import { LibraryFolder, LibraryPrompt, LibrarySkill } from '../types';
+import { flattenPromptForInjection, submitInputToAgents } from '../utils/terminalInput';
 
 interface LibraryViewProps {
     selectedAgentIds: Set<string>;
@@ -105,10 +105,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                 return;
             }
             try {
-                const flattenedPrompt = item.content.replace(/\r?\n/g, ' ');
-                for (const id of selectedAgentIds) {
-                    await invoke('send_input_to_agent', { sessionId: id, input: flattenedPrompt });
-                }
+                const flattenedPrompt = flattenPromptForInjection(item.content);
+                await submitInputToAgents(selectedAgentIds, flattenedPrompt);
             } catch (e) {
                 console.error('Failed to run prompt', e);
             }

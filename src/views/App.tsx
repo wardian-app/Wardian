@@ -23,6 +23,7 @@ import { LibraryView } from "./LibraryView";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 
 function App() {
   return (
@@ -147,6 +148,9 @@ function AppBody() {
       let effectiveTheme = theme;
       if (theme === "system") effectiveTheme = mediaQuery.matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", effectiveTheme);
+      invoke("save_opencode_theme", { theme }).catch((error) => {
+        console.error("Failed to sync OpenCode theme:", error);
+      });
     };
     applyTheme();
     mediaQuery.addEventListener("change", applyTheme);
@@ -334,7 +338,11 @@ function AppBody() {
   }, []);
 
   async function sendCommand(sessionId: string, cmd: string) {
-    try { await invoke("send_input_to_agent", { sessionId, input: cmd + "\r\n" }); } catch (e) { console.error(e); }
+    try {
+      await submitInputToAgent(sessionId, cmd);
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   async function renameAgent(sessionId: string, newName: string) {
@@ -351,9 +359,12 @@ function AppBody() {
     if (!broadcastMessage) return;
     try {
       if (selectedAgentIds.size > 0) {
-        for (const id of selectedAgentIds) await invoke("send_input_to_agent", { sessionId: id, input: broadcastMessage + "\r\n" });
+        await submitInputToAgents(selectedAgentIds, broadcastMessage);
       } else {
-        await invoke("broadcast_input", { input: broadcastMessage + "\r\n" });
+        await submitInputToAgents(
+          agents.map((agent) => agent.session_id),
+          broadcastMessage,
+        );
       }
       setBroadcastMessage("");
     } catch (e) { console.error(e); }
