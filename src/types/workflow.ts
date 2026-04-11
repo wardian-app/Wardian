@@ -91,11 +91,11 @@ export interface ScheduledRun {
 }
 
 export interface ActiveRunTracker {
-  run_id: string;
+  run_instance_id: string;
+  scheduled_run_id?: string | null;
   workflow_id: string;
   workflow_name: string;
   current_step: number;
   total_steps: number;
   active_node_name: string;
 }
-

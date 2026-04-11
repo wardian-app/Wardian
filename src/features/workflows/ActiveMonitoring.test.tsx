@@ -114,7 +114,8 @@ describe('ActiveMonitoring scheduled tasks', () => {
       <ActiveMonitoring
         activeRuns={[
           {
-            run_id: 'run-1',
+            run_instance_id: 'sched-1',
+            scheduled_run_id: 'sched-1',
             workflow_id: 'wf-1',
             workflow_name: 'Morning Sync',
             current_step: 1,
@@ -166,7 +167,45 @@ describe('ActiveMonitoring scheduled tasks', () => {
     expect(screen.getByRole('button', { name: /Run Now/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Pause schedule/i })).toBeInTheDocument();
   });
+
+  it('marks only the matching scheduled instance as running', () => {
+    render(
+      <ActiveMonitoring
+        activeRuns={[
+          {
+            run_instance_id: 'sched-2',
+            scheduled_run_id: 'sched-2',
+            workflow_id: 'wf-1',
+            workflow_name: 'Morning Sync',
+            current_step: 1,
+            total_steps: 3,
+            active_node_name: 'Research',
+          },
+        ]}
+        schedules={[
+          {
+            ...schedules[0],
+            id: 'sched-1',
+          },
+          {
+            ...schedules[0],
+            id: 'sched-2',
+          },
+        ]}
+        activeWorkflows={[]}
+        availableWorkflows={workflows}
+        agents={agents}
+        onStopRun={vi.fn()}
+        onStopTrigger={vi.fn()}
+        onToggleSchedule={vi.fn()}
+        onDeleteSchedule={vi.fn()}
+        onRunNow={vi.fn()}
+        onOpenWorkflow={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText('Running')).toHaveLength(1);
+    expect(screen.getAllByText('Live').length).toBeGreaterThan(0);
+  });
 });
-
-
 
