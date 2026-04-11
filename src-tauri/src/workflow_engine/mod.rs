@@ -776,10 +776,10 @@ pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: &str) {
     }
 }
 
-pub async fn stop_workflow_run(app: AppHandle, workflow_id: &str) {
+pub async fn stop_workflow_run(app: AppHandle, run_instance_id: &str) {
     let state = app.state::<crate::state::AppState>();
     let mut runs = state.workflow_runs.lock().await;
-    if let Some(handles) = runs.remove(workflow_id) {
+    if let Some(handles) = runs.remove(run_instance_id) {
         for handle in handles {
             handle.abort();
         }
@@ -1173,6 +1173,22 @@ pub async fn run_workflow(
         .find(|w| w.id == wf_id)
         .ok_or_else(|| format!("Workflow {} not found", wf_id))?;
 
+    let run_salt = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_micros() * 1000);
+
+    let scheduled_run_id = initial_payload
+        .as_ref()
+        .and_then(|p| p.get("scheduled_run_id").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+
+    // Generate unique run_instance_id per execution.
+    let run_instance_id = if let Some(scheduled_id) = scheduled_run_id.as_ref() {
+        format!("run-{}-{}", scheduled_id, run_salt)
+    } else {
+        format!("manual-{}-{}", wf_id, run_salt)
+    };
+
     // Merge role_mappings from payload (e.g. from scheduler) into the workflow
     if let Some(ref payload) = initial_payload {
         if let Some(mappings) = payload.get("role_mappings").and_then(|v| v.as_object()) {
@@ -1191,6 +1207,8 @@ pub async fn run_workflow(
         "workflow-status-updated",
         serde_json::json!({
             "workflow_id": wf_id,
+            "run_instance_id": run_instance_id,
+            "scheduled_run_id": scheduled_run_id.clone(),
             "status": "running",
         }),
     );
@@ -1199,8 +1217,11 @@ pub async fn run_workflow(
     let log_path = log_dir.join(format!("{}.json", timestamp));
 
     // Store the run handle for cancellation support
-    let wf_id_for_handle = wf_id.clone();
     let app_for_handle = app.clone();
+    let run_instance_id_for_completion = run_instance_id.clone();
+    let run_instance_id_for_cleanup = run_instance_id.clone();
+    let run_instance_id_for_handle = run_instance_id.clone();
+    let scheduled_run_id_for_completion = scheduled_run_id.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let mut trace = Vec::new();
         let mut pulsed_ports: HashMap<(String, String), u32> = HashMap::new(); // (node_id, port_id) -> count
@@ -1304,6 +1325,8 @@ pub async fn run_workflow(
                 "workflow-progress",
                 serde_json::json!({
                     "workflow_id": wf.id,
+                    "run_instance_id": run_instance_id,
+                    "scheduled_run_id": scheduled_run_id.clone(),
                     "workflow_name": wf.name,
                     "current_step": global_step_count,
                     "total_steps": total_enqueued + queue.len(),
@@ -2078,6 +2101,8 @@ pub async fn run_workflow(
             "workflow-status-updated",
             serde_json::json!({
                 "workflow_id": wf.id,
+                "run_instance_id": run_instance_id_for_completion,
+                "scheduled_run_id": scheduled_run_id_for_completion,
                 "status": if had_error { "failed" } else { "completed" },
             }),
         );
@@ -2086,13 +2111,17 @@ pub async fn run_workflow(
         if let Ok(json) = serde_json::to_string_pretty(&trace) {
             let _ = fs::write(log_path, json);
         }
+
+        let state = app.state::<crate::state::AppState>();
+        let mut runs = state.workflow_runs.lock().await;
+        runs.remove(&run_instance_id_for_cleanup);
     });
 
     // Store handle for cancellation
     {
         let state = app_for_handle.state::<crate::state::AppState>();
         let mut runs = state.workflow_runs.lock().await;
-        let handles = runs.entry(wf_id_for_handle).or_default();
+        let handles = runs.entry(run_instance_id_for_handle).or_default();
         handles.push(handle);
     }
 

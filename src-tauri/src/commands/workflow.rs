@@ -52,8 +52,8 @@ pub async fn stop_workflow_triggers(app: AppHandle, workflow_id: String) -> Resu
 }
 
 #[tauri::command]
-pub async fn stop_workflow_run(app: AppHandle, workflow_id: String) -> Result<(), String> {
-    workflow_engine::stop_workflow_run(app, &workflow_id).await;
+pub async fn stop_workflow_run(app: AppHandle, run_instance_id: String) -> Result<(), String> {
+    workflow_engine::stop_workflow_run(app, &run_instance_id).await;
     Ok(())
 }
 

@@ -147,11 +147,11 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
             <div className="text-[9px] text-muted-neutral italic py-4 text-center border border-dashed border-wardian-border/20 rounded-lg">No active runs</div>
           ) : (
             activeRuns.map(run => (
-              <div key={run.run_id} className="p-2.5 rounded-lg bg-[var(--color-wardian-card-bg)] border border-wardian-border/40 group hover:border-[var(--color-wardian-accent)]/30 transition-colors">
+              <div key={run.run_instance_id} className="p-2.5 rounded-lg bg-[var(--color-wardian-card-bg)] border border-wardian-border/40 group hover:border-[var(--color-wardian-accent)]/30 transition-colors">
                 <div className="flex justify-between items-start mb-2">
                   <span className="text-[11px] font-bold text-primary truncate leading-tight tracking-tight">{run.workflow_name}</span>
                   <button
-                    onClick={() => onStopRun(run.run_id)}
+                    onClick={() => onStopRun(run.run_instance_id)}
                     className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-red-500 transition-all hover:scale-110"
                     title="Terminate Run"
                   >
@@ -205,7 +205,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
             schedules.map(schedule => {
               const workflow = availableWorkflows.find(item => item.id === schedule.workflow_id);
               const isExpanded = selectedScheduleId === schedule.id;
-              const isRunning = activeRuns.some((run) => run.workflow_id === schedule.workflow_id);
+              const isRunning = activeRuns.some((run) => run.scheduled_run_id === schedule.id);
               const status = getScheduleStatus(schedule, isRunning);
               const targetSummary = summarizeScheduleTarget(schedule, workflow, agents);
               const roleMappings = Object.entries(schedule.role_mappings || {});
@@ -354,4 +354,3 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
     </div>
   );
 };
-

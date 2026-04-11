@@ -49,7 +49,7 @@ interface WorkflowState {
   runScheduledWorkflowNow: (runId: string) => Promise<void>;
   stopAllTriggers: () => Promise<void>;
   stopWorkflowTriggers: (workflowId: string) => Promise<void>;
-  stopWorkflowRun: (workflowId: string) => Promise<void>;
+  stopWorkflowRun: (runInstanceId: string) => Promise<void>;
   pauseAllTriggers: () => Promise<void>;
   resumeAllTriggers: () => Promise<void>;
   clearActiveWorkflow: () => void;
@@ -283,11 +283,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   handleProgress: (event) => {
-    const { workflow_id, current_step, total_steps, active_node_name, workflow_name } = event;
+    const { workflow_id, run_instance_id, scheduled_run_id, current_step, total_steps, active_node_name, workflow_name } = event;
+    const instanceId = run_instance_id || workflow_id;
     set((state) => {
-      const existingIdx = state.activeRuns.findIndex(r => r.workflow_id === workflow_id);
+      const existingIdx = state.activeRuns.findIndex(r => r.run_instance_id === instanceId);
       const newRun = {
-        run_id: workflow_id, // Simple mapping for now
+        run_instance_id: instanceId,
+        scheduled_run_id: scheduled_run_id || null,
         workflow_id,
         workflow_name: workflow_name || state.availableWorkflows.find(w => w.id === workflow_id)?.name || 'Unknown',
         current_step,
@@ -306,10 +308,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   handleStatusUpdate: (event) => {
-    const { workflow_id, status } = event;
+    const { workflow_id, run_instance_id, scheduled_run_id, status } = event;
+    const instanceId = run_instance_id || workflow_id;
+    
     if (status === 'running') {
       set((state) => {
-        if (state.activeRuns.some(run => run.workflow_id === workflow_id)) {
+        if (state.activeRuns.some(run => run.run_instance_id === instanceId)) {
           return state;
         }
 
@@ -317,7 +321,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           activeRuns: [
             ...state.activeRuns,
             {
-              run_id: workflow_id,
+              run_instance_id: instanceId,
+              scheduled_run_id: scheduled_run_id || null,
               workflow_id,
               workflow_name: state.availableWorkflows.find(w => w.id === workflow_id)?.name || 'Unknown',
               current_step: 0,
@@ -332,7 +337,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
     if (status === 'completed' || status === 'failed') {
       set((state) => ({
-        activeRuns: state.activeRuns.filter(r => r.workflow_id !== workflow_id)
+        activeRuns: state.activeRuns.filter(r => r.run_instance_id !== instanceId)
       }));
     }
   },
@@ -390,11 +395,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }
   },
 
-  stopWorkflowRun: async (workflowId: string) => {
+  stopWorkflowRun: async (runInstanceId: string) => {
     try {
-      await invoke("stop_workflow_run", { workflowId });
+      await invoke("stop_workflow_run", { runInstanceId });
       set((state) => ({
-        activeRuns: state.activeRuns.filter(r => r.workflow_id !== workflowId)
+        activeRuns: state.activeRuns.filter(r => r.run_instance_id !== runInstanceId)
       }));
     } catch (err) {
       console.error("Failed to stop workflow run:", err);
@@ -468,8 +473,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }
   },
 }));
-
-
 
 
 
