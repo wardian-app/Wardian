@@ -190,14 +190,16 @@ describe("Agent Class Dropdown", () => {
   it("includes custom classes in dropdown", async () => {
     setupDefaultMocks([], [...defaultClasses, ...customClasses]);
     render(<App />);
-    await screen.findByText("No Active Instances");
 
-    const selects = document.querySelectorAll("select");
-    const classSelect = Array.from(selects).find(s => {
-      const options = Array.from(s.querySelectorAll("option"));
-      return options.some(o => o.textContent === "DevOps");
+    await screen.findByText("DevOps");
+    await waitFor(() => {
+      const selects = document.querySelectorAll("select");
+      const classSelect = Array.from(selects).find(s => {
+        const options = Array.from(s.querySelectorAll("option"));
+        return options.some(o => o.textContent === "DevOps");
+      });
+      expect(classSelect).toBeDefined();
     });
-    expect(classSelect).toBeDefined();
   });
 });
 
