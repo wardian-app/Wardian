@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  msEdgeDriverToolInstallArgs,
   nativeDriverCandidates,
   nativeDriverGuidance,
   parseArgs,
@@ -31,4 +32,17 @@ test("native setup provides driver candidates and guidance for supported platfor
   assert.ok(nativeDriverCandidates("win32").some((candidate) => candidate.includes("msedgedriver")));
   assert.ok(nativeDriverCandidates("linux").includes("chromedriver"));
   assert.match(nativeDriverGuidance("darwin"), /chromedriver|geckodriver/);
+});
+
+test("native setup pins git-sourced msedgedriver helper", () => {
+  const args = msEdgeDriverToolInstallArgs();
+
+  assert.deepEqual(args.slice(0, 3), [
+    "install",
+    "--git",
+    "https://github.com/chippers/msedgedriver-tool",
+  ]);
+  assert.ok(args.includes("--rev"));
+  assert.match(args[args.indexOf("--rev") + 1], /^[0-9a-f]{40}$/);
+  assert.ok(args.includes("--locked"));
 });

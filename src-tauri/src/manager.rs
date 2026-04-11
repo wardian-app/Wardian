@@ -279,8 +279,8 @@ pub async fn spawn_agent(
 
     let mut background_processes = Vec::new();
     if config.provider == "opencode" {
-        background_processes.push(spawn_opencode_server(&provider_cwd, &config)?);
-        provider_args.extend(opencode_attach_args(&config, &provider_cwd));
+        background_processes.push(spawn_opencode_server(&provider_cwd, &config).await?);
+        provider_args.extend(opencode_attach_args(&config, &provider_cwd)?);
     } else {
         let is_resume = config
             .resume_session
@@ -1151,16 +1151,19 @@ fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
 }
 
-fn opencode_attach_args(config: &AgentConfig, provider_cwd: &std::path::Path) -> Vec<String> {
+fn opencode_attach_args(
+    config: &AgentConfig,
+    provider_cwd: &std::path::Path,
+) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     if config.debug.unwrap_or(false) {
         args.push("--print-logs".to_string());
     }
+    let port = config
+        .opencode_port
+        .ok_or("OpenCode port not configured for interactive session")?;
     args.push("attach".to_string());
-    args.push(format!(
-        "http://127.0.0.1:{}",
-        config.opencode_port.unwrap_or(0)
-    ));
+    args.push(format!("http://127.0.0.1:{}", port));
     if let Some(session_id) = config
         .resume_session
         .as_ref()
@@ -1171,10 +1174,10 @@ fn opencode_attach_args(config: &AgentConfig, provider_cwd: &std::path::Path) ->
     }
     args.push("--dir".to_string());
     args.push(provider_cwd.to_string_lossy().to_string());
-    args
+    Ok(args)
 }
 
-fn wait_for_loopback_port(port: u16, timeout: std::time::Duration) -> Result<(), String> {
+fn wait_for_loopback_port_blocking(port: u16, timeout: std::time::Duration) -> Result<(), String> {
     let started = std::time::Instant::now();
     while started.elapsed() < timeout {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -1188,7 +1191,10 @@ fn wait_for_loopback_port(port: u16, timeout: std::time::Duration) -> Result<(),
     ))
 }
 
-fn wait_for_opencode_server_ready(port: u16, timeout: std::time::Duration) -> Result<(), String> {
+fn wait_for_opencode_server_ready_blocking(
+    port: u16,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
     let started = std::time::Instant::now();
     while started.elapsed() < timeout {
         if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
@@ -1213,7 +1219,7 @@ fn wait_for_opencode_server_ready(port: u16, timeout: std::time::Duration) -> Re
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
-    wait_for_loopback_port(port, std::time::Duration::from_millis(10)).map_err(|_| {
+    wait_for_loopback_port_blocking(port, std::time::Duration::from_millis(10)).map_err(|_| {
         format!(
             "Timed out waiting for OpenCode server health on http://127.0.0.1:{}/global/health",
             port
@@ -1226,7 +1232,16 @@ fn wait_for_opencode_server_ready(port: u16, timeout: std::time::Duration) -> Re
     ))
 }
 
-fn spawn_opencode_server(
+async fn wait_for_opencode_server_ready(
+    port: u16,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || wait_for_opencode_server_ready_blocking(port, timeout))
+        .await
+        .map_err(|err| format!("Failed to join OpenCode server readiness task: {}", err))?
+}
+
+async fn spawn_opencode_server(
     cwd: &std::path::Path,
     config: &AgentConfig,
 ) -> Result<std::process::Child, String> {
@@ -1275,7 +1290,8 @@ fn spawn_opencode_server(
     ));
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    if let Err(err) = wait_for_opencode_server_ready(port, std::time::Duration::from_secs(10)) {
+    if let Err(err) = wait_for_opencode_server_ready(port, std::time::Duration::from_secs(10)).await
+    {
         let _ = child.kill();
         return Err(err);
     }
@@ -2907,7 +2923,8 @@ mod tests {
             ..Default::default()
         };
 
-        let args = opencode_attach_args(&config, Path::new("D:/Development/Wardian"));
+        let args =
+            opencode_attach_args(&config, Path::new("D:/Development/Wardian")).expect("args");
 
         assert_eq!(
             args,
@@ -2924,7 +2941,17 @@ mod tests {
     }
 
     #[test]
-    fn opencode_server_ready_requires_health_endpoint_not_just_open_port() {
+    fn opencode_attach_args_require_configured_port() {
+        let config = AgentConfig::default();
+
+        let err = opencode_attach_args(&config, Path::new("D:/Development/Wardian"))
+            .expect_err("missing port should fail early");
+
+        assert_eq!(err, "OpenCode port not configured for interactive session");
+    }
+
+    #[tokio::test]
+    async fn opencode_server_ready_requires_health_endpoint_not_just_open_port() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
         let port = listener.local_addr().expect("listener addr").port();
         let handle = std::thread::spawn(move || {
@@ -2944,6 +2971,7 @@ mod tests {
         });
 
         wait_for_opencode_server_ready(port, std::time::Duration::from_secs(2))
+            .await
             .expect("server should report healthy");
         handle.join().expect("join thread");
     }

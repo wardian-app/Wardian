@@ -70,7 +70,7 @@ const terminalSessionMap = new Map<string, TerminalSessionEntry>();
 declare global {
   interface Window {
     __wardianTerminalDebug?: {
-      sessions: Map<string, TerminalSessionEntry>;
+      sessionIds: () => string[];
       snapshot: (sessionId: string) => {
         cols: number;
         rows: number;
@@ -84,31 +84,37 @@ declare global {
   }
 }
 
-if (typeof window !== "undefined") {
-  window.__wardianTerminalDebug = {
-    sessions: terminalSessionMap,
-    snapshot: (sessionId: string) => {
-      const entry = terminalSessionMap.get(sessionId);
-      const term = entry?.parser;
-      const buffer = term?.buffer?.active;
-      if (!entry || !term || !buffer) {
-        return null;
-      }
-      const lineCount = Math.min(term.rows, 24);
-      const lines = Array.from({ length: lineCount }, (_, index) =>
-        buffer.getLine(index + buffer.viewportY)?.translateToString(true) || "",
-      );
-      return {
-        cols: term.cols,
-        rows: term.rows,
-        cursorX: buffer.cursorX,
-        cursorY: buffer.cursorY,
-        viewportY: buffer.viewportY,
-        lines,
-        recentWritePreviews: entry.recentWritePreviews,
-      };
-    },
-  };
+const shouldExposeTerminalDebug =
+  import.meta.env.DEV || import.meta.env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
+
+if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
+  Object.defineProperty(window, "__wardianTerminalDebug", {
+    configurable: true,
+    value: Object.freeze({
+      sessionIds: () => Array.from(terminalSessionMap.keys()),
+      snapshot: (sessionId: string) => {
+        const entry = terminalSessionMap.get(sessionId);
+        const term = entry?.parser;
+        const buffer = term?.buffer?.active;
+        if (!entry || !term || !buffer) {
+          return null;
+        }
+        const lineCount = Math.min(term.rows, 24);
+        const lines = Array.from({ length: lineCount }, (_, index) =>
+          buffer.getLine(index + buffer.viewportY)?.translateToString(true) || "",
+        );
+        return {
+          cols: term.cols,
+          rows: term.rows,
+          cursorX: buffer.cursorX,
+          cursorY: buffer.cursorY,
+          viewportY: buffer.viewportY,
+          lines,
+          recentWritePreviews: [...entry.recentWritePreviews],
+        };
+      },
+    }),
+  });
 }
 
 function queueAgentInput(sessionId: string, input: string) {

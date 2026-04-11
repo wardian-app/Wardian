@@ -8,6 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
 const nativeToolsDir = path.join(repoRoot, "tools", "e2e-native");
+const MSEDGEDRIVER_TOOL_REV = "8c4b34f51b45f5cf08013366d703de464ab871d1";
 
 function splitPathEntries(env = process.env) {
   return (env.PATH || "")
@@ -134,6 +135,17 @@ function ensureTauriDriver(options) {
   run("cargo", ["install", "tauri-driver", "--locked"]);
 }
 
+export function msEdgeDriverToolInstallArgs() {
+  return [
+    "install",
+    "--git",
+    "https://github.com/chippers/msedgedriver-tool",
+    "--rev",
+    MSEDGEDRIVER_TOOL_REV,
+    "--locked",
+  ];
+}
+
 function ensureWindowsEdgeDriver() {
   fs.mkdirSync(nativeToolsDir, { recursive: true });
 
@@ -146,7 +158,7 @@ function ensureWindowsEdgeDriver() {
   let tool = resolveCommand("msedgedriver-tool");
   if (!tool) {
     console.log("Installing msedgedriver-tool...");
-    run("cargo", ["install", "--git", "https://github.com/chippers/msedgedriver-tool"]);
+    run("cargo", msEdgeDriverToolInstallArgs());
     tool = resolveCommand("msedgedriver-tool");
   }
 

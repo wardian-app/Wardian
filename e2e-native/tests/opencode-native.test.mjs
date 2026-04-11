@@ -27,15 +27,21 @@ async function readDebugTail(harness) {
 
 async function readVisibleTerminalLines(driver) {
   return await driver.executeScript(() => {
-    const debug = window.__wardianTerminalDebug;
-    if (!debug) {
-      return [];
-    }
+    return Array.from(document.querySelectorAll(".xterm-rows > div"))
+      .map((element) => element.textContent || "")
+      .filter((line) => line.trim().length > 0);
+  });
+}
 
-    const sessionIds = Array.from(debug.sessions.keys());
-    const sessionId = sessionIds[sessionIds.length - 1];
-    const snapshot = sessionId ? debug.snapshot(sessionId) : null;
-    return snapshot?.lines || [];
+async function readLatestAgentSessionId(driver) {
+  return await driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("list_agents").then(
+      (agents) => {
+        const latest = Array.isArray(agents) ? agents[agents.length - 1] : null;
+        done(latest?.session_id || null);
+      },
+      (error) => done({ error: String(error) }),
+    );
   });
 }
 
@@ -114,16 +120,8 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
       `Expected visible OpenCode terminal output, got: ${JSON.stringify(lines)}`,
     );
 
-    const sessionId = await driver.executeScript(() => {
-      const debug = window.__wardianTerminalDebug;
-      if (!debug) {
-        return null;
-      }
-
-      const sessionIds = Array.from(debug.sessions.keys());
-      return sessionIds[sessionIds.length - 1] || null;
-    });
-    assert.ok(sessionId, "Expected an OpenCode terminal session id");
+    const sessionId = await readLatestAgentSessionId(driver);
+    assert.equal(typeof sessionId, "string", `Expected session id, got ${JSON.stringify(sessionId)}`);
 
     const submitResult = await driver.executeAsyncScript((sid, done) => {
       window.__TAURI_INTERNALS__.invoke("submit_prompt_to_agent", {

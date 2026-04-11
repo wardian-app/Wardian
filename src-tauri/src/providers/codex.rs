@@ -139,7 +139,8 @@ impl AgentProvider for CodexProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        if cfg!(target_os = "windows") {
+        #[cfg(target_os = "windows")]
+        {
             if let Some(paths) = std::env::var_os("PATH") {
                 let path_exts = std::env::var("PATHEXT")
                     .ok()
@@ -169,7 +170,10 @@ impl AgentProvider for CodexProvider {
             }
 
             ("codex".to_string(), vec![])
-        } else {
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
             ("codex".to_string(), vec![])
         }
     }
