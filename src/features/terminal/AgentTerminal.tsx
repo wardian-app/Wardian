@@ -2,9 +2,19 @@ import { useRef, useState, useEffect, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
+import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import {
+  normalizeOpenCodeOutput,
+  planTerminalCapabilityResponses,
+  shouldHomeCursorBeforeTransientResize,
+  shouldSuppressDuplicateResizeRedraw,
+  type TerminalOutputState,
+} from "./terminalCapabilities";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -22,39 +32,40 @@ const LIGHT_TERM_THEME = {
 
 const TERMINAL_SCROLLBACK_LINES = 5_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
-const ERASE_SCROLLBACK_SEQUENCE = "\u001b[3J";
-const DEVICE_STATUS_REPORT_QUERY = "\u001b[6n";
-const OPENCODE_XTVERSION_QUERY = "\u001b[>0q";
-const OPENCODE_KITTY_KEYBOARD_QUERY = "\u001b[?u";
-const OPENCODE_LIGHT_DARK_QUERY = "\u001b[?996n";
-const OPENCODE_SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
-const OPENCODE_UNSUPPORTED_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
-const OPENCODE_SYNC_OUTPUT_TOGGLE = /\u001b\[\?2026[hl]/g;
-const OPENCODE_DECRQM_QUERY = /\u001b\[\?\d+\$p/g;
 
 type TitleHandlerRef = {
   current?: (title: string) => void;
 };
 
-type TerminalSessionEntry = {
+type TerminalRendererEntry = {
+  resizeTimeout: ReturnType<typeof setTimeout> | null;
+  term: Terminal;
   fitAddon: FitAddon;
+  serializeAddon: SerializeAddon;
+  webglAddon: WebglAddon | null;
+  webglAttempted: boolean;
   host: HTMLDivElement;
+};
+
+type TerminalSessionEntry = {
   lastReportedSize: { cols: number; rows: number } | null;
-  opened: boolean;
+  lastMeasuredHostSize: { width: number; height: number } | null;
   recentWritePreviews: string[];
   opencodeFocusReported: boolean;
   outputReadyUnlisten: (() => void) | null;
   provider?: string;
-  resizeTimeout: ReturnType<typeof setTimeout> | null;
-  term: Terminal;
+  currentTheme: typeof DARK_TERM_THEME;
+  renderer: TerminalRendererEntry | null;
+  parser: HeadlessTerminal;
+  parserSerializeAddon: SerializeAddon;
+  latestTitle: string | null;
   titleHandlerRef: TitleHandlerRef;
   drainInFlight: boolean;
   drainQueued: boolean;
   disposed: boolean;
-};
+} & TerminalOutputState;
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
-const terminalPendingSequenceMap = new Map<string, string>();
 
 declare global {
   interface Window {
@@ -78,17 +89,18 @@ if (typeof window !== "undefined") {
     sessions: terminalSessionMap,
     snapshot: (sessionId: string) => {
       const entry = terminalSessionMap.get(sessionId);
-      const buffer = entry?.term.buffer?.active;
-      if (!entry || !buffer) {
+      const term = entry?.parser;
+      const buffer = term?.buffer?.active;
+      if (!entry || !term || !buffer) {
         return null;
       }
-      const lineCount = Math.min(entry.term.rows, 24);
+      const lineCount = Math.min(term.rows, 24);
       const lines = Array.from({ length: lineCount }, (_, index) =>
         buffer.getLine(index + buffer.viewportY)?.translateToString(true) || "",
       );
       return {
-        cols: entry.term.cols,
-        rows: entry.term.rows,
+        cols: term.cols,
+        rows: term.rows,
         cursorX: buffer.cursorX,
         cursorY: buffer.cursorY,
         viewportY: buffer.viewportY,
@@ -99,35 +111,6 @@ if (typeof window !== "undefined") {
   };
 }
 
-function preserveCodexScrollback(sessionId: string, data: string, provider?: string) {
-  if (provider !== "codex" || !data) {
-    return data;
-  }
-
-  const combined = `${terminalPendingSequenceMap.get(sessionId) || ""}${data}`;
-  let carry = "";
-  for (let i = Math.min(ERASE_SCROLLBACK_SEQUENCE.length - 1, combined.length); i > 0; i -= 1) {
-    const suffix = combined.slice(-i);
-    if (ERASE_SCROLLBACK_SEQUENCE.startsWith(suffix)) {
-      carry = suffix;
-      break;
-    }
-  }
-
-  const complete = carry ? combined.slice(0, -carry.length) : combined;
-  terminalPendingSequenceMap.set(sessionId, carry);
-  return complete.split(ERASE_SCROLLBACK_SEQUENCE).join("");
-}
-
-function normalizeOpenCodeOutput(data: string, provider?: string) {
-  if (provider !== "opencode" || !data) {
-    return data;
-  }
-  return data
-    .replace(OPENCODE_DECRQM_QUERY, "")
-    .replace(OPENCODE_SYNC_OUTPUT_TOGGLE, "");
-}
-
 function queueAgentInput(sessionId: string, input: string) {
   if (!input) {
     return;
@@ -135,74 +118,73 @@ function queueAgentInput(sessionId: string, input: string) {
   invoke("send_input_to_agent", { sessionId, input }).catch(() => {});
 }
 
-function currentLightDarkReply() {
-  const prefersLight =
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-color-scheme: light)").matches;
-  return `\u001b[?997;${prefersLight ? 2 : 1}n`;
-}
-
 function terminalPixelSizeReply(entry: TerminalSessionEntry) {
-  const rect = entry.host.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width || 0));
-  const height = Math.max(1, Math.round(rect.height || 0));
-  return `\u001b[4;${height};${width}t`;
+  const rect = entry.renderer?.host?.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect?.width || entry.lastMeasuredHostSize?.width || 0));
+  const height = Math.max(1, Math.round(rect?.height || entry.lastMeasuredHostSize?.height || 0));
+  return { width, height };
 }
 
 function terminalCursorPositionReply(entry: TerminalSessionEntry) {
-  const buffer = entry.term.buffer?.active;
-  const row = Math.max(1, (buffer?.cursorY || 0) + 1);
-  const col = Math.max(1, (buffer?.cursorX || 0) + 1);
-  return `\u001b[${row};${col}R`;
+  const buffer = entry.parser.buffer.active;
+  const row = Math.max(1, (buffer?.cursorY ?? 0) + 1);
+  const col = Math.max(1, (buffer?.cursorX ?? 0) + 1);
+  return { row, col };
+}
+
+function readParserLines(entry: TerminalSessionEntry) {
+  const buffer = entry.parser.buffer.active;
+  return Array.from({ length: buffer.length }, (_, index) =>
+    buffer.getLine(index)?.translateToString(true) || "",
+  );
+}
+
+function readParserScrollbackLineSet(entry: TerminalSessionEntry) {
+  const buffer = entry.parser.buffer.active;
+  const scrollbackLineCount = Math.max(0, buffer.baseY ?? 0);
+  return new Set(
+    Array.from({ length: scrollbackLineCount }, (_, index) =>
+      buffer.getLine(index)?.translateToString(true).replace(/\s+/g, " ").trim() || "",
+    ).filter(Boolean),
+  );
 }
 
 function queueOpenCodeCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
   if (!data) {
     return;
   }
+  const { row, col } = terminalCursorPositionReply(entry);
+  const { width, height } = terminalPixelSizeReply(entry);
+  const prefersLight =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: light)").matches;
+  const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+  const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
+  const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
+  const backgroundRgb =
+    background.length === 6
+      ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
+      : "02/04/02";
+  const foregroundRgb =
+    foreground.length === 6
+      ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
+      : "ee/f2/ee";
 
-  if (data.includes(DEVICE_STATUS_REPORT_QUERY)) {
-    queueAgentInput(sessionId, terminalCursorPositionReply(entry));
-  }
+  const plan = planTerminalCapabilityResponses(entry.provider, data, {
+    cursorRow: row,
+    cursorCol: col,
+    pixelWidth: width,
+    pixelHeight: height,
+    backgroundRgb,
+    foregroundRgb,
+    prefersLight,
+    focusReported: entry.opencodeFocusReported,
+  });
 
-  if (data.includes(OPENCODE_XTVERSION_QUERY)) {
-    queueAgentInput(sessionId, "\u001bP>|xterm.js 6.0.0\u001b\\");
-  }
-
-  if (data.includes(OPENCODE_KITTY_KEYBOARD_QUERY)) {
-    queueAgentInput(sessionId, "\u001b[?0u");
-  }
-
-  if (data.includes(OPENCODE_LIGHT_DARK_QUERY)) {
-    queueAgentInput(sessionId, currentLightDarkReply());
-  }
-
-  for (const match of data.matchAll(/\u001b\[\?(\d+)\$p/g)) {
-    const param = Number(match[1]);
-    if (!Number.isFinite(param)) {
-      continue;
-    }
-    if (OPENCODE_SUPPORTED_RESET_DECRQM_PARAMS.has(param)) {
-      queueAgentInput(sessionId, `\u001b[?${param};2$y`);
-      continue;
-    }
-    if (OPENCODE_UNSUPPORTED_DECRQM_PARAMS.has(param)) {
-      queueAgentInput(sessionId, `\u001b[?${param};0$y`);
-    }
-  }
-
-  if (data.includes("\u001b[14t")) {
-    queueAgentInput(sessionId, terminalPixelSizeReply(entry));
-  }
-
-  if (data.includes("\u001b]4;0;?\u0007")) {
-    queueAgentInput(sessionId, "\u001b]4;0;rgb:02/04/02\u001b\\");
-  }
-
-  if (!entry.opencodeFocusReported && data.includes("\u001b[?1004h")) {
-    entry.opencodeFocusReported = true;
-    queueAgentInput(sessionId, "\u001b[I");
+  entry.opencodeFocusReported = plan.focusReported;
+  for (const input of plan.outgoingInputs) {
+    queueAgentInput(sessionId, input);
   }
 }
 
@@ -214,11 +196,15 @@ function disposeTerminalSession(sessionId: string) {
 
   entry.disposed = true;
   entry.outputReadyUnlisten?.();
-  if (entry.resizeTimeout) {
-    clearTimeout(entry.resizeTimeout);
+  const renderer = entry.renderer;
+  if (renderer?.resizeTimeout) {
+    clearTimeout(renderer.resizeTimeout);
   }
-  terminalPendingSequenceMap.delete(sessionId);
-  entry.term.dispose();
+  renderer?.serializeAddon.dispose();
+  renderer?.webglAddon?.dispose();
+  renderer?.term.dispose();
+  entry.parserSerializeAddon.dispose();
+  entry.parser.dispose();
   terminalSessionMap.delete(sessionId);
 }
 
@@ -236,14 +222,60 @@ async function reportTerminalSize(sessionId: string, entry: TerminalSessionEntry
   await invoke("resize_agent_terminal", { sessionId, cols, rows }).catch(() => {});
 }
 
-async function drainPty(sessionId: string) {
-  const entry = terminalSessionMap.get(sessionId);
-  if (!entry || entry.disposed) {
+async function fitTerminalToContainer(
+  _sessionId: string,
+  entry: TerminalSessionEntry,
+  container: HTMLDivElement,
+  options?: { force?: boolean },
+) {
+  const renderer = entry.renderer;
+  if (!renderer) {
     return;
   }
 
-  if (!entry.opened) {
-    entry.drainQueued = true;
+  const rect = container.getBoundingClientRect();
+  const width = Math.round(rect.width || 0);
+  const height = Math.round(rect.height || 0);
+  if (width < 10 || height < 10) {
+    return;
+  }
+
+  const force = options?.force ?? false;
+  const lastMeasured = entry.lastMeasuredHostSize;
+  if (!force && lastMeasured && lastMeasured.width === width && lastMeasured.height === height) {
+    return;
+  }
+
+  entry.lastMeasuredHostSize = { width, height };
+
+  try {
+    const proposedDimensions = renderer.fitAddon.proposeDimensions();
+    if (!proposedDimensions) {
+      return;
+    }
+    if (
+      shouldHomeCursorBeforeTransientResize(entry, renderer.term.rows, proposedDimensions.rows)
+    ) {
+      await Promise.all([
+        new Promise<void>((resolve) => renderer.term.write("\u001b[H", () => resolve())),
+        new Promise<void>((resolve) => entry.parser.write("\u001b[H", () => resolve())),
+      ]);
+    }
+    if (
+      renderer.term.cols !== proposedDimensions.cols ||
+      renderer.term.rows !== proposedDimensions.rows
+    ) {
+      entry.pendingResizeRedrawSuppression = true;
+      renderer.term.resize(proposedDimensions.cols, proposedDimensions.rows);
+    }
+  } catch {
+    // Ignore fit errors during transient layout churn.
+  }
+}
+
+async function drainPty(sessionId: string) {
+  const entry = terminalSessionMap.get(sessionId);
+  if (!entry || entry.disposed) {
     return;
   }
 
@@ -256,6 +288,7 @@ async function drainPty(sessionId: string) {
   try {
     do {
       entry.drainQueued = false;
+      const rawChunks: string[] = [];
       while (!entry.disposed) {
         const data = await invoke<string | null>("read_agent_pty", { sessionId });
         if (!data) {
@@ -275,12 +308,31 @@ async function drainPty(sessionId: string) {
         if (entry.recentWritePreviews.length > 12) {
           entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
         }
-        entry.term.write(
-          normalizeOpenCodeOutput(
-            preserveCodexScrollback(sessionId, data, entry.provider),
-            entry.provider,
-          ),
-        );
+        rawChunks.push(data);
+      }
+
+      if (rawChunks.length > 0) {
+        const rawBatch = rawChunks.join("");
+        if (
+          entry.pendingResizeRedrawSuppression &&
+          shouldSuppressDuplicateResizeRedraw(rawBatch, readParserLines(entry))
+        ) {
+          entry.pendingResizeRedrawSuppression = false;
+          continue;
+        }
+        if (rawBatch.includes("\u001b[H")) {
+          entry.pendingResizeRedrawSuppression = false;
+        }
+
+        entry.existingScrollbackLines = readParserScrollbackLineSet(entry);
+        const batchedWrite = rawChunks
+          .map((data) => normalizeOpenCodeOutput(data, entry.provider, entry))
+          .join("");
+        entry.existingScrollbackLines = undefined;
+        entry.parser.write(batchedWrite);
+        if (entry.renderer) {
+          entry.renderer.term.write(batchedWrite, () => {});
+        }
       }
     } while (!entry.disposed && entry.drainQueued);
   } catch (error) {
@@ -307,17 +359,74 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     return existing;
   }
 
+  const parser = new HeadlessTerminal({
+    scrollback: TERMINAL_SCROLLBACK_LINES,
+    allowProposedApi: true,
+  });
+  const parserSerializeAddon = new SerializeAddon();
+  parser.loadAddon(parserSerializeAddon);
+
+  const entry: TerminalSessionEntry = {
+    lastReportedSize: null,
+    lastMeasuredHostSize: null,
+    recentWritePreviews: [],
+    opencodeFocusReported: false,
+    outputReadyUnlisten: null,
+    provider,
+    currentTheme: DARK_TERM_THEME,
+    renderer: null,
+    parser,
+    parserSerializeAddon,
+    latestTitle: null,
+    titleHandlerRef: {},
+    drainInFlight: false,
+    drainQueued: false,
+    disposed: false,
+    lastHomeRedrawLines: null,
+    homeRedrawScrollbackSeen: new Set(),
+    transientHomeRedrawActive: false,
+    pendingResizeRedrawSuppression: false,
+  };
+
+  terminalSessionMap.set(sessionId, entry);
+
+  void listen<{ session_id?: string }>("agent-pty-output-ready", (event) => {
+    if (event.payload?.session_id !== sessionId) {
+      return;
+    }
+    void drainPty(sessionId);
+  }).then((unlisten) => {
+    if (entry.disposed) {
+      unlisten();
+      return;
+    }
+    entry.outputReadyUnlisten = unlisten;
+  }).catch((error) => {
+    console.warn("agent-pty-output-ready listen error:", error);
+  });
+
+  return entry;
+}
+
+function clearRendererTimers(renderer: TerminalRendererEntry) {
+  if (renderer.resizeTimeout) {
+    clearTimeout(renderer.resizeTimeout);
+    renderer.resizeTimeout = null;
+  }
+}
+
+function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   const term = new Terminal({
-    theme: DARK_TERM_THEME,
-    fontFamily: "monospace",
+    theme: entry.currentTheme,
+    fontFamily: '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace',
     fontSize: 14,
+    customGlyphs: true,
     cursorBlink: true,
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
     convertEol: false,
     disableStdin: false,
     reflowCursorLine: false,
-    scrollOnEraseInDisplay: true,
     windowsPty: IS_WINDOWS ? { backend: "conpty", buildNumber: 22621 } : undefined,
     windowOptions: {
       getCellSizePixels: true,
@@ -331,7 +440,8 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-
+  const serializeAddon = new SerializeAddon();
+  term.loadAddon(serializeAddon);
   const unicode11Addon = new Unicode11Addon();
   term.loadAddon(unicode11Addon);
   if (term.unicode) {
@@ -343,21 +453,14 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   host.style.width = "100%";
   host.style.height = "100%";
 
-  const entry: TerminalSessionEntry = {
-    fitAddon,
-    host,
-    lastReportedSize: null,
-    opened: false,
-    recentWritePreviews: [],
-    opencodeFocusReported: false,
-    outputReadyUnlisten: null,
-    provider,
+  const renderer: TerminalRendererEntry = {
     resizeTimeout: null,
     term,
-    titleHandlerRef: {},
-    drainInFlight: false,
-    drainQueued: false,
-    disposed: false,
+    fitAddon,
+    serializeAddon,
+    webglAddon: null,
+    webglAttempted: false,
+    host,
   };
 
   term.onData((data) => {
@@ -373,40 +476,92 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   });
 
   term.onTitleChange((title) => {
+    entry.latestTitle = title;
     entry.titleHandlerRef.current?.(title);
   });
 
   term.onResize((size) => {
-    if (entry.resizeTimeout) {
-      clearTimeout(entry.resizeTimeout);
+    if (entry.parser.cols !== size.cols || entry.parser.rows !== size.rows) {
+      entry.parser.resize(size.cols, size.rows);
     }
-    entry.resizeTimeout = setTimeout(() => {
+    if (renderer.resizeTimeout) {
+      clearTimeout(renderer.resizeTimeout);
+    }
+    renderer.resizeTimeout = setTimeout(() => {
       void reportTerminalSize(sessionId, entry, size.cols, size.rows);
-    }, 50);
+    }, 120);
   });
 
-  terminalSessionMap.set(sessionId, entry);
+  return renderer;
+}
 
-  void listen<{ session_id?: string }>("agent-pty-output-ready", (event) => {
-    if (event.payload?.session_id !== sessionId) {
-      return;
+function activateWebglRenderer(renderer: TerminalRendererEntry) {
+  if (renderer.webglAttempted) {
+    return;
+  }
+
+  renderer.webglAttempted = true;
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      webglAddon.dispose();
+      if (renderer.webglAddon === webglAddon) {
+        renderer.webglAddon = null;
+      }
+      renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+    });
+    renderer.term.loadAddon(webglAddon);
+    renderer.webglAddon = webglAddon;
+  } catch (error) {
+    renderer.webglAddon = null;
+    console.warn("WebGL terminal renderer unavailable; using DOM renderer.", error);
+  }
+}
+
+function attachRendererHost(
+  session: TerminalSessionEntry,
+  container: HTMLDivElement,
+) {
+  const renderer = session.renderer;
+  if (!renderer) {
+    return null;
+  }
+
+  container.replaceChildren();
+  container.appendChild(renderer.host);
+  if (session.latestTitle) {
+    session.titleHandlerRef.current?.(session.latestTitle);
+  }
+
+  return renderer;
+}
+
+function mountRenderer(
+  sessionId: string,
+  session: TerminalSessionEntry,
+  container: HTMLDivElement,
+) {
+  const renderer = session.renderer ?? createRenderer(sessionId, session);
+  session.renderer = renderer;
+
+  if (!renderer.term.element) {
+    if (session.parser.cols !== renderer.term.cols || session.parser.rows !== renderer.term.rows) {
+      renderer.term.resize(session.parser.cols, session.parser.rows);
     }
-    void drainPty(sessionId);
-  }).then((unlisten) => {
-    if (entry.disposed) {
-      unlisten();
-      return;
+
+    const seedState = session.parserSerializeAddon.serialize({
+      scrollback: TERMINAL_SCROLLBACK_LINES,
+    });
+    if (seedState) {
+      renderer.term.write(seedState);
     }
-    entry.outputReadyUnlisten = unlisten;
-    void drainPty(sessionId);
-  }).catch((error) => {
-    console.warn("agent-pty-output-ready listen error:", error);
-    void drainPty(sessionId);
-  });
 
-  void drainPty(sessionId);
+    renderer.term.open(renderer.host);
+    activateWebglRenderer(renderer);
+  }
+  attachRendererHost(session, container);
 
-  return entry;
+  return renderer;
 }
 
 export const AgentTerminal = memo(function AgentTerminal({
@@ -454,27 +609,13 @@ export const AgentTerminal = memo(function AgentTerminal({
   }, [onTitleChange]);
 
   const performFit = useCallback(() => {
-    const term = xtermRef.current;
-    const fitAddon = fitAddonRef.current;
     const container = terminalRef.current;
-    if (!term || !fitAddon || !container) {
+    const entry = terminalSessionMap.get(sessionId);
+    if (!entry || !xtermRef.current || !fitAddonRef.current || !container) {
       return;
     }
-
-    const rect = container.getBoundingClientRect();
-    if (rect.width < 10 || rect.height < 10) {
-      return;
-    }
-
-    try {
-      fitAddon.fit();
-      if (term.cols > 10 && term.rows > 3) {
-        term.refresh(0, Math.max(term.rows - 1, 0));
-      }
-    } catch {
-      // Ignore fit errors during transient layout churn.
-    }
-  }, []);
+    void fitTerminalToContainer(sessionId, entry, container);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
@@ -483,8 +624,6 @@ export const AgentTerminal = memo(function AgentTerminal({
 
     let isMounted = true;
     let resizeObserver: ResizeObserver | null = null;
-    let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
-    let handleWindowResize: (() => void) | null = null;
     let entry: TerminalSessionEntry | null = null;
 
     const attach = async () => {
@@ -497,44 +636,35 @@ export const AgentTerminal = memo(function AgentTerminal({
         entry = session;
         session.provider = provider;
         session.titleHandlerRef.current = onTitleChangeRef.current;
-        session.term.options.theme = termTheme;
+        session.currentTheme = termTheme;
 
-        xtermRef.current = session.term;
-        fitAddonRef.current = session.fitAddon;
-
-        if (session.host.parentElement !== terminalRef.current) {
-          terminalRef.current.replaceChildren();
-          terminalRef.current.appendChild(session.host);
+        const renderer = mountRenderer(sessionId, session, terminalRef.current);
+        if (!renderer) {
+          return;
         }
 
-        if (!session.opened) {
-          session.term.open(session.host);
-          session.opened = true;
-        }
+        renderer.term.options.theme = termTheme;
+        attachRendererHost(session, terminalRef.current);
 
-        const checkSizing = () => {
+        xtermRef.current = renderer.term;
+        fitAddonRef.current = renderer.fitAddon;
+
+        const initialRect = terminalRef.current.getBoundingClientRect();
+        session.lastMeasuredHostSize = {
+          width: Math.round(initialRect.width || 0),
+          height: Math.round(initialRect.height || 0),
+        };
+
+        const checkSizing = (force = false) => {
           if (!isMounted || !terminalRef.current) {
             return;
           }
-
-          const rect = terminalRef.current.getBoundingClientRect();
-          if (rect.width < 10 || rect.height < 10) {
-            return;
-          }
-
-          try {
-            session.fitAddon.fit();
-            if (session.term.cols > 10 && session.term.rows > 3) {
-              void reportTerminalSize(sessionId, session, session.term.cols, session.term.rows);
-            }
-          } catch {
-            // Ignore fit errors during transient layout churn.
-          }
+          void fitTerminalToContainer(sessionId, session, terminalRef.current, { force });
         };
 
         void drainPty(sessionId);
-        requestAnimationFrame(checkSizing);
-        setTimeout(checkSizing, 50);
+        requestAnimationFrame(() => checkSizing(true));
+        setTimeout(() => checkSizing(true), 50);
 
         resizeObserver = new ResizeObserver(() => {
           if (!isMounted) {
@@ -542,28 +672,9 @@ export const AgentTerminal = memo(function AgentTerminal({
           }
 
           checkSizing();
-          if (resizeTimeout) {
-            clearTimeout(resizeTimeout);
-          }
-          resizeTimeout = setTimeout(() => {
-            if (!isMounted) {
-              return;
-            }
-            requestAnimationFrame(() => performFit());
-          }, 16);
+          requestAnimationFrame(() => performFit());
         });
         resizeObserver.observe(terminalRef.current);
-        if (terminalRef.current.parentElement) {
-          resizeObserver.observe(terminalRef.current.parentElement);
-        }
-
-        handleWindowResize = () => {
-          if (!isMounted) {
-            return;
-          }
-          requestAnimationFrame(() => performFit());
-        };
-        window.addEventListener("resize", handleWindowResize);
       } catch (error) {
         console.error("AgentTerminal Init Error:", error);
         setInitError(String(error));
@@ -574,12 +685,9 @@ export const AgentTerminal = memo(function AgentTerminal({
 
     return () => {
       isMounted = false;
-      if (resizeTimeout) {
-        clearTimeout(resizeTimeout);
-      }
       resizeObserver?.disconnect();
-      if (handleWindowResize) {
-        window.removeEventListener("resize", handleWindowResize);
+      if (entry?.renderer) {
+        clearRendererTimers(entry.renderer);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
@@ -587,24 +695,22 @@ export const AgentTerminal = memo(function AgentTerminal({
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [performFit, provider, sessionId, termTheme]);
+  }, [performFit, provider, sessionId]);
 
   useEffect(() => {
     const term = xtermRef.current;
     if (term) {
       term.options.theme = termTheme;
+      term.refresh(0, Math.max(term.rows - 1, 0));
     }
-  }, [termTheme]);
+  }, [sessionId, termTheme]);
 
   useEffect(() => {
     let isMounted = true;
-    const timers = [
-      setTimeout(() => isMounted && performFit(), 50),
-      setTimeout(() => isMounted && performFit(), 150),
-    ];
+    const timer = setTimeout(() => isMounted && performFit(), 50);
     return () => {
       isMounted = false;
-      timers.forEach(clearTimeout);
+      clearTimeout(timer);
     };
   }, [sessionId, isMaximized, performFit]);
 
@@ -620,7 +726,6 @@ export const AgentTerminal = memo(function AgentTerminal({
         ref={terminalRef}
         onClick={() => xtermRef.current?.focus()}
         className="w-full h-full overflow-hidden"
-        style={{ willChange: "transform" }}
       />
     </div>
   );

@@ -14,6 +14,9 @@ export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
   resolve: {
     preserveSymlinks: true,
+    alias: {
+      "@xterm/headless": "@xterm/headless/lib-headless/xterm-headless.js",
+    },
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

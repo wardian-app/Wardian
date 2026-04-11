@@ -310,6 +310,7 @@ pub async fn spawn_agent(
         cmd.arg(arg);
     }
     cmd.cwd(&provider_cwd);
+    apply_terminal_identity_env(&mut cmd);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
     // class/common/agent instruction files are loaded natively.
@@ -925,6 +926,10 @@ fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {
     stripped
 }
 
+fn strip_standalone_flag(args: Vec<String>, flag: &str) -> Vec<String> {
+    args.into_iter().filter(|arg| arg != flag).collect()
+}
+
 fn persisted_agent_config(session_id: &str) -> Option<AgentConfig> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
@@ -1100,9 +1105,13 @@ fn finalize_interactive_spawn_args(
     provider_name: &str,
     _is_restored: bool,
     _resume_session: &Option<String>,
-    provider_args: Vec<String>,
+    mut provider_args: Vec<String>,
 ) -> Vec<String> {
-    let _ = provider_name;
+    if provider_name == "claude" {
+        provider_args = strip_standalone_flag(provider_args, "--verbose");
+        provider_args = strip_flag_value_pairs(provider_args, "--input-format");
+        provider_args = strip_flag_value_pairs(provider_args, "--output-format");
+    }
     provider_args
 }
 
@@ -1130,14 +1139,16 @@ fn interactive_provider_launch(
     bin: &str,
     provider_args: &[String],
 ) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
-    if provider_name == "opencode" {
-        return Ok(crate::utils::shell::ShellLaunchSpec {
-            executable: bin.to_string(),
-            args: provider_args.to_vec(),
-        });
-    }
+    let _ = provider_name;
+    Ok(crate::utils::shell::ShellLaunchSpec {
+        executable: bin.to_string(),
+        args: provider_args.to_vec(),
+    })
+}
 
-    build_program_launch(bin, provider_args)
+fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM", "xterm-256color");
 }
 
 fn opencode_attach_args(config: &AgentConfig, provider_cwd: &std::path::Path) -> Vec<String> {
@@ -1639,10 +1650,14 @@ pub async fn obtain_session_id(
         provider_args.push("exec".to_string());
 
         if let Some(config) = config {
-            provider_args.extend(strip_flag_value_pairs(
-                provider.get_spawn_args(config, false),
-                "--add-dir",
-            ));
+            let spawn_args = strip_flag_value_pairs(provider.get_spawn_args(config, false), "--add-dir");
+            provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
+            if config.codex_skip_git_repo_check.unwrap_or(true) {
+                provider_args.push("--skip-git-repo-check".to_string());
+            }
+            if config.codex_ephemeral.unwrap_or(false) {
+                provider_args.push("--ephemeral".to_string());
+            }
         }
 
         provider_args.push("--json".to_string());
@@ -1919,6 +1934,45 @@ fn codex_session_file_path(
 
     let global_home = dirs::home_dir()?.join(".codex");
     codex_session_file_path_in(&global_home, session_id)
+}
+
+pub fn latest_codex_session_index_entry(
+    wardian_session_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let wardian_home = get_wardian_home().ok_or("Could not resolve Wardian home")?;
+    let index_path = wardian_home
+        .join("agents")
+        .join(wardian_session_id)
+        .join("habitat")
+        .join(".codex")
+        .join("session_index.jsonl");
+
+    if !index_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&index_path)
+        .map_err(|e| format!("Failed to read Codex session index: {}", e))?;
+    let latest = content
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+            let session_id = parsed.get("id")?.as_str()?.trim();
+            let updated_at = parsed.get("updated_at")?.as_str()?.trim();
+            if session_id.is_empty() || updated_at.is_empty() {
+                return None;
+            }
+
+            Some((session_id.to_string(), updated_at.to_string()))
+        });
+
+    Ok(latest)
 }
 
 fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
@@ -2409,7 +2463,8 @@ mod tests {
         codex_bootstrap_launch_context, finalize_interactive_spawn_args, headless_provider_launch,
         interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
         migrate_codex_bootstrap_home, opencode_attach_args, opencode_interactive_env,
-        opencode_runtime_config_content, strip_flag_value_pairs, wait_for_opencode_server_ready,
+        opencode_runtime_config_content, strip_flag_value_pairs, strip_standalone_flag,
+        wait_for_opencode_server_ready,
     };
     use crate::models::AgentConfig;
     use std::path::Path;
@@ -2512,6 +2567,29 @@ mod tests {
                 "--model".to_string(),
                 "gpt-5".to_string(),
                 "--search".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_standalone_flag_removes_only_the_matching_flag() {
+        let args = vec![
+            "resume".to_string(),
+            "session-abc".to_string(),
+            "--no-alt-screen".to_string(),
+            "--model".to_string(),
+            "gpt-5.4".to_string(),
+        ];
+
+        let stripped = strip_standalone_flag(args, "--no-alt-screen");
+
+        assert_eq!(
+            stripped,
+            vec![
+                "resume".to_string(),
+                "session-abc".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
             ]
         );
     }
@@ -2714,6 +2792,82 @@ mod tests {
         );
 
         assert_eq!(args, vec!["--session".to_string(), "ses_test".to_string()]);
+    }
+
+    #[test]
+    fn codex_interactive_spawn_preserves_inline_scrollback_mode() {
+        let args = finalize_interactive_spawn_args(
+            "codex",
+            true,
+            &Some("019d331a-0500-7592-969f-8f437886f42b".to_string()),
+            vec![
+                "resume".to_string(),
+                "019d331a-0500-7592-969f-8f437886f42b".to_string(),
+                "--no-alt-screen".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "resume".to_string(),
+                "019d331a-0500-7592-969f-8f437886f42b".to_string(),
+                "--no-alt-screen".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_bootstrap_exec_mode_keeps_skip_git_repo_check() {
+        let config = AgentConfig {
+            provider: "codex".to_string(),
+            codex_skip_git_repo_check: Some(true),
+            ..Default::default()
+        };
+
+        let provider = crate::providers::ProviderFactory::resolve("codex").unwrap();
+        let (_bin, mut provider_args) = provider.get_executable();
+        provider_args.push("--cd".to_string());
+        provider_args.push("D:/Development/Wardian".to_string());
+        provider_args.push("exec".to_string());
+        let spawn_args = strip_flag_value_pairs(provider.get_spawn_args(&config, false), "--add-dir");
+        provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
+        if config.codex_skip_git_repo_check.unwrap_or(true) {
+            provider_args.push("--skip-git-repo-check".to_string());
+        }
+
+        assert!(provider_args.contains(&"--skip-git-repo-check".to_string()));
+        assert!(!provider_args.contains(&"--no-alt-screen".to_string()));
+    }
+
+    #[test]
+    fn claude_interactive_spawn_drops_stream_json_flags() {
+        let args = finalize_interactive_spawn_args(
+            "claude",
+            true,
+            &Some("claude-session".to_string()),
+            vec![
+                "--verbose".to_string(),
+                "--input-format".to_string(),
+                "stream-json".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--resume".to_string(),
+                "claude-session".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--resume".to_string(),
+                "claude-session".to_string(),
+            ]
+        );
     }
 
     #[test]
