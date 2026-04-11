@@ -102,10 +102,6 @@ function resolveNativeDriverPath() {
     ]);
   }
 
-  if (process.platform === "darwin") {
-    return null;
-  }
-
   return resolveCommand(["chromedriver", "geckodriver"]);
 }
 
@@ -136,12 +132,6 @@ export function assertNativePreflight(harness) {
   if (!harness.appPath) {
     throw new Error(
       "Wardian app binary not found. Build it first or set WARDIAN_NATIVE_APP."
-    );
-  }
-
-  if (harness.platform === "darwin") {
-    throw new Error(
-      "Native Tauri WebDriver is not configured for macOS desktop in this harness yet."
     );
   }
 

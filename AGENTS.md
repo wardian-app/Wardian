@@ -75,7 +75,7 @@ Wardian has multiple test layers. Before marking a task as complete, run the app
    - Covers browser-level UI behavior only. It does **not** prove native Tauri IPC, PTY behavior, or real provider launch behavior.
 4. **Native Runtime E2E**: use the Tauri/WebDriver-native harness when validating PTY behavior, `invoke` commands, or provider spawning.
    - This is the required layer for real terminal and provider-runtime claims.
-   - Windows setup: `npm run setup:e2e:native:windows`
+   - Setup: `npm run setup:e2e:native`
    - Run: `npm run test:e2e:native`
    - Generated native driver artifacts live under `tools/e2e-native/` and are intentionally ignored by git.
 5. **Real Provider E2E**: run only when a change specifically depends on provider-specific native behavior and the native runtime harness is available.

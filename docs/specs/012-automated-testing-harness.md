@@ -90,8 +90,10 @@ This is the first layer that can truthfully validate PTY and native runtime beha
 
 Initial local setup and execution should use:
 
-* `npm run setup:e2e:native:windows`
+* `npm run setup:e2e:native`
 * `npm run test:e2e:native`
+
+The setup command must be cross-platform and implemented as Node tooling rather than shell-specific scripts. It should prepare `tauri-driver`, detect or install a native WebDriver where the project has a reliable automated path, and print OS-specific guidance when manual installation is required.
 
 ### 5. Opt-In Real Provider Verification
 Wardian will support a separate, opt-in native test layer for real providers such as OpenCode when provider-specific behavior must be validated directly.
