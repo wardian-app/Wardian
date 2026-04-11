@@ -108,9 +108,7 @@ pub fn ensure_claude_permission_hook(
     std::fs::create_dir_all(&hook_root).map_err(|e| e.to_string())?;
 
     let event_log_path = hook_root.join("permission-requests.jsonl");
-    if !event_log_path.exists() {
-        std::fs::write(&event_log_path, "").map_err(|e| e.to_string())?;
-    }
+    std::fs::write(&event_log_path, "").map_err(|e| e.to_string())?;
 
     let script_path = write_claude_permission_hook_script(&hook_root, &event_log_path)?;
     let command = claude_permission_hook_command(&script_path);
@@ -732,8 +730,8 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        build_opencode_runtime_config, create_directory_link, habitat_root_for_session,
-        projected_link_matches_target, provider_uses_projected_workspace,
+        build_opencode_runtime_config, create_directory_link, ensure_claude_permission_hook,
+        habitat_root_for_session, projected_link_matches_target, provider_uses_projected_workspace,
         resolve_opencode_runtime_roots, sync_codex_agent_home, sync_opencode_config_dir,
     };
     use std::path::{Path, PathBuf};
@@ -853,6 +851,30 @@ mod tests {
         unsafe { std::env::remove_var("WARDIAN_HOME") };
         assert!(result.is_some());
         assert!(result.unwrap().ends_with(".wardian"));
+    }
+
+    #[test]
+    fn ensure_claude_permission_hook_truncates_stale_events() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let root = unique_temp_dir("claude-hook-stale-events");
+        unsafe { std::env::set_var("WARDIAN_HOME", root.to_str().unwrap()) };
+
+        let stale_log = root
+            .join("agents")
+            .join("session-123")
+            .join("claude")
+            .join("permission-requests.jsonl");
+        std::fs::create_dir_all(stale_log.parent().unwrap()).expect("create hook dir");
+        std::fs::write(&stale_log, "{\"tool_name\":\"Bash\"}\n").expect("write stale hook event");
+
+        let paths = ensure_claude_permission_hook("session-123").expect("ensure hook");
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+        assert_eq!(
+            std::fs::read_to_string(paths.event_log_path).expect("read hook log"),
+            ""
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

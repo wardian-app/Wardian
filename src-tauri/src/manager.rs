@@ -1,4 +1,5 @@
 use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentTelemetry};
+use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
@@ -707,7 +708,8 @@ pub async fn spawn_agent(
                                                     let is_tool_result =
                                                         parsed.get("type").and_then(|v| v.as_str())
                                                             == Some("user")
-                                                            && !claude_is_real_user_query(&parsed);
+                                                            && classify_claude_user_event(&parsed)
+                                                                == ClaudeUserEventKind::ToolResult;
                                                     if is_tool_result {
                                                         *waiting = false;
                                                         apply_agent_status_event(
@@ -768,6 +770,18 @@ pub async fn spawn_agent(
         if let Some(hook_event_log) = hook_event_log {
             let hook_app = app.clone();
             let hook_session = config.session_id.clone();
+            let hook_accepted_sessions = {
+                let mut sessions = vec![config.session_id.clone()];
+                if let Some(resume_session) = config
+                    .resume_session
+                    .as_ref()
+                    .map(|sid| sid.trim())
+                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
+                {
+                    sessions.push(resume_session.to_string());
+                }
+                sessions
+            };
             let hook_current_status = current_status.clone();
             let hook_waiting_for_permission = waiting_for_permission.clone();
 
@@ -801,6 +815,11 @@ pub async fn spawn_agent(
                                 if let Ok(parsed) =
                                     serde_json::from_str::<serde_json::Value>(line.trim())
                                 {
+                                    if !hook_accepted_sessions.iter().any(|session_id| {
+                                        claude_permission_hook_matches_session(&parsed, session_id)
+                                    }) {
+                                        continue;
+                                    }
                                     if let Ok(mut waiting) = hook_waiting_for_permission.lock() {
                                         *waiting = true;
                                     }
@@ -2008,20 +2027,28 @@ fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
 }
 
 fn claude_is_real_user_query(line: &serde_json::Value) -> bool {
-    let Some(message) = line.get("message") else {
-        return true;
-    };
-    let Some(content) = message.get("content") else {
-        return true;
-    };
+    classify_claude_user_event(line) == ClaudeUserEventKind::RealQuery
+}
 
-    let Some(items) = content.as_array() else {
-        return true;
-    };
+fn claude_permission_hook_matches_session(event: &serde_json::Value, session_id: &str) -> bool {
+    if session_id.trim().is_empty() {
+        return false;
+    }
 
-    !items
-        .iter()
-        .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+    if event
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|sid| sid == session_id)
+    {
+        return true;
+    }
+
+    event
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .and_then(|path| std::path::Path::new(path).file_stem())
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == session_id)
 }
 
 fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
@@ -2476,6 +2503,7 @@ pub async fn kill_all_agents(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
+        claude_permission_hook_matches_session, claude_status_from_log,
         codex_bootstrap_launch_context, finalize_interactive_spawn_args, headless_provider_launch,
         interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
         migrate_codex_bootstrap_home, opencode_attach_args, opencode_interactive_env,
@@ -2539,6 +2567,97 @@ mod tests {
         let provider_cwd = interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
 
         assert_eq!(provider_cwd, workspace_cwd);
+    }
+
+    #[test]
+    fn claude_status_from_log_ignores_local_commands_after_idle() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "stop_reason": "end_turn"
+                }
+            }),
+            serde_json::json!({ "type": "system", "subtype": "turn_duration" }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<local-command-caveat>Do not respond.</local-command-caveat>"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<command-name>/model</command-name><command-message>model</command-message>"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<local-command-stdout>Set model to Opus 4.6</local-command-stdout>"
+                }
+            }),
+            serde_json::json!({ "type": "custom-title" }),
+            serde_json::json!({ "type": "file-history-snapshot" }),
+        ];
+
+        assert_eq!(claude_status_from_log(&lines), Some("Idle".to_string()));
+    }
+
+    #[test]
+    fn claude_status_from_log_treats_real_user_prompt_as_processing() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "stop_reason": "end_turn"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "Please continue." }
+            }),
+        ];
+
+        assert_eq!(
+            claude_status_from_log(&lines),
+            Some("Processing...".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_permission_hook_ignores_other_transcript_sessions() {
+        let event = serde_json::json!({
+            "session_id": "other-session",
+            "transcript_path": "C:\\Users\\tgemi\\.claude\\projects\\D--Development-Wardian\\other-session.jsonl",
+            "tool_name": "Bash"
+        });
+
+        assert!(!claude_permission_hook_matches_session(
+            &event,
+            "expected-session"
+        ));
+    }
+
+    #[test]
+    fn claude_permission_hook_accepts_matching_transcript_session() {
+        let event = serde_json::json!({
+            "session_id": "expected-session",
+            "transcript_path": "C:\\Users\\tgemi\\.claude\\projects\\D--Development-Wardian\\expected-session.jsonl",
+            "tool_name": "Bash"
+        });
+
+        assert!(claude_permission_hook_matches_session(
+            &event,
+            "expected-session"
+        ));
     }
 
     #[test]
