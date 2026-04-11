@@ -12,6 +12,14 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(val));
         }
     }
+    #[cfg(debug_assertions)]
+    {
+        // Use Cargo target directory so debug state is isolated from production
+        // and is wiped automatically by `cargo clean`.
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        Some(manifest_dir.join("target").join("debug").join(".wardian"))
+    }
+    #[cfg(not(debug_assertions))]
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
 
