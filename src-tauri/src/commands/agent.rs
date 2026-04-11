@@ -28,6 +28,31 @@ fn persisted_resume_session_for_provider(
     })
 }
 
+fn allocate_loopback_port() -> Result<u16, String> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Failed to allocate loopback port: {}", e))?
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| format!("Failed to read allocated loopback port: {}", e))
+}
+
+fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
+    config.is_off = false;
+
+    if config.resume_session.is_none() {
+        config.resume_session = Some(config.session_id.clone());
+    }
+
+    if config.provider == "opencode" {
+        // OpenCode interactive sessions are backed by a local sidecar server.
+        // Always rotate the loopback port on resume so a fresh attach cannot
+        // accidentally race against or reuse a stale server lifecycle.
+        config.opencode_port = Some(allocate_loopback_port()?);
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn spawn_agent(
     req: SpawnAgentRequest,
@@ -45,30 +70,33 @@ pub async fn spawn_agent(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
     ));
+    let provider_name = config_override
+        .as_ref()
+        .map(|c| c.provider.clone())
+        .unwrap_or_else(|| "claude".to_string());
     let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
 
     let mut session_id = actual_resume.clone();
 
     if actual_resume.is_none() {
-        let cwd = crate::utils::fs::resolve_cwd(&folder, "");
+        if provider_name == "codex" || provider_name == "claude" {
+            session_id = Some(uuid::Uuid::new_v4().to_string());
+        } else {
+            let cwd = crate::utils::fs::resolve_cwd(&folder, "");
 
-        let provider_name = config_override
-            .as_ref()
-            .map(|c| c.provider.clone())
-            .unwrap_or_else(|| "claude".to_string());
-
-        match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
-            Ok(real_sid) => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Intercepted stream-json session ID for {}: {}",
-                    provider_name, real_sid
-                ));
-                // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
-                session_id = Some(real_sid.clone());
-                actual_resume = Some(real_sid);
-            }
-            Err(e) => {
-                return Err(format!("Failed to initialize the provider session: {}", e));
+            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref()).await {
+                Ok(real_sid) => {
+                    manager::log_debug(&format!(
+                        "[WARDIAN] Intercepted stream-json session ID for {}: {}",
+                        provider_name, real_sid
+                    ));
+                    // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
+                    session_id = Some(real_sid.clone());
+                    actual_resume = Some(real_sid);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to initialize the provider session: {}", e));
+                }
             }
         }
     }
@@ -86,8 +114,28 @@ pub async fn spawn_agent(
         &agent_class,
         &session_id,
     ));
+    if config.provider == "opencode" && config.opencode_port.is_none() {
+        config.opencode_port = Some(allocate_loopback_port()?);
+    }
 
     let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
+    if config.provider == "codex" && actual_resume.is_none() {
+        for _ in 0..40 {
+            if let Some((provider_session_id, _updated_at)) =
+                manager::latest_codex_session_index_entry(&session_id)?
+            {
+                actual_resume = Some(provider_session_id.clone());
+                config.resume_session = Some(provider_session_id.clone());
+                active_agent.config.resume_session = Some(provider_session_id.clone());
+                manager::log_debug(&format!(
+                    "[WARDIAN] Adopted live Codex session id {} for Wardian session {}",
+                    provider_session_id, session_id
+                ));
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
     let persisted_resume =
         persisted_resume_session_for_provider(&config.provider, actual_resume.clone(), &session_id);
     config.resume_session = persisted_resume.clone();
@@ -218,12 +266,8 @@ pub async fn resume_agent(
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
-        agent.config.is_off = false;
-        // Ensure resume_session is set so gemini CLI resumes the correct conversation
-        if agent.config.resume_session.is_none() {
-            agent.config.resume_session = Some(agent.config.session_id.clone());
-        }
-        let new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
+        prepare_resume_config(&mut agent.config)?;
+        let mut new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
 
         // Register new input sender
         if let Some(ref tx) = new_active.stdin_tx {
@@ -232,20 +276,14 @@ pub async fn resume_agent(
             }
         }
 
-        // Replace ALL fields so the reader/writer threads share state with the stored agent
-        agent.child_process = new_active.child_process;
-        agent.pty_master = new_active.pty_master;
-        agent.stdin_tx = new_active.stdin_tx;
-        agent.process_id = new_active.process_id;
-        agent.output_buffer = new_active.output_buffer;
-        agent.query_count = new_active.query_count;
-        agent.init_timestamp = new_active.init_timestamp;
-        agent.current_status = new_active.current_status;
-        agent.log_path = new_active.log_path;
-        #[cfg(windows)]
-        {
-            agent.job_object = new_active.job_object;
-        }
+        // Terminate the old agent's process tree before replacing it.
+        manager::terminate_active_agent_process(agent);
+
+        // Preserve the updated config on the new agent, then swap the entire struct.
+        // The old ActiveAgent is dropped here; its Drop impl is a no-op because
+        // terminate_active_agent_process already cleared process_id and child_process.
+        new_active.config = agent.config.clone();
+        let _ = std::mem::replace(agent, new_active);
         manager::save_state(&app, &agents, &order);
         Ok(())
     } else {
@@ -327,7 +365,8 @@ pub async fn reorder_agents(
 
 #[cfg(test)]
 mod tests {
-    use super::persisted_resume_session_for_provider;
+    use super::{persisted_resume_session_for_provider, prepare_resume_config};
+    use crate::models::AgentConfig;
 
     #[test]
     fn claude_persists_resume_session_after_initial_spawn() {
@@ -343,5 +382,42 @@ mod tests {
             persisted_resume_session_for_provider("codex", None, "codex-session-1"),
             None
         );
+    }
+
+    #[test]
+    fn opencode_resume_rotates_loopback_port_and_sets_resume_session() {
+        let mut config = AgentConfig {
+            provider: "opencode".to_string(),
+            session_id: "ses_test".to_string(),
+            resume_session: None,
+            is_off: true,
+            opencode_port: Some(4100),
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("ses_test"));
+        assert!(!config.is_off);
+        assert_ne!(config.opencode_port, Some(4100));
+        assert!(config.opencode_port.is_some());
+    }
+
+    #[test]
+    fn non_opencode_resume_keeps_existing_port() {
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            opencode_port: Some(4100),
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        assert_eq!(config.opencode_port, Some(4100));
+        assert!(!config.is_off);
     }
 }

@@ -1,17 +1,51 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 
+fn debug_log_path() -> std::path::PathBuf {
+    // Write to ~/.wardian/wardian_debug.log so logs are reachable from any cwd,
+    // including production builds launched from read-only install directories.
+    std::env::var("WARDIAN_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| std::path::PathBuf::from(v).join("wardian_debug.log"))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".wardian").join("wardian_debug.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("wardian_debug.log"))
+}
+
 pub fn log_debug(msg: &str) {
+    let path = debug_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     for _ in 0..5 {
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("wardian_debug.log")
-        {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let _ = writeln!(file, "{}", msg);
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{debug_log_path, log_debug};
+
+    #[test]
+    fn log_debug_creates_parent_directory_for_custom_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let wardian_home = temp.path().join("nested").join("wardian-home");
+
+        unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
+
+        log_debug("parent directory smoke test");
+        let path = debug_log_path();
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        assert!(path.exists(), "expected debug log at {}", path.display());
+        let contents = std::fs::read_to_string(path).expect("read debug log");
+        assert!(contents.contains("parent directory smoke test"));
     }
 }
 

@@ -43,6 +43,7 @@ vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(() => ({
     open: vi.fn(),
     write: vi.fn(),
+    resize: vi.fn(),
     onData: vi.fn(),
     onBinary: vi.fn(),
     onTitleChange: vi.fn(),
@@ -51,6 +52,46 @@ vi.mock("@xterm/xterm", () => ({
     focus: vi.fn(),
     loadAddon: vi.fn(),
     scrollToBottom: vi.fn(),
+    cols: 80,
+    rows: 24,
+  })),
+}));
+
+vi.mock("@xterm/addon-serialize", () => ({
+  SerializeAddon: vi.fn().mockImplementation(() => ({
+    serialize: vi.fn(() => ""),
+    dispose: vi.fn(),
+    activate: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/addon-webgl", () => ({
+  WebglAddon: vi.fn().mockImplementation(() => ({
+    onContextLoss: vi.fn(),
+    clearTextureAtlas: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/headless", () => ({
+  Terminal: vi.fn().mockImplementation(() => ({
+    open: vi.fn(),
+    write: vi.fn((_data: string, callback?: () => void) => callback?.()),
+    loadAddon: vi.fn(),
+    dispose: vi.fn(),
+    resize: vi.fn(),
+    onData: vi.fn(),
+    onBinary: vi.fn(),
+    onTitleChange: vi.fn(),
+    onResize: vi.fn(),
+    buffer: {
+      active: {
+        cursorX: 0,
+        cursorY: 0,
+        viewportY: 0,
+      },
+    },
+    options: {},
     cols: 80,
     rows: 24,
   })),

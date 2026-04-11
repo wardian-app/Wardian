@@ -14,3 +14,8 @@ pub fn load_shell_settings() -> Result<ShellSettings, String> {
 pub fn save_shell_settings(settings: ShellSettings) -> Result<ShellSettings, String> {
     crate::utils::save_shell_settings(&settings)
 }
+
+#[tauri::command]
+pub fn save_opencode_theme(theme: String) -> Result<(), String> {
+    crate::utils::save_opencode_theme(&theme)
+}

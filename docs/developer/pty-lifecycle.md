@@ -38,5 +38,78 @@ Spawning an agent follows a deterministic sequence in `manager::spawn_agent`:
 - On Windows, `.cmd` and `.bat` provider shims may be re-routed through `cmd.exe` when the selected host shell is PowerShell, Git Bash, or WSL.
 - On Linux and macOS, Wardian resolves shells from the standard shell list and executes the provider command through that shell's command-string mode.
 
+## Testing Boundaries
+
+PTY behavior cannot be validated by browser-only UI tests.
+
+- Browser Playwright smoke tests are useful for layout, navigation, and non-native UI regressions.
+- Native Tauri runtime tests are required for:
+  - Tauri `invoke` behavior
+  - PTY-backed terminal rendering
+  - provider spawn and resume behavior
+  - shell-hosted process launch behavior
+
+When debugging or testing PTY issues, treat browser smoke results as insufficient evidence. Use the native runtime harness for any claim about terminal or provider behavior.
+
 ## 📐 Terminal Resizing
 Terminal resizing is handled asynchronously in `manager::resize_pty`. When the UI grid layout changes, it invokes a Tauri command that updates the PTY dimensions (`rows` and `cols`) via the `pty_master` handle, ensuring the agent's TUI renders correctly.
+
+## 🖥️ Frontend Terminal Runtime
+
+Wardian's frontend terminal stack is built on `xterm.js` and is intentionally treated as a runtime layer, not just a view component.
+
+### Renderer Strategy
+
+- Wardian uses xterm's WebGL renderer for mounted terminal views when available. WebGL is preferred because xterm's `customGlyphs` support for block and box-drawing characters does not apply to the DOM renderer, and provider TUIs such as Claude Code rely on those glyphs for mascot/status rendering.
+- If WebGL is unavailable or loses its context, Wardian falls back to xterm's built-in DOM renderer rather than failing terminal initialization.
+- Renderer instances are not the durable source of truth. Wardian reuses a live renderer across ordinary pane moves, but the parser state remains canonical if a renderer must be recreated.
+- Provider integrations must not depend on renderer-specific behavior.
+
+### Capability Handling
+
+Terminal capability negotiation is centralized in `src/features/terminal/terminalCapabilities.ts`.
+
+That layer is responsible for responding to standard terminal queries such as:
+
+- device status reports
+- resize and pixel-size queries
+- DECRQM mode checks
+- OSC palette queries
+- OSC 10/11 foreground and background color queries
+- synchronized output toggles
+
+Provider-specific terminal adapters should only exist when a provider genuinely requires non-standard behavior. Capability replies should otherwise be implemented once in the shared terminal layer.
+
+### In-App Replay Model
+
+Wardian preserves terminal state across UI remounts inside the running app process.
+
+That means:
+
+- switching views
+- maximizing or restoring panes
+- remounting the terminal component
+
+should not discard the active terminal buffer.
+
+This is intentionally scoped to the current app process only. Full restart persistence is still out of scope.
+
+The session model is split into two layers:
+
+- a detached parser terminal that continuously receives PTY output and owns the canonical in-app screen state
+- a mounted view terminal that can be disposed and recreated without losing that state
+
+When a terminal view remounts and the existing renderer is still valid, Wardian reattaches that renderer. If a renderer must be recreated, Wardian restores it from the parser terminal's serialized state instead of replaying raw PTY chunks into a fresh xterm view.
+
+### Redraw and Scrollback Normalization
+
+Some TUIs repaint by moving the cursor home and rewriting the current viewport instead of using the alternate screen buffer. Wardian normalizes the cases that would otherwise diverge from user expectations:
+
+- A clear-screen preamble made from many `EL + newline` writes followed by cursor-home is treated as a real clear-and-home operation. This prevents TUI redraws, such as Claude's mascot frame, from being copied into scrollback during maximize/restore.
+- Synchronized home-redraw TUIs are marked as transient screen renderers. Before a row-shrinking resize, Wardian moves the local xterm cursor home so xterm does not promote the old visible TUI frame into scrollback before the provider redraws at the new size.
+- After any resize, Wardian arms one duplicate-redraw suppression window. If the next synchronized home-redraw batch is mostly already present in the parser buffer, Wardian drops that repaint instead of letting xterm append a second copy of the same transcript to scrollback.
+- Codex interactive sessions use its documented `--no-alt-screen` inline mode, and Wardian journals overlapping home-redraw frames into xterm scrollback. Codex still emits a sliding viewport, so Wardian reconstructs dropped frame lines before applying the next repaint.
+
+### PTY Output Batching
+
+The frontend drain path batches PTY output before writing into xterm instead of issuing one write per small chunk. This reduces render pressure during bursty output and improves scrolling behavior for TUI-heavy providers such as OpenCode.

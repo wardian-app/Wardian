@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { LibraryPrompt, AgentConfig } from '../../types';
+import { flattenPromptForInjection, submitInputToAgent } from '../../utils/terminalInput';
 
 interface AssignPromptModalProps {
     prompt: LibraryPrompt;
@@ -33,8 +34,8 @@ export const AssignPromptModal: React.FC<AssignPromptModalProps> = ({ prompt, is
         
         setIsInjecting(true);
         try {
-            const flattenedPrompt = prompt.content.replace(/\r?\n/g, ' ');
-            await invoke('send_input_to_agent', { sessionId: selectedTargetId, input: flattenedPrompt });
+            const flattenedPrompt = flattenPromptForInjection(prompt.content);
+            await submitInputToAgent(selectedTargetId, flattenedPrompt);
             onClose();
         } catch (e) {
             console.error('Failed to run prompt:', e);

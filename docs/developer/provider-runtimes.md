@@ -1,6 +1,6 @@
 # Provider Runtime Notes
 
-This document captures the practical runtime differences between Wardian's three supported CLI providers: Gemini, Claude, and Codex. It is intended for maintainers working on spawn, resume, workflow execution, skill projection, and status/approval handling.
+This document captures the practical runtime differences between Wardian's supported CLI providers: Gemini, Claude, Codex, and OpenCode. It is intended for maintainers working on spawn, resume, workflow execution, skill projection, and status/approval handling.
 
 ## Shared Wardian Invariants
 
@@ -16,6 +16,7 @@ This document captures the practical runtime differences between Wardian's three
 | Gemini | Real target workspace | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 | Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
 | Codex | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
+| OpenCode | Real target workspace | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
 
 ## Gemini
 
@@ -135,6 +136,35 @@ Codex commentary events like `agent_message` should not be used as hard status t
   - Did Codex trust the workspace?
   - Did Codex succeed in spawning a shell command under its sandbox?
 
+## OpenCode
+
+### Working-root model
+
+OpenCode runs directly in the real target workspace. Wardian does not use a projected workspace for OpenCode.
+
+### Instruction and skill discovery
+
+- OpenCode reads `AGENTS.md` natively when it exists in the working tree.
+- Wardian also injects runtime configuration through `OPENCODE_CONFIG_CONTENT`.
+- That injected config adds:
+  - extra `AGENTS.md` files from Wardian include roots to `instructions`
+  - extra `.agents/skills` directories from Wardian include roots to `skills.paths`
+
+This is how OpenCode sees Wardian-managed class and agent context without forcing those files into the user repository.
+
+### Session identity
+
+- OpenCode session IDs are discovered from JSON output during `opencode run --format json`.
+- Wardian extracts the first `sessionID` it sees from `step_start` events.
+- Resume uses `--session <session_id>`.
+
+### Practical implications
+
+- OpenCode is closer to Gemini than Codex on workspace handling: it wants the real repo as `cwd`.
+- OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
+- If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `OPENCODE_CONFIG_CONTENT` first.
+- If interactive spawn works but telemetry is thin, that is expected today; OpenCode does not expose one stable per-session JSONL path the way Claude and Codex do.
+
 ## Choosing Where to Debug
 
 When provider behavior breaks, start with the provider-specific seam instead of the generic agent UI.
@@ -142,3 +172,4 @@ When provider behavior breaks, start with the provider-specific seam instead of 
 - Gemini problems: inspect patching, include directories, and JSON event parsing.
 - Claude problems: inspect `CLAUDE.md` discovery, permission hooks, and explicit session flags.
 - Codex problems: inspect `CODEX_HOME`, `--cd`, bootstrap migration, and sandbox approval transitions.
+- OpenCode problems: inspect `OPENCODE_CONFIG_CONTENT`, real-workspace `cwd`, and JSON session parsing.

@@ -3,6 +3,7 @@ use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::mock::MockProvider;
+use crate::providers::opencode::OpenCodeProvider;
 use std::sync::Arc;
 
 /// Resolves the correct `AgentProvider` implementation based on the provider name
@@ -12,7 +13,7 @@ pub struct ProviderFactory;
 impl ProviderFactory {
     /// Returns an `Arc<dyn AgentProvider>` for the given provider name.
     ///
-    /// Currently supported: `"gemini"`.
+    /// Currently supported: `"gemini"`, `"claude"`, `"codex"`, `"opencode"`, and `"mock"`.
     /// Returns `Err` for unknown provider names.
     pub fn resolve(provider_name: &str) -> Result<Arc<dyn AgentProvider>, String> {
         let lower = provider_name.to_lowercase();
@@ -20,9 +21,10 @@ impl ProviderFactory {
             "gemini" => Ok(Arc::new(GeminiProvider::new())),
             "claude" => Ok(Arc::new(ClaudeProvider::new())),
             "codex" => Ok(Arc::new(CodexProvider::new())),
+            "opencode" => Ok(Arc::new(OpenCodeProvider::new())),
             "mock" => Ok(Arc::new(MockProvider::new())),
             other => Err(format!(
-                "Unknown provider '{}'. Supported providers: gemini, claude, codex",
+                "Unknown provider '{}'. Supported providers: gemini, claude, codex, opencode",
                 other
             )),
         }
@@ -62,6 +64,13 @@ mod tests {
     }
 
     #[test]
+    fn resolve_opencode_succeeds() {
+        let provider = ProviderFactory::resolve("opencode");
+        assert!(provider.is_ok());
+        assert_eq!(provider.unwrap().name(), "OpenCode");
+    }
+
+    #[test]
     fn resolve_unknown_returns_error() {
         let result = ProviderFactory::resolve("invalid_provider_name");
         assert!(result.is_err());
@@ -92,6 +101,12 @@ mod tests {
     #[test]
     fn resolved_codex_provider_uses_agents_md() {
         let provider = ProviderFactory::resolve("codex").unwrap();
+        assert_eq!(provider.get_instruction_filename(), "AGENTS.md");
+    }
+
+    #[test]
+    fn resolved_opencode_provider_uses_agents_md() {
+        let provider = ProviderFactory::resolve("opencode").unwrap();
         assert_eq!(provider.get_instruction_filename(), "AGENTS.md");
     }
 }

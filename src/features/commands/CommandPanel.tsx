@@ -3,8 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Copy, Check } from "lucide-react";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import { LibraryFolder, LibraryPrompt } from "../../types";
+import { AgentConfig, LibraryFolder, LibraryPrompt } from "../../types";
 import { useConfirm } from "../../components/ConfirmDialog";
+import { flattenPromptForInjection, submitInputToAgents } from "../../utils/terminalInput";
 
 interface CommandPanelProps {
   selectedAgentIds: Set<string>;
@@ -51,14 +52,16 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
 
   const handleInject = async (promptContent: string) => {
     try {
-      const flattenedPrompt = promptContent.replace(/\r?\n/g, ' ');
+      const flattenedPrompt = flattenPromptForInjection(promptContent);
       if (selectedAgentIds.size > 0) {
-        for (const id of selectedAgentIds) {
-          await invoke("send_input_to_agent", { sessionId: id, input: flattenedPrompt });
-        }
+        await submitInputToAgents(selectedAgentIds, flattenedPrompt);
       } else {
         if (await confirm("No agents selected. This will broadcast the prompt to ALL agents. Are you sure?")) {
-          await invoke("broadcast_input", { input: flattenedPrompt });
+          const agents = await invoke<AgentConfig[]>("list_agents");
+          await submitInputToAgents(
+            agents.map((agent) => agent.session_id),
+            flattenedPrompt,
+          );
         }
       }
     } catch (e) {

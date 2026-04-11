@@ -37,6 +37,10 @@ export interface AgentConfig {
     codex_search?: boolean;
     codex_skip_git_repo_check?: boolean;
     codex_ephemeral?: boolean;
+
+    // OpenCode-specific fields
+    opencode_agent?: string;
+    opencode_port?: number;
 }
 
 export * from "./workflow";

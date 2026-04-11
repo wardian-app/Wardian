@@ -100,6 +100,7 @@ pub fn run() {
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
             commands::terminal::send_input_to_agent,
+            commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,
             commands::terminal::inject_session_input,
             commands::terminal::broadcast_input,
@@ -147,8 +148,54 @@ pub fn run() {
             commands::patch::run_gemini_patch,
             commands::settings::list_available_shells,
             commands::settings::load_shell_settings,
-            commands::settings::save_shell_settings
+            commands::settings::save_shell_settings,
+            commands::settings::save_opencode_theme
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<AppState>();
+
+                // Terminate all agent process trees on app exit to prevent zombies.
+                // We use try_lock to avoid deadlocking with background tasks during shutdown.
+                // If the lock is held, the agents will still be terminated when AppState
+                // drops, which triggers the `Drop` safety net on `ActiveAgent`.
+                {
+                    if let Ok(mut agents) = state.agents.try_lock() {
+                        for (_sid, agent) in agents.iter_mut() {
+                            manager::terminate_active_agent_process(agent);
+                        }
+                        agents.clear();
+                    }
+                }
+
+                // Abort all workflow triggers and running executions.
+                {
+                    if let Ok(mut triggers) = state.workflow_triggers.try_lock() {
+                        for (_wf_id, handles) in triggers.drain() {
+                            for handle in handles {
+                                handle.abort();
+                            }
+                        }
+                    }
+                }
+                {
+                    if let Ok(mut runs) = state.workflow_runs.try_lock() {
+                        for (_wf_id, handles) in runs.drain() {
+                            for handle in handles {
+                                handle.abort();
+                            }
+                        }
+                    }
+                }
+                {
+                    if let Ok(mut scheduler) = state.scheduler_handle.try_lock() {
+                        if let Some(h) = scheduler.take() {
+                            h.abort();
+                        }
+                    };
+                }
+            }
+        });
 }

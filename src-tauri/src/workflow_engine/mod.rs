@@ -90,16 +90,39 @@ async fn run_command_headless(
         }
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn process: {}", e))?;
     let timeout = std::time::Duration::from_millis(if timeout_ms > 0 { timeout_ms } else { 30000 });
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(-1);
+    // Take stdout/stderr before waiting so we retain mut access to child for kill.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(pipe) = stdout_pipe {
+            use tokio::io::AsyncReadExt;
+            let mut reader = pipe;
+            let _ = reader.read_to_string(&mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(pipe) = stderr_pipe {
+            use tokio::io::AsyncReadExt;
+            let mut reader = pipe;
+            let _ = reader.read_to_string(&mut buf).await;
+        }
+        buf
+    });
+
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            let exit_code = status.code().unwrap_or(-1);
 
             Ok(serde_json::json!({
                 "exit_code": exit_code,
@@ -108,9 +131,16 @@ async fn run_command_headless(
             }))
         }
         Ok(Err(e)) => Err(format!("Command execution failed: {}", e)),
-        Err(_) => Err(format!("Command timed out after {}ms", timeout.as_millis())),
+        Err(_) => {
+            // Kill the child on timeout to prevent zombie processes.
+            let _ = child.kill().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            Err(format!("Command timed out after {}ms", timeout.as_millis()))
+        }
     }
 }
+
 
 pub fn get_workflows_dir() -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflows"))
@@ -1514,12 +1544,13 @@ pub async fn run_workflow(
 
                             let run_result = tokio::time::timeout(
                                 std::time::Duration::from_millis(timeout_ms),
-                                crate::manager::run_headless(
+                                crate::manager::run_headless_with_config(
                                     &cwd,
                                     &prompt,
                                     agent_id,
                                     output_format,
                                     &provider_name,
+                                    agent_cfg.as_ref(),
                                 ),
                             )
                             .await;
@@ -1586,7 +1617,8 @@ pub async fn run_workflow(
                             };
 
                             if let Some(tx) = sender {
-                                // Agent is ONLINE: Use PTY injection
+                                // Agent is ONLINE: Use provider-native automation when PTY submit
+                                // is unreliable, otherwise inject through the live terminal.
                                 {
                                     let agents = state.agents.lock().await;
                                     if let Some(agent) = agents.get(agent_id) {
@@ -1596,48 +1628,88 @@ pub async fn run_workflow(
                                     }
                                 }
 
-                                let _ = tx.send(prompt.trim().as_bytes().to_vec()).await;
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                let _ = tx.send(b"\r".to_vec()).await;
+                                if provider_name == "opencode" {
+                                    let run_result = tokio::time::timeout(
+                                        std::time::Duration::from_millis(timeout_ms),
+                                        crate::manager::run_headless_with_config(
+                                            &cwd,
+                                            &prompt,
+                                            agent_id,
+                                            output_format,
+                                            &provider_name,
+                                            None,
+                                        ),
+                                    )
+                                    .await;
 
-                                let (completion_tx, mut completion_rx) =
-                                    tokio::sync::mpsc::channel::<Value>(1);
-                                let agent_id_clone = agent_id.to_string();
+                                    let run_result = match run_result {
+                                        Ok(res) => res,
+                                        Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
+                                    };
 
-                                let handler_id =
-                                    app.listen_any("agent-turn-completed", move |event| {
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<Value>(event.payload())
-                                        {
-                                            if parsed.get("session_id").and_then(|v| v.as_str())
-                                                == Some(&agent_id_clone)
+                                    match run_result {
+                                        Ok(data) => {
+                                            output_payload = flatten_headless_response(data);
+                                        }
+                                        Err(e) => {
+                                            log_debug(&format!(
+                                                "[Wardian] OpenCode online automation failed: {}",
+                                                e
+                                            ));
+                                            node_error = Some(e);
+                                        }
+                                    }
+                                } else {
+                                    if let Err(err) =
+                                        crate::utils::terminal_input::submit_prompt_via_sender(
+                                            &tx, &prompt,
+                                        )
+                                        .await
+                                    {
+                                        node_error = Some(err);
+                                    }
+
+                                    if node_error.is_none() {
+                                    let (completion_tx, mut completion_rx) =
+                                        tokio::sync::mpsc::channel::<Value>(1);
+                                    let agent_id_clone = agent_id.to_string();
+
+                                    let handler_id =
+                                        app.listen_any("agent-turn-completed", move |event| {
+                                            if let Ok(parsed) =
+                                                serde_json::from_str::<Value>(event.payload())
                                             {
-                                                let _ = completion_tx.try_send(parsed);
+                                                if parsed.get("session_id").and_then(|v| v.as_str())
+                                                    == Some(&agent_id_clone)
+                                                {
+                                                    let _ = completion_tx.try_send(parsed);
+                                                }
                                             }
-                                        }
-                                    });
+                                        });
 
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_millis(timeout_ms),
-                                    completion_rx.recv(),
-                                )
-                                .await
-                                {
-                                    Ok(_) => {
-                                        let agents = state.agents.lock().await;
-                                        if let Some(agent) = agents.get(agent_id) {
-                                            if let Ok(buf) = agent.output_buffer.lock() {
-                                                output_payload =
-                                                    serde_json::json!({ "text": buf.clone() });
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_millis(timeout_ms),
+                                        completion_rx.recv(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {
+                                            let agents = state.agents.lock().await;
+                                            if let Some(agent) = agents.get(agent_id) {
+                                                if let Ok(buf) = agent.output_buffer.lock() {
+                                                    output_payload =
+                                                        serde_json::json!({ "text": buf.clone() });
+                                                }
                                             }
                                         }
+                                        Err(_) => {
+                                            node_error =
+                                                Some(format!("Agent timeout ({}ms)", timeout_ms));
+                                        }
                                     }
-                                    Err(_) => {
-                                        node_error =
-                                            Some(format!("Agent timeout ({}ms)", timeout_ms));
-                                    }
+                                    app.unlisten(handler_id);
                                 }
-                                app.unlisten(handler_id);
+                                }
                             } else {
                                 // Agent is OFFLINE: Fallback to Headless Execution
                                 log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
@@ -1653,12 +1725,13 @@ pub async fn run_workflow(
                                 let _ = app.emit("agents-updated", ());
                                 let run_result = tokio::time::timeout(
                                     std::time::Duration::from_millis(timeout_ms),
-                                    crate::manager::run_headless(
+                                    crate::manager::run_headless_with_config(
                                         &cwd,
                                         &prompt,
                                         agent_id,
                                         output_format,
                                         &provider_name,
+                                        None,
                                     ),
                                 )
                                 .await;

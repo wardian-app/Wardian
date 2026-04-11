@@ -138,6 +138,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
               <option value="codex">Codex</option>
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
+              <option value="opencode">OpenCode</option>
             </select>
           </div>
           <div>

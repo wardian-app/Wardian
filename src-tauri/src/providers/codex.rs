@@ -15,6 +15,28 @@ impl CodexProvider {
         CodexProvider
     }
 
+    #[cfg(target_os = "windows")]
+    fn find_windows_codex_in_paths<I>(paths: I, path_exts: &[String]) -> Option<String>
+    where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        for path in paths {
+            for ext in path_exts {
+                let candidate = path.join(format!("codex{ext}"));
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+
+            let powershell = path.join("codex.ps1");
+            if powershell.exists() {
+                return Some(powershell.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
     fn parse_action_required_from_arguments(arguments: &str) -> Option<String> {
         let parsed: serde_json::Value = serde_json::from_str(arguments).ok()?;
         let sandbox_permissions = parsed.get("sandbox_permissions")?.as_str()?;
@@ -89,6 +111,11 @@ impl CodexProvider {
             if config.codex_ephemeral.unwrap_or(false) {
                 args.push("--ephemeral".into());
             }
+        } else {
+            // Codex documents this as inline TUI mode that preserves terminal
+            // scrollback. Wardian embeds the TUI inside xterm, so interactive
+            // sessions should prefer scrollback-friendly output.
+            args.push("--no-alt-screen".into());
         }
 
         let mut explicit_includes = Vec::new();
@@ -112,9 +139,41 @@ impl AgentProvider for CodexProvider {
     }
 
     fn get_executable(&self) -> (String, Vec<String>) {
-        if cfg!(target_os = "windows") {
-            ("codex.cmd".to_string(), vec![])
-        } else {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(paths) = std::env::var_os("PATH") {
+                let path_exts = std::env::var("PATHEXT")
+                    .ok()
+                    .map(|value| {
+                        value
+                            .split(';')
+                            .filter_map(|segment| {
+                                let trimmed = segment.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(trimmed.to_ascii_lowercase())
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|exts| !exts.is_empty())
+                    .unwrap_or_else(|| {
+                        vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()]
+                    });
+
+                if let Some(executable) =
+                    Self::find_windows_codex_in_paths(std::env::split_paths(&paths), &path_exts)
+                {
+                    return (executable, vec![]);
+                }
+            }
+
+            ("codex".to_string(), vec![])
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
             ("codex".to_string(), vec![])
         }
     }
@@ -134,7 +193,6 @@ impl AgentProvider for CodexProvider {
         }
 
         self.append_common_args(&mut args, config, false);
-        args.push("--no-alt-screen".into());
 
         if let Some(ref custom) = config.custom_args {
             if let Some(parsed) = shlex::split(custom) {
@@ -313,6 +371,23 @@ mod tests {
         assert_eq!(count, 1);
         assert!(args.contains(&"/user/dir".to_string()));
         assert!(!args.contains(&"/sys/dir".to_string()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_resolution_prefers_direct_codex_shim_paths_for_interactive_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("codex.ps1"), "echo test").unwrap();
+
+        let path_exts = vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()];
+        let executable =
+            CodexProvider::find_windows_codex_in_paths([temp.path().to_path_buf()], &path_exts)
+                .unwrap();
+
+        assert_eq!(
+            executable,
+            temp.path().join("codex.ps1").to_string_lossy().to_string()
+        );
     }
 
     #[test]
