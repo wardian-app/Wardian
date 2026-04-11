@@ -2083,6 +2083,98 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     None
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OpenCodeLogMetrics {
+    query_count: usize,
+    init_timestamp: Option<String>,
+    status: Option<String>,
+}
+
+const OPENCODE_ACTIVITY_WINDOW_MS: i64 = 8_000;
+
+fn opencode_log_path_in(base: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
+    let mut candidates = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .collect::<Vec<_>>();
+
+    candidates.sort();
+    candidates.reverse();
+
+    candidates.into_iter().find(|path| {
+        std::fs::read_to_string(path)
+            .map(|content| content.contains(session_id))
+            .unwrap_or(false)
+    })
+}
+
+fn opencode_metrics_from_log_at(
+    content: &str,
+    session_id: &str,
+    now_ms: i64,
+) -> OpenCodeLogMetrics {
+    let mut metrics = OpenCodeLogMetrics::default();
+    let mut last_activity_ms: Option<i64> = None;
+    let mut saw_error = false;
+
+    for line in content.lines() {
+        if !line.contains(session_id) {
+            continue;
+        }
+
+        let line_ts_ms = line.split_whitespace().nth(1).and_then(|ts| {
+            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(|dt| dt.and_utc().timestamp_millis())
+        });
+
+        if metrics.init_timestamp.is_none() {
+            metrics.init_timestamp = line.split_whitespace().nth(1).map(|ts| ts.to_string());
+        }
+
+        if line.contains("service=session.prompt") && line.contains(" step=") {
+            metrics.query_count += 1;
+            last_activity_ms = line_ts_ms.or(last_activity_ms);
+            continue;
+        }
+
+        if line.starts_with("ERROR ") || line.contains(" ERROR ") {
+            saw_error = true;
+            last_activity_ms = line_ts_ms.or(last_activity_ms);
+            continue;
+        }
+
+        if line.contains("service=llm") && line.contains(" stream")
+            || line.contains("service=session.processor")
+            || line.contains("service=tool.registry status=started")
+        {
+            last_activity_ms = line_ts_ms.or(last_activity_ms);
+        }
+    }
+
+    metrics.status = if saw_error {
+        Some("Error".to_string())
+    } else if let Some(last_ms) = last_activity_ms {
+        if now_ms.saturating_sub(last_ms) <= OPENCODE_ACTIVITY_WINDOW_MS {
+            Some("Processing...".to_string())
+        } else {
+            Some("Idle".to_string())
+        }
+    } else if metrics.init_timestamp.is_some() {
+        Some("Idle".to_string())
+    } else {
+        None
+    };
+
+    metrics
+}
+
+fn opencode_metrics_from_log(content: &str, session_id: &str) -> OpenCodeLogMetrics {
+    opencode_metrics_from_log_at(content, session_id, chrono::Utc::now().timestamp_millis())
+}
+
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     struct AgentSnapshot {
         session_id: String,
@@ -2202,18 +2294,14 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         }
                     }
                     "opencode" => {
-                        // OpenCode stores per-session diff snapshots at
-                        // ~/.local/share/opencode/storage/session_diff/<session_id>.json
                         if let Some(home) = dirs::home_dir() {
-                            let candidate = home
+                            let log_dir = home
                                 .join(".local")
                                 .join("share")
                                 .join("opencode")
-                                .join("storage")
-                                .join("session_diff")
-                                .join(format!("{}.json", snap.session_id));
-                            if candidate.exists() {
-                                *log_path_lock = Some(candidate);
+                                .join("log");
+                            if let Some(path) = opencode_log_path_in(&log_dir, &snap.session_id) {
+                                *log_path_lock = Some(path);
                             }
                         }
                     }
@@ -2331,9 +2419,25 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             }
                         }
                         "opencode" => {
-                            // OpenCode runtime status currently comes from live PTY parsing.
-                            // Keep log enrichment disabled until we add a stable session-file
-                            // mapping instead of falling through to Gemini parsing.
+                            let metrics = opencode_metrics_from_log(&content, &snap.session_id);
+
+                            q_count = metrics.query_count;
+
+                            if metrics.init_timestamp.is_some() {
+                                i_ts = metrics.init_timestamp;
+                            }
+
+                            if let Some(status) = metrics.status {
+                                let mut current_status = snap.current_status.lock().unwrap();
+                                let should_override = match status.as_str() {
+                                    "Error" => true,
+                                    _ => matches!(current_status.as_str(), "Pending..." | "Off"),
+                                };
+
+                                if should_override {
+                                    *current_status = status;
+                                }
+                            }
                         }
                         _ => {
                             // Gemini logs are a single JSON object with a messages array
@@ -2507,8 +2611,8 @@ mod tests {
         codex_bootstrap_launch_context, finalize_interactive_spawn_args, headless_provider_launch,
         interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
         migrate_codex_bootstrap_home, opencode_attach_args, opencode_interactive_env,
-        opencode_runtime_config_content, strip_flag_value_pairs, strip_standalone_flag,
-        wait_for_opencode_server_ready,
+        opencode_log_path_in, opencode_metrics_from_log_at, opencode_runtime_config_content,
+        strip_flag_value_pairs, strip_standalone_flag, wait_for_opencode_server_ready,
     };
     use crate::models::AgentConfig;
     use std::path::Path;
@@ -2669,6 +2773,76 @@ mod tests {
             interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
 
         assert_eq!(interactive_cwd, workspace_cwd);
+    }
+
+    #[test]
+    fn opencode_log_path_finds_newest_matching_log() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_dir = temp.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("create log dir");
+
+        let older = log_dir.join("2026-04-11T210615.log");
+        let newer = log_dir.join("2026-04-11T210616.log");
+        let unrelated = log_dir.join("2026-04-11T210617.log");
+
+        std::fs::write(
+            &older,
+            r#"INFO  2026-04-11T21:06:15 +0ms service=default args=[\"attach\",\"http://127.0.0.1:57079\",\"--session\",\"ses_target\"] opencode"#,
+        )
+        .expect("write older log");
+        std::fs::write(
+            &newer,
+            r#"INFO  2026-04-11T21:06:16 +0ms service=default args=[\"attach\",\"http://127.0.0.1:57079\",\"--session\",\"ses_target\"] opencode"#,
+        )
+        .expect("write newer log");
+        std::fs::write(
+            &unrelated,
+            r#"INFO  2026-04-11T21:06:17 +0ms service=default args=[\"attach\",\"http://127.0.0.1:57079\",\"--session\",\"ses_other\"] opencode"#,
+        )
+        .expect("write unrelated log");
+
+        let found = opencode_log_path_in(&log_dir, "ses_target").expect("matching log path");
+
+        assert_eq!(found, newer);
+    }
+
+    #[test]
+    fn opencode_metrics_from_log_counts_session_prompt_steps() {
+        let content = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:53 +1ms service=llm providerID=opencode sessionID=ses_target stream\n",
+            "INFO  2026-03-30T07:36:02 +0ms service=session.prompt step=1 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:36:04 +0ms service=session.prompt step=0 sessionID=ses_other loop\n"
+        );
+
+        let metrics = opencode_metrics_from_log_at(content, "ses_target", 1_774_856_162_000);
+
+        assert_eq!(metrics.query_count, 2);
+    }
+
+    #[test]
+    fn opencode_metrics_from_log_derives_processing_idle_and_error_status() {
+        let processing = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:53 +1ms service=llm providerID=opencode sessionID=ses_target stream\n"
+        );
+        let idle = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:53 +1ms service=llm providerID=opencode sessionID=ses_target stream\n"
+        );
+        let errored = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "ERROR 2026-03-30T07:35:54 +997ms service=llm providerID=opencode sessionID=ses_target error={\"error\":{}} stream error\n"
+        );
+
+        let processing_metrics =
+            opencode_metrics_from_log_at(processing, "ses_target", 1_774_856_154_000);
+        let idle_metrics = opencode_metrics_from_log_at(idle, "ses_target", 1_774_856_170_000);
+        let errored_metrics = opencode_metrics_from_log_at(errored, "ses_target", 1_774_856_155_000);
+
+        assert_eq!(processing_metrics.status, Some("Processing...".to_string()));
+        assert_eq!(idle_metrics.status, Some("Idle".to_string()));
+        assert_eq!(errored_metrics.status, Some("Error".to_string()));
     }
 
     #[test]

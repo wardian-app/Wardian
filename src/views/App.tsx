@@ -25,6 +25,19 @@ import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 
+declare global {
+  interface Window {
+    __wardianAppDebug?: {
+      snapshot: (sessionId: string) => {
+        title: string;
+        thought: string;
+        metrics: AgentTelemetry | null;
+        derivedStatus: string;
+      } | null;
+    };
+  }
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -103,6 +116,32 @@ function AppBody() {
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [activeListId, setActiveListId] = useState<string>("all");
   const hasAutoPatched = useRef(false);
+
+  useEffect(() => {
+    window.__wardianAppDebug = {
+      snapshot: (sessionId: string) => {
+        const metrics = telemetry[sessionId] ?? null;
+        if (!metrics && !terminalTitles[sessionId] && !currentThoughts[sessionId]) {
+          return null;
+        }
+
+        const title = terminalTitles[sessionId] || "";
+        const thought = currentThoughts[sessionId] || "";
+        const { status } = deriveCurrentThought(title, thought, metrics, offAgentIds.has(sessionId));
+
+        return {
+          title,
+          thought,
+          metrics,
+          derivedStatus: status,
+        };
+      },
+    };
+
+    return () => {
+      delete window.__wardianAppDebug;
+    };
+  }, [telemetry, terminalTitles, currentThoughts, offAgentIds]);
 
   useEffect(() => {
     (async () => {

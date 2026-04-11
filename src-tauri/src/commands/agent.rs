@@ -1,5 +1,5 @@
 use crate::manager;
-use crate::models::AgentConfig;
+use crate::models::{AgentConfig, AgentTelemetry};
 use crate::state::AppState;
 use tauri::{AppHandle, State};
 
@@ -169,6 +169,11 @@ pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentConfig>,
         }
     }
     Ok(list)
+}
+
+#[tauri::command]
+pub async fn list_agent_metrics(state: State<'_, AppState>) -> Result<Vec<AgentTelemetry>, String> {
+    Ok(manager::get_all_metrics(&state).await)
 }
 
 #[tauri::command]

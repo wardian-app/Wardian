@@ -123,8 +123,28 @@ pub async fn submit_prompt_to_agent(
     };
 
     if provider_name == "opencode" {
+        {
+            let agents = state.agents.lock().await;
+            if let Some(agent) = agents.get(&session_id) {
+                if let Ok(mut count) = agent.query_count.lock() {
+                    *count += 1;
+                }
+                if let Ok(mut status) = agent.current_status.lock() {
+                    *status = "Processing...".to_string();
+                }
+            }
+        }
+
+        let _ = app.emit(
+            "agent-status-updated",
+            serde_json::json!({
+                "session_id": session_id,
+                "current_status": "Processing...",
+            }),
+        );
+
         let cwd = crate::utils::fs::resolve_cwd(&folder, &session_id);
-        let result = manager::run_headless_with_config(
+        let result = match manager::run_headless_with_config(
             &cwd,
             &prompt,
             &session_id,
@@ -132,7 +152,30 @@ pub async fn submit_prompt_to_agent(
             &provider_name,
             Some(&config),
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                {
+                    let agents = state.agents.lock().await;
+                    if let Some(agent) = agents.get(&session_id) {
+                        if let Ok(mut status) = agent.current_status.lock() {
+                            *status = "Error".to_string();
+                        }
+                    }
+                }
+
+                let _ = app.emit(
+                    "agent-status-updated",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "current_status": "Error",
+                    }),
+                );
+
+                return Err(error);
+            }
+        };
         let response_text = result
             .get("text")
             .and_then(|value| value.as_str())
@@ -156,6 +199,23 @@ pub async fn submit_prompt_to_agent(
                 serde_json::json!({ "session_id": session_id }),
             );
         }
+
+        {
+            let agents = state.agents.lock().await;
+            if let Some(agent) = agents.get(&session_id) {
+                if let Ok(mut status) = agent.current_status.lock() {
+                    *status = "Idle".to_string();
+                }
+            }
+        }
+
+        let _ = app.emit(
+            "agent-status-updated",
+            serde_json::json!({
+                "session_id": session_id,
+                "current_status": "Idle",
+            }),
+        );
 
         return Ok(());
     }
