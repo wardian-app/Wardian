@@ -30,7 +30,7 @@ const LIGHT_TERM_THEME = {
   selectionBackground: "#e5e7eb",
 };
 
-const TERMINAL_SCROLLBACK_LINES = 5_000;
+const TERMINAL_SCROLLBACK_LINES = 1_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type TitleHandlerRef = {

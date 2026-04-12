@@ -15,6 +15,8 @@ pub struct ActiveAgent {
     pub query_count: Arc<Mutex<usize>>,
     pub init_timestamp: Arc<Mutex<Option<String>>>,
     pub current_status: Arc<Mutex<String>>,
+    pub terminal_title: Arc<Mutex<String>>,
+    pub last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
     pub log_path: Arc<Mutex<Option<PathBuf>>>,
     #[cfg(windows)]
     pub job_object: Option<win32job::Job>,

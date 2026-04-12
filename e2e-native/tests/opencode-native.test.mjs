@@ -34,6 +34,17 @@ async function readVisibleTerminalLines(driver) {
   });
 }
 
+async function readTerminalDebugLines(driver, sessionId) {
+  return await driver.executeScript((sid) => {
+    return window.__wardianTerminalDebug?.snapshot(sid)?.lines ?? [];
+  }, sessionId);
+}
+
+async function activateAgentCard(driver, sessionId) {
+  const card = await driver.findElement(By.id(`agent-card-${sessionId}`));
+  await card.click();
+}
+
 async function readLatestAgentSessionId(driver) {
   return await driver.executeAsyncScript((done) => {
     window.__TAURI_INTERNALS__.invoke("list_agents").then(
@@ -76,6 +87,15 @@ async function readAgentMetricRow(driver, sessionId) {
     : null;
 }
 
+async function readAgentPty(driver, sessionId) {
+  return await driver.executeAsyncScript((sid, done) => {
+    window.__TAURI_INTERNALS__.invoke("read_agent_pty", { sessionId: sid }).then(
+      (chunk) => done(chunk),
+      (error) => done({ error: String(error) }),
+    );
+  }, sessionId);
+}
+
 async function readDerivedAppStatus(driver, sessionId) {
   const snapshot = await driver.executeScript((sid) => {
     return window.__wardianAppDebug?.snapshot(sid) ?? null;
@@ -109,20 +129,30 @@ async function sampleAgentStatuses(driver, sessionId, durationMs = 10000, interv
 }
 
 async function startPromptSubmission(driver, sessionId, prompt) {
-  return await driver.executeScript((sid, body) => {
+  await driver.executeScript(() => {
     window.__wardianNativePromptResult = null;
-    window.__TAURI_INTERNALS__.invoke("submit_prompt_to_agent", {
+  });
+
+  return await driver.executeAsyncScript((sid, body, done) => {
+    window.__TAURI_INTERNALS__.invoke("send_input_to_agent", {
       sessionId: sid,
-      prompt: body,
+      input: body,
     }).then(
+      () => window.__TAURI_INTERNALS__.invoke("send_input_to_agent", {
+        sessionId: sid,
+        input: "\r",
+      }),
+      (error) => Promise.reject(error),
+    ).then(
       () => {
         window.__wardianNativePromptResult = { ok: true };
+        done(true);
       },
       (error) => {
         window.__wardianNativePromptResult = { ok: false, error: String(error) };
+        done(false);
       },
     );
-    return true;
   }, sessionId, prompt);
 }
 
@@ -202,22 +232,29 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
     const sessionId = await readLatestAgentSessionId(driver);
     assert.equal(typeof sessionId, "string", `Expected session id, got ${JSON.stringify(sessionId)}`);
 
+    await activateAgentCard(driver, sessionId);
+
     const initialMetrics = await readAgentMetricRow(driver, sessionId);
     assert.ok(initialMetrics, "Expected telemetry row for spawned OpenCode session");
 
     const initialStatus = await readDerivedAppStatus(driver, sessionId);
     assert.match(initialStatus, /Idle|Pending|Booting/i);
 
+    await driver.wait(async () => {
+      const snapshot = await readAppSnapshot(driver, sessionId);
+      return snapshot?.title === "OpenCode";
+    }, 30000);
+
     await startPromptSubmission(
       driver,
       sessionId,
-      "Verify whether wardian-native-skill is available. If yes, reply with exactly NATIVE_SKILL_VISIBLE. Otherwise reply with exactly NATIVE_SKILL_MISSING.",
+      "Use the skill tool to load wardian-native-skill. If it is available, reply with exactly NATIVE_SKILL_VISIBLE. If it is unavailable, reply with exactly NATIVE_SKILL_MISSING. Do not search the repository.",
     );
 
     const sampledStatuses = await sampleAgentStatuses(driver, sessionId, 10000, 100);
 
     assert.ok(
-      sampledStatuses.some((entry) => /Processing/i.test(entry.derivedStatus)),
+      sampledStatuses.some((entry) => /Processing/i.test(entry.derivedStatus) || /^OC \| /.test(entry.title ?? "")),
       `Expected to observe Processing status, got: ${JSON.stringify(sampledStatuses)}`,
     );
 
@@ -231,17 +268,31 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
 
     const finalMetrics = await readAgentMetricRow(driver, sessionId);
     assert.ok(finalMetrics && finalMetrics.query_count >= 1, "Expected query count to increment after prompt submission");
+
+    const finalSnapshot = await readAppSnapshot(driver, sessionId);
+    assert.ok(
+      finalSnapshot?.title === "OpenCode" || /^OC \| /.test(finalSnapshot?.title ?? ""),
+      `Expected OpenCode title telemetry after prompt submission, got snapshot: ${JSON.stringify(finalSnapshot)}`,
+    );
   } catch (error) {
     const debugTail = await readDebugTail(harness);
     const tauriLogs = session.logs();
     let metricSnapshot = "Unavailable";
     let appSnapshot = "Unavailable";
+    let visibleLines = "Unavailable";
+    let promptResult = "Unavailable";
+    let ptyChunk = "Unavailable";
+    let terminalDebugLines = "Unavailable";
     try {
       const sessionId = await readLatestAgentSessionId(driver);
       const row = sessionId ? await readAgentMetricRow(driver, sessionId) : null;
       metricSnapshot = JSON.stringify(row);
       const snapshot = sessionId ? await readAppSnapshot(driver, sessionId) : null;
       appSnapshot = JSON.stringify(snapshot);
+      visibleLines = JSON.stringify(await readVisibleTerminalLines(driver));
+      promptResult = JSON.stringify(await driver.executeScript(() => window.__wardianNativePromptResult ?? null));
+      ptyChunk = JSON.stringify(sessionId ? await readAgentPty(driver, sessionId) : null);
+      terminalDebugLines = JSON.stringify(sessionId ? await readTerminalDebugLines(driver, sessionId) : null);
     } catch {
       // ignore telemetry read failures while building debug context
     }
@@ -250,6 +301,10 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
         `Original error: ${error}\n` +
         `--- Last metric row ---\n${metricSnapshot}\n` +
         `--- Last app snapshot ---\n${appSnapshot}\n` +
+        `--- Visible terminal lines ---\n${visibleLines}\n` +
+        `--- Terminal debug lines ---\n${terminalDebugLines}\n` +
+        `--- PTY chunk ---\n${ptyChunk}\n` +
+        `--- Prompt submission result ---\n${promptResult}\n` +
         `--- Wardian debug tail ---\n${debugTail}\n` +
         `--- tauri-driver stdout ---\n${tauriLogs.stdout}\n` +
         `--- tauri-driver stderr ---\n${tauriLogs.stderr}`

@@ -141,13 +141,6 @@ impl OpenCodeProvider {
 
         summary
     }
-
-    fn format_timestamp(timestamp_ms: Option<i64>) -> Option<String> {
-        timestamp_ms.and_then(|millis| {
-            chrono::DateTime::from_timestamp_millis(millis)
-                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        })
-    }
 }
 
 impl AgentProvider for OpenCodeProvider {
@@ -259,18 +252,9 @@ impl AgentProvider for OpenCodeProvider {
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         let msg_type = parsed.get("type")?.as_str()?;
-        let session_id = parsed
-            .get("sessionID")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let timestamp = Self::format_timestamp(parsed.get("timestamp").and_then(|v| v.as_i64()));
 
         match msg_type {
-            "step_start" => Some(AgentEvent::Init {
-                session_id,
-                timestamp,
-            }),
+            "step_start" => Some(AgentEvent::UserQuery),
             "text" => Some(AgentEvent::Generating),
             "tool_use" => Some(AgentEvent::Generating),
             "step_finish" => {
@@ -352,19 +336,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_output_step_start_emits_init() {
+    fn parse_output_step_start_counts_as_user_query() {
         let provider = make_provider();
         let line = r#"{"type":"step_start","timestamp":1775197573899,"sessionID":"ses_test"}"#;
 
         let event = provider.parse_output(line).unwrap();
 
-        assert_eq!(
-            event,
-            AgentEvent::Init {
-                session_id: "ses_test".into(),
-                timestamp: Some("2026-04-03T06:26:13.899Z".into()),
-            }
-        );
+        assert_eq!(event, AgentEvent::UserQuery);
     }
 
     #[test]

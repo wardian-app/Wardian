@@ -33,6 +33,10 @@ describe("deriveEffectiveStatus", () => {
     expect(deriveEffectiveStatus("OpenCode", undefined, "Idle")).toBe("Idle");
   });
 
+  it("does not let stale OpenCode OC title override backend idle", () => {
+    expect(deriveEffectiveStatus("OC | Previous task", undefined, "Idle")).toBe("Idle");
+  });
+
   it("returns Idle when title contains ◇ diamond", () => {
     expect(deriveEffectiveStatus("◇ Waiting", undefined, undefined)).toBe("Idle");
   });

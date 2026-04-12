@@ -22,7 +22,11 @@ export function deriveEffectiveStatus(
   if (rawTitle.includes("Action Required")) {
     effectiveStatus = "Action Needed";
   } else if (rawTitle.startsWith("OC | ")) {
-    if (effectiveStatus !== "Action Needed") {
+    if (
+      effectiveStatus !== "Action Needed" &&
+      effectiveStatus !== "Idle" &&
+      effectiveStatus !== "Off"
+    ) {
       effectiveStatus = "Processing...";
     }
   } else if (rawTitle.includes("Ready") || rawTitle.includes("Idle") || rawTitle.includes("◇")) {

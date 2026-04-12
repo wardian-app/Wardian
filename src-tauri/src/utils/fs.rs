@@ -67,7 +67,7 @@ pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
 }
 
 pub fn provider_uses_projected_workspace(provider: &str) -> bool {
-    provider == "codex"
+    matches!(provider, "codex" | "opencode")
 }
 
 pub fn prepare_provider_habitat(
@@ -179,7 +179,6 @@ pub fn build_opencode_runtime_config(include_roots: &[std::path::PathBuf]) -> se
         }
 
         let instruction_file = root.join("AGENTS.md");
-
         if instruction_file.is_file() {
             let path = path_to_forward_slash(&instruction_file);
             if !instructions.contains(&path) {
@@ -769,9 +768,10 @@ mod tests {
     }
 
     #[test]
-    fn only_codex_uses_projected_workspaces() {
+    fn only_codex_and_opencode_use_projected_workspaces() {
         assert!(!provider_uses_projected_workspace("claude"));
         assert!(provider_uses_projected_workspace("codex"));
+        assert!(provider_uses_projected_workspace("opencode"));
         assert!(!provider_uses_projected_workspace("gemini"));
     }
 
