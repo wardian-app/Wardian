@@ -53,7 +53,7 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
 
 describe('GridView maximize behavior', () => {
   it('maximized terminals use fixed positioning for full-screen overlay', () => {
-    const { container } = renderGrid('agent-1');
+    renderGrid('agent-1');
 
     const card = screen.getByTestId('terminal-agent-1').closest('#agent-card-agent-1');
     expect(card?.className).toContain('fixed');
