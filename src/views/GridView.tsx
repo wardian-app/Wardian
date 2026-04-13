@@ -122,7 +122,7 @@ export const GridView: React.FC<GridViewProps> = ({
       style={gridStyle}
       className={`flex-1 min-h-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
     >
-      {visibleAgents.map((agent: AgentConfig, idx: number) => {
+      {visibleAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
         const isAgentMaximized = maximizedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
@@ -280,6 +280,7 @@ export const GridView: React.FC<GridViewProps> = ({
           onAddToList={onAddToList}
           onRemoveFromList={onRemoveFromList}
           onDelete={onDelete}
+          onResetLayout={resetLayout}
           onClose={() => setContextMenu({ ...contextMenu, visible: false })}
         />
       )}
