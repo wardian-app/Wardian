@@ -353,39 +353,6 @@
     transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Shared Gutter Resizing Handles */
-.grid-gutter-h {
-  position: absolute;
-  top: 0;
-  right: -2.5px; /* Center 4px handle over 1px gap */
-  bottom: 0;
-  width: 5px;
-  cursor: col-resize;
-  z-index: 30;
-  transition: background 0.2s;
-}
-
-.grid-gutter-h:hover, .grid-gutter-h.active {
-  background: var(--color-wardian-accent);
-  opacity: 0.4;
-}
-
-.grid-gutter-v {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -2.5px; /* Center 4px handle over 1px gap */
-  height: 5px;
-  cursor: row-resize;
-  z-index: 30;
-  transition: background 0.2s;
-}
-
-.grid-gutter-v:hover, .grid-gutter-v.active {
-  background: var(--color-wardian-accent);
-  opacity: 0.4;
-}
-
 /* Snap Guide Lines */
 .grid-guide-line-v {
   position: fixed;

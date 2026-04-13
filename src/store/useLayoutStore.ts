@@ -10,7 +10,7 @@ interface LayoutState {
 }
 
 const DEFAULT_LAYOUT: GridLayout = {
-  column_tracks: [1, 1], // Default 2 equal columns
+  column_tracks: [0.5, 0.5], // Default 2 equal columns (normalized 0-1)
   row_height: 450,
 };
 

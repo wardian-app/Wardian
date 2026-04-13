@@ -17,48 +17,65 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!resizing || !containerRef.current) return;
 
-    const rect = containerRef.current.getBoundingClientRect();
+    const container = containerRef.current;
+    const rect = container.getBoundingClientRect();
+    const totalWeight = layout.column_tracks.reduce((a, b) => a + b, 0);
+    // Normalize tracks to 1.0 to handle old [1, 1] relative weights in local storage
+    const normalizedTracks = layout.column_tracks.map(t => t / totalWeight);
     
     if (resizing.type === 'h') {
       const mouseX = e.clientX - rect.left;
-      setGuidePos(e.clientX);
-      let newWeight = mouseX / rect.width;
+      // Use clientWidth to exclude vertical scrollbar width from percentage math
+      let globalWeight = mouseX / container.clientWidth;
 
-      // Snap logic (normalized 0-1)
+      // Snap global weight
       for (const snap of SNAP_WEIGHTS) {
-        if (Math.abs(newWeight - snap) < SNAP_THRESHOLD) {
-          newWeight = snap;
-          setGuidePos(rect.left + (snap * rect.width));
+        if (Math.abs(globalWeight - snap) < SNAP_THRESHOLD) {
+          globalWeight = snap;
           break;
         }
       }
+      
+      setGuidePos(rect.left + (globalWeight * container.clientWidth));
+
+      // Calculate weight of tracks before the active handle
+      const cumulativeBefore = normalizedTracks.slice(0, resizing.index).reduce((a, b) => a + b, 0);
+      const newActiveTrackWeight = globalWeight - cumulativeBefore;
 
       // Hard clamp for min width
-      if (newWeight * rect.width < MIN_TRACK_PX) return;
+      if (newActiveTrackWeight * container.clientWidth < MIN_TRACK_PX) return;
 
-      const newTracks = [...layout.column_tracks];
-      const currentTrackWeight = layout.column_tracks[resizing.index];
-      const delta = newWeight - currentTrackWeight;
+      const newTracks = [...normalizedTracks];
+      const delta = newActiveTrackWeight - normalizedTracks[resizing.index];
       
-      // Balance with neighbor if it exists (for fluid track system)
+      // Balance with immediate right neighbor
       if (newTracks[resizing.index + 1] !== undefined) {
         const neighborNewWeight = newTracks[resizing.index + 1] - delta;
+        if (neighborNewWeight * container.clientWidth < MIN_TRACK_PX) return;
         
-        // Ensure neighbor doesn't shrink below minimum
-        if (neighborNewWeight * rect.width < MIN_TRACK_PX) return;
-        
-        newTracks[resizing.index] = newWeight;
+        newTracks[resizing.index] = newActiveTrackWeight;
         newTracks[resizing.index + 1] = neighborNewWeight;
         setColumnTracks(newTracks);
       }
     } else {
       const mouseY = e.clientY - rect.top;
-      setGuidePos(e.clientY);
+      // Determine vertical snap
+      const SNAP_HEIGHTS = [300, 450, 600, 800];
+      const HEIGHT_SNAP_THRESHOLD = 20;
       
-      // We assume synchronized rows, so we just update the global row height
-      // based on the dragged card's row position.
-      const rowCount = Math.floor(resizing.index / layout.column_tracks.length) + 1;
-      const calculatedHeight = mouseY / rowCount;
+      let finalY = mouseY;
+      for (const snap of SNAP_HEIGHTS) {
+        if (Math.abs(mouseY - snap) < HEIGHT_SNAP_THRESHOLD) {
+          finalY = snap;
+          break;
+        }
+      }
+
+      setGuidePos(rect.top + finalY);
+      
+      // Row height is synchronized across all rows
+      const rowIdx = Math.floor(resizing.index / layout.column_tracks.length);
+      const calculatedHeight = finalY / (rowIdx + 1);
       
       setRowHeight(Math.max(300, calculatedHeight));
     }

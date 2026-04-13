@@ -110,9 +110,9 @@ export const GridView: React.FC<GridViewProps> = ({
       ? '1fr' 
       : layout.column_tracks.map(t => `${t}fr`).join(' '),
     gridAutoRows: `${layout.row_height}px`,
-    gap: (isMaximized || isMobile) ? '16px' : '1px',
-    background: (isMaximized || isMobile) ? 'transparent' : 'var(--color-wardian-border)',
-    padding: (isMaximized || isMobile) ? '16px' : '0',
+    gap: (isMaximized || isMobile) ? '16px' : '8px',
+    background: 'transparent',
+    padding: (isMaximized || isMobile) ? '16px' : '8px',
     paddingBottom: '200px',
   };
 
@@ -120,7 +120,7 @@ export const GridView: React.FC<GridViewProps> = ({
     <div 
       ref={containerRef}
       style={gridStyle}
-      className={`flex-1 min-h-full ${isResizing ? 'cursor-col-resize' : ''}`}
+      className={`flex-1 min-h-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
     >
       {visibleAgents.map((agent: AgentConfig, idx: number) => {
         const agentId = agent.session_id.toString();
@@ -141,7 +141,6 @@ export const GridView: React.FC<GridViewProps> = ({
         );
 
         const statusColorClass = getStatusColorClass(effectiveStatus);
-        const colIdx = idx % layout.column_tracks.length;
 
         return (
           <div
@@ -151,7 +150,7 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'fixed inset-0 z-50 rounded-none border-none transition-none' : 'transition-all border-none ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'fixed inset-0 z-50 rounded-none border-none transition-none' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
           >
             <div 
               onMouseEnter={() => onMouseEnterCard(agentId)}
@@ -213,25 +212,52 @@ export const GridView: React.FC<GridViewProps> = ({
                 />
               </div>
             </div>
-
-            {/* Resize Handles */}
-            {!isAgentMaximized && !isMobile && (
-              <>
-                {colIdx < layout.column_tracks.length - 1 && (
-                  <div 
-                    className="grid-gutter-h" 
-                    onMouseDown={(e) => { e.stopPropagation(); startResize('h', colIdx); }} 
-                  />
-                )}
-                <div 
-                  className="grid-gutter-v" 
-                  onMouseDown={(e) => { e.stopPropagation(); startResize('v', idx); }} 
-                />
-              </>
-            )}
           </div>
         );
       })}
+
+      {/* Global Track Resize Overlays (Gutters) */}
+      {!isMaximized && !isMobile && (
+        <>
+          {/* Vertical Gutters (Column Resizing) */}
+          {layout.column_tracks.slice(0, -1).map((weight, i) => {
+            const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
+            const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
+            return (
+              <div 
+                key={`gutter-h-${i}`}
+                className="absolute top-0 bottom-0 z-30 group/gutter flex justify-center"
+                style={{ 
+                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`, 
+                  width: '12px',
+                  cursor: 'col-resize'
+                }}
+                onMouseDown={(e) => { e.stopPropagation(); startResize('h', i); }}
+              >
+                {/* Visual Line */}
+                <div className="w-[2px] h-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+              </div>
+            );
+          })}
+
+          {/* Horizontal Gutters (Row Resizing) */}
+          {Array.from({ length: Math.ceil(visibleAgents.length / layout.column_tracks.length) - 1 }).map((_, i) => (
+            <div 
+              key={`gutter-v-${i}`}
+              className="absolute left-0 right-0 z-30 group/gutter flex items-center"
+              style={{ 
+                top: `calc(${(i + 1) * layout.row_height}px + ${i * 8}px + 6px)`, 
+                height: '12px',
+                cursor: 'row-resize'
+              }}
+              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * layout.column_tracks.length); }}
+            >
+              {/* Visual Line */}
+              <div className="h-[2px] w-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+            </div>
+          ))}
+        </>
+      )}
 
       {filteredAgents.length === 0 && (
         <div className="col-span-full h-64 flex flex-col items-center justify-center text-muted border-2 border-dashed border-wardian-border rounded-xl w-full">
@@ -256,18 +282,6 @@ export const GridView: React.FC<GridViewProps> = ({
           onDelete={onDelete}
           onClose={() => setContextMenu({ ...contextMenu, visible: false })}
         />
-      )}
-
-      {/* Layout Controls Overlay */}
-      {!isMaximized && !isMobile && filteredAgents.length > 0 && (
-        <div className="fixed bottom-6 right-6 z-40 flex flex-col gap-2">
-          <button 
-            onClick={resetLayout}
-            className="bg-wardian-card border border-wardian-border px-3 py-1.5 rounded-lg label-small hover:border-wardian-accent transition-all shadow-xl text-primary"
-          >
-            Reset Grid
-          </button>
-        </div>
       )}
 
       {/* Visual Guide Lines */}
