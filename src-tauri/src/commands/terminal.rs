@@ -90,6 +90,9 @@ pub async fn send_input_to_agent(
                                 .map(|status| status.clone())
                                 .unwrap_or_default();
                             if current_status != "Action Needed" && current_status != "Off" {
+                                if let Ok(mut count) = agent.query_count.lock() {
+                                    *count += 1;
+                                }
                                 if let Ok(mut status) = agent.current_status.lock() {
                                     *status = "Processing...".to_string();
                                 }
