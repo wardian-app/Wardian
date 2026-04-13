@@ -120,7 +120,7 @@ export const GridView: React.FC<GridViewProps> = ({
     <div 
       ref={containerRef}
       style={gridStyle}
-      className={`flex-1 min-h-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
+      className={`flex-1 h-fit min-h-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
     >
       {visibleAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
