@@ -220,7 +220,7 @@ export const GridView: React.FC<GridViewProps> = ({
       {!isMaximized && !isMobile && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
-          {layout.column_tracks.slice(0, -1).map((weight, i) => {
+          {layout.column_tracks.slice(0, -1).map((_weight, i) => {
             const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
             const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
             return (
