@@ -118,7 +118,8 @@ function AppBody() {
   const hasAutoPatched = useRef(false);
 
   useEffect(() => {
-    window.__wardianAppDebug = {
+    if (import.meta.env.DEV) {
+      window.__wardianAppDebug = {
       snapshot: (sessionId: string) => {
         const metrics = telemetry[sessionId] ?? null;
         if (!metrics && !terminalTitles[sessionId] && !currentThoughts[sessionId]) {
@@ -137,6 +138,7 @@ function AppBody() {
         };
       },
     };
+    }
 
     return () => {
       delete window.__wardianAppDebug;

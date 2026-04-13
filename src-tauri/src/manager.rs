@@ -138,7 +138,7 @@ fn opencode_should_fallback_to_idle(
         return false;
     };
     now.duration_since(last_output_at)
-        .map(|duration| duration >= std::time::Duration::from_secs(1))
+        .map(|duration| duration >= std::time::Duration::from_secs(6))
         .unwrap_or(false)
 }
 
@@ -582,7 +582,7 @@ pub async fn spawn_agent(
                         *stamp = Some(std::time::SystemTime::now());
                     }
                     if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
-                        let previous_title = terminal_title_clone
+                        let _previous_title = terminal_title_clone
                             .lock()
                             .map(|value| value.clone())
                             .unwrap_or_default();
@@ -597,13 +597,6 @@ pub async fn spawn_agent(
                         }
                         if provider_name_for_pty == "opencode" {
                             if let Some(next_status) = opencode_status_from_title(&title) {
-                                if next_status == "Processing..."
-                                    && !previous_title.starts_with("OC | ")
-                                {
-                                    if let Ok(mut count) = query_count_clone.lock() {
-                                        *count += 1;
-                                    }
-                                }
                                 set_agent_status(
                                     &pty_emit_app,
                                     &sid_for_pty,
