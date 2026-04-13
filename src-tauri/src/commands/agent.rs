@@ -1,5 +1,5 @@
 use crate::manager;
-use crate::models::AgentConfig;
+use crate::models::{AgentConfig, AgentTelemetry};
 use crate::state::AppState;
 use tauri::{AppHandle, State};
 
@@ -28,26 +28,43 @@ fn persisted_resume_session_for_provider(
     })
 }
 
-fn allocate_loopback_port() -> Result<u16, String> {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|e| format!("Failed to allocate loopback port: {}", e))?
-        .local_addr()
-        .map(|addr| addr.port())
-        .map_err(|e| format!("Failed to read allocated loopback port: {}", e))
+fn provider_uses_generated_session_id(provider_name: &str) -> bool {
+    matches!(provider_name, "claude")
+}
+
+fn restore_runtime_state_after_resume(new_active: &mut crate::state::ActiveAgent, old_active: &crate::state::ActiveAgent) {
+    if let (Ok(old_count), Ok(mut new_count)) = (old_active.query_count.lock(), new_active.query_count.lock()) {
+        *new_count = *old_count;
+    }
+    if let (Ok(old_ts), Ok(mut new_ts)) = (old_active.init_timestamp.lock(), new_active.init_timestamp.lock()) {
+        *new_ts = old_ts.clone();
+    }
+    if let (Ok(old_path), Ok(mut new_path)) = (old_active.log_path.lock(), new_active.log_path.lock()) {
+        *new_path = old_path.clone();
+    }
 }
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
 
-    if config.resume_session.is_none() {
-        config.resume_session = Some(config.session_id.clone());
+    // For opencode, Wardian uses a UUID as session_id internally, but opencode
+    // only recognises real ses_xxx IDs.  Clear any stale UUID stored in
+    // resume_session (e.g. from a pre-fix save), then only fall back to
+    // session_id if it is already in the ses_xxx format.
+    if config.provider == "opencode" {
+        if let Some(ref rs) = config.resume_session {
+            if !rs.starts_with("ses_") {
+                config.resume_session = None;
+            }
+        }
     }
 
-    if config.provider == "opencode" {
-        // OpenCode interactive sessions are backed by a local sidecar server.
-        // Always rotate the loopback port on resume so a fresh attach cannot
-        // accidentally race against or reuse a stale server lifecycle.
-        config.opencode_port = Some(allocate_loopback_port()?);
+    if config.resume_session.is_none() {
+        let should_fallback = config.provider != "opencode"
+            || config.session_id.starts_with("ses_");
+        if should_fallback {
+            config.resume_session = Some(config.session_id.clone());
+        }
     }
 
     Ok(())
@@ -79,7 +96,7 @@ pub async fn spawn_agent(
     let mut session_id = actual_resume.clone();
 
     if actual_resume.is_none() {
-        if provider_name == "codex" || provider_name == "claude" {
+        if provider_uses_generated_session_id(&provider_name) {
             session_id = Some(uuid::Uuid::new_v4().to_string());
         } else {
             let cwd = crate::utils::fs::resolve_cwd(&folder, "");
@@ -114,11 +131,9 @@ pub async fn spawn_agent(
         &agent_class,
         &session_id,
     ));
-    if config.provider == "opencode" && config.opencode_port.is_none() {
-        config.opencode_port = Some(allocate_loopback_port()?);
-    }
-
     let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
+    // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
+    config.opencode_port = active_agent.config.opencode_port;
     if config.provider == "codex" && actual_resume.is_none() {
         for _ in 0..40 {
             if let Some((provider_session_id, _updated_at)) =
@@ -169,6 +184,11 @@ pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentConfig>,
         }
     }
     Ok(list)
+}
+
+#[tauri::command]
+pub async fn list_agent_metrics(state: State<'_, AppState>) -> Result<Vec<AgentTelemetry>, String> {
+    Ok(manager::get_all_metrics(&state).await)
 }
 
 #[tauri::command]
@@ -235,6 +255,33 @@ pub async fn pause_agent(
     if let Some(agent) = agents.get_mut(&session_id) {
         manager::terminate_active_agent_process(agent);
 
+        // For opencode: capture the real ses_xxx session ID from the log so
+        // resume can pass --session ses_xxx rather than the internal UUID.
+        // The log file is populated by the metrics poll loop; if no session
+        // was ever created (user paused before sending a message) this is a
+        // no-op and resume will simply start a fresh opencode session.
+        if agent.config.provider == "opencode"
+            && agent
+                .config
+                .resume_session
+                .as_deref()
+                .map(|s| !s.starts_with("ses_"))
+                .unwrap_or(true)
+        {
+            let log_path_snap = agent
+                .log_path
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            if let Some(log_path) = log_path_snap {
+                if let Some(ses_id) =
+                    manager::opencode_extract_created_session_id(&log_path)
+                {
+                    agent.config.resume_session = Some(ses_id);
+                }
+            }
+        }
+
         agent.pty_master = None;
         agent.stdin_tx = None;
         agent.config.is_off = true;
@@ -268,6 +315,7 @@ pub async fn resume_agent(
     if let Some(agent) = agents.get_mut(&session_id) {
         prepare_resume_config(&mut agent.config)?;
         let mut new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
+        restore_runtime_state_after_resume(&mut new_active, agent);
 
         // Register new input sender
         if let Some(ref tx) = new_active.stdin_tx {
@@ -365,8 +413,66 @@ pub async fn reorder_agents(
 
 #[cfg(test)]
 mod tests {
-    use super::{persisted_resume_session_for_provider, prepare_resume_config};
+    use super::{
+        persisted_resume_session_for_provider, prepare_resume_config,
+        restore_runtime_state_after_resume,
+        provider_uses_generated_session_id,
+    };
     use crate::models::AgentConfig;
+    use crate::state::ActiveAgent;
+    use std::sync::{Arc, Mutex};
+
+    fn make_test_agent() -> ActiveAgent {
+        ActiveAgent {
+            config: AgentConfig::default(),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: Arc::new(Mutex::new(String::new())),
+            process_id: None,
+            query_count: Arc::new(Mutex::new(0)),
+            init_timestamp: Arc::new(Mutex::new(None)),
+            current_status: Arc::new(Mutex::new("Idle".to_string())),
+            terminal_title: Arc::new(Mutex::new(String::new())),
+            last_output_at: Arc::new(Mutex::new(None)),
+            log_path: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+
+    #[test]
+    fn opencode_uses_provider_session_id_instead_of_generated_uuid() {
+        assert!(!provider_uses_generated_session_id("opencode"));
+    }
+
+    #[test]
+    fn claude_keeps_generated_session_ids() {
+        assert!(provider_uses_generated_session_id("claude"));
+        assert!(!provider_uses_generated_session_id("codex"));
+    }
+
+    #[test]
+    fn resume_restores_query_count_and_log_path() {
+        let old_active = make_test_agent();
+        *old_active.query_count.lock().unwrap() = 3;
+        *old_active.init_timestamp.lock().unwrap() = Some("2026-04-12T17:00:00.000Z".to_string());
+        *old_active.log_path.lock().unwrap() = Some(std::path::PathBuf::from("C:/tmp/session.json"));
+
+        let mut new_active = make_test_agent();
+        restore_runtime_state_after_resume(&mut new_active, &old_active);
+
+        assert_eq!(*new_active.query_count.lock().unwrap(), 3);
+        assert_eq!(
+            new_active.init_timestamp.lock().unwrap().as_deref(),
+            Some("2026-04-12T17:00:00.000Z")
+        );
+        assert_eq!(
+            new_active.log_path.lock().unwrap().as_deref(),
+            Some(std::path::Path::new("C:/tmp/session.json"))
+        );
+    }
 
     #[test]
     fn claude_persists_resume_session_after_initial_spawn() {
@@ -385,13 +491,13 @@ mod tests {
     }
 
     #[test]
-    fn opencode_resume_rotates_loopback_port_and_sets_resume_session() {
+    fn opencode_resume_sets_resume_session_and_clears_off() {
+        // session_id already in ses_xxx format → resume_session inherits it
         let mut config = AgentConfig {
             provider: "opencode".to_string(),
             session_id: "ses_test".to_string(),
             resume_session: None,
             is_off: true,
-            opencode_port: Some(4100),
             ..Default::default()
         };
 
@@ -399,25 +505,55 @@ mod tests {
 
         assert_eq!(config.resume_session.as_deref(), Some("ses_test"));
         assert!(!config.is_off);
-        assert_ne!(config.opencode_port, Some(4100));
-        assert!(config.opencode_port.is_some());
     }
 
     #[test]
-    fn non_opencode_resume_keeps_existing_port() {
+    fn opencode_resume_with_uuid_session_id_leaves_resume_session_none() {
+        // session_id is a Wardian UUID (not ses_xxx) → must NOT be used as --session
+        let mut config = AgentConfig {
+            provider: "opencode".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session, None);
+        assert!(!config.is_off);
+    }
+
+    #[test]
+    fn opencode_resume_clears_stale_uuid_resume_session() {
+        // Stale state: resume_session was previously saved as a UUID (pre-fix)
+        let mut config = AgentConfig {
+            provider: "opencode".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            resume_session: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session, None);
+        assert!(!config.is_off);
+    }
+
+    #[test]
+    fn non_opencode_resume_clears_off_and_sets_resume_session() {
         let mut config = AgentConfig {
             provider: "gemini".to_string(),
             session_id: "gemini-session".to_string(),
             resume_session: None,
             is_off: true,
-            opencode_port: Some(4100),
             ..Default::default()
         };
 
         prepare_resume_config(&mut config).expect("prepare resume config");
 
         assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
-        assert_eq!(config.opencode_port, Some(4100));
         assert!(!config.is_off);
     }
 }

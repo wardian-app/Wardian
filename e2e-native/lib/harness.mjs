@@ -178,7 +178,20 @@ export function ensureNativeAppBuilt(harness) {
 }
 
 export function prepareIsolatedHome(harness) {
-  fs.rmSync(harness.isolatedHome, { recursive: true, force: true });
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      fs.rmSync(harness.isolatedHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
   fs.mkdirSync(harness.isolatedHome, { recursive: true });
 }
 

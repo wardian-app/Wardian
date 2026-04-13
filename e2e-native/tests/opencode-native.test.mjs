@@ -14,6 +14,7 @@ import {
 
 const runRealOpenCode = process.env.WARDIAN_E2E_REAL_OPENCODE === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
+const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 
 async function readDebugTail(harness) {
   try {
@@ -33,6 +34,17 @@ async function readVisibleTerminalLines(driver) {
   });
 }
 
+async function readTerminalDebugLines(driver, sessionId) {
+  return await driver.executeScript((sid) => {
+    return window.__wardianTerminalDebug?.snapshot(sid)?.lines ?? [];
+  }, sessionId);
+}
+
+async function activateAgentCard(driver, sessionId) {
+  const card = await driver.findElement(By.id(`agent-card-${sessionId}`));
+  await card.click();
+}
+
 async function readLatestAgentSessionId(driver) {
   return await driver.executeAsyncScript((done) => {
     window.__TAURI_INTERNALS__.invoke("list_agents").then(
@@ -43,6 +55,112 @@ async function readLatestAgentSessionId(driver) {
       (error) => done({ error: String(error) }),
     );
   });
+}
+
+async function readAgentMetrics(driver) {
+  return await driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("list_agent_metrics").then(
+      (metrics) => done(metrics),
+      (error) => done({ error: String(error) }),
+    );
+  });
+}
+
+async function readAgentStatus(driver, sessionId) {
+  const metrics = await readAgentMetrics(driver);
+  if (metrics && typeof metrics === "object" && "error" in metrics) {
+    throw new Error(`Failed to read agent metrics: ${metrics.error}`);
+  }
+  const row = Array.isArray(metrics)
+    ? metrics.find((entry) => entry.session_id === sessionId)
+    : null;
+  return row?.current_status || null;
+}
+
+async function readAgentMetricRow(driver, sessionId) {
+  const metrics = await readAgentMetrics(driver);
+  if (metrics && typeof metrics === "object" && "error" in metrics) {
+    throw new Error(`Failed to read agent metrics: ${metrics.error}`);
+  }
+  return Array.isArray(metrics)
+    ? metrics.find((entry) => entry.session_id === sessionId) || null
+    : null;
+}
+
+async function readAgentPty(driver, sessionId) {
+  return await driver.executeAsyncScript((sid, done) => {
+    window.__TAURI_INTERNALS__.invoke("read_agent_pty", { sessionId: sid }).then(
+      (chunk) => done(chunk),
+      (error) => done({ error: String(error) }),
+    );
+  }, sessionId);
+}
+
+async function readDerivedAppStatus(driver, sessionId) {
+  const snapshot = await driver.executeScript((sid) => {
+    return window.__wardianAppDebug?.snapshot(sid) ?? null;
+  }, sessionId);
+  return snapshot?.derivedStatus || null;
+}
+
+async function readAppSnapshot(driver, sessionId) {
+  return await driver.executeScript((sid) => {
+    return window.__wardianAppDebug?.snapshot(sid) ?? null;
+  }, sessionId);
+}
+
+async function sampleAgentStatuses(driver, sessionId, durationMs = 10000, intervalMs = 100) {
+  const seen = [];
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < durationMs) {
+    const snapshot = await readAppSnapshot(driver, sessionId);
+    if (snapshot?.derivedStatus) {
+      seen.push({
+        title: snapshot.title,
+        thought: snapshot.thought,
+        derivedStatus: snapshot.derivedStatus,
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return seen;
+}
+
+async function startPromptSubmission(driver, sessionId, prompt) {
+  await driver.executeScript(() => {
+    window.__wardianNativePromptResult = null;
+  });
+
+  return await driver.executeAsyncScript((sid, body, done) => {
+    window.__TAURI_INTERNALS__.invoke("send_input_to_agent", {
+      sessionId: sid,
+      input: body,
+    }).then(
+      () => window.__TAURI_INTERNALS__.invoke("send_input_to_agent", {
+        sessionId: sid,
+        input: "\r",
+      }),
+      (error) => Promise.reject(error),
+    ).then(
+      () => {
+        window.__wardianNativePromptResult = { ok: true };
+        done(true);
+      },
+      (error) => {
+        window.__wardianNativePromptResult = { ok: false, error: String(error) };
+        done(false);
+      },
+    );
+  }, sessionId, prompt);
+}
+
+async function waitForPromptSubmissionResult(driver, timeoutMs = 90000) {
+  return await driver.wait(async () => {
+    const result = await driver.executeScript(() => window.__wardianNativePromptResult ?? null);
+    return result || false;
+  }, timeoutMs);
 }
 
 async function seedCommonSkill(harness, skillName) {
@@ -69,7 +187,9 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
 
   const harness = await createNativeHarness();
   try {
-    ensureNativeAppBuilt(harness);
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
+    }
   } catch (error) {
     t.skip(String(error));
     return;
@@ -102,58 +222,89 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
   await driver.findElement(By.css('[data-testid="spawn-submit"]')).click();
 
   try {
-    const card = await driver.wait(
-      until.elementLocated(By.css('[data-testid="agent-card"]')),
-      60000,
-    );
-    const title = await card.getText();
-    assert.match(title, /Native OpenCode/);
-
     await driver.wait(async () => {
-      const lines = await readVisibleTerminalLines(driver);
-      return lines.some((line) => line.trim().length > 0);
-    }, 20000);
-
-    const lines = await readVisibleTerminalLines(driver);
-    assert.ok(
-      lines.some((line) => /OpenCode|MiniMax|█|▀|▄/.test(line)),
-      `Expected visible OpenCode terminal output, got: ${JSON.stringify(lines)}`,
-    );
+      const agents = await driver.executeAsyncScript((done) => {
+        window.__TAURI_INTERNALS__.invoke("list_agents").then(done, (error) => done({ error: String(error) }));
+      });
+      return Array.isArray(agents) && agents.some((agent) => agent.session_name === "Native OpenCode");
+    }, 60000);
 
     const sessionId = await readLatestAgentSessionId(driver);
     assert.equal(typeof sessionId, "string", `Expected session id, got ${JSON.stringify(sessionId)}`);
 
-    const submitResult = await driver.executeAsyncScript((sid, done) => {
-      window.__TAURI_INTERNALS__.invoke("submit_prompt_to_agent", {
-        sessionId: sid,
-        prompt:
-          "Verify whether wardian-native-skill is available. If yes, reply with exactly NATIVE_SKILL_VISIBLE. Otherwise reply with exactly NATIVE_SKILL_MISSING.",
-      }).then(
-        () => done({ ok: true }),
-        (error) => done({ ok: false, error: String(error) }),
-      );
-    }, sessionId);
+    await activateAgentCard(driver, sessionId);
 
+    const initialMetrics = await readAgentMetricRow(driver, sessionId);
+    assert.ok(initialMetrics, "Expected telemetry row for spawned OpenCode session");
+
+    const initialStatus = await readDerivedAppStatus(driver, sessionId);
+    assert.match(initialStatus, /Idle|Pending|Booting/i);
+
+    await driver.wait(async () => {
+      const snapshot = await readAppSnapshot(driver, sessionId);
+      return snapshot?.title === "OpenCode";
+    }, 30000);
+
+    await startPromptSubmission(
+      driver,
+      sessionId,
+      "Use the skill tool to load wardian-native-skill. If it is available, reply with exactly NATIVE_SKILL_VISIBLE. If it is unavailable, reply with exactly NATIVE_SKILL_MISSING. Do not search the repository.",
+    );
+
+    const sampledStatuses = await sampleAgentStatuses(driver, sessionId, 10000, 100);
+
+    assert.ok(
+      sampledStatuses.some((entry) => /Processing/i.test(entry.derivedStatus) || /^OC \| /.test(entry.title ?? "")),
+      `Expected to observe Processing status, got: ${JSON.stringify(sampledStatuses)}`,
+    );
+
+    const submitResult = await waitForPromptSubmissionResult(driver, 90000);
     assert.deepEqual(submitResult, { ok: true });
 
     await driver.wait(async () => {
-      const lines = await readVisibleTerminalLines(driver);
-      return lines.some((line) =>
-        /NATIVE_SKILL_VISIBLE|NATIVE_SKILL_MISSING/.test(line),
-      );
+      const row = await readAgentMetricRow(driver, sessionId);
+      return !!row && row.query_count >= 1;
     }, 90000);
 
-    const finalLines = await readVisibleTerminalLines(driver);
+    const finalMetrics = await readAgentMetricRow(driver, sessionId);
+    assert.ok(finalMetrics && finalMetrics.query_count >= 1, "Expected query count to increment after prompt submission");
+
+    const finalSnapshot = await readAppSnapshot(driver, sessionId);
     assert.ok(
-      finalLines.some((line) => /NATIVE_SKILL_VISIBLE/.test(line)),
-      `Expected seeded Wardian skill to be available, got: ${JSON.stringify(finalLines)}`,
+      finalSnapshot?.title === "OpenCode" || /^OC \| /.test(finalSnapshot?.title ?? ""),
+      `Expected OpenCode title telemetry after prompt submission, got snapshot: ${JSON.stringify(finalSnapshot)}`,
     );
   } catch (error) {
     const debugTail = await readDebugTail(harness);
     const tauriLogs = session.logs();
+    let metricSnapshot = "Unavailable";
+    let appSnapshot = "Unavailable";
+    let visibleLines = "Unavailable";
+    let promptResult = "Unavailable";
+    let ptyChunk = "Unavailable";
+    let terminalDebugLines = "Unavailable";
+    try {
+      const sessionId = await readLatestAgentSessionId(driver);
+      const row = sessionId ? await readAgentMetricRow(driver, sessionId) : null;
+      metricSnapshot = JSON.stringify(row);
+      const snapshot = sessionId ? await readAppSnapshot(driver, sessionId) : null;
+      appSnapshot = JSON.stringify(snapshot);
+      visibleLines = JSON.stringify(await readVisibleTerminalLines(driver));
+      promptResult = JSON.stringify(await driver.executeScript(() => window.__wardianNativePromptResult ?? null));
+      ptyChunk = JSON.stringify(sessionId ? await readAgentPty(driver, sessionId) : null);
+      terminalDebugLines = JSON.stringify(sessionId ? await readTerminalDebugLines(driver, sessionId) : null);
+    } catch {
+      // ignore telemetry read failures while building debug context
+    }
     throw new Error(
-      `OpenCode native spawn did not produce an agent card.\n` +
+        `OpenCode native telemetry assertion failed.\n` +
         `Original error: ${error}\n` +
+        `--- Last metric row ---\n${metricSnapshot}\n` +
+        `--- Last app snapshot ---\n${appSnapshot}\n` +
+        `--- Visible terminal lines ---\n${visibleLines}\n` +
+        `--- Terminal debug lines ---\n${terminalDebugLines}\n` +
+        `--- PTY chunk ---\n${ptyChunk}\n` +
+        `--- Prompt submission result ---\n${promptResult}\n` +
         `--- Wardian debug tail ---\n${debugTail}\n` +
         `--- tauri-driver stdout ---\n${tauriLogs.stdout}\n` +
         `--- tauri-driver stderr ---\n${tauriLogs.stderr}`

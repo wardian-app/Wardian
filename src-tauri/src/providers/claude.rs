@@ -4,6 +4,67 @@ use crate::models::AgentConfig;
 /// The concrete `AgentProvider` implementation for Claude Code CLI.
 pub struct ClaudeProvider;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeUserEventKind {
+    RealQuery,
+    ToolResult,
+    LocalCommand,
+    Ignored,
+}
+
+pub(crate) fn classify_claude_user_event(parsed: &serde_json::Value) -> ClaudeUserEventKind {
+    let Some(message) = parsed.get("message") else {
+        return ClaudeUserEventKind::Ignored;
+    };
+    let Some(content) = message.get("content") else {
+        return ClaudeUserEventKind::Ignored;
+    };
+
+    if let Some(text) = content.as_str() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return ClaudeUserEventKind::Ignored;
+        }
+        if is_claude_local_command_content(trimmed) {
+            return ClaudeUserEventKind::LocalCommand;
+        }
+        return ClaudeUserEventKind::RealQuery;
+    }
+
+    let Some(items) = content.as_array() else {
+        return ClaudeUserEventKind::Ignored;
+    };
+
+    if items.is_empty() {
+        return ClaudeUserEventKind::Ignored;
+    }
+    if items
+        .iter()
+        .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+    {
+        return ClaudeUserEventKind::ToolResult;
+    }
+    if items.iter().any(|item| {
+        item.get("type").and_then(|v| v.as_str()) == Some("text")
+            && item
+                .get("text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|text| !text.trim().is_empty())
+    }) {
+        return ClaudeUserEventKind::RealQuery;
+    }
+
+    ClaudeUserEventKind::Ignored
+}
+
+fn is_claude_local_command_content(content: &str) -> bool {
+    content.starts_with("<local-command-caveat>")
+        || content.starts_with("<command-name>")
+        || content.starts_with("<command-message>")
+        || content.starts_with("<command-args>")
+        || content.starts_with("<local-command-stdout>")
+}
+
 impl Default for ClaudeProvider {
     fn default() -> Self {
         Self::new()
@@ -28,23 +89,6 @@ impl ClaudeProvider {
         }
 
         None
-    }
-
-    fn is_real_user_query(parsed: &serde_json::Value) -> bool {
-        let Some(message) = parsed.get("message") else {
-            return true;
-        };
-        let Some(content) = message.get("content") else {
-            return true;
-        };
-
-        let Some(items) = content.as_array() else {
-            return true;
-        };
-
-        !items
-            .iter()
-            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
     }
 
     fn assistant_event(parsed: &serde_json::Value) -> AgentEvent {
@@ -284,13 +328,13 @@ impl AgentProvider for ClaudeProvider {
                 }
             }
             // Only count real user prompts as queries. Tool results are part of the same turn.
-            "user" => {
-                if Self::is_real_user_query(&parsed) {
-                    Some(AgentEvent::UserQuery)
-                } else {
-                    Some(AgentEvent::Generating)
+            "user" => match classify_claude_user_event(&parsed) {
+                ClaudeUserEventKind::RealQuery => Some(AgentEvent::UserQuery),
+                ClaudeUserEventKind::ToolResult => Some(AgentEvent::Generating),
+                ClaudeUserEventKind::LocalCommand | ClaudeUserEventKind::Ignored => {
+                    Some(AgentEvent::Unknown)
                 }
-            }
+            },
             // Claude is actively streaming a response
             "assistant" => Some(Self::assistant_event(&parsed)),
             "message_stream" => Some(AgentEvent::Generating),
@@ -411,6 +455,27 @@ mod tests {
         let p = make_provider();
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}"#;
         assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    }
+
+    #[test]
+    fn parse_output_user_empty_content_is_not_query() {
+        let p = make_provider();
+        let line = r#"{"type":"user","message":{"role":"user","content":[]}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_output_user_local_command_is_not_query() {
+        let p = make_provider();
+        let line = r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_output_user_local_command_stdout_is_not_query() {
+        let p = make_provider();
+        let line = r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 4.6</local-command-stdout>"}}"#;
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
     }
 
     #[test]

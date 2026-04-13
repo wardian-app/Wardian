@@ -21,6 +21,14 @@ export function deriveEffectiveStatus(
   // this prevents Claude Code's idle ◇ symbol from stomping backend "Processing..." or "Action Needed".
   if (rawTitle.includes("Action Required")) {
     effectiveStatus = "Action Needed";
+  } else if (rawTitle.startsWith("OC | ")) {
+    if (
+      effectiveStatus !== "Action Needed" &&
+      effectiveStatus !== "Idle" &&
+      effectiveStatus !== "Off"
+    ) {
+      effectiveStatus = "Processing...";
+    }
   } else if (rawTitle.includes("Ready") || rawTitle.includes("Idle") || rawTitle.includes("◇")) {
     if (effectiveStatus !== "Processing..." && effectiveStatus !== "Action Needed") {
       effectiveStatus = "Idle";
@@ -61,6 +69,10 @@ export function deriveCurrentThought(
 ): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" } {
   let effectiveStatus = deriveEffectiveStatus(rawTitle, liveThought, metrics?.current_status, isOff);
   let currentThought = cleanThought(liveThought || rawTitle.trim());
+
+  if (!liveThought && rawTitle.startsWith("OC | ")) {
+    currentThought = cleanThought(rawTitle.slice(5).trim());
+  }
 
   if (isOff) {
     return { thought: "Off", status: "Off" };
@@ -150,6 +162,27 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
       return { type: "notification", message: toolName, level: "warning" };
     }
     if (subtype === "turn_duration") {
+      return { type: "clear_thought" };
+    }
+  }
+  if (data.type === "text") {
+    const part = data.part as Record<string, unknown> | undefined;
+    const raw = (part?.text as string) || "";
+    return { type: "progress", thought: truncateThought(raw, "Responding...") };
+  }
+  if (data.type === "tool_use") {
+    const part = data.part as Record<string, unknown> | undefined;
+    const toolName =
+      (part?.tool as string) ||
+      (part?.name as string) ||
+      (data.tool as string) ||
+      "Running tool...";
+    return { type: "progress", thought: truncateThought(toolName, "Running tool...") };
+  }
+  if (data.type === "step_finish") {
+    const part = data.part as Record<string, unknown> | undefined;
+    const reason = part?.reason as string | undefined;
+    if (reason === "stop") {
       return { type: "clear_thought" };
     }
   }
@@ -290,4 +323,3 @@ export function getStatusColorClass(effectiveStatus: string): string {
   }
   return "bg-wardian-off flex-shrink-0";
 }
-

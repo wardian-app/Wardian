@@ -34,6 +34,19 @@ Run the native mock-provider suite:
 npm run test:e2e:native
 ```
 
+For rapid iteration after you already have a current native build, reuse the
+existing binary instead of rebuilding on every run:
+
+```bash
+npm run test:e2e:native:fast
+```
+
+You can also target a specific file:
+
+```bash
+npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
+```
+
 Use this layer when validating:
 
 - terminal scrollback or renderer behavior

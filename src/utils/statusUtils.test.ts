@@ -28,6 +28,15 @@ describe("deriveEffectiveStatus", () => {
     expect(deriveEffectiveStatus("Ready - Gemini", undefined, "Action Needed")).toBe("Action Needed");
   });
 
+  it("falls back to backend status for plain OpenCode title", () => {
+    expect(deriveEffectiveStatus("OpenCode", undefined, "Processing...")).toBe("Processing...");
+    expect(deriveEffectiveStatus("OpenCode", undefined, "Idle")).toBe("Idle");
+  });
+
+  it("does not let stale OpenCode OC title override backend idle", () => {
+    expect(deriveEffectiveStatus("OC | Previous task", undefined, "Idle")).toBe("Idle");
+  });
+
   it("returns Idle when title contains ◇ diamond", () => {
     expect(deriveEffectiveStatus("◇ Waiting", undefined, undefined)).toBe("Idle");
   });
@@ -129,6 +138,20 @@ describe("deriveCurrentThought", () => {
     const result = deriveCurrentThought("✦ Running tests", undefined, { ...baseMetrics, current_status: "Pending..." });
     expect(result.thought).toBe("Running tests");
     expect(result.status).toBe("Processing...");
+  });
+
+  it("treats OpenCode OC title as processing", () => {
+    const result = deriveCurrentThought("OC | Assistant introduction", undefined, {
+      ...baseMetrics,
+      current_status: "Pending...",
+    });
+    expect(result.thought).toBe("Assistant introduction");
+    expect(result.status).toBe("Processing...");
+  });
+
+  it("strips OpenCode OC prefix from displayed thought", () => {
+    const result = deriveCurrentThought("OC | Introduction prompt: self-intro guidance", undefined, baseMetrics);
+    expect(result.thought).toBe("Introduction prompt: self-intro guidance");
   });
 
   it("shows Booting when no title, no thought, low uptime", () => {
@@ -320,6 +343,27 @@ describe("classifyJsonEvent", () => {
     expect(classifyJsonEvent({
       type: "event_msg",
       payload: { type: "task_complete" },
+    })).toEqual({ type: "clear_thought" });
+  });
+
+  it("classifies OpenCode text event as progress", () => {
+    expect(classifyJsonEvent({
+      type: "text",
+      part: { type: "text", text: "Inspecting scheduler state now" },
+    })).toEqual({ type: "progress", thought: "Inspecting scheduler state now" });
+  });
+
+  it("classifies OpenCode tool_use event as progress", () => {
+    expect(classifyJsonEvent({
+      type: "tool_use",
+      part: { tool: "bash" },
+    })).toEqual({ type: "progress", thought: "bash" });
+  });
+
+  it("classifies OpenCode stop event as clear_thought", () => {
+    expect(classifyJsonEvent({
+      type: "step_finish",
+      part: { reason: "stop" },
     })).toEqual({ type: "clear_thought" });
   });
 });

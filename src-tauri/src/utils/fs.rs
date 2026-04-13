@@ -12,6 +12,14 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(val));
         }
     }
+    #[cfg(debug_assertions)]
+    {
+        // Use Cargo target directory so debug state is isolated from production
+        // and is wiped automatically by `cargo clean`.
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        Some(manifest_dir.join("target").join("debug").join(".wardian"))
+    }
+    #[cfg(not(debug_assertions))]
     dirs::home_dir().map(|h| h.join(".wardian"))
 }
 
@@ -59,7 +67,7 @@ pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
 }
 
 pub fn provider_uses_projected_workspace(provider: &str) -> bool {
-    provider == "codex"
+    matches!(provider, "codex" | "opencode")
 }
 
 pub fn prepare_provider_habitat(
@@ -100,9 +108,7 @@ pub fn ensure_claude_permission_hook(
     std::fs::create_dir_all(&hook_root).map_err(|e| e.to_string())?;
 
     let event_log_path = hook_root.join("permission-requests.jsonl");
-    if !event_log_path.exists() {
-        std::fs::write(&event_log_path, "").map_err(|e| e.to_string())?;
-    }
+    std::fs::write(&event_log_path, "").map_err(|e| e.to_string())?;
 
     let script_path = write_claude_permission_hook_script(&hook_root, &event_log_path)?;
     let command = claude_permission_hook_command(&script_path);
@@ -173,7 +179,6 @@ pub fn build_opencode_runtime_config(include_roots: &[std::path::PathBuf]) -> se
         }
 
         let instruction_file = root.join("AGENTS.md");
-
         if instruction_file.is_file() {
             let path = path_to_forward_slash(&instruction_file);
             if !instructions.contains(&path) {
@@ -724,8 +729,8 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        build_opencode_runtime_config, create_directory_link, habitat_root_for_session,
-        projected_link_matches_target, provider_uses_projected_workspace,
+        build_opencode_runtime_config, create_directory_link, ensure_claude_permission_hook,
+        habitat_root_for_session, projected_link_matches_target, provider_uses_projected_workspace,
         resolve_opencode_runtime_roots, sync_codex_agent_home, sync_opencode_config_dir,
     };
     use std::path::{Path, PathBuf};
@@ -763,9 +768,10 @@ mod tests {
     }
 
     #[test]
-    fn only_codex_uses_projected_workspaces() {
+    fn only_codex_and_opencode_use_projected_workspaces() {
         assert!(!provider_uses_projected_workspace("claude"));
         assert!(provider_uses_projected_workspace("codex"));
+        assert!(provider_uses_projected_workspace("opencode"));
         assert!(!provider_uses_projected_workspace("gemini"));
     }
 
@@ -845,6 +851,30 @@ mod tests {
         unsafe { std::env::remove_var("WARDIAN_HOME") };
         assert!(result.is_some());
         assert!(result.unwrap().ends_with(".wardian"));
+    }
+
+    #[test]
+    fn ensure_claude_permission_hook_truncates_stale_events() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let root = unique_temp_dir("claude-hook-stale-events");
+        unsafe { std::env::set_var("WARDIAN_HOME", root.to_str().unwrap()) };
+
+        let stale_log = root
+            .join("agents")
+            .join("session-123")
+            .join("claude")
+            .join("permission-requests.jsonl");
+        std::fs::create_dir_all(stale_log.parent().unwrap()).expect("create hook dir");
+        std::fs::write(&stale_log, "{\"tool_name\":\"Bash\"}\n").expect("write stale hook event");
+
+        let paths = ensure_claude_permission_hook("session-123").expect("ensure hook");
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+        assert_eq!(
+            std::fs::read_to_string(paths.event_log_path).expect("read hook log"),
+            ""
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

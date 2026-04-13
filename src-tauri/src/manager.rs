@@ -1,4 +1,5 @@
 use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentTelemetry};
+use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
@@ -96,6 +97,51 @@ fn set_agent_status(
     }
 }
 
+fn opencode_status_from_title(title: &str) -> Option<&'static str> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "OpenCode" {
+        return Some("Idle");
+    }
+    if trimmed.contains("Action Required") {
+        return Some("Action Needed");
+    }
+    if trimmed.starts_with("OC | ") {
+        return Some("Processing...");
+    }
+    None
+}
+
+fn opencode_session_diff_path(session_id: &str) -> std::path::PathBuf {
+    let base = dirs::data_local_dir().or_else(|| {
+        dirs::home_dir().map(|home| home.join(".local").join("share"))
+    });
+    let base = base.unwrap_or_else(|| std::path::PathBuf::from("."));
+    base
+        .join("opencode")
+        .join("storage")
+        .join("session_diff")
+        .join(format!("{session_id}.json"))
+}
+
+fn opencode_should_fallback_to_idle(
+    current_status: &str,
+    last_output_at: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+) -> bool {
+    if current_status != "Processing..." {
+        return false;
+    }
+    let Some(last_output_at) = last_output_at else {
+        return false;
+    };
+    now.duration_since(last_output_at)
+        .map(|duration| duration >= std::time::Duration::from_secs(6))
+        .unwrap_or(false)
+}
+
 fn debug_preview_bytes(bytes: &[u8], limit: usize) -> String {
     let mut out = String::new();
     for &byte in bytes.iter().take(limit) {
@@ -112,6 +158,54 @@ fn debug_preview_bytes(bytes: &[u8], limit: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+fn extract_terminal_titles(chunk: &str) -> Vec<String> {
+    let bytes = chunk.as_bytes();
+    let mut titles = Vec::new();
+    let mut index = 0usize;
+
+    while index + 2 < bytes.len() {
+        if bytes[index] == 0x1b && bytes[index + 1] == b']' {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() && bytes[cursor] != b';' {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                break;
+            }
+
+            let code = String::from_utf8_lossy(&bytes[index + 2..cursor]);
+            if code != "0" && code != "2" {
+                index = cursor.saturating_add(1);
+                continue;
+            }
+
+            let value_start = cursor + 1;
+            let mut end = value_start;
+            while end < bytes.len() {
+                if bytes[end] == 0x07 {
+                    break;
+                }
+                if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\' {
+                    break;
+                }
+                end += 1;
+            }
+
+            let title = String::from_utf8_lossy(&bytes[value_start..end]).trim().to_string();
+            if !title.is_empty() {
+                titles.push(title);
+            }
+
+            index = end.saturating_add(1);
+            continue;
+        }
+
+        index += 1;
+    }
+
+    titles
 }
 
 fn apply_agent_event(
@@ -235,6 +329,8 @@ pub async fn spawn_agent(
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
             init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_status: std::sync::Arc::new(std::sync::Mutex::new("Off".to_string())),
+            terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
             log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(windows)]
             job_object: None,
@@ -277,25 +373,20 @@ pub async fn spawn_agent(
         }
     }
 
-    let mut background_processes = Vec::new();
-    if config.provider == "opencode" {
-        background_processes.push(spawn_opencode_server(&provider_cwd, &config).await?);
-        provider_args.extend(opencode_attach_args(&config, &provider_cwd)?);
-    } else {
-        let is_resume = config
-            .resume_session
-            .as_deref()
-            .is_some_and(|s| !s.is_empty());
-        let spawn_args = provider.get_spawn_args(&config, is_resume);
-        let spawn_args = finalize_interactive_spawn_args(
-            &config.provider,
-            is_restored,
-            &config.resume_session,
-            spawn_args,
-        );
-        provider_args.extend(spawn_args);
-        provider_args = interactive_provider_args(&config.provider, &provider_cwd, provider_args);
-    }
+    let background_processes = Vec::new();
+    let is_resume = config
+        .resume_session
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    let spawn_args = provider.get_spawn_args(&config, is_resume);
+    let spawn_args = finalize_interactive_spawn_args(
+        &config.provider,
+        is_restored,
+        &config.resume_session,
+        spawn_args,
+    );
+    provider_args.extend(spawn_args);
+    provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
@@ -423,8 +514,11 @@ pub async fn spawn_agent(
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
+    let terminal_title = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let terminal_title_clone = terminal_title.clone();
+    let last_output_at = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let last_output_at_clone = last_output_at.clone();
     let log_path = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
-
     // PTY reader thread: uses provider.parse_output() for event classification
     let pty_app = app.clone();
     let pty_provider = provider.clone();
@@ -484,6 +578,34 @@ pub async fn spawn_agent(
                         &buf[0..n],
                     );
                     let text = String::from_utf8_lossy(&buf[0..n]).to_string();
+                    if let Ok(mut stamp) = last_output_at_clone.lock() {
+                        *stamp = Some(std::time::SystemTime::now());
+                    }
+                    if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
+                        let _previous_title = terminal_title_clone
+                            .lock()
+                            .map(|value| value.clone())
+                            .unwrap_or_default();
+                        if provider_name_for_pty == "opencode" {
+                            log_debug(&format!(
+                                "[Wardian] OpenCode backend title for session {}: {}",
+                                sid_for_pty, title
+                            ));
+                        }
+                        if let Ok(mut current_title) = terminal_title_clone.lock() {
+                            *current_title = title.clone();
+                        }
+                        if provider_name_for_pty == "opencode" {
+                            if let Some(next_status) = opencode_status_from_title(&title) {
+                                set_agent_status(
+                                    &pty_emit_app,
+                                    &sid_for_pty,
+                                    &current_status_clone,
+                                    next_status,
+                                );
+                            }
+                        }
+                    }
                     let should_emit_output_ready = if let Ok(mut h) = output_buffer_clone.lock() {
                         let was_empty = h.is_empty();
                         h.push_str(&text);
@@ -508,6 +630,8 @@ pub async fn spawn_agent(
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
+                                        // Claude uses a dedicated log watcher for status, so
+                                        // only capture Init timestamps from its PTY JSON.
                                         if provider_name_for_pty == "claude" {
                                             if let AgentEvent::Init { timestamp, .. } = event {
                                                 if let Ok(mut ts) = init_timestamp_clone.lock() {
@@ -707,7 +831,8 @@ pub async fn spawn_agent(
                                                     let is_tool_result =
                                                         parsed.get("type").and_then(|v| v.as_str())
                                                             == Some("user")
-                                                            && !claude_is_real_user_query(&parsed);
+                                                            && classify_claude_user_event(&parsed)
+                                                                == ClaudeUserEventKind::ToolResult;
                                                     if is_tool_result {
                                                         *waiting = false;
                                                         apply_agent_status_event(
@@ -768,6 +893,18 @@ pub async fn spawn_agent(
         if let Some(hook_event_log) = hook_event_log {
             let hook_app = app.clone();
             let hook_session = config.session_id.clone();
+            let hook_accepted_sessions = {
+                let mut sessions = vec![config.session_id.clone()];
+                if let Some(resume_session) = config
+                    .resume_session
+                    .as_ref()
+                    .map(|sid| sid.trim())
+                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
+                {
+                    sessions.push(resume_session.to_string());
+                }
+                sessions
+            };
             let hook_current_status = current_status.clone();
             let hook_waiting_for_permission = waiting_for_permission.clone();
 
@@ -801,6 +938,11 @@ pub async fn spawn_agent(
                                 if let Ok(parsed) =
                                     serde_json::from_str::<serde_json::Value>(line.trim())
                                 {
+                                    if !hook_accepted_sessions.iter().any(|session_id| {
+                                        claude_permission_hook_matches_session(&parsed, session_id)
+                                    }) {
+                                        continue;
+                                    }
                                     if let Ok(mut waiting) = hook_waiting_for_permission.lock() {
                                         *waiting = true;
                                     }
@@ -839,6 +981,7 @@ pub async fn spawn_agent(
         }
     }
 
+    // ── OpenCode log-file watcher ─────────────────────────────────────────
     Ok(ActiveAgent {
         config: AgentConfig {
             folder: expected_folder,
@@ -853,6 +996,8 @@ pub async fn spawn_agent(
         query_count,
         init_timestamp,
         current_status,
+        terminal_title,
+        last_output_at,
         log_path,
         #[cfg(windows)]
         job_object,
@@ -1004,7 +1149,8 @@ fn opencode_custom_config_dir(
                 .join(".opencode")
         };
 
-    sync_opencode_config_dir(&config_dir, &roots)?;
+    // Sync the custom config dir and create the merged skills tree.
+    crate::utils::fs::sync_opencode_config_dir(&config_dir, &roots)?;
     Ok(Some(config_dir))
 }
 
@@ -1023,10 +1169,15 @@ fn opencode_env(
     }
     if let Some(config_dir) = opencode_custom_config_dir(cwd, class_name, session_id, config)? {
         let config_path = config_dir.join("opencode.json");
-        let runtime_config = opencode_runtime_config_content(class_name, session_id, config)
-            .unwrap_or_else(|| "{}".to_string());
-        std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-        std::fs::write(&config_path, runtime_config).map_err(|e| e.to_string())?;
+
+        // Build the runtime config (instructions + theme), and pair it with a
+        // custom config directory so OpenCode can discover projected skills.
+        let runtime_config: serde_json::Value =
+            opencode_runtime_config_content(class_name, session_id, config)
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({"theme": "system"}));
+
+        std::fs::write(&config_path, runtime_config.to_string()).map_err(|e| e.to_string())?;
         envs.push((
             "OPENCODE_CONFIG_DIR".to_string(),
             config_dir.to_string_lossy().to_string(),
@@ -1073,8 +1224,12 @@ fn interactive_provider_cwd(
         return provider_cwd.clone();
     }
 
-    if matches!(provider_name, "codex" | "opencode") {
+    if provider_name == "codex" {
         workspace_cwd.to_path_buf()
+    } else if provider_name == "opencode" {
+        habitat_root
+            .map(|root| root.to_path_buf())
+            .unwrap_or_else(|| workspace_cwd.to_path_buf())
     } else {
         habitat_root
             .map(habitat_workspace_cwd)
@@ -1085,6 +1240,7 @@ fn interactive_provider_cwd(
 fn interactive_provider_args(
     provider_name: &str,
     provider_cwd: &std::path::Path,
+    workspace_cwd: &std::path::Path,
     mut provider_args: Vec<String>,
 ) -> Vec<String> {
     match provider_name {
@@ -1093,7 +1249,12 @@ fn interactive_provider_args(
             provider_args.push(provider_cwd.to_string_lossy().to_string());
         }
         "opencode" => {
-            provider_args.push(provider_cwd.to_string_lossy().to_string());
+            let target_dir = if provider_cwd.file_name().is_some_and(|name| name == "habitat") {
+                habitat_workspace_cwd(provider_cwd)
+            } else {
+                workspace_cwd.to_path_buf()
+            };
+            provider_args.push(target_dir.to_string_lossy().replace('\\', "/"));
         }
         _ => {}
     }
@@ -1151,152 +1312,6 @@ fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
 }
 
-fn opencode_attach_args(
-    config: &AgentConfig,
-    provider_cwd: &std::path::Path,
-) -> Result<Vec<String>, String> {
-    let mut args = Vec::new();
-    if config.debug.unwrap_or(false) {
-        args.push("--print-logs".to_string());
-    }
-    let port = config
-        .opencode_port
-        .ok_or("OpenCode port not configured for interactive session")?;
-    args.push("attach".to_string());
-    args.push(format!("http://127.0.0.1:{}", port));
-    if let Some(session_id) = config
-        .resume_session
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        args.push("--session".to_string());
-        args.push(session_id.clone());
-    }
-    args.push("--dir".to_string());
-    args.push(provider_cwd.to_string_lossy().to_string());
-    Ok(args)
-}
-
-fn wait_for_loopback_port_blocking(port: u16, timeout: std::time::Duration) -> Result<(), String> {
-    let started = std::time::Instant::now();
-    while started.elapsed() < timeout {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-    Err(format!(
-        "Timed out waiting for OpenCode server on 127.0.0.1:{}",
-        port
-    ))
-}
-
-fn wait_for_opencode_server_ready_blocking(
-    port: u16,
-    timeout: std::time::Duration,
-) -> Result<(), String> {
-    let started = std::time::Instant::now();
-    while started.elapsed() < timeout {
-        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-            let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
-
-            if std::io::Write::write_all(
-                &mut stream,
-                b"GET /global/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-            )
-            .is_ok()
-            {
-                let mut body = String::new();
-                if std::io::Read::read_to_string(&mut stream, &mut body).is_ok()
-                    && body.contains("\"healthy\":true")
-                {
-                    return Ok(());
-                }
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-
-    wait_for_loopback_port_blocking(port, std::time::Duration::from_millis(10)).map_err(|_| {
-        format!(
-            "Timed out waiting for OpenCode server health on http://127.0.0.1:{}/global/health",
-            port
-        )
-    })?;
-
-    Err(format!(
-        "OpenCode server on 127.0.0.1:{} accepted TCP connections but never became healthy",
-        port
-    ))
-}
-
-async fn wait_for_opencode_server_ready(
-    port: u16,
-    timeout: std::time::Duration,
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || wait_for_opencode_server_ready_blocking(port, timeout))
-        .await
-        .map_err(|err| format!("Failed to join OpenCode server readiness task: {}", err))?
-}
-
-async fn spawn_opencode_server(
-    cwd: &std::path::Path,
-    config: &AgentConfig,
-) -> Result<std::process::Child, String> {
-    let port = config
-        .opencode_port
-        .ok_or("OpenCode port not configured for interactive session")?;
-    let provider = ProviderFactory::resolve("opencode")?;
-    let (bin, mut provider_args) = provider.get_executable();
-    if config.debug.unwrap_or(false) {
-        provider_args.push("--print-logs".to_string());
-    }
-    provider_args.push("serve".to_string());
-    provider_args.push("--port".to_string());
-    provider_args.push(port.to_string());
-    provider_args.push("--hostname".to_string());
-    provider_args.push("127.0.0.1".to_string());
-
-    let launch_spec = headless_provider_launch("opencode", &bin, &provider_args)?;
-    let mut cmd = std::process::Command::new(&launch_spec.executable);
-    for arg in &launch_spec.args {
-        cmd.arg(arg);
-    }
-    for (key, value) in opencode_env(
-        cwd,
-        &config.agent_class,
-        Some(config.session_id.as_str()),
-        Some(config),
-    )? {
-        cmd.env(key, value);
-    }
-    cmd.current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-
-    log_debug(&format!(
-        "[Wardian] OpenCode server launch: exe={} args={:?} cwd={}",
-        launch_spec.executable,
-        launch_spec.args,
-        cwd.display()
-    ));
-
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    if let Err(err) = wait_for_opencode_server_ready(port, std::time::Duration::from_secs(10)).await
-    {
-        let _ = child.kill();
-        return Err(err);
-    }
-    Ok(child)
-}
 
 #[cfg(windows)]
 fn quote_cmd_arg(value: &str) -> String {
@@ -1430,12 +1445,6 @@ pub async fn run_headless_with_config(
             provider_args.push("run".to_string());
             if let Some(config) = persisted_opencode_config.as_ref() {
                 provider_args.extend(provider.get_spawn_args(config, !session_id.is_empty()));
-                if !config.is_off {
-                    if let Some(port) = config.opencode_port {
-                        provider_args.push("--attach".to_string());
-                        provider_args.push(format!("http://127.0.0.1:{port}"));
-                    }
-                }
             } else if !session_id.is_empty() {
                 provider_args.push("--session".to_string());
                 provider_args.push(session_id.to_string());
@@ -1781,6 +1790,16 @@ pub async fn obtain_session_id(
                         let trimmed = line.trim();
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
+                            if provider_name == "opencode" {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_part) {
+                                    if session_id.is_none() {
+                                        session_id = parsed
+                                            .get("sessionID")
+                                            .and_then(|value| value.as_str())
+                                            .map(|value| value.to_string());
+                                    }
+                                }
+                            }
                             if let Some(evt) = provider.parse_output(json_part) {
                                 match evt {
                                     AgentEvent::Init {
@@ -2008,20 +2027,28 @@ fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
 }
 
 fn claude_is_real_user_query(line: &serde_json::Value) -> bool {
-    let Some(message) = line.get("message") else {
-        return true;
-    };
-    let Some(content) = message.get("content") else {
-        return true;
-    };
+    classify_claude_user_event(line) == ClaudeUserEventKind::RealQuery
+}
 
-    let Some(items) = content.as_array() else {
-        return true;
-    };
+fn claude_permission_hook_matches_session(event: &serde_json::Value, session_id: &str) -> bool {
+    if session_id.trim().is_empty() {
+        return false;
+    }
 
-    !items
-        .iter()
-        .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+    if event
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|sid| sid == session_id)
+    {
+        return true;
+    }
+
+    event
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .and_then(|path| std::path::Path::new(path).file_stem())
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == session_id)
 }
 
 fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
@@ -2056,15 +2083,189 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OpenCodeLogMetrics {
+    query_count: usize,
+    init_timestamp: Option<String>,
+    status: Option<String>,
+}
+
+
+/// Find the newest OpenCode log file whose filesystem mtime is at or after
+/// `spawn_time`.  OpenCode creates one log file per process invocation using
+/// a timestamp-based name, so the file(s) created after the PTY was launched
+/// belong to this session.
+///
+/// OpenCode sometimes spawns a background server subprocess that writes to a
+/// SEPARATE log file roughly 1 s after the parent process starts.  The watcher
+/// calls this function on every tick while `ses_id` is still unknown so it can
+/// switch to that newer server log once it appears.
+///
+/// Returns the file with the highest mtime among all qualifying candidates so
+/// that the server log (newer) wins over the parent log (older).
+#[cfg(test)]
+fn opencode_log_path_after(
+    base: &std::path::Path,
+    spawn_time: std::time::SystemTime,
+) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<_> = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("log"))
+        .filter_map(|p| {
+            let mtime = p.metadata().ok()?.modified().ok()?;
+            if mtime >= spawn_time {
+                Some((p, mtime))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Newest mtime last → next_back() returns the most recently created file.
+    candidates.sort_by_key(|(_, mtime)| *mtime);
+    candidates.into_iter().next_back().map(|(p, _)| p)
+}
+
+/// Find the OpenCode log file for a session by content-searching for the
+/// Wardian session UUID.  The UUID appears in log entries because
+/// `OPENCODE_CONFIG` points to a config file whose path embeds the UUID.
+///
+/// Used for sessions recovered after an app restart (where no live watcher
+/// is running).
+fn opencode_log_path_in(base: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
+    let mut candidates = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .collect::<Vec<_>>();
+
+    candidates.sort();
+    candidates.reverse();
+
+    candidates.into_iter().find(|path| {
+        std::fs::read_to_string(path)
+            .map(|content| content.contains(session_id))
+            .unwrap_or(false)
+    })
+}
+
+/// Return the ordered list of directories where opencode writes its log files.
+/// Tries platform-native data dirs first (Windows: %LOCALAPPDATA%, %APPDATA%),
+/// then the XDG fallback (~/.local/share).
+fn opencode_log_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(d) = dirs::data_local_dir() {
+        dirs.push(d.join("opencode").join("log"));
+    }
+    if let Some(d) = dirs::data_dir() {
+        let p = d.join("opencode").join("log");
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    if let Some(h) = dirs::home_dir() {
+        let p = h.join(".local").join("share").join("opencode").join("log");
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
+/// Extract the real opencode session ID (ses_xxx) from a log file.
+/// Looks for `service=session id=ses_xxx ... created` lines and returns
+/// the last one found (most recently created session in the log).
+pub fn opencode_extract_created_session_id(log_path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(log_path).ok()?;
+    content
+        .lines()
+        .filter(|line| line.contains("service=session") && line.contains("created"))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find(|w| w.starts_with("id=ses_"))
+                .and_then(|w| w.strip_prefix("id="))
+                .map(|id| id.to_string())
+        })
+        .next_back()
+}
+
+/// Derive status and metrics from an opencode log.
+///
+/// Status is determined semantically from `service=session.prompt` markers:
+/// - `exiting loop`  → the prompt loop finished → **Idle**
+/// - `step=N loop`   → the prompt loop is active → **Processing…**
+///
+/// This avoids timestamp comparisons entirely, which would be unreliable
+/// because opencode logs timestamps in local time while `now` is UTC.
+#[cfg(test)]
+fn opencode_metrics_from_log(content: &str, session_id: &str) -> OpenCodeLogMetrics {
+    let mut metrics = OpenCodeLogMetrics::default();
+    // true  = last session.prompt event was "exiting loop" (Idle)
+    // false = last session.prompt event was "step=N loop"  (Processing)
+    let mut last_prompt_exited = false;
+    let mut saw_prompt = false;
+    let mut saw_error = false;
+
+    for line in content.lines() {
+        if !line.contains(session_id) {
+            continue;
+        }
+
+        if metrics.init_timestamp.is_none() {
+            metrics.init_timestamp = line.split_whitespace().nth(1).map(|ts| ts.to_string());
+        }
+
+        if line.contains("service=session.prompt") {
+            if line.contains("exiting loop") {
+                last_prompt_exited = true;
+                saw_prompt = true;
+            } else if line.contains(" step=") {
+                metrics.query_count += 1;
+                last_prompt_exited = false;
+                saw_prompt = true;
+            }
+            continue;
+        }
+
+        if line.starts_with("ERROR ") || line.contains(" ERROR ") {
+            saw_error = true;
+        }
+    }
+
+    metrics.status = if saw_error && !last_prompt_exited {
+        Some("Error".to_string())
+    } else if !saw_prompt {
+        // No prompt activity yet — return None so we don't override a
+        // status set by the PTY reader (e.g. "Pending…" or "Off").
+        if metrics.init_timestamp.is_some() {
+            Some("Idle".to_string())
+        } else {
+            None
+        }
+    } else if last_prompt_exited {
+        Some("Idle".to_string())
+    } else {
+        Some("Processing...".to_string())
+    };
+
+    metrics
+}
+
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     struct AgentSnapshot {
         session_id: String,
         provider: String,
         folder: String,
+        resume_session: Option<String>,
         process_id: Option<u32>,
         query_count: std::sync::Arc<std::sync::Mutex<usize>>,
         init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
         current_status: std::sync::Arc<std::sync::Mutex<String>>,
+        last_output_at: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
         log_path: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     }
 
@@ -2076,10 +2277,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 session_id: sid.clone(),
                 provider: agent.config.provider.clone(),
                 folder: agent.config.folder.clone(),
+                resume_session: agent.config.resume_session.clone(),
                 process_id: agent.process_id,
                 query_count: agent.query_count.clone(),
                 init_timestamp: agent.init_timestamp.clone(),
                 current_status: agent.current_status.clone(),
+                last_output_at: agent.last_output_at.clone(),
                 log_path: agent.log_path.clone(),
             })
             .collect()
@@ -2140,12 +2343,28 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .map(|pid| sys.process(sysinfo::Pid::from_u32(pid)).is_some())
                 .unwrap_or(false);
 
-            let mut q_count = 0;
-            let mut i_ts = None;
+            let mut q_count = *snap.query_count.lock().unwrap();
+            let mut i_ts = snap.init_timestamp.lock().unwrap().clone();
             let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
 
             // Provider-aware log discovery
-            if log_path_lock.is_none() {
+            if snap.provider == "opencode" {
+                let opencode_session_id = snap
+                    .resume_session
+                    .as_deref()
+                    .filter(|value| value.starts_with("ses_"))
+                    .unwrap_or(&snap.session_id);
+                *log_path_lock = Some(opencode_session_diff_path(opencode_session_id));
+                if !log_path_lock.as_ref().is_some_and(|path| path.exists()) {
+                    let log_dirs = opencode_log_dirs();
+                    for dir in &log_dirs {
+                        if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
+                            *log_path_lock = Some(path);
+                            break;
+                        }
+                    }
+                }
+            } else if log_path_lock.is_none() {
                 match snap.provider.as_str() {
                     "codex" => {
                         let agent_home = get_wardian_home()
@@ -2169,22 +2388,6 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 .join("projects")
                                 .join(&project_dir)
                                 .join(format!("{}.jsonl", snap.session_id));
-                            if candidate.exists() {
-                                *log_path_lock = Some(candidate);
-                            }
-                        }
-                    }
-                    "opencode" => {
-                        // OpenCode stores per-session diff snapshots at
-                        // ~/.local/share/opencode/storage/session_diff/<session_id>.json
-                        if let Some(home) = dirs::home_dir() {
-                            let candidate = home
-                                .join(".local")
-                                .join("share")
-                                .join("opencode")
-                                .join("storage")
-                                .join("session_diff")
-                                .join(format!("{}.json", snap.session_id));
                             if candidate.exists() {
                                 *log_path_lock = Some(candidate);
                             }
@@ -2304,9 +2507,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             }
                         }
                         "opencode" => {
-                            // OpenCode runtime status currently comes from live PTY parsing.
-                            // Keep log enrichment disabled until we add a stable session-file
-                            // mapping instead of falling through to Gemini parsing.
+                            // OpenCode status and query count come from PTY events now.
+                            // Keep the discovered storage path for diagnostics only.
                         }
                         _ => {
                             // Gemini logs are a single JSON object with a messages array
@@ -2335,6 +2537,18 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             }
             if let Some(ts) = i_ts {
                 *snap.init_timestamp.lock().unwrap() = Some(ts);
+            }
+
+            if snap.provider == "opencode" {
+                let current_status = snap.current_status.lock().unwrap().clone();
+                let last_output_at = *snap.last_output_at.lock().unwrap();
+                if opencode_should_fallback_to_idle(
+                    &current_status,
+                    last_output_at,
+                    std::time::SystemTime::now(),
+                ) {
+                    *snap.current_status.lock().unwrap() = "Idle".to_string();
+                }
             }
 
             // If the process has terminated, force status to "Off" so the UI
@@ -2476,14 +2690,46 @@ pub async fn kill_all_agents(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
+        claude_permission_hook_matches_session, claude_status_from_log,
         codex_bootstrap_launch_context, finalize_interactive_spawn_args, headless_provider_launch,
+        extract_terminal_titles, opencode_should_fallback_to_idle, opencode_status_from_title,
         interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
-        migrate_codex_bootstrap_home, opencode_attach_args, opencode_interactive_env,
-        opencode_runtime_config_content, strip_flag_value_pairs, strip_standalone_flag,
-        wait_for_opencode_server_ready,
+        migrate_codex_bootstrap_home, opencode_interactive_env, opencode_log_path_after,
+        opencode_log_path_in, opencode_metrics_from_log, opencode_runtime_config_content,
+        strip_flag_value_pairs, strip_standalone_flag,
     };
     use crate::models::AgentConfig;
     use std::path::Path;
+
+    #[test]
+    fn extract_terminal_titles_reads_bel_and_st_sequences() {
+        let chunk = "\u{1b}]0;OpenCode\u{7}x\u{1b}]2;OC | Working\u{1b}\\";
+
+        assert_eq!(
+            extract_terminal_titles(chunk),
+            vec!["OpenCode".to_string(), "OC | Working".to_string()]
+        );
+    }
+
+    #[test]
+    fn opencode_title_maps_to_status() {
+        assert_eq!(opencode_status_from_title("OpenCode"), Some("Idle"));
+        assert_eq!(opencode_status_from_title("OC | Working"), Some("Processing..."));
+        assert_eq!(
+            opencode_status_from_title("OC | Action Required: approve tool"),
+            Some("Action Needed")
+        );
+        assert_eq!(opencode_status_from_title(""), None);
+    }
+
+    #[test]
+    fn opencode_idle_fallback_triggers_after_quiet_period() {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let last = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3);
+
+        assert!(opencode_should_fallback_to_idle("Processing...", Some(last), now));
+        assert!(!opencode_should_fallback_to_idle("Idle", Some(last), now));
+    }
 
     #[test]
     fn codex_bootstrap_launch_context_is_stable_for_same_workspace() {
@@ -2532,13 +2778,110 @@ mod tests {
     }
 
     #[test]
-    fn opencode_interactive_launch_uses_real_workspace_cwd() {
+    fn opencode_interactive_launch_uses_habitat_root() {
         let workspace_cwd = Path::new("D:/Development/Wardian");
         let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
 
         let provider_cwd = interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
 
-        assert_eq!(provider_cwd, workspace_cwd);
+        // OpenCode starts from the habitat root so its project-local skill walk-up
+        // sees habitat/.opencode and habitat/.agents before switching to the real
+        // workspace via --dir.
+        assert_eq!(
+            provider_cwd,
+            Path::new("C:/Users/test/.wardian/agents/ses_test/habitat")
+        );
+    }
+
+    #[test]
+    fn claude_status_from_log_ignores_local_commands_after_idle() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "stop_reason": "end_turn"
+                }
+            }),
+            serde_json::json!({ "type": "system", "subtype": "turn_duration" }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<local-command-caveat>Do not respond.</local-command-caveat>"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<command-name>/model</command-name><command-message>model</command-message>"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<local-command-stdout>Set model to Opus 4.6</local-command-stdout>"
+                }
+            }),
+            serde_json::json!({ "type": "custom-title" }),
+            serde_json::json!({ "type": "file-history-snapshot" }),
+        ];
+
+        assert_eq!(claude_status_from_log(&lines), Some("Idle".to_string()));
+    }
+
+    #[test]
+    fn claude_status_from_log_treats_real_user_prompt_as_processing() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "stop_reason": "end_turn"
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "Please continue." }
+            }),
+        ];
+
+        assert_eq!(
+            claude_status_from_log(&lines),
+            Some("Processing...".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_permission_hook_ignores_other_transcript_sessions() {
+        let event = serde_json::json!({
+            "session_id": "other-session",
+            "transcript_path": "C:\\Users\\tgemi\\.claude\\projects\\D--Development-Wardian\\other-session.jsonl",
+            "tool_name": "Bash"
+        });
+
+        assert!(!claude_permission_hook_matches_session(
+            &event,
+            "expected-session"
+        ));
+    }
+
+    #[test]
+    fn claude_permission_hook_accepts_matching_transcript_session() {
+        let event = serde_json::json!({
+            "session_id": "expected-session",
+            "transcript_path": "C:\\Users\\tgemi\\.claude\\projects\\D--Development-Wardian\\expected-session.jsonl",
+            "tool_name": "Bash"
+        });
+
+        assert!(claude_permission_hook_matches_session(
+            &event,
+            "expected-session"
+        ));
     }
 
     #[test]
@@ -2549,14 +2892,137 @@ mod tests {
         let interactive_cwd =
             interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
 
-        assert_eq!(interactive_cwd, workspace_cwd);
+        assert_eq!(
+            interactive_cwd,
+            Path::new("C:/Users/test/.wardian/agents/ses_test/habitat")
+        );
+    }
+
+    #[test]
+    fn opencode_log_path_finds_newest_matching_log() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_dir = temp.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("create log dir");
+
+        let older = log_dir.join("2026-04-11T210615.log");
+        let newer = log_dir.join("2026-04-11T210616.log");
+        let unrelated = log_dir.join("2026-04-11T210617.log");
+
+        std::fs::write(
+            &older,
+            r#"INFO  2026-04-11T21:06:15 +0ms service=default args=[\"attach\",\"http://127.0.0.1:57079\",\"--session\",\"ses_target\"] opencode"#,
+        )
+        .expect("write older log");
+        std::fs::write(
+            &newer,
+            r#"INFO  2026-04-11T21:06:16 +0ms service=default args=[\"attach\",\"http://127.0.0.1:57079\",\"--session\",\"ses_target\"] opencode"#,
+        )
+        .expect("write newer log");
+        std::fs::write(
+            &unrelated,
+            r#"INFO  2026-04-11T21:06:17 +0ms service=default args=[\"attach\",\"http://127.0.0.1:57079\",\"--session\",\"ses_other\"] opencode"#,
+        )
+        .expect("write unrelated log");
+
+        let found = opencode_log_path_in(&log_dir, "ses_target").expect("matching log path");
+
+        assert_eq!(found, newer);
+    }
+
+    #[test]
+    fn opencode_log_path_after_returns_newest_file_created_after_spawn() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_dir = temp.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("create log dir");
+
+        // Pre-existing log (before spawn — must be ignored).
+        let old_file = log_dir.join("2026-04-12T100000.log");
+        std::fs::write(&old_file, "old session log").expect("write old");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let spawn_time = std::time::SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Parent log — created first after spawn.
+        let parent_log = log_dir.join("2026-04-12T100001.log");
+        std::fs::write(&parent_log, "parent process startup").expect("write parent");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Server log — created ~1 s later; should win because it has higher mtime.
+        let server_log = log_dir.join("2026-04-12T100002.log");
+        std::fs::write(&server_log, "server session events").expect("write server");
+
+        let found = opencode_log_path_after(&log_dir, spawn_time)
+            .expect("should find a log after spawn");
+
+        assert_eq!(
+            found, server_log,
+            "should return the newest (server) log, not the parent log"
+        );
+    }
+
+    #[test]
+    fn opencode_log_path_after_returns_none_when_no_files_after_spawn() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_dir = temp.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("create log dir");
+
+        let file = log_dir.join("2026-04-12T100001.log");
+        std::fs::write(&file, "session started").expect("write");
+
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(opencode_log_path_after(&log_dir, future).is_none());
+    }
+
+    #[test]
+    fn opencode_metrics_from_log_counts_session_prompt_steps() {
+        let content = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:53 +1ms service=llm providerID=opencode sessionID=ses_target stream\n",
+            "INFO  2026-03-30T07:36:02 +0ms service=session.prompt step=1 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:36:04 +0ms service=session.prompt step=0 sessionID=ses_other loop\n"
+        );
+
+        let metrics = opencode_metrics_from_log(content, "ses_target");
+
+        assert_eq!(metrics.query_count, 2);
+    }
+
+    #[test]
+    fn opencode_metrics_from_log_derives_processing_idle_and_error_status() {
+        // Processing: last session.prompt event is "step=N loop" (no exiting yet)
+        let processing = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:53 +1ms service=llm providerID=opencode sessionID=ses_target stream\n"
+        );
+        // Idle: last session.prompt event is "exiting loop"
+        let idle = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:53 +1ms service=llm providerID=opencode sessionID=ses_target stream\n",
+            "INFO  2026-03-30T07:35:56 +0ms service=session.prompt step=1 sessionID=ses_target loop\n",
+            "INFO  2026-03-30T07:35:56 +0ms service=session.prompt sessionID=ses_target exiting loop\n"
+        );
+        // Error: ERROR line with no subsequent "exiting loop"
+        let errored = concat!(
+            "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
+            "ERROR 2026-03-30T07:35:54 +997ms service=llm providerID=opencode sessionID=ses_target error={\"error\":{}} stream error\n"
+        );
+
+        let processing_metrics = opencode_metrics_from_log(processing, "ses_target");
+        let idle_metrics = opencode_metrics_from_log(idle, "ses_target");
+        let errored_metrics = opencode_metrics_from_log(errored, "ses_target");
+
+        assert_eq!(processing_metrics.status, Some("Processing...".to_string()));
+        assert_eq!(idle_metrics.status, Some("Idle".to_string()));
+        assert_eq!(errored_metrics.status, Some("Error".to_string()));
     }
 
     #[test]
     fn opencode_interactive_args_include_dir_for_real_workspace_anchor() {
         let workspace_cwd = Path::new("D:/Development/Wardian");
 
-        let args = interactive_provider_args("opencode", workspace_cwd, Vec::new());
+        let args = interactive_provider_args("opencode", workspace_cwd, workspace_cwd, Vec::new());
 
         assert_eq!(
             args,
@@ -2702,34 +3168,26 @@ mod tests {
             .expect("instructions array");
 
         assert_eq!(instructions.len(), 4);
+
+        // Config JSON must NOT contain skills.paths — OpenCode 1.4.3 does not
+        // expose a skills.paths config key, so Wardian omits it entirely.
+        assert!(
+            parsed.get("skills").is_none(),
+            "skills key must not be present in the config"
+        );
+
         let config_dir = envs
             .iter()
             .find(|(key, _)| key == "OPENCODE_CONFIG_DIR")
             .map(|(_, value)| value)
-            .expect("interactive config dir");
+            .expect("interactive runtime config dir");
+
         assert!(
             std::path::Path::new(config_dir)
                 .join("skills")
                 .join("common-skill")
-                .exists()
-        );
-        assert!(
-            std::path::Path::new(config_dir)
-                .join("skills")
-                .join("class-skill")
-                .exists()
-        );
-        assert!(
-            std::path::Path::new(config_dir)
-                .join("skills")
-                .join("agent-skill")
-                .exists()
-        );
-        assert!(
-            std::path::Path::new(config_dir)
-                .join("skills")
-                .join("user-skill")
-                .exists()
+                .exists(),
+            "OPENCODE_CONFIG_DIR should expose projected skills"
         );
     }
 
@@ -2887,92 +3345,22 @@ mod tests {
     }
 
     #[test]
-    fn opencode_spawn_args_can_include_local_attach_server() {
-        let mut args = vec!["--session".to_string(), "ses_test".to_string()];
-        args.push("--port".to_string());
-        args.push("4111".to_string());
-        args.push("--hostname".to_string());
-        args.push("127.0.0.1".to_string());
-
-        let final_args = interactive_provider_args(
+    fn opencode_interactive_args_append_dir_after_flags() {
+        let args = interactive_provider_args(
             "opencode",
+            Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"),
             Path::new("D:/Development/Wardian"),
-            args,
+            vec!["--session".to_string(), "ses_test".to_string()],
         );
-
-        assert_eq!(
-            final_args,
-            vec![
-                "--session".to_string(),
-                "ses_test".to_string(),
-                "--port".to_string(),
-                "4111".to_string(),
-                "--hostname".to_string(),
-                "127.0.0.1".to_string(),
-                "D:/Development/Wardian".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn opencode_attach_args_use_local_server_and_real_workspace_dir() {
-        let config = AgentConfig {
-            debug: Some(true),
-            resume_session: Some("ses_test".to_string()),
-            opencode_port: Some(4111),
-            ..Default::default()
-        };
-
-        let args =
-            opencode_attach_args(&config, Path::new("D:/Development/Wardian")).expect("args");
 
         assert_eq!(
             args,
             vec![
-                "--print-logs".to_string(),
-                "attach".to_string(),
-                "http://127.0.0.1:4111".to_string(),
                 "--session".to_string(),
                 "ses_test".to_string(),
-                "--dir".to_string(),
-                "D:/Development/Wardian".to_string(),
+                "C:/Users/test/.wardian/agents/ses_test/habitat/workspace".to_string(),
             ]
         );
     }
 
-    #[test]
-    fn opencode_attach_args_require_configured_port() {
-        let config = AgentConfig::default();
-
-        let err = opencode_attach_args(&config, Path::new("D:/Development/Wardian"))
-            .expect_err("missing port should fail early");
-
-        assert_eq!(err, "OpenCode port not configured for interactive session");
-    }
-
-    #[tokio::test]
-    async fn opencode_server_ready_requires_health_endpoint_not_just_open_port() {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
-        let port = listener.local_addr().expect("listener addr").port();
-        let handle = std::thread::spawn(move || {
-            for stream in listener.incoming().take(4) {
-                let Ok(mut stream) = stream else {
-                    continue;
-                };
-                let mut request = [0u8; 512];
-                let _ = std::io::Read::read(&mut stream, &mut request);
-                if String::from_utf8_lossy(&request).contains("GET /global/health") {
-                    let response =
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"healthy\":true}";
-                    let _ = std::io::Write::write_all(&mut stream, response);
-                    break;
-                }
-            }
-        });
-
-        wait_for_opencode_server_ready(port, std::time::Duration::from_secs(2))
-            .await
-            .expect("server should report healthy");
-        handle.join().expect("join thread");
-    }
 }
