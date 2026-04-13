@@ -1,8 +1,10 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { AgentConfig, AgentTelemetry } from "../types";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
 import type { Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
+import { useLayoutStore } from "../store/useLayoutStore";
+import { useGridResize } from "../features/grid/useGridResize";
 
 interface GridViewProps {
   filteredAgents: AgentConfig[];
@@ -69,6 +71,17 @@ export const GridView: React.FC<GridViewProps> = ({
   onPause,
   onRestart,
 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { layout, resetLayout } = useLayoutStore();
+  const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+
+  useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   const [contextMenu, setContextMenu] = useState<{ visible: boolean; x: number; y: number; agentId: string | null }>({
     visible: false, x: 0, y: 0, agentId: null
   });
@@ -88,15 +101,34 @@ export const GridView: React.FC<GridViewProps> = ({
   const hasVisibleMaximizedAgent = maximizedAgents.length > 0;
   const visibleAgents = hasVisibleMaximizedAgent ? maximizedAgents : filteredAgents;
 
+  const isMaximized = !!maximizedAgentId;
+  const isMobile = windowWidth < 1000;
+
+  const gridStyle: React.CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: (isMaximized || isMobile) 
+      ? '1fr' 
+      : layout.column_tracks.map(t => `${t}fr`).join(' '),
+    gridAutoRows: `${layout.row_height}px`,
+    gap: (isMaximized || isMobile) ? '16px' : '8px',
+    background: 'transparent',
+    padding: (isMaximized || isMobile) ? '16px' : '8px',
+    paddingBottom: '200px',
+  };
+
   return (
-    <div className={`flex-1 min-h-full ${hasVisibleMaximizedAgent ? 'relative overflow-hidden' : 'flex gap-2 flex-row flex-wrap content-start pb-[200px]'}`}>
-      {visibleAgents.map((agent: AgentConfig) => {
+    <div 
+      ref={containerRef}
+      style={gridStyle}
+      className={`flex-1 min-h-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
+    >
+      {visibleAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
-        const isMaximized = maximizedAgentId === agentId;
+        const isAgentMaximized = maximizedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
         
-        if (isOff && !isMaximized) return null;
+        if (isOff && !isAgentMaximized) return null;
         
         const metrics = telemetry[agentId];
         const rawTitle = terminalTitles[agentId] || "";
@@ -118,13 +150,13 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg ${isMaximized ? 'absolute inset-0 z-20 rounded-xl border border-wardian-border transition-none' : 'relative transition-all rounded-xl border h-[500px] w-[calc(50%-0.5rem)] min-w-[650px] ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent' : 'border-wardian-border')} ${draggedAgentId === agentId && !isMaximized ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId && !isMaximized ? 'translate-y-[-2px]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'fixed inset-0 z-50 rounded-none border-none transition-none' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
           >
             <div 
               onMouseEnter={() => onMouseEnterCard(agentId)}
               onMouseDown={(e) => { if (e.button === 0) onMouseDown(agentId); }}
-              onClick={(e) => { e.stopPropagation(); if (!isMaximized) onCardClick(e, agentId); }}
-              onContextMenu={(e) => { if (!isMaximized) handleContextMenu(e, agentId); }}
+              onClick={(e) => { e.stopPropagation(); if (!isAgentMaximized) onCardClick(e, agentId); }}
+              onContextMenu={(e) => { if (!isAgentMaximized) handleContextMenu(e, agentId); }}
               className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none flex ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
             >
               <div className="flex items-center gap-3">
@@ -149,7 +181,7 @@ export const GridView: React.FC<GridViewProps> = ({
                 )}
               </div>
               <div className="flex items-center gap-2">
-                 {isMaximized ? (
+                 {isAgentMaximized ? (
                    <button 
                      onClick={(e) => { e.stopPropagation(); onMaximize(null); }}
                      className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
@@ -166,7 +198,7 @@ export const GridView: React.FC<GridViewProps> = ({
                </div>
             </div>
 
-            <div className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text flex-1 relative min-h-[300px] block`}>
+            <div className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text flex-1 relative min-h-[200px] block`}>
               <div 
                 className="absolute inset-4 select-text"
                 onClick={(e) => e.stopPropagation()}
@@ -174,7 +206,7 @@ export const GridView: React.FC<GridViewProps> = ({
                 <AgentTerminal 
                   sessionId={agentId} 
                   provider={agent.provider}
-                  isMaximized={isMaximized}
+                  isMaximized={isAgentMaximized}
                   theme={theme}
                   onTitleChange={(title) => handleTitleChange(agentId, title)} 
                 />
@@ -183,6 +215,49 @@ export const GridView: React.FC<GridViewProps> = ({
           </div>
         );
       })}
+
+      {/* Global Track Resize Overlays (Gutters) */}
+      {!isMaximized && !isMobile && (
+        <>
+          {/* Vertical Gutters (Column Resizing) */}
+          {layout.column_tracks.slice(0, -1).map((_weight, i) => {
+            const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
+            const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
+            return (
+              <div 
+                key={`gutter-h-${i}`}
+                className="absolute top-0 bottom-0 z-30 group/gutter flex justify-center"
+                style={{ 
+                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`, 
+                  width: '12px',
+                  cursor: 'col-resize'
+                }}
+                onMouseDown={(e) => { e.stopPropagation(); startResize('h', i); }}
+              >
+                {/* Visual Line */}
+                <div className="w-[2px] h-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+              </div>
+            );
+          })}
+
+          {/* Horizontal Gutters (Row Resizing) */}
+          {Array.from({ length: Math.ceil(visibleAgents.length / layout.column_tracks.length) - 1 }).map((_, i) => (
+            <div 
+              key={`gutter-v-${i}`}
+              className="absolute left-0 right-0 z-30 group/gutter flex items-center"
+              style={{ 
+                top: `calc(${(i + 1) * layout.row_height}px + ${i * 8}px + 6px)`, 
+                height: '12px',
+                cursor: 'row-resize'
+              }}
+              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * layout.column_tracks.length); }}
+            >
+              {/* Visual Line */}
+              <div className="h-[2px] w-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+            </div>
+          ))}
+        </>
+      )}
 
       {filteredAgents.length === 0 && (
         <div className="col-span-full h-64 flex flex-col items-center justify-center text-muted border-2 border-dashed border-wardian-border rounded-xl w-full">
@@ -205,7 +280,16 @@ export const GridView: React.FC<GridViewProps> = ({
           onAddToList={onAddToList}
           onRemoveFromList={onRemoveFromList}
           onDelete={onDelete}
+          onResetLayout={resetLayout}
           onClose={() => setContextMenu({ ...contextMenu, visible: false })}
+        />
+      )}
+
+      {/* Visual Guide Lines */}
+      {isResizing && guidePos !== null && (
+        <div 
+          className={resizeType === 'h' ? "grid-guide-line-v" : "grid-guide-line-h"}
+          style={resizeType === 'h' ? { left: guidePos } : { top: guidePos }}
         />
       )}
     </div>

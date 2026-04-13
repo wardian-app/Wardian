@@ -52,18 +52,13 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
 }
 
 describe('GridView maximize behavior', () => {
-  it('keeps maximized terminals scoped to the grid container', () => {
-    const { container } = renderGrid('agent-1');
-
-    const root = container.firstElementChild;
-    expect(root?.className).toContain('relative');
+  it('maximized terminals use fixed positioning for full-screen overlay', () => {
+    renderGrid('agent-1');
 
     const card = screen.getByTestId('terminal-agent-1').closest('#agent-card-agent-1');
-    expect(card?.className).toContain('absolute');
+    expect(card?.className).toContain('fixed');
     expect(card?.className).toContain('inset-0');
-    expect(card?.className).not.toContain('fixed');
-    expect(card?.className).not.toContain('h-screen');
-    expect(card?.className).not.toContain('w-screen');
+    expect(card?.className).toContain('z-50');
   });
 
   it('falls back to the filtered grid when the maximized agent is no longer visible', () => {
@@ -71,8 +66,8 @@ describe('GridView maximize behavior', () => {
     const { container } = renderGrid('agent-1', visibleSubset);
 
     const root = container.firstElementChild;
-    expect(root?.className).toContain('flex gap-2');
-    expect(root?.className).not.toContain('relative overflow-hidden');
+    // New grid implementation uses grid display
+    expect((root as HTMLElement).style.display).toBe('grid');
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
 });

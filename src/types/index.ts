@@ -61,6 +61,11 @@ export interface AgentStatusUpdate {
     current_status: string;
 }
 
+export interface GridLayout {
+    column_tracks: number[]; // Relative weights (e.g. [1, 1] for 50/50)
+    row_height: number;      // Fixed height for all rows in pixels
+}
+
 export interface AgentTelemetry {
     session_id: string;
     cpu_usage: number;

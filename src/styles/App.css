@@ -353,6 +353,18 @@
     transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Snap Guide Lines */
+.grid-guide-line-v {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  border-left: 1px dashed var(--color-wardian-accent);
+  opacity: 0.2;
+  pointer-events: none;
+  z-index: 100;
+}
+
 /* Global Scrollbar Styling */
 ::-webkit-scrollbar {
   width: 8px;
