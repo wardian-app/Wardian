@@ -6,6 +6,8 @@ export interface BlockField {
   type: 'text' | 'textarea' | 'select' | 'code' | 'schema';
   options?: string[];
   placeholder?: string;
+  default?: any;
+  required?: boolean;
 }
 
 export interface BlockPorts {
@@ -45,9 +47,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     inputs: 'Provided Payload', 
     outputs: 'Trigger Context', 
     ports: { inputs: 0, outputs: ['default'] },
-    fields: [
-      { name: 'input_schema', label: 'Input Schema', type: 'schema', placeholder: '{ "type": "object" }' }
-    ]
+    fields: []
   },
   { 
     type: 'trigger', 

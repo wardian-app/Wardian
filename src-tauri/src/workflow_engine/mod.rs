@@ -1039,6 +1039,7 @@ mod tests {
                     "time": "09:00",
                     "status": status,
                 }),
+                parameter_schema: None,
                 dependencies: None,
                 position: None,
             }],
@@ -1257,10 +1258,46 @@ pub async fn run_workflow(
                 break;
             }
 
-            let node = match wf.nodes.iter().find(|n| n.id == current_node_id) {
-                Some(n) => n,
+            let mut node = match wf.nodes.iter().find(|n| n.id == current_node_id) {
+                Some(n) => n.clone(),
                 None => continue,
             };
+
+            // --- PARAMETER SCHEMA MERGE & VALIDATION ---
+            let mut merged_config = match node.config.clone() {
+                Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            };
+
+            let mut node_validation_error: Option<String> = None;
+            if let Some(Value::Object(schema_props)) = &node.parameter_schema {
+                for (param_name, param_def) in schema_props {
+                    if let Some(def_obj) = param_def.as_object() {
+                        let is_required = def_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                        
+                        let is_missing = match merged_config.get(param_name) {
+                            None | Some(Value::Null) => true,
+                            Some(Value::String(s)) if s.is_empty() => true,
+                            _ => false,
+                        };
+
+                        if is_missing {
+                            if let Some(default_val) = def_obj.get("default") {
+                                let final_val = if let Some(s) = default_val.as_str() {
+                                    Value::String(interpolate_string(s, &registry))
+                                } else {
+                                    default_val.clone()
+                                };
+                                merged_config.insert(param_name.clone(), final_val);
+                            } else if is_required {
+                                node_validation_error = Some(format!("Missing required parameter: {}", param_name));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            node.config = Value::Object(merged_config);
 
             // --- 2A. Transactional Consumption Logic ---
             let mut triggered_by_dep = None;
@@ -1337,7 +1374,9 @@ pub async fn run_workflow(
             // --- NODE LOGIC ---
             let mut result_ports = vec!["default".to_string()];
             let mut output_payload = Value::Null;
-            let mut node_error = None;
+            let mut node_error = node_validation_error;
+
+            if node_error.is_none() {
 
             match node.r#type.as_str() {
                 "trigger" => {
@@ -2029,6 +2068,8 @@ pub async fn run_workflow(
                     output_payload = serde_json::json!({ "status": "unknown_type" });
                 }
             }
+            
+            } // end if node_error.is_none()
 
             // Inject fired_ports into output for telemetry
             if !output_payload.is_object() {

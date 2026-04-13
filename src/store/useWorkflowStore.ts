@@ -116,6 +116,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         data: { 
           label: node.name || node.id, 
           config: node.config,
+          parameter_schema: node.parameter_schema,
           type: node.type,
           blockName: blockDef?.name,
           inputs: blockDef?.inputs || 'None',

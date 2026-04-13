@@ -193,6 +193,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         type: (n.type || 'agent') as WorkflowNodeDefinition['type'],
         name: typeof n.data.label === 'string' ? n.data.label : n.id,
         config: existingConfig,
+        parameter_schema: typeof n.data.parameter_schema === 'object' && n.data.parameter_schema !== null ? n.data.parameter_schema : undefined,
         position: n.position,
         dependencies: edges
           .filter(e => e.target === n.id)
@@ -297,8 +298,10 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   const addNode = (block: BlockDefinition) => {
     const id = getNextNodeId(block.type);
     
-    // Initialize config with defaults
+    // Initialize config and parameter_schema with defaults
     const config: Record<string, any> = {};
+    const parameter_schema: Record<string, any> = {};
+
     if (block.type === 'agent') {
       config.session_type = 'persistent';
       config.output_format = 'text';
@@ -313,6 +316,19 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       config.interval = '5';
     }
 
+    const allFields = [...(block.fields || []), ...(block.advancedFields || [])];
+    allFields.forEach(f => {
+      if (f.default !== undefined && config[f.name] === undefined) {
+        config[f.name] = f.default;
+      }
+      parameter_schema[f.name] = {
+        title: f.label,
+        type: f.type,
+        default: config[f.name] !== undefined ? config[f.name] : f.default,
+        required: f.required !== undefined ? f.required : true,
+      };
+    });
+
     const newNode = {
       id,
       type: block.type,
@@ -323,7 +339,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         blockName: block.name,
         inputs: block.inputs,
         outputs: block.outputs,
-        config
+        config,
+        parameter_schema
       },
     };
     setNodes([...nodes, newNode]);
@@ -809,6 +826,22 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   </>
                 );
               })()}
+
+              <div className="pt-8 border-t border-wardian-border space-y-6">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em]">Parameter Schema</h4>
+                </div>
+                <p className="text-[10px] text-muted-neutral">Define required parameters and default values for this node.</p>
+                <SchemaEditor 
+                  value={selectedNode?.data.parameter_schema ? JSON.stringify((selectedNode.data.parameter_schema as any)?.properties || selectedNode.data.parameter_schema) : '{}'}
+                  nodeId={selectedNodeId!}
+                  onChange={(newVal) => {
+                    const parsed = (() => { try { return JSON.parse(newVal); } catch { return {}; } })();
+                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, parameter_schema: parsed } } : n);
+                    setNodes(newNodes);
+                  }}
+                />
+              </div>
             </div>
 
             {/* Variable Assistant */}

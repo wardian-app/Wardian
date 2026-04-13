@@ -19,6 +19,7 @@ pub struct WorkflowNode {
     pub r#type: String,
     pub name: Option<String>,
     pub config: serde_json::Value,
+    pub parameter_schema: Option<serde_json::Value>,
     pub dependencies: Option<Vec<NodeDependency>>,
     pub position: Option<NodePosition>,
 }

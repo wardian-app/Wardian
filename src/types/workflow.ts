@@ -25,6 +25,7 @@ export interface WorkflowNode {
   type: NodeType;
   name?: string;
   config: Record<string, any>;
+  parameter_schema?: Record<string, any>;
   dependencies?: NodeDependency[];
   // For UI state tracking
   position?: { x: number; y: number };

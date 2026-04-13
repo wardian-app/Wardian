@@ -3,10 +3,6 @@ import { RenderableInput } from '../../components/RenderableInput';
 import type { WorkflowDefinition } from '../../types/workflow';
 import { getWorkflowRoleTargets } from './workflowLaunch';
 
-/**
- * Inspects a workflow for a Manual Trigger node with an input_schema.
- * Returns the schema info if the trigger has defined input properties, or null.
- */
 export function getManualTriggerSchema(
   workflow: WorkflowDefinition
 ): { nodeId: string; schema: any } | null {
@@ -15,18 +11,10 @@ export function getManualTriggerSchema(
   );
   if (!trigger) return null;
 
-  const schemaStr = trigger.config?.input_schema;
-  if (!schemaStr) return null;
-
-  try {
-    const schema = JSON.parse(schemaStr);
-    const properties = schema.properties || (schema.type === 'object' ? {} : null);
-    if (properties && Object.keys(properties).length > 0) {
-      return { nodeId: trigger.id, schema };
-    }
-  } catch {
-    // Invalid JSON schema
+  if (trigger.parameter_schema && typeof trigger.parameter_schema === 'object') {
+    return { nodeId: trigger.id, schema: { properties: trigger.parameter_schema } };
   }
+
   return null;
 }
 
@@ -199,10 +187,15 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
                   <span className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.15em]">Input Parameters</span>
                 </div>
               )}
-              {Object.entries(properties).map(([key, prop]: [string, any]) => (
+              {Object.entries(properties).map(([key, prop]: [string, any]) => {
+                const isRequired = prop.required !== false;
+                return (
                 <div key={key} className="flex flex-col gap-2">
                   <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
+                    <div className="flex items-center gap-1">
+                      <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
+                      {isRequired && <span className="text-[11px] text-[var(--color-wardian-error)] font-bold">*</span>}
+                    </div>
                     <div className="flex items-center gap-1.5 opacity-60">
                       <span className="text-[9px] font-mono text-muted-neutral bg-white/5 px-1.5 py-0.5 rounded border border-white/10">{prop.type || 'string'}</span>
                     </div>
@@ -219,7 +212,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
                   </div>
                   {prop.description && <p className="text-[9px] text-muted-neutral/60 italic leading-snug">{prop.description}</p>}
                 </div>
-              ))}
+              )})}
             </div>
           )}
         </div>
