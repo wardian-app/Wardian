@@ -2725,7 +2725,7 @@ mod tests {
     #[test]
     fn opencode_idle_fallback_triggers_after_quiet_period() {
         let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
-        let last = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(6);
+        let last = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3);
 
         assert!(opencode_should_fallback_to_idle("Processing...", Some(last), now));
         assert!(!opencode_should_fallback_to_idle("Idle", Some(last), now));
