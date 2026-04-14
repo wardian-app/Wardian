@@ -6,13 +6,25 @@ import { getWorkflowRoleTargets } from './workflowLaunch';
 export function getManualTriggerSchema(
   workflow: WorkflowDefinition
 ): { nodeId: string; schema: any } | null {
-  const trigger = workflow.nodes.find(
-    (n) => n.type === 'trigger' && n.name === 'Manual Trigger'
-  );
+  const trigger = workflow.nodes.find((n) => n.type === 'trigger');
   if (!trigger) return null;
 
-  if (trigger.parameter_schema && typeof trigger.parameter_schema === 'object') {
+  if (trigger.parameter_schema && typeof trigger.parameter_schema === 'object' && Object.keys(trigger.parameter_schema).length > 0) {
     return { nodeId: trigger.id, schema: { properties: trigger.parameter_schema } };
+  }
+
+  // Fallback for legacy workflows
+  const schemaStr = trigger.config?.input_schema;
+  if (schemaStr) {
+    try {
+      const schema = JSON.parse(schemaStr);
+      const properties = schema.properties || (schema.type === 'object' ? {} : null);
+      if (properties && Object.keys(properties).length > 0) {
+        return { nodeId: trigger.id, schema };
+      }
+    } catch {
+      // Invalid JSON schema
+    }
   }
 
   return null;
