@@ -26,7 +26,7 @@ describe('ActiveMonitoring scheduled tasks', () => {
       id: 'sched-1',
       workflow_id: 'wf-1',
       workflow_name: 'Morning Sync',
-      schedule: { schedule_type: 'daily', value: '09:00', active: true },
+      schedule: { schedule_type: 'daily', time_of_day: '09:00', end_condition: 'never', repeat_every: 1, occurrence_count: 0, active: true },
       role_mappings: { analyst: 'agent-1' },
       description: 'Daily at 09:00',
       next_run_epoch_ms: Date.now() + 60_000,

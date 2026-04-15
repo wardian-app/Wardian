@@ -1,5 +1,5 @@
 use crate::manager::log_debug;
-use crate::workflow_engine::{get_workflows_dir, list_workflows};
+use crate::workflow_engine::{get_workflows_dir, get_scheduled_runs_path, list_workflows};
 use std::collections::HashMap;
 
 fn synthesize_role_name(base: &str, node_id: &str, existing: &HashMap<String, String>) -> String {
@@ -107,5 +107,143 @@ pub fn migrate_workflows_if_needed() {
                 ));
             }
         }
+    }
+
+    // Migrate scheduled_runs.json from old format
+    migrate_scheduled_runs_if_needed();
+}
+
+/// Migrates `scheduled_runs.json` from old flat `{ schedule_type, value, active }`
+/// to the new rich ScheduleDefinition format.
+fn migrate_scheduled_runs_if_needed() {
+    let path = match get_scheduled_runs_path() {
+        Some(p) => p,
+        None => return,
+    };
+
+    if !path.exists() {
+        return;
+    }
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let runs: Vec<serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    // Check if migration is needed: old format has "value" field in schedule
+    let needs_migration = runs.iter().any(|run| {
+        run.get("schedule")
+            .and_then(|s| s.get("value"))
+            .is_some()
+    });
+
+    if !needs_migration {
+        return;
+    }
+
+    let migrated: Vec<serde_json::Value> = runs
+        .into_iter()
+        .map(|mut run| {
+            if let Some(schedule) = run.get("schedule").cloned() {
+                if schedule.get("value").is_some() {
+                    let old_type = schedule
+                        .get("schedule_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let old_value = schedule
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let active = schedule
+                        .get("active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+
+                    let new_schedule = match old_type {
+                        "minutes" => {
+                            let mins: u32 = old_value.parse().unwrap_or(5);
+                            serde_json::json!({
+                                "schedule_type": "interval",
+                                "interval_minutes": mins,
+                                "end_condition": "never",
+                                "repeat_every": 1,
+                                "occurrence_count": 0,
+                                "active": active
+                            })
+                        }
+                        "hours" => {
+                            let hours: u32 = old_value.parse().unwrap_or(1);
+                            serde_json::json!({
+                                "schedule_type": "interval",
+                                "interval_minutes": hours * 60,
+                                "end_condition": "never",
+                                "repeat_every": 1,
+                                "occurrence_count": 0,
+                                "active": active
+                            })
+                        }
+                        "daily" => {
+                            serde_json::json!({
+                                "schedule_type": "daily",
+                                "time_of_day": old_value,
+                                "end_condition": "never",
+                                "repeat_every": 1,
+                                "occurrence_count": 0,
+                                "active": active
+                            })
+                        }
+                        "weekly" => {
+                            // old format: "Mon,Wed@09:00"
+                            let parts: Vec<&str> = old_value.split('@').collect();
+                            let days: Vec<String> = if parts.len() >= 1 {
+                                parts[0].split(',').map(|s| s.trim().to_string()).collect()
+                            } else {
+                                vec![]
+                            };
+                            let time = if parts.len() >= 2 {
+                                parts[1].to_string()
+                            } else {
+                                "00:00".to_string()
+                            };
+                            serde_json::json!({
+                                "schedule_type": "weekly",
+                                "days_of_week": days,
+                                "time_of_day": time,
+                                "repeat_every": 1,
+                                "end_condition": "never",
+                                "occurrence_count": 0,
+                                "active": active
+                            })
+                        }
+                        "one_time" => {
+                            serde_json::json!({
+                                "schedule_type": "one_time",
+                                "run_at": old_value,
+                                "end_condition": "never",
+                                "repeat_every": 1,
+                                "occurrence_count": 0,
+                                "active": active
+                            })
+                        }
+                        _ => schedule,
+                    };
+
+                    if let Some(obj) = run.as_object_mut() {
+                        obj.insert("schedule".to_string(), new_schedule);
+                    }
+                }
+            }
+            run
+        })
+        .collect();
+
+    if let Ok(json) = serde_json::to_string_pretty(&migrated) {
+        let _ = std::fs::write(&path, json);
+        log_debug("[Wardian] Migrated scheduled_runs.json to new ScheduleDefinition format");
     }
 }

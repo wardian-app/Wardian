@@ -3,7 +3,7 @@ import { NodeType } from '../../types/workflow';
 export interface BlockField {
   name: string;
   label: string;
-  type: 'text' | 'textarea' | 'select' | 'code' | 'schema';
+  type: 'text' | 'textarea' | 'select' | 'code' | 'schema' | 'schedule';
   options?: string[];
   placeholder?: string;
   default?: any;
@@ -72,11 +72,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     outputs: 'Trigger Context',
     ports: { inputs: 0, outputs: ['default'] },
     fields: [
-      { name: 'schedule_type', label: 'Frequency', type: 'select', options: ['Minutes', 'Hours', 'Daily', 'Weekly', 'One-Time'], default: 'Minutes', required: true },
-      { name: 'interval', label: 'Interval Value', type: 'text', placeholder: '5', default: '5', required: true },
-      { name: 'time', label: 'Time', type: 'text', placeholder: '09:00' },
-      { name: 'days', label: 'Days', type: 'text', placeholder: 'Mon,Tue,Wed' },
-      { name: 'datetime', label: 'Date & Time', type: 'text', placeholder: '2026-03-27T09:00' }
+      { name: 'schedule', label: 'Schedule', type: 'schedule', default: { schedule_type: 'interval', interval_minutes: 60, end_condition: 'never', repeat_every: 1, active: true } }
     ]
   },
   

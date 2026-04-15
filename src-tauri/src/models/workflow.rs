@@ -44,12 +44,46 @@ pub struct WorkflowDefinition {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduleDefinition {
-    /// "one_time" | "minutes" | "hours" | "daily" | "weekly"
+    /// "interval" | "daily" | "weekly" | "monthly" | "specific_dates" | "one_time"
     pub schedule_type: String,
-    /// ISO8601 for one_time, interval number for minutes/hours, HH:MM for daily, "Mon,Wed@09:00" for weekly
-    pub value: String,
+    /// For interval: number of minutes between runs
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
+    /// HH:MM in local time (used by daily, weekly, monthly, specific_dates)
+    #[serde(default)]
+    pub time_of_day: Option<String>,
+    /// For weekly: which days (e.g. ["Mon","Tue","Fri"])
+    #[serde(default)]
+    pub days_of_week: Option<Vec<String>>,
+    /// For weekly: repeat every N weeks (default 1)
+    #[serde(default = "default_repeat_every")]
+    pub repeat_every: u32,
+    /// For monthly: which day(s) of the month (e.g. [1, 15])
+    #[serde(default)]
+    pub days_of_month: Option<Vec<u32>>,
+    /// For specific_dates: list of ISO date strings ["2026-05-01", "2026-06-15"]
+    #[serde(default)]
+    pub specific_dates: Option<Vec<String>>,
+    /// ISO8601 datetime for one_time schedules
+    #[serde(default)]
+    pub run_at: Option<String>,
+    /// End condition: "never" | "on_date" | "after_occurrences"
+    #[serde(default = "default_end_condition")]
+    pub end_condition: String,
+    /// ISO date (YYYY-MM-DD) for end_condition = "on_date"
+    #[serde(default)]
+    pub end_date: Option<String>,
+    /// Count for end_condition = "after_occurrences"
+    #[serde(default)]
+    pub max_occurrences: Option<u32>,
+    /// How many times this schedule has fired (for occurrence tracking)
+    #[serde(default)]
+    pub occurrence_count: u32,
     pub active: bool,
 }
+
+fn default_repeat_every() -> u32 { 1 }
+fn default_end_condition() -> String { "never".to_string() }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduledRun {

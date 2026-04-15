@@ -16,6 +16,7 @@ import { WorkflowNode } from '../features/workflows/WorkflowNode';
 import { BLOCK_LIBRARY, BlockDefinition } from '../features/workflows/blockLibrary';
 import { SchemaEditor } from '../components/SchemaEditor';
 import { RenderableInput } from '../components/RenderableInput';
+import { ScheduleEditor } from '../features/workflows/ScheduleEditor';
 import { VariableAssistant } from '../features/workflows/VariableAssistant';
 import { RunPayloadModal, getManualTriggerSchema } from '../features/workflows/RunPayloadModal';
 import type { WorkflowDefinition, WorkflowNode as WorkflowNodeDefinition } from '../types/workflow';
@@ -239,7 +240,43 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     }
 
     if (kind === 'scheduled') {
-      const scheduledRun = buildScheduledRunFromWorkflow(configuredWorkflow);
+      let workflowForSchedule = configuredWorkflow;
+      if (payload?.schedule) {
+        workflowForSchedule = {
+          ...configuredWorkflow,
+          nodes: configuredWorkflow.nodes.map(n => {
+            if (n.type === 'trigger' && n.name === 'Scheduled Trigger') {
+              return { ...n, config: { ...n.config, schedule: { ...n.config?.schedule, ...payload.schedule } } };
+            }
+            return n;
+          }),
+        };
+        // Persist the updated schedule into the saved workflow
+        await saveWorkflow(workflowForSchedule);
+        
+        // Also update the local state so the canvas reflects the schedule change immediately
+        const updatedNodes = nodes.map(n => {
+          if (n.data?.type === 'trigger' && (n.data?.label === 'Scheduled Trigger' || n.data?.blockName === 'Scheduled Trigger')) {
+            return {
+              ...n,
+              data: {
+                ...n.data,
+                config: {
+                  ...(n.data.config as Record<string, any> || {}),
+                  schedule: {
+                    ...((n.data.config as Record<string, any> || {})?.schedule || {}),
+                    ...payload.schedule
+                  }
+                }
+              }
+            };
+          }
+          return n;
+        });
+        setNodes(updatedNodes as any);
+      }
+
+      const scheduledRun = buildScheduledRunFromWorkflow(workflowForSchedule);
       if (scheduledRun) {
         await createScheduledRun(scheduledRun);
       }
@@ -745,14 +782,19 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     if (field.name === 'json_schema' && outputFormat !== 'json') return null;
                   }
 
-                  // Conditional visibility for Schedule fields
-                  if (selectedNode?.data.blockName === 'Scheduled Trigger') {
-                    const st = (selectedNode?.data.config as any)?.schedule_type || 'Minutes';
-                    if (st === 'Minutes' && ['time', 'days', 'datetime'].includes(field.name)) return null;
-                    if (st === 'Hours' && ['time', 'days', 'datetime'].includes(field.name)) return null;
-                    if (st === 'Daily' && ['interval', 'days', 'datetime'].includes(field.name)) return null;
-                    if (st === 'Weekly' && ['interval', 'datetime'].includes(field.name)) return null;
-                    if (st === 'One-Time' && ['interval', 'time', 'days'].includes(field.name)) return null;
+                  // Schedule editor field
+                  if (field.type === 'schedule') {
+                    const schedVal = (selectedNode?.data.config as any)?.[field.name] || field.default || {};
+                    return (
+                      <div key={field.name} className="flex flex-col gap-2">
+                        <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] tracking-wide">{field.label}</label>
+                        <ScheduleEditor
+                          value={schedVal}
+                          onChange={(newVal) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, newVal)}
+                          compact
+                        />
+                      </div>
+                    );
                   }
 
                   // Conditional visibility for Loop fields

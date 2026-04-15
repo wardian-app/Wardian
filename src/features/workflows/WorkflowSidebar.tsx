@@ -70,7 +70,23 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflow
     });
 
     if (kind === 'scheduled') {
-      const scheduledRun = buildScheduledRunFromWorkflow(configuredWorkflow);
+      // If the modal provided a schedule config, merge it into the trigger node
+      let workflowForSchedule = configuredWorkflow;
+      if (payload?.schedule) {
+        workflowForSchedule = {
+          ...configuredWorkflow,
+          nodes: configuredWorkflow.nodes.map(n => {
+            if (n.type === 'trigger' && n.name === 'Scheduled Trigger') {
+              return { ...n, config: { ...n.config, schedule: { ...n.config?.schedule, ...payload.schedule } } };
+            }
+            return n;
+          }),
+        };
+        // Persist the updated schedule into the saved workflow
+        await saveWorkflow(workflowForSchedule);
+      }
+
+      const scheduledRun = buildScheduledRunFromWorkflow(workflowForSchedule);
       if (!scheduledRun) {
         return;
       }

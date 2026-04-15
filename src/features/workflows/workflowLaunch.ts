@@ -83,7 +83,10 @@ export function getWorkflowRoleTargets(workflow: WorkflowDefinition): WorkflowRo
 }
 
 export function workflowNeedsRunConfig(workflow: WorkflowDefinition, hasManualSchema: boolean): boolean {
-  return hasManualSchema || getWorkflowRoleTargets(workflow).length > 0;
+  const hasSchedule = workflow.nodes.some(
+    n => n.type === 'trigger' && n.name === 'Scheduled Trigger'
+  );
+  return hasManualSchema || getWorkflowRoleTargets(workflow).length > 0 || hasSchedule;
 }
 
 export function setWorkflowTriggerStatus(workflow: WorkflowDefinition, status: 'active' | 'off'): WorkflowDefinition {
@@ -101,20 +104,34 @@ export function setWorkflowTriggerStatus(workflow: WorkflowDefinition, status: '
   };
 }
 
-function describeSchedule(scheduleType: string, value: string, interval: string, time: string, days: string, datetime: string): string {
-  switch (scheduleType) {
-    case 'Minutes':
-      return `Every ${interval}m`;
-    case 'Hours':
-      return `Every ${interval}h`;
-    case 'Daily':
-      return `Daily at ${time}`;
-    case 'Weekly':
-      return `${days} at ${time}`;
-    case 'One-Time':
-      return `Once at ${datetime}`;
+function describeSchedule(sched: any): string {
+  if (!sched || !sched.schedule_type) return 'Unknown schedule';
+  switch (sched.schedule_type) {
+    case 'interval': {
+      const mins = sched.interval_minutes || 0;
+      return mins >= 60 && mins % 60 === 0 ? `Every ${mins / 60}h` : `Every ${mins}m`;
+    }
+    case 'daily':
+      return `Daily at ${sched.time_of_day || '00:00'}`;
+    case 'weekly': {
+      const days = (sched.days_of_week || []).join(', ');
+      const time = sched.time_of_day || '00:00';
+      return sched.repeat_every > 1
+        ? `Every ${sched.repeat_every} weeks on ${days} at ${time}`
+        : `${days} at ${time}`;
+    }
+    case 'monthly': {
+      const mDays = (sched.days_of_month || []).join(', ');
+      return `Monthly on day(s) ${mDays} at ${sched.time_of_day || '00:00'}`;
+    }
+    case 'specific_dates': {
+      const count = (sched.specific_dates || []).length;
+      return `${count} specific date(s) at ${sched.time_of_day || '00:00'}`;
+    }
+    case 'one_time':
+      return `Once at ${sched.run_at || '?'}`;
     default:
-      return value;
+      return sched.schedule_type;
   }
 }
 
@@ -133,31 +150,56 @@ export function buildScheduledRunFromWorkflow(workflow: WorkflowDefinition): Sch
     return null;
   }
 
-  const scheduleType = typeof trigger.config?.schedule_type === 'string' ? trigger.config.schedule_type : '';
-  const interval = typeof trigger.config?.interval === 'string' ? trigger.config.interval : '';
-  const time = typeof trigger.config?.time === 'string' ? trigger.config.time : '00:00';
-  const days = typeof trigger.config?.days === 'string' ? trigger.config.days : '';
-  const datetime = typeof trigger.config?.datetime === 'string' ? trigger.config.datetime : '';
+  // Read nested schedule object from config
+  const schedule = trigger.config?.schedule;
+  if (!schedule || !schedule.schedule_type) {
+    // Legacy fallback: convert old flat config keys
+    const scheduleType = typeof trigger.config?.schedule_type === 'string' ? trigger.config.schedule_type : '';
+    const interval = typeof trigger.config?.interval === 'string' ? trigger.config.interval : '';
+    const time = typeof trigger.config?.time === 'string' ? trigger.config.time : '00:00';
+    const days = typeof trigger.config?.days === 'string' ? trigger.config.days : '';
+    const datetime = typeof trigger.config?.datetime === 'string' ? trigger.config.datetime : '';
 
-  const mapped: { schedule_type: 'one_time' | 'minutes' | 'hours' | 'daily' | 'weekly'; value: string } | null = (() => {
-    switch (scheduleType) {
-      case 'Minutes':
-        return { schedule_type: 'minutes', value: interval };
-      case 'Hours':
-        return { schedule_type: 'hours', value: interval };
-      case 'Daily':
-        return { schedule_type: 'daily', value: time };
-      case 'Weekly':
-        return { schedule_type: 'weekly', value: `${days}@${time}` };
-      case 'One-Time':
-        return { schedule_type: 'one_time', value: datetime };
-      default:
-        return null;
-    }
-  })();
+    type ScheduleType = "interval" | "daily" | "weekly" | "monthly" | "specific_dates" | "one_time";
 
-  if (!mapped) {
-    return null;
+    const mapped: { schedule_type: ScheduleType; interval_minutes?: number; time_of_day?: string; days_of_week?: string[]; run_at?: string } | null = (() => {
+      switch (scheduleType) {
+        case 'Minutes':
+          return { schedule_type: 'interval' as ScheduleType, interval_minutes: parseInt(interval) || 5 };
+        case 'Hours':
+          return { schedule_type: 'interval' as ScheduleType, interval_minutes: (parseInt(interval) || 1) * 60 };
+        case 'Daily':
+          return { schedule_type: 'daily' as ScheduleType, time_of_day: time };
+        case 'Weekly':
+          return { schedule_type: 'weekly' as ScheduleType, time_of_day: time, days_of_week: days.split(',').map(s => s.trim()) };
+        case 'One-Time':
+          return { schedule_type: 'one_time' as ScheduleType, run_at: datetime };
+        default:
+          return null;
+      }
+    })();
+
+    if (!mapped) return null;
+
+    const legacySchedule = {
+      ...mapped,
+      repeat_every: 1,
+      end_condition: 'never' as const,
+      occurrence_count: 0,
+      active: true,
+    };
+
+    return {
+      id: createScheduledRunInstanceId(normalized.id, trigger.id),
+      workflow_id: normalized.id,
+      workflow_name: normalized.name,
+      schedule: legacySchedule,
+      role_mappings: { ...(normalized.role_mappings || {}) },
+      description: describeSchedule(legacySchedule),
+      next_run_epoch_ms: null,
+      paused_remaining_ms: null,
+      is_paused: false,
+    };
   }
 
   return {
@@ -165,12 +207,11 @@ export function buildScheduledRunFromWorkflow(workflow: WorkflowDefinition): Sch
     workflow_id: normalized.id,
     workflow_name: normalized.name,
     schedule: {
-      schedule_type: mapped.schedule_type,
-      value: mapped.value,
-      active: true,
+      ...schedule,
+      active: schedule.active !== false,
     },
     role_mappings: { ...(normalized.role_mappings || {}) },
-    description: describeSchedule(scheduleType, mapped.value, interval, time, days, datetime),
+    description: describeSchedule(schedule),
     next_run_epoch_ms: null,
     paused_remaining_ms: null,
     is_paused: false,
