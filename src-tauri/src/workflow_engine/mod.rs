@@ -870,7 +870,7 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                             if repeat_weeks > 1 {
                                 let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 3).unwrap(); // a known Monday in the past
                                 let weeks_since = (candidate_date - epoch).num_weeks();
-                                if weeks_since.rem_euclid(repeat_weeks as i64) != 0 {
+                                if weeks_since.rem_euclid(repeat_weeks) != 0 {
                                     continue;
                                 }
                             }
