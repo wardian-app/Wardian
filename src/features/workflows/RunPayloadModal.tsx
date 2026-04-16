@@ -7,7 +7,7 @@ import { getWorkflowRoleTargets } from './workflowLaunch';
 export function getManualTriggerSchema(
   workflow: WorkflowDefinition
 ): { nodeId: string; schema: any } | null {
-  const trigger = workflow.nodes.find((n) => n.type === 'trigger');
+  const trigger = workflow.nodes.find((n) => n.type === 'trigger' && n.name === 'Manual Trigger');
   if (!trigger) return null;
 
   if (trigger.parameter_schema && typeof trigger.parameter_schema === 'object' && Object.keys(trigger.parameter_schema).length > 0) {

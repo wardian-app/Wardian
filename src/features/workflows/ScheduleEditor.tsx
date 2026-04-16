@@ -158,6 +158,8 @@ export const ScheduleEditor: React.FC<ScheduleEditorProps> = ({ value, onChange,
                         ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] border-[var(--color-wardian-accent)]'
                         : 'bg-transparent text-muted-neutral border-wardian-border hover:border-[var(--color-wardian-accent)]/50'
                     }`}
+                    aria-label={key}
+                    aria-pressed={active}
                   >
                     {label}
                   </button>

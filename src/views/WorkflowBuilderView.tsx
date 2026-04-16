@@ -362,7 +362,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         title: f.label,
         type: f.type,
         default: config[f.name] !== undefined ? config[f.name] : f.default,
-        required: f.required !== undefined ? f.required : true,
+        required: f.required === true,
       };
     });
 
@@ -879,7 +879,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   nodeId={selectedNodeId!}
                   onChange={(newVal) => {
                     const parsed = (() => { try { return JSON.parse(newVal); } catch { return {}; } })();
-                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, parameter_schema: parsed } } : n);
+                    const schemaToSave = parsed.properties || parsed;
+                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, parameter_schema: schemaToSave } } : n);
                     setNodes(newNodes);
                   }}
                 />

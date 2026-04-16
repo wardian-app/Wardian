@@ -353,9 +353,12 @@ fn sync_scheduled_runs_for_workflow(
                 && run.schedule.time_of_day == schedule.time_of_day
                 && run.schedule.days_of_week == schedule.days_of_week
                 && run.schedule.repeat_every == schedule.repeat_every
-                && run.schedule.days_of_month == schedule.days_of_month
-                && run.schedule.specific_dates == schedule.specific_dates
-                && run.schedule.run_at == schedule.run_at
+                        && run.schedule.days_of_month == schedule.days_of_month
+                        && run.schedule.specific_dates == schedule.specific_dates
+                        && run.schedule.run_at == schedule.run_at
+                        && run.schedule.end_condition == schedule.end_condition
+                        && run.schedule.end_date == schedule.end_date
+                        && run.schedule.max_occurrences == schedule.max_occurrences
         });
 
         let mut final_schedule = schedule;
@@ -363,9 +366,6 @@ fn sync_scheduled_runs_for_workflow(
             if let Some(prev) = previous {
                 final_schedule.active = prev.schedule.active;
                 final_schedule.occurrence_count = prev.schedule.occurrence_count;
-                final_schedule.end_condition = prev.schedule.end_condition.clone();
-                final_schedule.end_date = prev.schedule.end_date.clone();
-                final_schedule.max_occurrences = prev.schedule.max_occurrences;
             }
         }
 
@@ -868,9 +868,9 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                         if candidate_date.weekday() == target_day {
                             // For repeat_every > 1, check week alignment
                             if repeat_weeks > 1 {
-                                let epoch = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(); // a known Monday
+                                let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 3).unwrap(); // a known Monday in the past
                                 let weeks_since = (candidate_date - epoch).num_weeks();
-                                if weeks_since % repeat_weeks != 0 {
+                                if weeks_since.rem_euclid(repeat_weeks as i64) != 0 {
                                     continue;
                                 }
                             }
@@ -1289,6 +1289,27 @@ mod tests {
     }
 
     #[test]
+    fn compute_next_run_weekly_epoch_alignment() {
+        use super::compute_next_run;
+        use chrono::TimeZone;
+        let schedule = ScheduleDefinition {
+            schedule_type: "weekly".to_string(),
+            time_of_day: Some("09:00".to_string()),
+            days_of_week: Some(vec!["Mon".to_string(), "Wed".to_string()]),
+            repeat_every: 2, // Every 2 weeks
+            ..Default::default()
+        };
+        // Use a test date: 2024-01-01 was a Monday
+        let now = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_time(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        let now_ms = chrono::Local.from_local_datetime(&now).earliest().unwrap().timestamp_millis() as u64;
+        
+        // This will verify `rem_euclid` doesn't panic and returns a valid timestamp in the future.
+        let next = compute_next_run(&schedule, now_ms);
+        assert!(next.is_some());
+        assert!(next.unwrap() > now_ms);
+    }
+
+    #[test]
     fn resolve_command_node_launch_returns_shell_spec() {
         let spec = resolve_command_node_launch("echo hi", |_| {
             Ok(ShellLaunchSpec {
@@ -1544,7 +1565,7 @@ pub async fn run_workflow(
             if let Some(Value::Object(schema_props)) = &node.parameter_schema {
                 for (param_name, param_def) in schema_props {
                     if let Some(def_obj) = param_def.as_object() {
-                        let is_required = def_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let is_required = def_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
                         
                         let is_missing = match merged_config.get(param_name) {
                             None | Some(Value::Null) => true,

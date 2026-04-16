@@ -246,7 +246,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 <div key={field.name} className="flex flex-col gap-1">
                   <div className="flex items-center gap-1">
                     <span className="text-[8px] font-mono text-[var(--color-wardian-text-muted)] tracking-wide">{field.label}</span>
-                    {((data.parameter_schema as any)?.[field.name]?.required !== false) && (
+                    {((data.parameter_schema as any)?.[field.name]?.required === true) && (
                       <span className="text-[8px] text-[var(--color-wardian-error)] font-bold">*</span>
                     )}
                   </div>

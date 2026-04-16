@@ -42,7 +42,7 @@ pub struct WorkflowDefinition {
     pub role_mappings: HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduleDefinition {
     /// "interval" | "daily" | "weekly" | "monthly" | "specific_dates" | "one_time"
     pub schedule_type: String,
