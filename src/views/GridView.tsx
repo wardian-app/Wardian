@@ -120,7 +120,7 @@ export const GridView: React.FC<GridViewProps> = ({
     <div 
       ref={containerRef}
       style={gridStyle}
-      className={`flex-1 min-h-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
+      className={`w-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
     >
       {visibleAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
@@ -289,7 +289,7 @@ export const GridView: React.FC<GridViewProps> = ({
       {isResizing && guidePos !== null && (
         <div 
           className={resizeType === 'h' ? "grid-guide-line-v" : "grid-guide-line-h"}
-          style={resizeType === 'h' ? { left: guidePos } : { top: guidePos }}
+          style={resizeType === 'h' ? { left: guidePos, height: '100%', top: 0, bottom: 0, position: 'absolute' } : { top: guidePos, width: '100%', left: 0, right: 0, position: 'absolute' }}
         />
       )}
     </div>
