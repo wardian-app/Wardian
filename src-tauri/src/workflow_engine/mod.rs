@@ -404,7 +404,7 @@ fn describe_schedule(schedule: &crate::models::ScheduleDefinition) -> String {
     match schedule.schedule_type.as_str() {
         "interval" => {
             let mins = schedule.interval_minutes.unwrap_or(0);
-            if mins >= 60 && mins % 60 == 0 {
+            if mins >= 60 && mins.is_multiple_of(60) {
                 format!("Every {}h", mins / 60)
             } else {
                 format!("Every {}m", mins)

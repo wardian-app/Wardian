@@ -200,7 +200,7 @@ fn migrate_scheduled_runs_if_needed() {
                         "weekly" => {
                             // old format: "Mon,Wed@09:00"
                             let parts: Vec<&str> = old_value.split('@').collect();
-                            let days: Vec<String> = if parts.len() >= 1 {
+                            let days: Vec<String> = if !parts.is_empty() {
                                 parts[0].split(',').map(|s| s.trim().to_string()).collect()
                             } else {
                                 vec![]
