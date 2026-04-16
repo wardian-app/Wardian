@@ -72,10 +72,15 @@ function AppBody() {
       }
     });
     
+    const unlistenScheduledRuns = listen("scheduled-runs-updated", () => {
+      loadScheduledRuns();
+    });
+    
     return () => { 
       unlistenWorkflow.then(fn => fn()); 
       unlistenProgress.then(fn => fn());
       unlistenStatus.then(fn => fn());
+      unlistenScheduledRuns.then(fn => fn());
     };
   }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate, loadScheduledRuns]);
 

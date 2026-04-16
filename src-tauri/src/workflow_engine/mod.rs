@@ -784,6 +784,7 @@ pub async fn start_scheduler(app: AppHandle) {
                     }
                 }
                 let _ = save_scheduled_runs(&fresh);
+                let _ = app_clone.emit("scheduled-runs-updated", ());
             }
         }
     });
