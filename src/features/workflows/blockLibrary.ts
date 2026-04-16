@@ -3,9 +3,11 @@ import { NodeType } from '../../types/workflow';
 export interface BlockField {
   name: string;
   label: string;
-  type: 'text' | 'textarea' | 'select' | 'code' | 'schema';
+  type: 'text' | 'textarea' | 'select' | 'code' | 'schema' | 'schedule';
   options?: string[];
   placeholder?: string;
+  default?: any;
+  required?: boolean;
 }
 
 export interface BlockPorts {
@@ -45,9 +47,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     inputs: 'Provided Payload', 
     outputs: 'Trigger Context', 
     ports: { inputs: 0, outputs: ['default'] },
-    fields: [
-      { name: 'input_schema', label: 'Input Schema', type: 'schema', placeholder: '{ "type": "object" }' }
-    ]
+    fields: []
   },
   { 
     type: 'trigger', 
@@ -72,11 +72,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     outputs: 'Trigger Context',
     ports: { inputs: 0, outputs: ['default'] },
     fields: [
-      { name: 'schedule_type', label: 'Frequency', type: 'select', options: ['Minutes', 'Hours', 'Daily', 'Weekly', 'One-Time'] },
-      { name: 'interval', label: 'Interval Value', type: 'text', placeholder: '5' },
-      { name: 'time', label: 'Time', type: 'text', placeholder: '09:00' },
-      { name: 'days', label: 'Days', type: 'text', placeholder: 'Mon,Tue,Wed' },
-      { name: 'datetime', label: 'Date & Time', type: 'text', placeholder: '2026-03-27T09:00' }
+      { name: 'schedule', label: 'Schedule', type: 'schedule', default: { schedule_type: 'interval', interval_minutes: 60, end_condition: 'never', repeat_every: 1, active: true } }
     ]
   },
   
@@ -92,10 +88,10 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     fields: [
       { name: 'agent_id', label: 'Target Agent', type: 'select', placeholder: 'Select Agent' },
       { name: 'agent_class', label: 'Agent Class', type: 'select', placeholder: 'Select Class' },
-      { name: 'prompt', label: 'Prompt Template', type: 'textarea', placeholder: 'Analyze {{nodes.step1.output}}' },
-      { name: 'session_type', label: 'Session Type', type: 'select', options: ['persistent', 'temporary'] },
+      { name: 'prompt', label: 'Prompt Template', type: 'textarea', placeholder: 'Analyze {{nodes.step1.output}}', required: true },
+      { name: 'session_type', label: 'Session Type', type: 'select', options: ['persistent', 'temporary'], default: 'persistent' },
       { name: 'folder', label: 'Workspace Folder', type: 'text', placeholder: 'C:\\path\\to\\project' },
-      { name: 'output_format', label: 'Output Format', type: 'select', options: ['text', 'json'] },
+      { name: 'output_format', label: 'Output Format', type: 'select', options: ['text', 'json'], default: 'text' },
       { name: 'json_schema', label: 'JSON Schema', type: 'schema', placeholder: '{ "type": "object" }' }
     ],
     advancedFields: [
@@ -170,10 +166,10 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     outputs: 'Body / Done', 
     ports: { inputs: 1, outputs: ['body', 'done'] },
     fields: [
-      { name: 'mode', label: 'Loop Mode', type: 'select', options: ['count', 'conditional'] },
-      { name: 'max_iterations', label: 'Max Iterations', type: 'text', placeholder: '10' },
+      { name: 'mode', label: 'Loop Mode', type: 'select', options: ['count', 'conditional'], default: 'count' },
+      { name: 'max_iterations', label: 'Max Iterations', type: 'text', placeholder: '10', default: '10' },
       { name: 'condition', label: 'Condition', type: 'text', placeholder: 'nodes.step.output.iter < 5' },
-      { name: 'iterator_name', label: 'Iterator Name', type: 'text', placeholder: 'iter' }
+      { name: 'iterator_name', label: 'Iterator Name', type: 'text', placeholder: 'iter', default: 'i' }
     ]
   },
   { 

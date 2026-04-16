@@ -16,6 +16,7 @@ import { WorkflowNode } from '../features/workflows/WorkflowNode';
 import { BLOCK_LIBRARY, BlockDefinition } from '../features/workflows/blockLibrary';
 import { SchemaEditor } from '../components/SchemaEditor';
 import { RenderableInput } from '../components/RenderableInput';
+import { ScheduleEditor } from '../features/workflows/ScheduleEditor';
 import { VariableAssistant } from '../features/workflows/VariableAssistant';
 import { RunPayloadModal, getManualTriggerSchema } from '../features/workflows/RunPayloadModal';
 import type { WorkflowDefinition, WorkflowNode as WorkflowNodeDefinition } from '../types/workflow';
@@ -193,6 +194,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         type: (n.type || 'agent') as WorkflowNodeDefinition['type'],
         name: typeof n.data.label === 'string' ? n.data.label : n.id,
         config: existingConfig,
+        parameter_schema: typeof n.data.parameter_schema === 'object' && n.data.parameter_schema !== null ? n.data.parameter_schema : undefined,
         position: n.position,
         dependencies: edges
           .filter(e => e.target === n.id)
@@ -238,7 +240,43 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     }
 
     if (kind === 'scheduled') {
-      const scheduledRun = buildScheduledRunFromWorkflow(configuredWorkflow);
+      let workflowForSchedule = configuredWorkflow;
+      if (payload?.schedule) {
+        workflowForSchedule = {
+          ...configuredWorkflow,
+          nodes: configuredWorkflow.nodes.map(n => {
+            if (n.type === 'trigger' && n.name === 'Scheduled Trigger') {
+              return { ...n, config: { ...n.config, schedule: { ...n.config?.schedule, ...payload.schedule } } };
+            }
+            return n;
+          }),
+        };
+        // Persist the updated schedule into the saved workflow
+        await saveWorkflow(workflowForSchedule);
+        
+        // Also update the local state so the canvas reflects the schedule change immediately
+        const updatedNodes = nodes.map(n => {
+          if (n.data?.type === 'trigger' && (n.data?.label === 'Scheduled Trigger' || n.data?.blockName === 'Scheduled Trigger')) {
+            return {
+              ...n,
+              data: {
+                ...n.data,
+                config: {
+                  ...(n.data.config as Record<string, any> || {}),
+                  schedule: {
+                    ...((n.data.config as Record<string, any> || {})?.schedule || {}),
+                    ...payload.schedule
+                  }
+                }
+              }
+            };
+          }
+          return n;
+        });
+        setNodes(updatedNodes as any);
+      }
+
+      const scheduledRun = buildScheduledRunFromWorkflow(workflowForSchedule);
       if (scheduledRun) {
         await createScheduledRun(scheduledRun);
       }
@@ -297,8 +335,10 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   const addNode = (block: BlockDefinition) => {
     const id = getNextNodeId(block.type);
     
-    // Initialize config with defaults
+    // Initialize config and parameter_schema with defaults
     const config: Record<string, any> = {};
+    const parameter_schema: Record<string, any> = {};
+
     if (block.type === 'agent') {
       config.session_type = 'persistent';
       config.output_format = 'text';
@@ -313,6 +353,19 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
       config.interval = '5';
     }
 
+    const allFields = [...(block.fields || []), ...(block.advancedFields || [])];
+    allFields.forEach(f => {
+      if (f.default !== undefined && config[f.name] === undefined) {
+        config[f.name] = f.default;
+      }
+      parameter_schema[f.name] = {
+        title: f.label,
+        type: f.type,
+        default: config[f.name] !== undefined ? config[f.name] : f.default,
+        required: f.required === true,
+      };
+    });
+
     const newNode = {
       id,
       type: block.type,
@@ -323,7 +376,8 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
         blockName: block.name,
         inputs: block.inputs,
         outputs: block.outputs,
-        config
+        config,
+        parameter_schema
       },
     };
     setNodes([...nodes, newNode]);
@@ -728,14 +782,19 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     if (field.name === 'json_schema' && outputFormat !== 'json') return null;
                   }
 
-                  // Conditional visibility for Schedule fields
-                  if (selectedNode?.data.blockName === 'Scheduled Trigger') {
-                    const st = (selectedNode?.data.config as any)?.schedule_type || 'Minutes';
-                    if (st === 'Minutes' && ['time', 'days', 'datetime'].includes(field.name)) return null;
-                    if (st === 'Hours' && ['time', 'days', 'datetime'].includes(field.name)) return null;
-                    if (st === 'Daily' && ['interval', 'days', 'datetime'].includes(field.name)) return null;
-                    if (st === 'Weekly' && ['interval', 'datetime'].includes(field.name)) return null;
-                    if (st === 'One-Time' && ['interval', 'time', 'days'].includes(field.name)) return null;
+                  // Schedule editor field
+                  if (field.type === 'schedule') {
+                    const schedVal = (selectedNode?.data.config as any)?.[field.name] || field.default || {};
+                    return (
+                      <div key={field.name} className="flex flex-col gap-2">
+                        <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] tracking-wide">{field.label}</label>
+                        <ScheduleEditor
+                          value={schedVal}
+                          onChange={(newVal) => useWorkflowStore.getState().updateNodeConfig(selectedNodeId!, field.name, newVal)}
+                          compact
+                        />
+                      </div>
+                    );
                   }
 
                   // Conditional visibility for Loop fields
@@ -809,6 +868,23 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   </>
                 );
               })()}
+
+              <div className="pt-8 border-t border-wardian-border space-y-6">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em]">Parameter Schema</h4>
+                </div>
+                <p className="text-[10px] text-muted-neutral">Define required parameters and default values for this node.</p>
+                <SchemaEditor 
+                  value={selectedNode?.data.parameter_schema ? JSON.stringify((selectedNode.data.parameter_schema as any)?.properties || selectedNode.data.parameter_schema) : '{}'}
+                  nodeId={selectedNodeId!}
+                  onChange={(newVal) => {
+                    const parsed = (() => { try { return JSON.parse(newVal); } catch { return {}; } })();
+                    const schemaToSave = parsed.properties || parsed;
+                    const newNodes = nodes.map(n => n.id === selectedNodeId ? { ...n, data: { ...n.data, parameter_schema: schemaToSave } } : n);
+                    setNodes(newNodes);
+                  }}
+                />
+              </div>
             </div>
 
             {/* Variable Assistant */}

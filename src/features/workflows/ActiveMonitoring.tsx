@@ -27,22 +27,51 @@ function formatNextRun(epochMs: number | null): string {
 }
 
 function formatScheduleSummary(schedule: ScheduledRun['schedule']): string {
+  let base = "";
   switch (schedule.schedule_type) {
-    case 'minutes':
-      return `Every ${schedule.value}m`;
-    case 'hours':
-      return `Every ${schedule.value}h`;
+    case 'interval': {
+      const mins = schedule.interval_minutes || 0;
+      base = mins >= 60 && mins % 60 === 0 ? `Every ${mins / 60}h` : `Every ${mins}m`;
+      break;
+    }
     case 'daily':
-      return `Daily · ${schedule.value}`;
+      base = `Daily · ${schedule.time_of_day || '00:00'}`;
+      break;
     case 'weekly': {
-      const [days, time] = schedule.value.split('@');
-      return `Weekly · ${days || '—'} ${time || ''}`.trim();
+      const days = (schedule.days_of_week || []).join(', ');
+      const time = schedule.time_of_day || '00:00';
+      if (schedule.repeat_every && schedule.repeat_every > 1) {
+        base = `Every ${schedule.repeat_every} wks · ${days} ${time}`.trim();
+      } else {
+        base = `Weekly · ${days || '—'} ${time}`.trim();
+      }
+      break;
+    }
+    case 'monthly': {
+      const mDays = (schedule.days_of_month || []).join(', ');
+      base = `Monthly · Day ${mDays} ${schedule.time_of_day || '00:00'}`.trim();
+      break;
+    }
+    case 'specific_dates': {
+      const count = (schedule.specific_dates || []).length;
+      base = `${count} date(s) · ${schedule.time_of_day || '00:00'}`;
+      break;
     }
     case 'one_time':
-      return `Once · ${schedule.value}`;
+      base = `Once · ${schedule.run_at || '?'}`;
+      break;
     default:
-      return schedule.value;
+      base = schedule.schedule_type;
+      break;
   }
+  
+  if (schedule.end_condition === 'on_date') {
+    base += ` (Ends ${schedule.end_date || '?'})`;
+  } else if (schedule.end_condition === 'after_occurrences') {
+    const total = schedule.max_occurrences || '?';
+    base += ` (Ends after ${total} runs)`;
+  }
+  return base;
 }
 
 function getScheduleStatus(schedule: ScheduledRun, isRunning: boolean): 'Paused' | 'Due' | 'Live' | 'Running' {

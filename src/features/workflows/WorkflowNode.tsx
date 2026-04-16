@@ -6,6 +6,68 @@ import { useWorkflowStore } from '../../store/useWorkflowStore';
 import { VariablePill } from '../../components/VariablePill';
 import { RenderableInput } from '../../components/RenderableInput';
 
+function describeScheduleConfig(config: any): string {
+  if (!config) return 'Not configured';
+  const sched = config.schedule;
+
+  if (!sched || !sched.schedule_type) {
+    // Legacy fallback
+    const st = config.schedule_type;
+    if (!st) return 'Not configured';
+    if (st === 'Minutes') return `Every ${config.interval || 0}m`;
+    if (st === 'Hours') return `Every ${config.interval || 0}h`;
+    if (st === 'Daily') return `Daily at ${config.time || '00:00'}`;
+    if (st === 'Weekly') return `${config.days || 'Mon'} at ${config.time || '00:00'}`;
+    if (st === 'One-Time') return config.datetime ? `Once at ${config.datetime}` : 'Set date/time';
+    return 'Unknown';
+  }
+
+  let base = "";
+  // New schedule format
+  switch (sched.schedule_type) {
+    case 'interval': {
+      const mins = sched.interval_minutes || 0;
+      base = mins >= 60 && mins % 60 === 0 ? `Every ${mins / 60}h` : `Every ${mins}m`;
+      break;
+    }
+    case 'daily':
+      base = `Daily at ${sched.time_of_day || '00:00'}`;
+      break;
+    case 'weekly': {
+      const days = (sched.days_of_week || []).join(', ');
+      const time = sched.time_of_day || '00:00';
+      base = sched.repeat_every > 1
+        ? `Every ${sched.repeat_every} wks on ${days} at ${time}`
+        : `${days} at ${time}`;
+      break;
+    }
+    case 'monthly': {
+      const mDays = (sched.days_of_month || []).join(', ');
+      base = `Monthly on ${mDays} at ${sched.time_of_day || '00:00'}`;
+      break;
+    }
+    case 'specific_dates': {
+      const count = (sched.specific_dates || []).length;
+      base = `${count} date(s) at ${sched.time_of_day || '00:00'}`;
+      break;
+    }
+    case 'one_time':
+      base = `Once at ${sched.run_at || '?'}`;
+      break;
+    default:
+      base = 'Unknown';
+      break;
+  }
+  
+  if (sched.end_condition === 'on_date') {
+    base += ` (Ends ${sched.end_date || '?'})`;
+  } else if (sched.end_condition === 'after_occurrences') {
+    const total = sched.max_occurrences || '?';
+    base += ` (Ends after ${total} runs)`;
+  }
+  return base;
+}
+
 const CATEGORY_COLORS: Record<string, string> = {
   'TRIGGER': 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
   'EXECUTION': 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
@@ -22,7 +84,7 @@ const STATUS_COLORS: Record<NodeStatus, string> = {
   blocked: 'bg-[var(--color-wardian-warning)] shadow-[0_0_10px_var(--color-wardian-warning)] animate-pulse',
 };
 
-export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label: string; type: NodeType; blockName?: string; status?: NodeStatus; inputs?: string; outputs?: string; config?: Record<string, any> }>>) => {
+export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label: string; type: NodeType; blockName?: string; status?: NodeStatus; inputs?: string; outputs?: string; config?: Record<string, any>; parameter_schema?: Record<string, any> }>>) => {
   const type = data.type || 'agent';
   const status = data.status || 'idle';
   
@@ -141,14 +203,15 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 if (field.name === 'json_schema' && outputFormat !== 'json') return null;
               }
 
-              // Conditional visibility for Cron fields
-              if (blockDef?.name === 'Scheduled Trigger') {
-                const st = data.config?.schedule_type || 'Minutes';
-                if (st === 'Minutes' && ['time', 'days', 'datetime'].includes(field.name)) return null;
-                if (st === 'Hours' && ['time', 'days', 'datetime'].includes(field.name)) return null;
-                if (st === 'Daily' && ['interval', 'days', 'datetime'].includes(field.name)) return null;
-                if (st === 'Weekly' && ['interval', 'datetime'].includes(field.name)) return null;
-                if (st === 'One-Time' && ['interval', 'time', 'days'].includes(field.name)) return null;
+              // Schedule field: show human-readable summary instead of raw fields
+              if (field.type === 'schedule') {
+                const summary = describeScheduleConfig(data.config);
+                return (
+                  <div key={field.name} className="flex flex-col gap-1 p-2 mt-1 bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_95%)] rounded border border-[var(--color-wardian-accent)]/10">
+                    <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-accent)] font-bold tracking-wide">{field.label}</span>
+                    <span className="text-[10px] text-[var(--color-wardian-text)] font-medium opacity-90 truncate">{summary}</span>
+                  </div>
+                );
               }
 
               // Loop conditional visibility (Hardened)
@@ -181,7 +244,12 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
 
               return (
                 <div key={field.name} className="flex flex-col gap-1">
-                  <span className="text-[8px] font-mono text-[var(--color-wardian-text-muted)] tracking-wide">{field.label}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[8px] font-mono text-[var(--color-wardian-text-muted)] tracking-wide">{field.label}</span>
+                    {((data.parameter_schema as any)?.[field.name]?.required === true) && (
+                      <span className="text-[8px] text-[var(--color-wardian-error)] font-bold">*</span>
+                    )}
+                  </div>
                   
                   {field.type === 'textarea' || field.type === 'code' || field.type === 'text' ? (
                     <RenderableInput
@@ -222,24 +290,6 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 </div>
               );
             })}
-
-            {/* Cron Summary */}
-            {blockDef?.name === 'Scheduled Trigger' && (
-              <div className="flex flex-col gap-1 p-2 bg-[var(--color-wardian-accent)]/5 rounded border border-[var(--color-wardian-accent)]/10">
-                <span className="text-[8px] font-mono text-[var(--color-wardian-accent)] font-bold tracking-wide">Schedule</span>
-                <span className="text-xs text-[var(--color-wardian-text)] font-medium">
-                  {(() => {
-                    const cfg = data.config || {};
-                    if (cfg.schedule_type === 'Minutes') return `Every ${cfg.interval || 0}m`;
-                    if (cfg.schedule_type === 'Hours') return `Every ${cfg.interval || 0}h`;
-                    if (cfg.schedule_type === 'Daily') return `Daily at ${cfg.time || '00:00'}`;
-                    if (cfg.schedule_type === 'Weekly') return `${cfg.days || 'Mon'} at ${cfg.time || '00:00'}`;
-                    if (cfg.schedule_type === 'One-Time') return cfg.datetime ? `Once at ${cfg.datetime}` : 'Set date/time';
-                    return 'Select Frequency';
-                  })()}
-                </span>
-              </div>
-            )}
           </div>
         )}
 

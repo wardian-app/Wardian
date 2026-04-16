@@ -125,7 +125,7 @@ describe('workflowLaunch', () => {
       ...baseWorkflow,
       role_mappings: { research_agent: 'agent-123' },
       nodes: [
-        { id: 'trigger-1', type: 'trigger', name: 'Scheduled Trigger', config: { schedule_type: 'Hours', interval: '2', status: 'active' } },
+        { id: 'trigger-1', type: 'trigger', name: 'Scheduled Trigger', config: { schedule: { schedule_type: 'interval', interval_minutes: 120, end_condition: 'never', repeat_every: 1, active: true }, status: 'active' } },
         { id: 'agent-1', type: 'agent', name: 'Research Agent', config: { role: 'research_agent', agent_id: 'agent-123' } },
       ],
     };
@@ -142,8 +142,8 @@ describe('workflowLaunch', () => {
       workflow_id: 'wf-1',
       workflow_name: 'Morning Sync',
       schedule: {
-        schedule_type: 'hours',
-        value: '2',
+        schedule_type: 'interval',
+        interval_minutes: 120,
         active: true,
       },
       role_mappings: { research_agent: 'agent-123' },
@@ -172,39 +172,33 @@ describe('workflowLaunch', () => {
 
   it('builds schedule descriptions for all supported schedule types', () => {
     const scheduleCases: Array<{
-      config: Record<string, string>;
-      expectedType: 'minutes' | 'hours' | 'daily' | 'weekly' | 'one_time';
-      expectedValue: string;
+      config: Record<string, any>;
+      expectedType: string;
       expectedDescription: string;
     }> = [
       {
-        config: { schedule_type: 'Minutes', interval: '5' },
-        expectedType: 'minutes',
-        expectedValue: '5',
+        config: { schedule: { schedule_type: 'interval', interval_minutes: 5, end_condition: 'never', repeat_every: 1, active: true } },
+        expectedType: 'interval',
         expectedDescription: 'Every 5m',
       },
       {
-        config: { schedule_type: 'Hours', interval: '2' },
-        expectedType: 'hours',
-        expectedValue: '2',
+        config: { schedule: { schedule_type: 'interval', interval_minutes: 120, end_condition: 'never', repeat_every: 1, active: true } },
+        expectedType: 'interval',
         expectedDescription: 'Every 2h',
       },
       {
-        config: { schedule_type: 'Daily', time: '09:30' },
+        config: { schedule: { schedule_type: 'daily', time_of_day: '09:30', end_condition: 'never', repeat_every: 1, active: true } },
         expectedType: 'daily',
-        expectedValue: '09:30',
         expectedDescription: 'Daily at 09:30',
       },
       {
-        config: { schedule_type: 'Weekly', days: 'Mon,Fri', time: '18:00' },
+        config: { schedule: { schedule_type: 'weekly', days_of_week: ['Mon', 'Fri'], time_of_day: '18:00', repeat_every: 1, end_condition: 'never', active: true } },
         expectedType: 'weekly',
-        expectedValue: 'Mon,Fri@18:00',
-        expectedDescription: 'Mon,Fri at 18:00',
+        expectedDescription: 'Mon, Fri at 18:00',
       },
       {
-        config: { schedule_type: 'One-Time', datetime: '2026-05-01T12:00' },
+        config: { schedule: { schedule_type: 'one_time', run_at: '2026-05-01T12:00', end_condition: 'never', repeat_every: 1, active: true } },
         expectedType: 'one_time',
-        expectedValue: '2026-05-01T12:00',
         expectedDescription: 'Once at 2026-05-01T12:00',
       },
     ];
@@ -221,8 +215,22 @@ describe('workflowLaunch', () => {
       const run = buildScheduledRunFromWorkflow(workflow);
       expect(run).not.toBeNull();
       expect(run?.schedule.schedule_type).toBe(scheduleCase.expectedType);
-      expect(run?.schedule.value).toBe(scheduleCase.expectedValue);
       expect(run?.description).toBe(scheduleCase.expectedDescription);
     }
+  });
+
+  it('builds scheduled run from legacy flat config keys', () => {
+    const workflow: WorkflowDefinition = {
+      ...baseWorkflow,
+      nodes: [
+        { id: 'trigger-1', type: 'trigger', name: 'Scheduled Trigger', config: { schedule_type: 'Daily', time: '14:00' } },
+      ],
+    };
+
+    const run = buildScheduledRunFromWorkflow(workflow);
+    expect(run).not.toBeNull();
+    expect(run?.schedule.schedule_type).toBe('daily');
+    expect(run?.schedule.time_of_day).toBe('14:00');
+    expect(run?.description).toBe('Daily at 14:00');
   });
 });

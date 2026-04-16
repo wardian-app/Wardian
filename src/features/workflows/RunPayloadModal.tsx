@@ -1,33 +1,76 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { RenderableInput } from '../../components/RenderableInput';
-import type { WorkflowDefinition } from '../../types/workflow';
+import { ScheduleEditor } from './ScheduleEditor';
+import type { WorkflowDefinition, ScheduleDefinition } from '../../types/workflow';
 import { getWorkflowRoleTargets } from './workflowLaunch';
 
-/**
- * Inspects a workflow for a Manual Trigger node with an input_schema.
- * Returns the schema info if the trigger has defined input properties, or null.
- */
 export function getManualTriggerSchema(
   workflow: WorkflowDefinition
 ): { nodeId: string; schema: any } | null {
+  const trigger = workflow.nodes.find((n) => n.type === 'trigger' && n.name === 'Manual Trigger');
+  if (!trigger) return null;
+
+  if (trigger.parameter_schema && typeof trigger.parameter_schema === 'object' && Object.keys(trigger.parameter_schema).length > 0) {
+    return { nodeId: trigger.id, schema: { properties: trigger.parameter_schema } };
+  }
+
+  // Fallback for legacy workflows
+  const schemaStr = trigger.config?.input_schema;
+  if (schemaStr) {
+    try {
+      const schema = JSON.parse(schemaStr);
+      const properties = schema.properties || (schema.type === 'object' ? {} : null);
+      if (properties && Object.keys(properties).length > 0) {
+        return { nodeId: trigger.id, schema };
+      }
+    } catch {
+      // Invalid JSON schema
+    }
+  }
+
+  return null;
+}
+
+/** Extract the schedule config from a scheduled trigger node, if present. */
+export function getScheduledTriggerConfig(
+  workflow: WorkflowDefinition
+): { nodeId: string; schedule: Partial<ScheduleDefinition> } | null {
   const trigger = workflow.nodes.find(
-    (n) => n.type === 'trigger' && n.name === 'Manual Trigger'
+    (n) => n.type === 'trigger' && n.name === 'Scheduled Trigger'
   );
   if (!trigger) return null;
 
-  const schemaStr = trigger.config?.input_schema;
-  if (!schemaStr) return null;
+  let schedule = trigger.config?.schedule;
 
-  try {
-    const schema = JSON.parse(schemaStr);
-    const properties = schema.properties || (schema.type === 'object' ? {} : null);
-    if (properties && Object.keys(properties).length > 0) {
-      return { nodeId: trigger.id, schema };
+  if (!schedule || typeof schedule !== 'object' || !schedule.schedule_type) {
+    // If it's a legacy flat config, try to map it, or return defaults.
+    const st = typeof trigger.config?.schedule_type === 'string' ? trigger.config.schedule_type : 'Minutes';
+    const interval = typeof trigger.config?.interval === 'string' ? trigger.config.interval : '5';
+    
+    type ScheduleType = "interval" | "daily" | "weekly" | "monthly" | "specific_dates" | "one_time";
+    
+    schedule = {
+      schedule_type: (st === 'Daily' ? 'daily' : 
+                     st === 'Weekly' ? 'weekly' : 
+                     st === 'One-Time' ? 'one_time' : 'interval') as ScheduleType,
+      end_condition: 'never',
+      repeat_every: 1,
+      active: true,
+    };
+
+    if (schedule.schedule_type === 'interval') {
+      schedule.interval_minutes = st === 'Hours' ? (parseInt(interval) || 1) * 60 : parseInt(interval) || 5;
+    } else if (schedule.schedule_type === 'daily') {
+      schedule.time_of_day = typeof trigger.config?.time === 'string' ? trigger.config.time : '09:00';
+    } else if (schedule.schedule_type === 'weekly') {
+      schedule.time_of_day = typeof trigger.config?.time === 'string' ? trigger.config.time : '09:00';
+      schedule.days_of_week = typeof trigger.config?.days === 'string' ? trigger.config.days.split(',').map(s => s.trim()) : [];
+    } else if (schedule.schedule_type === 'one_time') {
+      schedule.run_at = typeof trigger.config?.datetime === 'string' ? trigger.config.datetime : '';
     }
-  } catch {
-    // Invalid JSON schema
   }
-  return null;
+
+  return { nodeId: trigger.id, schedule };
 }
 
 /** Extract agent nodes that have roles defined (for runtime agent assignment). */
@@ -88,10 +131,12 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
   agents = [],
 }) => {
   const schemaInfo = useMemo(() => getManualTriggerSchema(workflow), [workflow]);
+  const scheduleInfo = useMemo(() => getScheduledTriggerConfig(workflow), [workflow]);
   const roles = useMemo(() => getWorkflowRoles(workflow), [workflow]);
   const properties: Record<string, any> = schemaInfo?.schema?.properties || {};
   const hasInputs = Object.keys(properties).length > 0;
   const hasRoles = roles.length > 0;
+  const hasSchedule = scheduleInfo !== null;
 
   const [values, setValues] = useState<Record<string, any>>(() => {
     const initial: Record<string, any> = {};
@@ -100,6 +145,10 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
     }
     return initial;
   });
+
+  const [scheduleConfig, setScheduleConfig] = useState<Partial<ScheduleDefinition>>(
+    () => scheduleInfo?.schedule || { schedule_type: 'interval', interval_minutes: 60, end_condition: 'never', active: true }
+  );
 
   const [roleMappings, setRoleMappings] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
@@ -131,10 +180,18 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
     if (hasRoles) {
       finalPayload.role_mappings = roleMappings;
     }
+    if (hasSchedule) {
+      finalPayload.schedule = scheduleConfig;
+    }
     onRun(finalPayload);
-  }, [values, properties, roleMappings, hasInputs, hasRoles, onRun]);
+  }, [values, properties, roleMappings, scheduleConfig, hasInputs, hasRoles, hasSchedule, onRun]);
 
-  if (!isOpen || (!hasInputs && !hasRoles)) return null;
+  if (!isOpen || (!hasInputs && !hasRoles && !hasSchedule)) return null;
+
+  const subtitleParts: string[] = [];
+  if (hasSchedule) subtitleParts.push('Schedule');
+  if (hasRoles) subtitleParts.push('Agents');
+  if (hasInputs) subtitleParts.push('Inputs');
 
   return (
     <div className="absolute inset-0 z-[110] flex items-center justify-center p-8 bg-black/60 backdrop-blur-md animate-in fade-in duration-200">
@@ -143,7 +200,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
           <div className="flex flex-col">
             <h3 className="text-xl font-bold text-[var(--color-wardian-text)] tracking-tight">{workflow.name}</h3>
             <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">
-              {hasInputs && hasRoles ? 'Configure Inputs & Agents' : hasRoles ? 'Assign Agents' : 'Provide Input Parameters'}
+              Configure {subtitleParts.join(' & ')}
             </span>
           </div>
           <button
@@ -155,6 +212,25 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
         </div>
 
         <div className="p-6 space-y-6 max-h-[60vh] overflow-y-auto no-scrollbar">
+          {/* Schedule Configuration Section */}
+          {hasSchedule && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 mb-1">
+                <svg className="w-3.5 h-3.5 text-[var(--color-wardian-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.15em]">Schedule</span>
+              </div>
+              <ScheduleEditor
+                value={scheduleConfig}
+                onChange={setScheduleConfig}
+              />
+            </div>
+          )}
+
+          {/* Separator */}
+          {hasSchedule && (hasRoles || hasInputs) && (
+            <div className="border-t border-wardian-border/30" />
+          )}
+
           {/* Agent Assignments Section */}
           {hasRoles && (
             <div className="space-y-3">
@@ -193,16 +269,21 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
           {/* Input Parameters Section */}
           {hasInputs && (
             <div className="space-y-4">
-              {hasRoles && (
+              {(hasRoles || hasSchedule) && (
                 <div className="flex items-center gap-2 mb-1">
                   <svg className="w-3.5 h-3.5 text-[var(--color-wardian-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                   <span className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.15em]">Input Parameters</span>
                 </div>
               )}
-              {Object.entries(properties).map(([key, prop]: [string, any]) => (
+              {Object.entries(properties).map(([key, prop]: [string, any]) => {
+                const isRequired = prop.required !== false;
+                return (
                 <div key={key} className="flex flex-col gap-2">
                   <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
+                    <div className="flex items-center gap-1">
+                      <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
+                      {isRequired && <span className="text-[11px] text-[var(--color-wardian-error)] font-bold">*</span>}
+                    </div>
                     <div className="flex items-center gap-1.5 opacity-60">
                       <span className="text-[9px] font-mono text-muted-neutral bg-white/5 px-1.5 py-0.5 rounded border border-white/10">{prop.type || 'string'}</span>
                     </div>
@@ -219,7 +300,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
                   </div>
                   {prop.description && <p className="text-[9px] text-muted-neutral/60 italic leading-snug">{prop.description}</p>}
                 </div>
-              ))}
+              )})}
             </div>
           )}
         </div>
@@ -235,12 +316,10 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
             onClick={handleSubmit}
             className="px-8 py-2 bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] rounded-xl text-[10px] font-bold uppercase tracking-widest hover:scale-105 active:scale-95 transition-all cursor-pointer"
           >
-            Run Workflow
+            {hasSchedule ? 'Schedule Workflow' : 'Run Workflow'}
           </button>
         </div>
       </div>
     </div>
   );
 };
-
-

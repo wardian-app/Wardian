@@ -25,6 +25,7 @@ export interface WorkflowNode {
   type: NodeType;
   name?: string;
   config: Record<string, any>;
+  parameter_schema?: Record<string, any>;
   dependencies?: NodeDependency[];
   // For UI state tracking
   position?: { x: number; y: number };
@@ -72,8 +73,18 @@ export interface WorkflowSummary {
 }
 
 export interface ScheduleDefinition {
-  schedule_type: "one_time" | "minutes" | "hours" | "daily" | "weekly";
-  value: string;
+  schedule_type: "interval" | "daily" | "weekly" | "monthly" | "specific_dates" | "one_time";
+  interval_minutes?: number;
+  time_of_day?: string;           // "HH:MM"
+  days_of_week?: string[];        // ["Mon","Tue","Fri"]
+  repeat_every?: number;          // every N weeks (default 1)
+  days_of_month?: number[];       // [1, 15] for monthly
+  specific_dates?: string[];      // ["2026-05-01"] for specific_dates
+  run_at?: string;                // ISO datetime for one_time
+  end_condition?: "never" | "on_date" | "after_occurrences";
+  end_date?: string;              // YYYY-MM-DD
+  max_occurrences?: number;
+  occurrence_count?: number;
   active: boolean;
 }
 

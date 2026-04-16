@@ -245,61 +245,135 @@ fn sync_scheduled_runs_for_workflow(
             continue;
         }
 
-        let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) else {
-            continue;
+        // Read the nested schedule object from config
+        let schedule: crate::models::ScheduleDefinition = if let Some(sched_val) = config.get("schedule") {
+            match serde_json::from_value(sched_val.clone()) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            // Legacy fallback: read flat config keys
+            let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let interval = config.get("interval").and_then(|v| v.as_str()).unwrap_or("");
+            let time = config.get("time").and_then(|v| v.as_str()).unwrap_or("00:00");
+            let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
+            let datetime = config.get("datetime").and_then(|v| v.as_str()).unwrap_or("");
+
+            match sched_type {
+                "Minutes" => crate::models::ScheduleDefinition {
+                    schedule_type: "interval".to_string(),
+                    interval_minutes: Some(interval.parse().unwrap_or(5)),
+                    time_of_day: None,
+                    days_of_week: None,
+                    repeat_every: 1,
+                    days_of_month: None,
+                    specific_dates: None,
+                    run_at: None,
+                    end_condition: "never".to_string(),
+                    end_date: None,
+                    max_occurrences: None,
+                    occurrence_count: 0,
+                    active: true,
+                },
+                "Hours" => crate::models::ScheduleDefinition {
+                    schedule_type: "interval".to_string(),
+                    interval_minutes: Some(interval.parse::<u32>().unwrap_or(1) * 60),
+                    time_of_day: None,
+                    days_of_week: None,
+                    repeat_every: 1,
+                    days_of_month: None,
+                    specific_dates: None,
+                    run_at: None,
+                    end_condition: "never".to_string(),
+                    end_date: None,
+                    max_occurrences: None,
+                    occurrence_count: 0,
+                    active: true,
+                },
+                "Daily" => crate::models::ScheduleDefinition {
+                    schedule_type: "daily".to_string(),
+                    interval_minutes: None,
+                    time_of_day: Some(time.to_string()),
+                    days_of_week: None,
+                    repeat_every: 1,
+                    days_of_month: None,
+                    specific_dates: None,
+                    run_at: None,
+                    end_condition: "never".to_string(),
+                    end_date: None,
+                    max_occurrences: None,
+                    occurrence_count: 0,
+                    active: true,
+                },
+                "Weekly" => crate::models::ScheduleDefinition {
+                    schedule_type: "weekly".to_string(),
+                    interval_minutes: None,
+                    time_of_day: Some(time.to_string()),
+                    days_of_week: Some(days.split(',').map(|s| s.trim().to_string()).collect()),
+                    repeat_every: 1,
+                    days_of_month: None,
+                    specific_dates: None,
+                    run_at: None,
+                    end_condition: "never".to_string(),
+                    end_date: None,
+                    max_occurrences: None,
+                    occurrence_count: 0,
+                    active: true,
+                },
+                "One-Time" => crate::models::ScheduleDefinition {
+                    schedule_type: "one_time".to_string(),
+                    interval_minutes: None,
+                    time_of_day: None,
+                    days_of_week: None,
+                    repeat_every: 1,
+                    days_of_month: None,
+                    specific_dates: None,
+                    run_at: Some(datetime.to_string()),
+                    end_condition: "never".to_string(),
+                    end_date: None,
+                    max_occurrences: None,
+                    occurrence_count: 0,
+                    active: true,
+                },
+                _ => continue,
+            }
         };
 
-        let interval = config
-            .get("interval")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let time = config
-            .get("time")
-            .and_then(|v| v.as_str())
-            .unwrap_or("00:00");
-        let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
-        let datetime = config
-            .get("datetime")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let (model_type, value) = match sched_type {
-            "Minutes" => ("minutes".to_string(), interval.to_string()),
-            "Hours" => ("hours".to_string(), interval.to_string()),
-            "Daily" => ("daily".to_string(), time.to_string()),
-            "Weekly" => ("weekly".to_string(), format!("{}@{}", days, time)),
-            "One-Time" => ("one_time".to_string(), datetime.to_string()),
-            _ => continue,
-        };
-
-        let description = match sched_type {
-            "Minutes" => format!("Every {}m", interval),
-            "Hours" => format!("Every {}h", interval),
-            "Daily" => format!("Daily at {}", time),
-            "Weekly" => format!("{} at {}", days, time),
-            "One-Time" => format!("Once at {}", datetime),
-            _ => value.clone(),
-        };
+        let description = describe_schedule(&schedule);
 
         let run_id = format!("{}-{}", wf.id, node.id);
         let previous = existing_runs.iter().find(|run| run.id == run_id);
+
+        // Detect if the schedule config actually changed
         let schedule_unchanged = previous.is_some_and(|run| {
-            run.schedule.schedule_type == model_type && run.schedule.value == value
+            run.schedule.schedule_type == schedule.schedule_type
+                && run.schedule.interval_minutes == schedule.interval_minutes
+                && run.schedule.time_of_day == schedule.time_of_day
+                && run.schedule.days_of_week == schedule.days_of_week
+                && run.schedule.repeat_every == schedule.repeat_every
+                        && run.schedule.days_of_month == schedule.days_of_month
+                        && run.schedule.specific_dates == schedule.specific_dates
+                        && run.schedule.run_at == schedule.run_at
+                        && run.schedule.end_condition == schedule.end_condition
+                        && run.schedule.end_date == schedule.end_date
+                        && run.schedule.max_occurrences == schedule.max_occurrences
         });
+
+        let mut final_schedule = schedule;
+        if schedule_unchanged {
+            if let Some(prev) = previous {
+                final_schedule.active = prev.schedule.active;
+                final_schedule.occurrence_count = prev.schedule.occurrence_count;
+            }
+        }
 
         synced_runs.push(crate::models::ScheduledRun {
             id: run_id.clone(),
             workflow_id: wf.id.clone(),
             workflow_name: wf.name.clone(),
-            schedule: crate::models::ScheduleDefinition {
-                schedule_type: model_type,
-                value,
-                active: if schedule_unchanged {
-                    previous.map(|run| run.schedule.active).unwrap_or(true)
-                } else {
-                    true
-                },
-            },
+            schedule: final_schedule,
             role_mappings: wf.role_mappings.clone(),
             description,
             next_run_epoch_ms: if schedule_unchanged {
@@ -324,6 +398,49 @@ fn sync_scheduled_runs_for_workflow(
     }
 
     synced_runs
+}
+
+fn describe_schedule(schedule: &crate::models::ScheduleDefinition) -> String {
+    match schedule.schedule_type.as_str() {
+        "interval" => {
+            let mins = schedule.interval_minutes.unwrap_or(0);
+            if mins >= 60 && mins.is_multiple_of(60) {
+                format!("Every {}h", mins / 60)
+            } else {
+                format!("Every {}m", mins)
+            }
+        }
+        "daily" => {
+            let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            format!("Daily at {}", time)
+        }
+        "weekly" => {
+            let days = schedule.days_of_week.as_ref().map(|d| d.join(", ")).unwrap_or_default();
+            let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            if schedule.repeat_every > 1 {
+                format!("Every {} weeks on {} at {}", schedule.repeat_every, days, time)
+            } else {
+                format!("{} at {}", days, time)
+            }
+        }
+        "monthly" => {
+            let days = schedule.days_of_month.as_ref()
+                .map(|d| d.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            format!("Monthly on day(s) {} at {}", days, time)
+        }
+        "specific_dates" => {
+            let count = schedule.specific_dates.as_ref().map(|d| d.len()).unwrap_or(0);
+            let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            format!("{} specific date(s) at {}", count, time)
+        }
+        "one_time" => {
+            let run_at = schedule.run_at.as_deref().unwrap_or("?");
+            format!("Once at {}", run_at)
+        }
+        _ => "Unknown schedule".to_string(),
+    }
 }
 
 pub fn get_logs_dir(workflow_id: &str) -> Option<PathBuf> {
@@ -568,10 +685,45 @@ pub async fn start_scheduler(app: AppHandle) {
             let mut runs = load_scheduled_runs();
             let now_ms = Utc::now().timestamp_millis() as u64;
             let mut modified = false;
-            let mut completed_one_time_run_ids = Vec::new();
+            let mut runs_to_delete = Vec::new();
 
             for run in runs.iter_mut() {
                 if run.is_paused || !run.schedule.active {
+                    continue;
+                }
+
+                // --- Aggressive End Condition Checks ---
+                let end_cond = run.schedule.end_condition.as_str();
+                let mut should_delete = false;
+
+                if end_cond == "on_date" {
+                    if let Some(ref end_date_str) = run.schedule.end_date {
+                        let today = chrono::Local::now().date_naive();
+                        if let Ok(end_date) = chrono::NaiveDate::parse_from_str(end_date_str, "%Y-%m-%d") {
+                            if today > end_date {
+                                log_debug(&format!(
+                                    "[Wardian] Schedule {} expired (end_date {})",
+                                    run.id, end_date_str
+                                ));
+                                should_delete = true;
+                            }
+                        }
+                    }
+                } else if end_cond == "after_occurrences" {
+                    if let Some(max) = run.schedule.max_occurrences {
+                        if run.schedule.occurrence_count >= max {
+                            log_debug(&format!(
+                                "[Wardian] Schedule {} completed all {} occurrences",
+                                run.id, max
+                            ));
+                            should_delete = true;
+                        }
+                    }
+                }
+
+                if should_delete {
+                    runs_to_delete.push(run.id.clone());
+                    modified = true;
                     continue;
                 }
 
@@ -591,12 +743,17 @@ pub async fn start_scheduler(app: AppHandle) {
                         ));
 
                         let is_one_time = run.schedule.schedule_type == "one_time";
+                        let is_specific_dates = run.schedule.schedule_type == "specific_dates";
                         let completed_run_id = run.id.clone();
+
+                        // Increment occurrence count
+                        run.schedule.occurrence_count += 1;
 
                         run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
                         run.paused_remaining_ms = None;
-                        if is_one_time {
-                            run.schedule.active = false;
+                        
+                        if is_one_time || (is_specific_dates && run.next_run_epoch_ms.is_none()) {
+                            runs_to_delete.push(completed_run_id);
                         }
                         modified = true;
 
@@ -609,27 +766,25 @@ pub async fn start_scheduler(app: AppHandle) {
                         let _ =
                             run_workflow(app_clone.clone(), run.workflow_id.clone(), Some(payload))
                                 .await;
-
-                        if is_one_time {
-                            completed_one_time_run_ids.push(completed_run_id);
-                        }
                     }
                 }
             }
 
             if modified {
                 let mut fresh = load_scheduled_runs();
-                if !completed_one_time_run_ids.is_empty() {
-                    fresh.retain(|run| !completed_one_time_run_ids.iter().any(|id| id == &run.id));
+                if !runs_to_delete.is_empty() {
+                    fresh.retain(|run| !runs_to_delete.iter().any(|id| id == &run.id));
                 }
                 for fresh_run in fresh.iter_mut() {
                     if let Some(updated) = runs.iter().find(|r| r.id == fresh_run.id) {
                         fresh_run.next_run_epoch_ms = updated.next_run_epoch_ms;
                         fresh_run.paused_remaining_ms = updated.paused_remaining_ms;
                         fresh_run.schedule.active = updated.schedule.active;
+                        fresh_run.schedule.occurrence_count = updated.schedule.occurrence_count;
                     }
                 }
                 let _ = save_scheduled_runs(&fresh);
+                let _ = app_clone.emit("scheduled-runs-updated", ());
             }
         }
     });
@@ -640,48 +795,17 @@ pub async fn start_scheduler(app: AppHandle) {
 
 fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -> Option<u64> {
     match schedule.schedule_type.as_str() {
-        "one_time" => {
-            // Try ISO8601/RFC3339 first, then "YYYY-MM-DDTHH:MM" local time
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&schedule.value) {
-                let ms = dt.timestamp_millis() as u64;
-                if ms > now_ms {
-                    Some(ms)
-                } else {
-                    None
-                }
-            } else if let Ok(dt) =
-                chrono::NaiveDateTime::parse_from_str(&schedule.value, "%Y-%m-%dT%H:%M")
-            {
-                let local = chrono::Local.from_local_datetime(&dt).earliest()?;
-                let ms = local.timestamp_millis() as u64;
-                if ms > now_ms {
-                    Some(ms)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        "minutes" => {
-            let mins: u64 = schedule.value.parse().unwrap_or(0);
+        "interval" => {
+            let mins = schedule.interval_minutes.unwrap_or(0) as u64;
             if mins > 0 {
                 Some(now_ms + mins * 60_000)
             } else {
                 None
             }
         }
-        "hours" => {
-            let hours: u64 = schedule.value.parse().unwrap_or(0);
-            if hours > 0 {
-                Some(now_ms + hours * 3_600_000)
-            } else {
-                None
-            }
-        }
         "daily" => {
-            // value = "HH:MM"
-            let parts: Vec<&str> = schedule.value.split(':').collect();
+            let time_str = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            let parts: Vec<&str> = time_str.split(':').collect();
             if parts.len() != 2 {
                 return None;
             }
@@ -700,23 +824,22 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
             if target_ms > now_ms {
                 Some(target_ms)
             } else {
-                // Schedule for tomorrow
                 Some(target_ms + 86_400_000)
             }
         }
         "weekly" => {
-            // value = "Mon,Wed@09:00"
-            let parts: Vec<&str> = schedule.value.split('@').collect();
-            if parts.len() != 2 {
-                return None;
-            }
-            let day_names: Vec<&str> = parts[0].split(',').map(|s| s.trim()).collect();
-            let time_parts: Vec<&str> = parts[1].split(':').collect();
+            let time_str = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            let time_parts: Vec<&str> = time_str.split(':').collect();
             if time_parts.len() != 2 {
                 return None;
             }
             let hour: u32 = time_parts[0].parse().unwrap_or(0);
             let minute: u32 = time_parts[1].parse().unwrap_or(0);
+
+            let day_names = match &schedule.days_of_week {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => return None,
+            };
 
             let day_map = |name: &str| -> Option<chrono::Weekday> {
                 match name.to_lowercase().as_str() {
@@ -731,16 +854,26 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                 }
             };
 
+            let repeat_weeks = schedule.repeat_every.max(1) as i64;
             let now_local = chrono::Local::now();
             let mut best: Option<u64> = None;
 
+            // Search up to repeat_weeks * 7 + 7 days ahead
+            let search_days = (repeat_weeks * 7 + 7) as u32;
             for day_name in &day_names {
                 if let Some(target_day) = day_map(day_name) {
-                    // Find next occurrence of this weekday
-                    for offset in 0..8u32 {
+                    for offset in 0..search_days {
                         let candidate_date =
                             (now_local + chrono::Duration::days(offset as i64)).date_naive();
                         if candidate_date.weekday() == target_day {
+                            // For repeat_every > 1, check week alignment
+                            if repeat_weeks > 1 {
+                                let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 3).unwrap(); // a known Monday in the past
+                                let weeks_since = (candidate_date - epoch).num_weeks();
+                                if weeks_since.rem_euclid(repeat_weeks) != 0 {
+                                    continue;
+                                }
+                            }
                             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
                             let candidate_naive = candidate_date.and_time(target_time);
                             if let Some(candidate_local) = chrono::Local
@@ -761,6 +894,114 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
             }
 
             best
+        }
+        "monthly" => {
+            let time_str = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            let time_parts: Vec<&str> = time_str.split(':').collect();
+            if time_parts.len() != 2 {
+                return None;
+            }
+            let hour: u32 = time_parts[0].parse().unwrap_or(0);
+            let minute: u32 = time_parts[1].parse().unwrap_or(0);
+
+            let target_days = match &schedule.days_of_month {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => return None,
+            };
+
+            let now_local = chrono::Local::now();
+            let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
+            let mut best: Option<u64> = None;
+
+            // Check current month and next 2 months
+            for month_offset in 0..3i32 {
+                let candidate_month = now_local.month() as i32 + month_offset;
+                let candidate_year = now_local.year() + (candidate_month - 1) / 12;
+                let candidate_month_norm = ((candidate_month - 1) % 12 + 1) as u32;
+
+                for &day in &target_days {
+                    if let Some(candidate_date) = chrono::NaiveDate::from_ymd_opt(
+                        candidate_year,
+                        candidate_month_norm,
+                        day,
+                    ) {
+                        let candidate_naive = candidate_date.and_time(target_time);
+                        if let Some(candidate_local) = chrono::Local
+                            .from_local_datetime(&candidate_naive)
+                            .earliest()
+                        {
+                            let candidate_ms = candidate_local.timestamp_millis() as u64;
+                            if candidate_ms > now_ms {
+                                best = Some(
+                                    best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if best.is_some() {
+                    break;
+                }
+            }
+
+            best
+        }
+        "specific_dates" => {
+            let time_str = schedule.time_of_day.as_deref().unwrap_or("00:00");
+            let time_parts: Vec<&str> = time_str.split(':').collect();
+            let hour: u32 = time_parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
+            let minute: u32 = time_parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+
+            let dates = match &schedule.specific_dates {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => return None,
+            };
+
+            let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
+            let mut best: Option<u64> = None;
+
+            for date_str in &dates {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let candidate_naive = date.and_time(target_time);
+                    if let Some(candidate_local) = chrono::Local
+                        .from_local_datetime(&candidate_naive)
+                        .earliest()
+                    {
+                        let candidate_ms = candidate_local.timestamp_millis() as u64;
+                        if candidate_ms > now_ms {
+                            best = Some(
+                                best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)),
+                            );
+                        }
+                    }
+                }
+            }
+
+            best
+        }
+        "one_time" => {
+            let run_at = schedule.run_at.as_deref().unwrap_or("");
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(run_at) {
+                let ms = dt.timestamp_millis() as u64;
+                if ms > now_ms {
+                    Some(ms)
+                } else {
+                    None
+                }
+            } else if let Ok(dt) =
+                chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M")
+            {
+                let local = chrono::Local.from_local_datetime(&dt).earliest()?;
+                let ms = local.timestamp_millis() as u64;
+                if ms > now_ms {
+                    Some(ms)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -1039,11 +1280,33 @@ mod tests {
                     "time": "09:00",
                     "status": status,
                 }),
+                parameter_schema: None,
                 dependencies: None,
                 position: None,
             }],
             role_mappings: HashMap::from([("analyst".to_string(), "agent-1".to_string())]),
         }
+    }
+
+    #[test]
+    fn compute_next_run_weekly_epoch_alignment() {
+        use super::compute_next_run;
+        use chrono::TimeZone;
+        let schedule = ScheduleDefinition {
+            schedule_type: "weekly".to_string(),
+            time_of_day: Some("09:00".to_string()),
+            days_of_week: Some(vec!["Mon".to_string(), "Wed".to_string()]),
+            repeat_every: 2, // Every 2 weeks
+            ..Default::default()
+        };
+        // Use a test date: 2024-01-01 was a Monday
+        let now = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_time(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        let now_ms = chrono::Local.from_local_datetime(&now).earliest().unwrap().timestamp_millis() as u64;
+        
+        // This will verify `rem_euclid` doesn't panic and returns a valid timestamp in the future.
+        let next = compute_next_run(&schedule, now_ms);
+        assert!(next.is_some());
+        assert!(next.unwrap() > now_ms);
     }
 
     #[test]
@@ -1090,7 +1353,17 @@ mod tests {
             workflow_name: "Morning Sync".to_string(),
             schedule: ScheduleDefinition {
                 schedule_type: "daily".to_string(),
-                value: "09:00".to_string(),
+                interval_minutes: None,
+                time_of_day: Some("09:00".to_string()),
+                days_of_week: None,
+                repeat_every: 1,
+                days_of_month: None,
+                specific_dates: None,
+                run_at: None,
+                end_condition: "never".to_string(),
+                end_date: None,
+                max_occurrences: None,
+                occurrence_count: 0,
                 active: true,
             },
             role_mappings: HashMap::new(),
@@ -1106,7 +1379,7 @@ mod tests {
         assert_eq!(runs[0].id, "wf-1-trigger-1");
         assert_eq!(runs[0].workflow_name, "Morning Sync");
         assert_eq!(runs[0].schedule.schedule_type, "daily");
-        assert_eq!(runs[0].schedule.value, "09:00");
+        assert_eq!(runs[0].schedule.time_of_day.as_deref(), Some("09:00"));
         assert!(runs[0].is_paused);
         assert_eq!(runs[0].next_run_epoch_ms, Some(1234));
     }
@@ -1120,7 +1393,17 @@ mod tests {
             workflow_name: "Morning Sync".to_string(),
             schedule: ScheduleDefinition {
                 schedule_type: "daily".to_string(),
-                value: "08:00".to_string(),
+                interval_minutes: None,
+                time_of_day: Some("08:00".to_string()),
+                days_of_week: None,
+                repeat_every: 1,
+                days_of_month: None,
+                specific_dates: None,
+                run_at: None,
+                end_condition: "never".to_string(),
+                end_date: None,
+                max_occurrences: None,
+                occurrence_count: 0,
                 active: true,
             },
             role_mappings: HashMap::new(),
@@ -1133,7 +1416,7 @@ mod tests {
         let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
 
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].schedule.value, "09:00");
+        assert_eq!(runs[0].schedule.time_of_day.as_deref(), Some("09:00"));
         assert_eq!(runs[0].next_run_epoch_ms, None);
     }
 
@@ -1146,7 +1429,17 @@ mod tests {
             workflow_name: "Morning Sync".to_string(),
             schedule: ScheduleDefinition {
                 schedule_type: "daily".to_string(),
-                value: "09:00".to_string(),
+                interval_minutes: None,
+                time_of_day: Some("09:00".to_string()),
+                days_of_week: None,
+                repeat_every: 1,
+                days_of_month: None,
+                specific_dates: None,
+                run_at: None,
+                end_condition: "never".to_string(),
+                end_date: None,
+                max_occurrences: None,
+                occurrence_count: 0,
                 active: true,
             },
             role_mappings: HashMap::new(),
@@ -1257,10 +1550,46 @@ pub async fn run_workflow(
                 break;
             }
 
-            let node = match wf.nodes.iter().find(|n| n.id == current_node_id) {
-                Some(n) => n,
+            let mut node = match wf.nodes.iter().find(|n| n.id == current_node_id) {
+                Some(n) => n.clone(),
                 None => continue,
             };
+
+            // --- PARAMETER SCHEMA MERGE & VALIDATION ---
+            let mut merged_config = match node.config.clone() {
+                Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            };
+
+            let mut node_validation_error: Option<String> = None;
+            if let Some(Value::Object(schema_props)) = &node.parameter_schema {
+                for (param_name, param_def) in schema_props {
+                    if let Some(def_obj) = param_def.as_object() {
+                        let is_required = def_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+                        
+                        let is_missing = match merged_config.get(param_name) {
+                            None | Some(Value::Null) => true,
+                            Some(Value::String(s)) if s.is_empty() => true,
+                            _ => false,
+                        };
+
+                        if is_missing {
+                            if let Some(default_val) = def_obj.get("default") {
+                                let final_val = if let Some(s) = default_val.as_str() {
+                                    Value::String(interpolate_string(s, &registry))
+                                } else {
+                                    default_val.clone()
+                                };
+                                merged_config.insert(param_name.clone(), final_val);
+                            } else if is_required {
+                                node_validation_error = Some(format!("Missing required parameter: {}", param_name));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            node.config = Value::Object(merged_config);
 
             // --- 2A. Transactional Consumption Logic ---
             let mut triggered_by_dep = None;
@@ -1337,7 +1666,9 @@ pub async fn run_workflow(
             // --- NODE LOGIC ---
             let mut result_ports = vec!["default".to_string()];
             let mut output_payload = Value::Null;
-            let mut node_error = None;
+            let mut node_error = node_validation_error;
+
+            if node_error.is_none() {
 
             match node.r#type.as_str() {
                 "trigger" => {
@@ -2029,6 +2360,8 @@ pub async fn run_workflow(
                     output_payload = serde_json::json!({ "status": "unknown_type" });
                 }
             }
+            
+            } // end if node_error.is_none()
 
             // Inject fired_ports into output for telemetry
             if !output_payload.is_object() {
