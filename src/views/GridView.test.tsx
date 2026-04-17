@@ -52,13 +52,13 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
 }
 
 describe('GridView maximize behavior', () => {
-  it('maximized terminals use fixed positioning for full-screen overlay', () => {
+  it('maximized terminals fill the grid container', () => {
     renderGrid('agent-1');
 
     const card = screen.getByTestId('terminal-agent-1').closest('#agent-card-agent-1');
-    expect(card?.className).toContain('fixed');
-    expect(card?.className).toContain('inset-0');
-    expect(card?.className).toContain('z-[100]');
+    expect(card?.className).toContain('h-full');
+    expect(card?.className).toContain('w-full');
+    expect(card?.className).not.toContain('fixed');
   });
 
   it('falls back to the filtered grid when the maximized agent is no longer visible', () => {

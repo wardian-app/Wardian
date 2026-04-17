@@ -125,7 +125,6 @@ export const GridView: React.FC<GridViewProps> = ({
     gap: (isMaximized || isMobile) ? '0' : '8px',
     background: 'transparent',
     padding: (isMaximized || isMobile) ? '0' : '8px',
-    // Removed the excessive paddingBottom: '200px'
     height: (isMaximized || isMobile) ? '100%' : 'auto',
   };
 
@@ -172,7 +171,7 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'fixed inset-0 z-[100] rounded-none border-none transition-none h-screen w-screen' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'h-full w-full rounded-none border-none transition-none z-10' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
           >
             <div 
               onMouseEnter={() => onMouseEnterCard(agentId)}
