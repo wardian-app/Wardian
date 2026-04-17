@@ -9,6 +9,7 @@ interface SettingsState {
   shell_id: string;
   custom_executable: string;
   custom_args: string;
+  agent_session_persistence: 'fresh' | 'resume';
   available_shells: ShellOption[];
   shell_settings_loaded: boolean;
   shells_loaded: boolean;
@@ -17,6 +18,7 @@ interface SettingsState {
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
+  setAgentSessionPersistence: (value: 'fresh' | 'resume') => void;
   loadShellSettings: () => Promise<void>;
   loadAvailableShells: () => Promise<void>;
   saveShellSettings: () => Promise<void>;
@@ -26,6 +28,7 @@ const DEFAULT_SHELL_SETTINGS: ShellSettings = {
   shell_id: 'auto',
   custom_executable: null,
   custom_args: null,
+  agent_session_persistence: 'resume',
 };
 
 export const useSettingsStore = create<SettingsState>()(
@@ -36,6 +39,7 @@ export const useSettingsStore = create<SettingsState>()(
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
+      agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
       available_shells: [],
       shell_settings_loaded: false,
       shells_loaded: false,
@@ -44,6 +48,7 @@ export const useSettingsStore = create<SettingsState>()(
       setShellId: (shell_id) => set({ shell_id }),
       setCustomExecutable: (custom_executable) => set({ custom_executable }),
       setCustomArgs: (custom_args) => set({ custom_args }),
+      setAgentSessionPersistence: (agent_session_persistence) => set({ agent_session_persistence }),
       loadShellSettings: async () => {
         try {
           const settings = await invoke<ShellSettings>('load_shell_settings');
@@ -51,6 +56,7 @@ export const useSettingsStore = create<SettingsState>()(
             shell_id: settings.shell_id,
             custom_executable: settings.custom_executable ?? '',
             custom_args: settings.custom_args ?? '',
+            agent_session_persistence: settings.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
             shell_settings_loaded: true,
           });
         } catch (error) {
@@ -59,6 +65,7 @@ export const useSettingsStore = create<SettingsState>()(
             shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
             custom_executable: '',
             custom_args: '',
+            agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
             shell_settings_loaded: true,
           });
         }
@@ -77,12 +84,14 @@ export const useSettingsStore = create<SettingsState>()(
           shell_id: get().shell_id,
           custom_executable: get().custom_executable.trim() || null,
           custom_args: get().custom_args.trim() || null,
+          agent_session_persistence: get().agent_session_persistence,
         };
         const saved = await invoke<ShellSettings>('save_shell_settings', { settings });
         set({
           shell_id: saved.shell_id,
           custom_executable: saved.custom_executable ?? '',
           custom_args: saved.custom_args ?? '',
+          agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
           shell_settings_loaded: true,
         });
       },

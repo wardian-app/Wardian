@@ -37,9 +37,15 @@ Unlike traditional DAGs, Wardian supports **Cycles** and **Loops** through a pul
 ## 🧩 Node Types & Logic
 
 ### Agent Node
-The most complex node type. It can run in two modes:
-- **PTY (Text) Mode**: Injects a prompt into a live agent's terminal and waits for an "Idle" JSON event from the CLI.
-- **Headless (JSON) Mode**: Temporarily kills the live PTY, runs a one-off `gemini-cli` command for structured JSON output, and then restores the PTY.
+The most complex node type. The builder exposes one execution policy selector:
+
+- **`ephemeral`**: build a fresh workflow-run agent config from the node's class and folder fields.
+- **`inherit_fresh`**: clone the selected agent's provider, class, workspace, skills, and scoped read configuration, but clear provider resume state and run under a workflow-run session ID.
+- **`inherit_resume`**: intentionally use the selected agent's provider session and mutable runtime state.
+
+The backend resolves that selector into an `AgentExecutionContext` before launch. Fresh modes use headless execution and must not kill or mutate a live source agent. Resume mode may use the live PTY for text output, or temporarily switch to provider-native headless execution for structured JSON output when the provider requires it.
+
+Workflow-spawned agent runs skip interactive startup prompts. Provider resume flags are emitted only when the resolved context is `inherit_resume`.
 
 ### Logic Node
 Evaluates a string condition (e.g., `nodes.gatekeeper.output.decision === 'PROCEED'`) using a regex-based parser. Pulses either the `on_true` or `on_false` port.

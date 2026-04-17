@@ -73,14 +73,22 @@ Use it to send a prompt into an agent session or run an agent headlessly when th
 Behavior:
 
 - supports direct targeting or role-based assignment
-- supports `persistent` and `temporary` session modes in the builder
+- supports `ephemeral`, `inherit_fresh`, and `inherit_resume` run modes
 - supports `text` or `json` output formats
-- can require launch-time assignment through the run modal
+- can require launch-time assignment through the run modal when the run mode inherits from an existing agent
+- skips automatic startup or "introduce yourself" prompts for workflow-spawned runs
 
 Common pitfalls:
 
-- leaving a role unmapped, which prevents execution
+- leaving an inherited role unmapped, which prevents execution
+- using `inherit_resume` when you wanted a fresh run with the selected agent's profile
 - assuming JSON mode behaves exactly like an interactive PTY run
+
+Run modes:
+
+- `ephemeral`: use the selected class and workspace for a fresh workflow-run provider session.
+- `inherit_fresh`: clone settings from the selected agent, read that agent's scoped context, and start a fresh workflow-run provider session.
+- `inherit_resume`: continue the selected agent's provider session and runtime directory.
 
 ### Shell Command
 

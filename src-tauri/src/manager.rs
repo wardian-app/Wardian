@@ -1,4 +1,4 @@
-use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentTelemetry};
+use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentProvider, AgentTelemetry};
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
@@ -115,12 +115,10 @@ fn opencode_status_from_title(title: &str) -> Option<&'static str> {
 }
 
 fn opencode_session_diff_path(session_id: &str) -> std::path::PathBuf {
-    let base = dirs::data_local_dir().or_else(|| {
-        dirs::home_dir().map(|home| home.join(".local").join("share"))
-    });
+    let base = dirs::data_local_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")));
     let base = base.unwrap_or_else(|| std::path::PathBuf::from("."));
-    base
-        .join("opencode")
+    base.join("opencode")
         .join("storage")
         .join("session_diff")
         .join(format!("{session_id}.json"))
@@ -193,7 +191,9 @@ fn extract_terminal_titles(chunk: &str) -> Vec<String> {
                 end += 1;
             }
 
-            let title = String::from_utf8_lossy(&bytes[value_start..end]).trim().to_string();
+            let title = String::from_utf8_lossy(&bytes[value_start..end])
+                .trim()
+                .to_string();
             if !title.is_empty() {
                 titles.push(title);
             }
@@ -1249,7 +1249,10 @@ fn interactive_provider_args(
             provider_args.push(provider_cwd.to_string_lossy().to_string());
         }
         "opencode" => {
-            let target_dir = if provider_cwd.file_name().is_some_and(|name| name == "habitat") {
+            let target_dir = if provider_cwd
+                .file_name()
+                .is_some_and(|name| name == "habitat")
+            {
                 habitat_workspace_cwd(provider_cwd)
             } else {
                 workspace_cwd.to_path_buf()
@@ -1311,7 +1314,6 @@ fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM", "xterm-256color");
 }
-
 
 #[cfg(windows)]
 fn quote_cmd_arg(value: &str) -> String {
@@ -1385,55 +1387,45 @@ pub async fn run_headless(
     run_headless_with_config(cwd, prompt, session_id, output_format, provider_name, None).await
 }
 
-pub async fn run_headless_with_config(
-    cwd: &std::path::Path,
-    prompt: &str,
-    session_id: &str,
-    output_format: &str,
+pub struct HeadlessRunOptions<'a> {
+    pub cwd: &'a std::path::Path,
+    pub prompt: &'a str,
+    pub wardian_session_id: &'a str,
+    pub resume_session: Option<&'a str>,
+    pub output_format: &'a str,
+    pub provider_name: &'a str,
+    pub config_override: Option<&'a AgentConfig>,
+}
+
+fn headless_provider_args(
     provider_name: &str,
+    provider: &dyn AgentProvider,
+    provider_cwd: &std::path::Path,
+    prompt: &str,
+    output_format: &str,
+    resume_session: Option<&str>,
     config_override: Option<&AgentConfig>,
-) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    let provider = ProviderFactory::resolve(provider_name)?;
-    let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(session_id))?;
-    let provider_cwd = cwd.to_path_buf();
-    let normalized_prompt = if provider_name == "opencode" {
-        crate::utils::terminal_input::normalize_prompt_for_terminal_submit(prompt)
-    } else {
-        prompt.to_string()
-    };
-    let persisted_opencode_config = if provider_name == "opencode" {
-        config_override.cloned().or_else(|| persisted_agent_config(session_id))
-    } else {
-        None
-    };
-    let (bin, mut provider_args) = provider.get_executable();
-    let claude_hook = if provider_name == "claude" {
-        ensure_claude_permission_hook(session_id).ok()
-    } else {
-        None
-    };
+) -> Vec<String> {
+    let (_bin, mut provider_args) = provider.get_executable();
     match provider_name {
         "codex" => {
             provider_args.push("--cd".to_string());
             provider_args.push(provider_cwd.to_string_lossy().to_string());
             provider_args.push("exec".to_string());
-            provider_args.push("resume".to_string());
-            provider_args.push(session_id.to_string());
+            if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
+                provider_args.push("resume".to_string());
+                provider_args.push(resume_id.to_string());
+            }
             provider_args.push("--json".to_string());
             provider_args.push(prompt.to_string());
         }
         "claude" => {
-            if let Some(hook) = claude_hook.as_ref() {
-                provider_args.push("--settings".to_string());
-                provider_args.push(hook.settings_arg.clone());
-            }
             provider_args.push("--print".to_string());
             provider_args.push("--output-format".to_string());
             provider_args.push(output_format.to_string());
-            if !session_id.is_empty() {
+            if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
                 provider_args.push("--resume".to_string());
-                provider_args.push(session_id.to_string());
+                provider_args.push(resume_id.to_string());
             }
             provider_args.push(prompt.to_string());
         }
@@ -1443,27 +1435,96 @@ pub async fn run_headless_with_config(
         }
         "opencode" => {
             provider_args.push("run".to_string());
-            if let Some(config) = persisted_opencode_config.as_ref() {
-                provider_args.extend(provider.get_spawn_args(config, !session_id.is_empty()));
-            } else if !session_id.is_empty() {
+            if let Some(config) = config_override {
+                let mut config = config.clone();
+                config.resume_session = resume_session.map(str::to_string);
+                provider_args.extend(provider.get_spawn_args(&config, resume_session.is_some()));
+            } else if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
                 provider_args.push("--session".to_string());
-                provider_args.push(session_id.to_string());
+                provider_args.push(resume_id.to_string());
             }
             provider_args.push("--format".to_string());
             provider_args.push("json".to_string());
             provider_args.push("--dir".to_string());
             provider_args.push(provider_cwd.to_string_lossy().to_string());
-            provider_args.push(normalized_prompt.clone());
+            provider_args
+                .push(crate::utils::terminal_input::normalize_prompt_for_terminal_submit(prompt));
         }
         _ => {
             provider_args.push("-p".to_string());
             provider_args.push(prompt.to_string());
             provider_args.push("--output-format".to_string());
             provider_args.push(output_format.to_string());
-            if !session_id.is_empty() {
+            if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
                 provider_args.push("--resume".to_string());
-                provider_args.push(session_id.to_string());
+                provider_args.push(resume_id.to_string());
             }
+        }
+    }
+    provider_args
+}
+
+pub async fn run_headless_with_config(
+    cwd: &std::path::Path,
+    prompt: &str,
+    session_id: &str,
+    output_format: &str,
+    provider_name: &str,
+    config_override: Option<&AgentConfig>,
+) -> Result<serde_json::Value, String> {
+    run_headless_with_options(HeadlessRunOptions {
+        cwd,
+        prompt,
+        wardian_session_id: session_id,
+        resume_session: (!session_id.trim().is_empty()).then_some(session_id),
+        output_format,
+        provider_name,
+        config_override,
+    })
+    .await
+}
+
+pub async fn run_headless_with_options(
+    options: HeadlessRunOptions<'_>,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let cwd = options.cwd;
+    let prompt = options.prompt;
+    let wardian_session_id = options.wardian_session_id;
+    let resume_session = options.resume_session;
+    let output_format = options.output_format;
+    let provider_name = options.provider_name;
+    let config_override = options.config_override;
+    let provider = ProviderFactory::resolve(provider_name)?;
+    let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(wardian_session_id))?;
+    let provider_cwd = cwd.to_path_buf();
+    let persisted_opencode_config = if provider_name == "opencode" {
+        config_override
+            .cloned()
+            .or_else(|| persisted_agent_config(wardian_session_id))
+    } else {
+        None
+    };
+    let (bin, _) = provider.get_executable();
+    let claude_hook = if provider_name == "claude" {
+        ensure_claude_permission_hook(wardian_session_id).ok()
+    } else {
+        None
+    };
+
+    let mut provider_args = headless_provider_args(
+        provider_name,
+        provider.as_ref(),
+        &provider_cwd,
+        prompt,
+        output_format,
+        resume_session,
+        persisted_opencode_config.as_ref(),
+    );
+    if let Some(hook) = claude_hook.as_ref() {
+        if provider_name == "claude" {
+            provider_args.insert(0, hook.settings_arg.clone());
+            provider_args.insert(0, "--settings".to_string());
         }
     }
 
@@ -1483,10 +1544,15 @@ pub async fn run_headless_with_config(
             .as_ref()
             .map(|config| config.agent_class.as_str())
             .unwrap_or("");
+        let opencode_scope_session = if resume_session.is_some() {
+            resume_session
+        } else {
+            (!wardian_session_id.trim().is_empty()).then_some(wardian_session_id)
+        };
         for (key, value) in opencode_env(
             &provider_cwd,
             class_name,
-            (!session_id.is_empty()).then_some(session_id),
+            opencode_scope_session,
             persisted_opencode_config.as_ref(),
         )? {
             cmd.env(key, value);
@@ -1510,7 +1576,7 @@ pub async fn run_headless_with_config(
     log_debug(&format!(
         "[Wardian] run_headless: provider={}, session_id={}, cwd={}, prompt_len={}, output_format={}",
         provider_name,
-        if session_id.is_empty() { "<none>" } else { session_id },
+        if wardian_session_id.is_empty() { "<none>" } else { wardian_session_id },
         cwd.display(),
         prompt.len(),
         output_format
@@ -1611,7 +1677,7 @@ pub async fn run_headless_with_config(
 
         if output_format == "json" {
             Ok(serde_json::json!({
-                "thread_id": session_id,
+                "thread_id": wardian_session_id,
                 "response": last_message.unwrap_or_default(),
                 "raw": output,
             }))
@@ -1623,7 +1689,7 @@ pub async fn run_headless_with_config(
 
         if output_format == "json" {
             Ok(serde_json::json!({
-                "session_id": summary.session_id.unwrap_or_else(|| session_id.to_string()),
+                "session_id": summary.session_id.unwrap_or_else(|| wardian_session_id.to_string()),
                 "response": summary.last_text.clone().unwrap_or_default(),
                 "raw": output,
             }))
@@ -1675,7 +1741,8 @@ pub async fn obtain_session_id(
         provider_args.push("exec".to_string());
 
         if let Some(config) = config {
-            let spawn_args = strip_flag_value_pairs(provider.get_spawn_args(config, false), "--add-dir");
+            let spawn_args =
+                strip_flag_value_pairs(provider.get_spawn_args(config, false), "--add-dir");
             provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
             if config.codex_skip_git_repo_check.unwrap_or(true) {
                 provider_args.push("--skip-git-repo-check".to_string());
@@ -1700,10 +1767,8 @@ pub async fn obtain_session_id(
     } else if provider_name == "claude" {
         // --print mode does not accept --input-format stream-json; strip it.
         if let Some(config) = config {
-            let spawn_args = strip_flag_value_pairs(
-                provider.get_spawn_args(config, false),
-                "--input-format",
-            );
+            let spawn_args =
+                strip_flag_value_pairs(provider.get_spawn_args(config, false), "--input-format");
             provider_args.extend(spawn_args);
         } else {
             provider_args.push("--verbose".to_string());
@@ -1791,7 +1856,9 @@ pub async fn obtain_session_id(
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
                             if provider_name == "opencode" {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_part) {
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(json_part)
+                                {
                                     if session_id.is_none() {
                                         session_id = parsed
                                             .get("sessionID")
@@ -1988,24 +2055,21 @@ pub fn latest_codex_session_index_entry(
 
     let content = std::fs::read_to_string(&index_path)
         .map_err(|e| format!("Failed to read Codex session index: {}", e))?;
-    let latest = content
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
+    let latest = content.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
 
-            let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-            let session_id = parsed.get("id")?.as_str()?.trim();
-            let updated_at = parsed.get("updated_at")?.as_str()?.trim();
-            if session_id.is_empty() || updated_at.is_empty() {
-                return None;
-            }
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        let session_id = parsed.get("id")?.as_str()?.trim();
+        let updated_at = parsed.get("updated_at")?.as_str()?.trim();
+        if session_id.is_empty() || updated_at.is_empty() {
+            return None;
+        }
 
-            Some((session_id.to_string(), updated_at.to_string()))
-        });
+        Some((session_id.to_string(), updated_at.to_string()))
+    });
 
     Ok(latest)
 }
@@ -2090,7 +2154,6 @@ struct OpenCodeLogMetrics {
     init_timestamp: Option<String>,
     status: Option<String>,
 }
-
 
 /// Find the newest OpenCode log file whose filesystem mtime is at or after
 /// `spawn_time`.  OpenCode creates one log file per process invocation using
@@ -2691,12 +2754,13 @@ pub async fn kill_all_agents(state: &AppState) {
 mod tests {
     use super::{
         claude_permission_hook_matches_session, claude_status_from_log,
-        codex_bootstrap_launch_context, finalize_interactive_spawn_args, headless_provider_launch,
-        extract_terminal_titles, opencode_should_fallback_to_idle, opencode_status_from_title,
-        interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
-        migrate_codex_bootstrap_home, opencode_interactive_env, opencode_log_path_after,
-        opencode_log_path_in, opencode_metrics_from_log, opencode_runtime_config_content,
-        strip_flag_value_pairs, strip_standalone_flag,
+        codex_bootstrap_launch_context, extract_terminal_titles, finalize_interactive_spawn_args,
+        headless_provider_args, headless_provider_launch, interactive_provider_args,
+        interactive_provider_cwd, interactive_provider_launch, migrate_codex_bootstrap_home,
+        opencode_interactive_env, opencode_log_path_after, opencode_log_path_in,
+        opencode_metrics_from_log, opencode_runtime_config_content,
+        opencode_should_fallback_to_idle, opencode_status_from_title, strip_flag_value_pairs,
+        strip_standalone_flag,
     };
     use crate::models::AgentConfig;
     use std::path::Path;
@@ -2714,7 +2778,10 @@ mod tests {
     #[test]
     fn opencode_title_maps_to_status() {
         assert_eq!(opencode_status_from_title("OpenCode"), Some("Idle"));
-        assert_eq!(opencode_status_from_title("OC | Working"), Some("Processing..."));
+        assert_eq!(
+            opencode_status_from_title("OC | Working"),
+            Some("Processing...")
+        );
         assert_eq!(
             opencode_status_from_title("OC | Action Required: approve tool"),
             Some("Action Needed")
@@ -2727,7 +2794,11 @@ mod tests {
         let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
         let last = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3);
 
-        assert!(opencode_should_fallback_to_idle("Processing...", Some(last), now));
+        assert!(opencode_should_fallback_to_idle(
+            "Processing...",
+            Some(last),
+            now
+        ));
         assert!(!opencode_should_fallback_to_idle("Idle", Some(last), now));
     }
 
@@ -2953,8 +3024,8 @@ mod tests {
         let server_log = log_dir.join("2026-04-12T100002.log");
         std::fs::write(&server_log, "server session events").expect("write server");
 
-        let found = opencode_log_path_after(&log_dir, spawn_time)
-            .expect("should find a log after spawn");
+        let found =
+            opencode_log_path_after(&log_dir, spawn_time).expect("should find a log after spawn");
 
         assert_eq!(
             found, server_log,
@@ -3024,10 +3095,7 @@ mod tests {
 
         let args = interactive_provider_args("opencode", workspace_cwd, workspace_cwd, Vec::new());
 
-        assert_eq!(
-            args,
-            vec!["D:/Development/Wardian".to_string()]
-        );
+        assert_eq!(args, vec!["D:/Development/Wardian".to_string()]);
     }
     #[test]
     fn strip_flag_value_pairs_removes_all_add_dir_arguments() {
@@ -3221,6 +3289,65 @@ mod tests {
     }
 
     #[test]
+    fn codex_fresh_headless_args_omit_resume_subcommand() {
+        let provider = crate::providers::ProviderFactory::resolve("codex").unwrap();
+        let args = headless_provider_args(
+            "codex",
+            provider.as_ref(),
+            Path::new("D:/Development/Wardian"),
+            "task",
+            "json",
+            None,
+            None,
+        );
+
+        assert!(args.contains(&"exec".to_string()));
+        assert!(!args.contains(&"resume".to_string()));
+        assert!(!args.contains(&"ses_source".to_string()));
+    }
+
+    #[test]
+    fn claude_fresh_headless_args_omit_resume_flag() {
+        let provider = crate::providers::ProviderFactory::resolve("claude").unwrap();
+        let args = headless_provider_args(
+            "claude",
+            provider.as_ref(),
+            Path::new("D:/Development/Wardian"),
+            "task",
+            "text",
+            None,
+            None,
+        );
+
+        assert!(args.contains(&"--print".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn opencode_fresh_headless_args_omit_session_flag_but_keep_config() {
+        let provider = crate::providers::ProviderFactory::resolve("opencode").unwrap();
+        let config = AgentConfig {
+            opencode_agent: Some("build".into()),
+            ..Default::default()
+        };
+
+        let args = headless_provider_args(
+            "opencode",
+            provider.as_ref(),
+            Path::new("D:/Development/Wardian"),
+            "task",
+            "text",
+            None,
+            Some(&config),
+        );
+
+        assert!(args.contains(&"run".to_string()));
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"build".to_string()));
+        assert!(!args.contains(&"--session".to_string()));
+    }
+
+    #[test]
     fn opencode_interactive_launch_bypasses_shell_wrapper() {
         let launch = interactive_provider_launch(
             "opencode",
@@ -3308,7 +3435,8 @@ mod tests {
         provider_args.push("--cd".to_string());
         provider_args.push("D:/Development/Wardian".to_string());
         provider_args.push("exec".to_string());
-        let spawn_args = strip_flag_value_pairs(provider.get_spawn_args(&config, false), "--add-dir");
+        let spawn_args =
+            strip_flag_value_pairs(provider.get_spawn_args(&config, false), "--add-dir");
         provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
         if config.codex_skip_git_repo_check.unwrap_or(true) {
             provider_args.push("--skip-git-repo-check".to_string());
@@ -3337,10 +3465,7 @@ mod tests {
 
         assert_eq!(
             args,
-            vec![
-                "--resume".to_string(),
-                "claude-session".to_string(),
-            ]
+            vec!["--resume".to_string(), "claude-session".to_string(),]
         );
     }
 
@@ -3362,5 +3487,4 @@ mod tests {
             ]
         );
     }
-
 }

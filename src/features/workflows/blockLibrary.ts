@@ -89,7 +89,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
       { name: 'agent_id', label: 'Target Agent', type: 'select', placeholder: 'Select Agent' },
       { name: 'agent_class', label: 'Agent Class', type: 'select', placeholder: 'Select Class' },
       { name: 'prompt', label: 'Prompt Template', type: 'textarea', placeholder: 'Analyze {{nodes.step1.output}}', required: true },
-      { name: 'session_type', label: 'Session Type', type: 'select', options: ['persistent', 'temporary'], default: 'persistent' },
+      { name: 'mode', label: 'Run Mode', type: 'select', options: ['ephemeral', 'inherit_fresh', 'inherit_resume'], default: 'ephemeral' },
       { name: 'folder', label: 'Workspace Folder', type: 'text', placeholder: 'C:\\path\\to\\project' },
       { name: 'output_format', label: 'Output Format', type: 'select', options: ['text', 'json'], default: 'text' },
       { name: 'json_schema', label: 'JSON Schema', type: 'schema', placeholder: '{ "type": "object" }' }

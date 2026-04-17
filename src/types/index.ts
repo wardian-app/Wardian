@@ -44,6 +44,7 @@ export interface AgentConfig {
 
     // Git isolation
     git_worktree?: boolean;
+
 }
 
 export interface GitFileEntry {

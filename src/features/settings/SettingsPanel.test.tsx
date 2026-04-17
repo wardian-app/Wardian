@@ -16,6 +16,7 @@ describe('SettingsPanel', () => {
       shell_id: 'auto',
       custom_executable: '',
       custom_args: '',
+      agent_session_persistence: 'resume',
       available_shells: [],
       shell_settings_loaded: false,
       shells_loaded: false,
@@ -28,6 +29,7 @@ describe('SettingsPanel', () => {
             shell_id: 'pwsh',
             custom_executable: null,
             custom_args: null,
+            agent_session_persistence: 'resume',
           };
         case 'list_available_shells':
           return [
@@ -88,10 +90,31 @@ describe('SettingsPanel', () => {
           shell_id: 'custom',
           custom_executable: 'C:/Tools/custom-shell.exe',
           custom_args: '--command',
+          agent_session_persistence: 'resume',
         },
       });
     });
 
-    expect(await screen.findByText('Default shell updated.')).toBeInTheDocument();
+    expect(await screen.findByText('Runtime settings updated.')).toBeInTheDocument();
+  });
+
+  it('saves global regular agent session persistence through tauri', async () => {
+    render(<SettingsPanel />);
+
+    const select = await screen.findByLabelText('Regular agent sessions');
+    fireEvent.change(select, { target: { value: 'fresh' } });
+
+    fireEvent.click(screen.getByText('Save Agent Runtime'));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_shell_settings', {
+        settings: {
+          shell_id: 'pwsh',
+          custom_executable: null,
+          custom_args: null,
+          agent_session_persistence: 'fresh',
+        },
+      });
+    });
   });
 });

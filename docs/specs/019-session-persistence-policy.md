@@ -136,12 +136,15 @@ OpenCode is the clearest example of why the distinction matters: Wardian can clo
 
 ### Settings
 
-Add settings at two levels:
+Add one global setting for regular interactive agents:
 
-1. **Global workflow default**: default run mode for newly created workflow agent nodes.
-2. **Agent default**: optional preferred inherited run mode when this agent is selected in workflow builder surfaces.
+| Setting | Values | Default |
+| --- | --- | --- |
+| Regular agent sessions | `resume`, `fresh` | `resume` |
 
-The agent-level setting should not override an explicit workflow node choice. Initial implementation may omit these settings and default new workflow nodes to `ephemeral`, with legacy persistent nodes migrating to `inherit_fresh`.
+This setting controls normal visible-agent resume behavior after an agent has been paused or is off. `resume` continues the provider-native session when possible. `fresh` restarts the agent without provider resume flags, reducing provider-context growth for ordinary agent restarts.
+
+Workflow agent nodes do not inherit this global setting. Their behavior remains explicit through `ephemeral`, `inherit_fresh`, and `inherit_resume`, with new workflow nodes defaulting to `ephemeral` and legacy persistent nodes migrating to `inherit_fresh`.
 
 ### Documentation
 

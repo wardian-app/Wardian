@@ -104,10 +104,12 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
 
   const incomingEdges = edges.filter(e => e.target === id);
   const isWaitNode = type === 'wait';
+  const legacySessionType = data.config?.session_type;
+  const agentRunMode = data.config?.mode || (legacySessionType === 'persistent' ? 'inherit_fresh' : 'ephemeral');
 
   // Hard Sync Check (Amber Warning)
   const targetAgent = agents?.find(a => a.session_id === data.config?.agent_id);
-  const isPersistent = data.config?.session_type === 'persistent';
+  const isPersistent = agentRunMode === 'inherit_resume';
   
   // A Hard Sync (Restart) is required if the agent is already online but parameters differ
   const needsRestart = targetAgent && !targetAgent.is_off && (
@@ -185,19 +187,23 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
           {resolveVariables(data.label)}
         </div>
 
+        {type === 'agent' && agentRunMode === 'inherit_resume' && (
+          <div className="rounded border border-[var(--color-wardian-warning)]/40 bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_90%)] px-2 py-1 text-[10px] leading-snug text-[var(--color-wardian-text)]">
+            Resumes the selected agent conversation. Token use can grow with each workflow run.
+          </div>
+        )}
 
         {/* Dynamic Fields */}
         {blockDef?.fields && blockDef.fields.length > 0 && (
           <div className="flex flex-col gap-2 pt-2 border-t border-[var(--color-wardian-border)]">
             {blockDef.fields.map(field => {
               const val = data.config?.[field.name] || '';
-              const sessionType = data.config?.session_type || 'persistent';
 
               // Conditional visibility for Agent fields
               if (type === 'agent') {
-                if (field.name === 'agent_id' && sessionType === 'temporary') return null;
-                if (field.name === 'agent_class' && sessionType === 'persistent') return null;
-                if (field.name === 'folder' && sessionType === 'persistent') return null;
+                if (field.name === 'agent_id' && agentRunMode === 'ephemeral') return null;
+                if (field.name === 'agent_class' && agentRunMode !== 'ephemeral') return null;
+                if (field.name === 'folder' && agentRunMode !== 'ephemeral') return null;
                 
                 const outputFormat = data.config?.output_format || 'text';
                 if (field.name === 'json_schema' && outputFormat !== 'json') return null;

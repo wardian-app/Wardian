@@ -8,6 +8,10 @@ This document captures the practical runtime differences between Wardian's suppo
 - Every provider receives Wardian's `system_include_directories`, which are resolved from `common`, `classes/<class>`, and `agents/<session_id>`.
 - Headless execution and interactive execution use the same provider-specific assumptions where possible. Differences should stay explicit in `manager.rs` instead of being hidden in frontend state.
 - Provider-native instruction discovery matters more than Wardian's abstract model. The backend adapts Wardian's files and directories to each CLI instead of expecting the CLI to understand Wardian directly.
+- Workflow Agent nodes expose one run mode: `ephemeral`, `inherit_fresh`, or `inherit_resume`. Provider resume flags are emitted only for `inherit_resume`.
+- `inherit_fresh` clones the selected agent's runtime configuration and scoped read context, but writes workflow artifacts under a workflow-run session ID and clears provider resume state.
+- Workflow-spawned fresh runs skip interactive startup prompts. The workflow node prompt is the first provider input.
+- Regular visible agents use the global `Regular agent sessions` setting. `resume` keeps the previous provider session where possible; `fresh` restarts without provider resume flags.
 
 ## Quick Comparison
 

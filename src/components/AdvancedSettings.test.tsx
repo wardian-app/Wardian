@@ -20,4 +20,5 @@ describe("AdvancedSettings", () => {
 
     expect(updateField).toHaveBeenCalledWith("opencode_agent", "build");
   });
+
 });

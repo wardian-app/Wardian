@@ -15,6 +15,8 @@ export type NodeType =
 
 export type NodeStatus = 'idle' | 'processing' | 'completed' | 'failed' | 'blocked';
 
+export type WorkflowAgentMode = 'ephemeral' | 'inherit_fresh' | 'inherit_resume';
+
 export interface NodeDependency {
   node_id: string;
   port: string;
@@ -29,6 +31,19 @@ export interface WorkflowNode {
   dependencies?: NodeDependency[];
   // For UI state tracking
   position?: { x: number; y: number };
+}
+
+export interface WorkflowAgentNodeConfig {
+  mode?: WorkflowAgentMode;
+  /** Legacy field retained for migration from older saved workflows. */
+  session_type?: 'temporary' | 'persistent';
+  agent_id?: string;
+  agent_class?: string;
+  folder?: string;
+  prompt?: string;
+  output_format?: 'text' | 'json';
+  json_schema?: Record<string, unknown>;
+  timeout_ms?: number | string;
 }
 
 export interface WorkflowSettings {

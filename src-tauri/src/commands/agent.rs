@@ -1,5 +1,5 @@
 use crate::manager;
-use crate::models::{AgentConfig, AgentTelemetry};
+use crate::models::{AgentConfig, AgentSessionPersistence, AgentTelemetry};
 use crate::state::AppState;
 use tauri::{AppHandle, State};
 
@@ -46,6 +46,12 @@ fn restore_runtime_state_after_resume(new_active: &mut crate::state::ActiveAgent
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
+
+    let settings = crate::utils::load_shell_settings().unwrap_or_default();
+    if settings.agent_session_persistence == AgentSessionPersistence::Fresh {
+        config.resume_session = None;
+        return Ok(());
+    }
 
     // For opencode, Wardian uses a UUID as session_id internally, but opencode
     // only recognises real ses_xxx IDs.  Clear any stale UUID stored in
@@ -555,5 +561,31 @@ mod tests {
 
         assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
         assert!(!config.is_off);
+    }
+
+    #[test]
+    fn global_fresh_session_persistence_resume_clears_resume_session() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            agent_session_persistence: crate::models::AgentSessionPersistence::Fresh,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: Some("provider-session".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session, None);
+        assert!(!config.is_off);
+        std::env::remove_var("WARDIAN_HOME");
     }
 }

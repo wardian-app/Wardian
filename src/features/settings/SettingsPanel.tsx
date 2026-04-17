@@ -13,12 +13,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     shell_id,
     custom_executable,
     custom_args,
+    agent_session_persistence,
     available_shells,
     shell_settings_loaded,
     shells_loaded,
     setShellId,
     setCustomExecutable,
     setCustomArgs,
+    setAgentSessionPersistence,
     loadShellSettings,
     loadAvailableShells,
     saveShellSettings,
@@ -60,7 +62,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     try {
       await saveShellSettings();
       setShellStatus("success");
-      setShellMessage("Default shell updated.");
+      setShellMessage("Runtime settings updated.");
       setTimeout(() => {
         setShellStatus("idle");
         setShellMessage("");
@@ -132,6 +134,42 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
             <p className="text-[10px] text-muted-neutral leading-relaxed">
               <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> For complete terminal synchronization, update the gemini CLI theme as well, and then restart the application.
             </p>
+          </div>
+        </div>
+
+        <div className="border-t border-wardian-border pt-6">
+          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Agent Runtime</h3>
+
+          <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
+            <label className="text-sm font-bold text-primary" htmlFor="agent-session-persistence">
+              Regular agent sessions
+            </label>
+            <select
+              id="agent-session-persistence"
+              value={agent_session_persistence}
+              onChange={(e) => setAgentSessionPersistence(e.target.value as 'fresh' | 'resume')}
+              className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+            >
+              <option value="resume">Resume provider session</option>
+              <option value="fresh">Start fresh on resume</option>
+            </select>
+            <p className="text-[10px] text-muted-neutral leading-relaxed">
+              Applies when regular visible agents are resumed from Off. Workflow agent nodes use their own run mode.
+            </p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleSaveShell}
+                disabled={!shell_settings_loaded || shellStatus === 'saving'}
+                className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
+                  shellStatus === 'saving'
+                    ? 'bg-wardian-border text-muted border-transparent cursor-not-allowed'
+                    : 'bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
+                }`}
+              >
+                {shellStatus === 'saving' ? 'Saving...' : 'Save Agent Runtime'}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -272,4 +310,3 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     </div>
   );
 };
-

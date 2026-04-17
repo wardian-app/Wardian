@@ -8,6 +8,33 @@ export interface WorkflowRoleTarget {
   nodeName: string;
 }
 
+export function normalizeWorkflowAgentConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...config };
+
+  if (typeof normalized.mode !== 'string') {
+    if (normalized.session_type === 'temporary') {
+      normalized.mode = 'ephemeral';
+    } else if (normalized.session_type === 'persistent') {
+      normalized.mode = 'inherit_fresh';
+    } else if (
+      (typeof normalized.agent_id === 'string' && normalized.agent_id.trim().length > 0) ||
+      (typeof normalized.role === 'string' && normalized.role.trim().length > 0)
+    ) {
+      normalized.mode = 'inherit_fresh';
+    }
+  }
+
+  return normalized;
+}
+
+function workflowAgentNeedsInheritedAgent(config: Record<string, unknown> | undefined): boolean {
+  if (!config) {
+    return false;
+  }
+
+  return normalizeWorkflowAgentConfig(config).mode !== 'ephemeral';
+}
+
 function isTriggerNode(node: WorkflowNode): boolean {
   return node.type === 'trigger';
 }
@@ -33,7 +60,9 @@ export function normalizeWorkflowForLaunch(workflow: WorkflowDefinition): Workfl
       return node;
     }
 
-    const config = typeof node.config === 'object' && node.config !== null ? { ...node.config } : {};
+    const config = normalizeWorkflowAgentConfig(
+      typeof node.config === 'object' && node.config !== null ? node.config : {}
+    );
     const role = typeof config.role === 'string' && config.role.trim().length > 0
       ? config.role
       : synthesizeWorkflowRole(node);
@@ -41,7 +70,7 @@ export function normalizeWorkflowForLaunch(workflow: WorkflowDefinition): Workfl
     config.role = role;
 
     const agentId = typeof config.agent_id === 'string' ? config.agent_id : '';
-    if (agentId && !roleMappings[role]) {
+    if (agentId && config.mode !== 'ephemeral' && !roleMappings[role]) {
       roleMappings[role] = agentId;
     }
 
@@ -74,7 +103,7 @@ export function getWorkflowRoleTargets(workflow: WorkflowDefinition): WorkflowRo
   const normalized = normalizeWorkflowForLaunch(workflow);
 
   return normalized.nodes
-    .filter((node) => node.type === 'agent')
+    .filter((node) => node.type === 'agent' && workflowAgentNeedsInheritedAgent(node.config))
     .map((node) => ({
       role: String(node.config?.role || synthesizeWorkflowRole(node)),
       defaultAgentId: typeof node.config?.agent_id === 'string' ? node.config.agent_id : '',
@@ -217,4 +246,3 @@ export function buildScheduledRunFromWorkflow(workflow: WorkflowDefinition): Sch
     is_paused: false,
   };
 }
-
