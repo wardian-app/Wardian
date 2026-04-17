@@ -16,8 +16,8 @@ use tauri::{Emitter, Manager};
 pub fn run() {
     #[cfg(windows)]
     {
-        use windows::core::PCWSTR;
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        use windows::core::PCWSTR;
         let aumid: Vec<u16> = "org.wardian.desktop"
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -97,6 +97,7 @@ pub fn run() {
             commands::agent::kill_agent,
             commands::agent::pause_agent,
             commands::agent::resume_agent,
+            commands::agent::clear_agent_session,
             commands::agent::rename_agent,
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,

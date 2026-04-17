@@ -440,6 +440,22 @@ function AppBody() {
     }
   };
 
+  const onClear = async (id: string) => {
+    try {
+      await invoke('clear_agent_session', { sessionId: id });
+      setCurrentThoughts(prev => ({ ...prev, [id]: "" }));
+      setTerminalTitles(prev => ({ ...prev, [id]: "" }));
+      setOffAgentIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      fetchAgents();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const onDelete = async (id: string) => {
     if (await confirm('Delete this agent?')) {
       try {
@@ -537,6 +553,7 @@ function AppBody() {
                 onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
                 onPause={onPause}
                 onRestart={onRestart}
+                onClear={onClear}
                 onMouseEnterCard={handleMouseEnterCard}
                 onMouseUp={handleMouseUp}
                 onMouseDown={handleMouseDown}
@@ -595,6 +612,7 @@ function AppBody() {
           onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
           onPause={onPause}
           onRestart={onRestart}
+          onClear={onClear}
           onDelete={onDelete}
           onAddToList={handleAddToList}
           onRemoveFromList={handleRemoveFromList}

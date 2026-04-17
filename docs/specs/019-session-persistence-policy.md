@@ -156,6 +156,8 @@ Workflow agent nodes do not inherit this global setting. Their behavior remains 
 
 Claude has one extra runtime constraint: fresh resume must not reuse the old Claude `--session-id`. Wardian keeps the stable Wardian agent ID for UI state, scoped files, and telemetry, but generates a new Claude provider session ID for the fresh launch and then stores that provider ID as the next resumable session. This prevents Claude's "session ID is already in use" error while preserving the user's visible agent identity.
 
+Regular agents also expose a context-menu `Clear` action. `Clear` is a one-shot fresh restart: it ignores the agent's default/fresh/resume setting for that launch, clears Wardian's terminal output buffer, and broadcasts a terminal-clear event so the frontend scrollback cache is discarded too. It does not change the saved per-agent session persistence setting.
+
 ### Documentation
 
 Update user-facing workflow docs to explain:

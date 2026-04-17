@@ -12,6 +12,7 @@ This document captures the practical runtime differences between Wardian's suppo
 - `inherit_fresh` clones the selected agent's runtime configuration and scoped read context, but writes workflow artifacts under a workflow-run session ID and clears provider resume state.
 - Workflow-spawned fresh runs skip interactive startup prompts. The workflow node prompt is the first provider input.
 - Regular visible agents use the global `Regular agent sessions` setting unless the agent config sets `session_persistence` to `fresh` or `resume`. The agent-level `default` value inherits the global setting.
+- The regular-agent context menu `Clear` action forces a fresh provider launch for that one action and clears both the backend PTY output buffer and frontend terminal scrollback cache.
 
 ## Quick Comparison
 

@@ -21,4 +21,21 @@ describe("AdvancedSettings", () => {
     expect(updateField).toHaveBeenCalledWith("opencode_agent", "build");
   });
 
+  it("edits regular session persistence from advanced settings", () => {
+    const updateField = vi.fn();
+
+    render(
+      <AdvancedSettings
+        config={{ provider: "claude", session_persistence: "default" }}
+        updateField={updateField}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced Settings" }));
+    fireEvent.change(screen.getByLabelText("Regular Session Resume"), {
+      target: { value: "fresh" },
+    });
+
+    expect(updateField).toHaveBeenCalledWith("session_persistence", "fresh");
+  });
 });

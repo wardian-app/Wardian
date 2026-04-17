@@ -53,6 +53,7 @@ type TerminalSessionEntry = {
   recentWritePreviews: string[];
   opencodeFocusReported: boolean;
   outputReadyUnlisten: (() => void) | null;
+  terminalClearedUnlisten: (() => void) | null;
   provider?: string;
   currentTheme: typeof DARK_TERM_THEME;
   renderer: TerminalRendererEntry | null;
@@ -202,6 +203,7 @@ function disposeTerminalSession(sessionId: string) {
 
   entry.disposed = true;
   entry.outputReadyUnlisten?.();
+  entry.terminalClearedUnlisten?.();
   const renderer = entry.renderer;
   if (renderer?.resizeTimeout) {
     clearTimeout(renderer.resizeTimeout);
@@ -212,6 +214,34 @@ function disposeTerminalSession(sessionId: string) {
   entry.parserSerializeAddon.dispose();
   entry.parser.dispose();
   terminalSessionMap.delete(sessionId);
+}
+
+function clearTerminalSession(sessionId: string) {
+  const entry = terminalSessionMap.get(sessionId);
+  if (!entry || entry.disposed) {
+    return;
+  }
+
+  entry.recentWritePreviews = [];
+  entry.latestTitle = null;
+  entry.lastHomeRedrawLines = null;
+  entry.homeRedrawScrollbackSeen?.clear();
+  entry.transientHomeRedrawActive = false;
+  entry.pendingResizeRedrawSuppression = false;
+  entry.existingScrollbackLines = undefined;
+  const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
+  if (typeof parserWithReset.reset === "function") {
+    parserWithReset.reset();
+  } else {
+    entry.parser.write("\u001bc");
+  }
+  const rendererTerm = entry.renderer?.term as (Terminal & { reset?: () => void; clear?: () => void }) | undefined;
+  if (typeof rendererTerm?.reset === "function") {
+    rendererTerm.reset();
+  } else if (typeof rendererTerm?.clear === "function") {
+    rendererTerm.clear();
+  }
+  entry.titleHandlerRef.current?.("");
 }
 
 async function reportTerminalSize(sessionId: string, entry: TerminalSessionEntry, cols: number, rows: number) {
@@ -378,6 +408,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     recentWritePreviews: [],
     opencodeFocusReported: false,
     outputReadyUnlisten: null,
+    terminalClearedUnlisten: null,
     provider,
     currentTheme: DARK_TERM_THEME,
     renderer: null,
@@ -395,6 +426,21 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   };
 
   terminalSessionMap.set(sessionId, entry);
+
+  void listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
+    if (event.payload?.session_id !== sessionId) {
+      return;
+    }
+    clearTerminalSession(sessionId);
+  }).then((unlisten) => {
+    if (entry.disposed) {
+      unlisten();
+      return;
+    }
+    entry.terminalClearedUnlisten = unlisten;
+  }).catch((error) => {
+    console.warn("agent-terminal-cleared listen error:", error);
+  });
 
   void listen<{ session_id?: string }>("agent-pty-output-ready", (event) => {
     if (event.payload?.session_id !== sessionId) {

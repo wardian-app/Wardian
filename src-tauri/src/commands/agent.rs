@@ -3,7 +3,7 @@ use crate::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
 };
 use crate::state::AppState;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +95,16 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
+    config.is_off = false;
+    config.resume_session = None;
+    config.fresh_provider_session_id = None;
+    if config.provider == "claude" {
+        config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
+    }
     Ok(())
 }
 
@@ -369,6 +379,58 @@ pub async fn resume_agent(
 }
 
 #[tauri::command]
+pub async fn clear_agent_session(
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    manager::log_debug(&format!(
+        "[WARDIAN] clear_agent_session called for session: {}",
+        session_id
+    ));
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+
+    if let Some(agent) = agents.get_mut(&session_id) {
+        prepare_clear_config(&mut agent.config)?;
+        if let Ok(mut buf) = agent.output_buffer.lock() {
+            buf.clear();
+        }
+        if let Ok(mut title) = agent.terminal_title.lock() {
+            title.clear();
+        }
+        if let Ok(mut status) = agent.current_status.lock() {
+            *status = "Processing...".to_string();
+        }
+        let _ = app.emit(
+            "agent-terminal-cleared",
+            serde_json::json!({ "session_id": session_id }),
+        );
+
+        let mut new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
+        if agent.config.provider == "claude" {
+            if let Some(fresh_provider_session_id) = agent.config.fresh_provider_session_id.take() {
+                agent.config.resume_session = Some(fresh_provider_session_id);
+            }
+        }
+
+        if let Some(ref tx) = new_active.stdin_tx {
+            if let Ok(mut senders) = state.input_senders.write() {
+                senders.insert(session_id.clone(), tx.clone());
+            }
+        }
+
+        manager::terminate_active_agent_process(agent);
+        new_active.config = agent.config.clone();
+        let _ = std::mem::replace(agent, new_active);
+        manager::save_state(&app, &agents, &order);
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", session_id))
+    }
+}
+
+#[tauri::command]
 pub async fn rename_agent(
     session_id: String,
     new_name: String,
@@ -443,7 +505,7 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        persisted_resume_session_for_provider, prepare_resume_config,
+        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
         provider_uses_generated_session_id, restore_runtime_state_after_resume,
     };
     use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
@@ -715,5 +777,28 @@ mod tests {
         );
         assert!(config.fresh_provider_session_id.is_some());
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn prepare_clear_config_forces_fresh_resume_and_clears_runtime_fields() {
+        let mut config = AgentConfig {
+            provider: "claude".to_string(),
+            session_id: "wardian-agent-id".to_string(),
+            resume_session: Some("old-claude-session".to_string()),
+            session_persistence: AgentSessionPersistenceOverride::Resume,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_clear_config(&mut config).expect("prepare clear config");
+
+        assert_eq!(config.session_id, "wardian-agent-id");
+        assert_eq!(config.resume_session, None);
+        assert_eq!(
+            config.session_persistence,
+            AgentSessionPersistenceOverride::Resume
+        );
+        assert!(config.fresh_provider_session_id.is_some());
+        assert!(!config.is_off);
     }
 }

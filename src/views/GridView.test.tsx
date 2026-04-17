@@ -47,6 +47,7 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
       onQuery={vi.fn()}
       onPause={vi.fn()}
       onRestart={vi.fn()}
+      onClear={vi.fn()}
     />
   );
 }

@@ -24,6 +24,7 @@ interface AgentWatchlistProps {
   onQuery: (agentId: string) => void;
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
+  onClear: (agentId: string) => void;
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
   onDelete: (agentId: string) => void;
@@ -48,6 +49,7 @@ export default function AgentWatchlist({
   onQuery,
   onPause,
   onRestart,
+  onClear,
   onAddToList,
   onRemoveFromList,
   onDelete,
@@ -483,6 +485,7 @@ export default function AgentWatchlist({
           onQuery={onQuery}
           onPause={onPause}
           onRestart={onRestart}
+          onClear={onClear}
           onAddToList={(listId, agentId) => {
             onAddToList(listId, agentId);
             setContextMenu(p => ({ ...p, visible: false }));
