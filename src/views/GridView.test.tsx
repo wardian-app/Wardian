@@ -58,7 +58,7 @@ describe('GridView maximize behavior', () => {
     const card = screen.getByTestId('terminal-agent-1').closest('#agent-card-agent-1');
     expect(card?.className).toContain('fixed');
     expect(card?.className).toContain('inset-0');
-    expect(card?.className).toContain('z-50');
+    expect(card?.className).toContain('z-[100]');
   });
 
   it('falls back to the filtered grid when the maximized agent is no longer visible', () => {

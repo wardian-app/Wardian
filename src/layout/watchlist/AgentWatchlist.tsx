@@ -9,7 +9,6 @@ import {
 } from "./watchlistUtils";
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
-import { useLayoutStore } from "../../store/useLayoutStore";
 
 interface AgentWatchlistProps {
   agents: AgentConfig[];
@@ -58,7 +57,6 @@ export default function AgentWatchlist({
   onActiveListChange,
   onWatchlistsChange,
 }: AgentWatchlistProps) {
-  const { resetLayout } = useLayoutStore();
   // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
@@ -494,7 +492,6 @@ export default function AgentWatchlist({
             setContextMenu(p => ({ ...p, visible: false }));
           }}
           onDelete={onDelete}
-          onResetLayout={resetLayout}
           onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
         />
       )}
