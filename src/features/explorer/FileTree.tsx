@@ -132,7 +132,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
               </span>
 
               <span
-                className={`truncate flex-1 ${!gitColor ? (node.is_dir ? 'text-wardian-text font-medium' : 'text-wardian-text-muted group-hover:text-wardian-text') : ''} transition-colors`}
+                className={`truncate flex-1 ${node.is_dir ? 'font-medium' : ''} ${!gitColor ? (node.is_dir ? 'text-wardian-text' : 'text-wardian-text-muted group-hover:text-wardian-text') : ''} transition-colors`}
                 style={gitColor ? { color: gitColor } : undefined}
               >
                 {node.name}

@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AgentConfig, GitStatusResult } from "../../types";
+import { listen } from "@tauri-apps/api/event";
+import { AgentConfig, GitStatusResult, GitLogEntry } from "../../types";
 import { GitFileList } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
 import { useConfirm } from "../../components/ConfirmDialog";
@@ -27,6 +28,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [stagedOpen, setStagedOpen] = useState(true);
   const [changesOpen, setChangesOpen] = useState(true);
   const [untrackedOpen, setUntrackedOpen] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(true);
+
+  // Commit history
+  const [history, setHistory] = useState<GitLogEntry[]>([]);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
@@ -34,7 +39,6 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const isWorktreeActive = status?.branch?.startsWith("wardian/") ?? false;
   const isAgentRunning = (telemetry[selectedAgentId ?? ""]?.current_status ?? "Off") !== "Off";
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Resolve the agent's working directory
   useEffect(() => {
@@ -66,14 +70,38 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   }, [rootPath]);
 
-  // Poll status every 3 seconds
+  // Fetch commit history when root changes or after a commit
+  const refreshHistory = useCallback(async () => {
+    if (!rootPath) return;
+    try {
+      const log = await invoke<GitLogEntry[]>("git_log", { cwd: rootPath, count: 50 });
+      setHistory(log);
+    } catch {
+      setHistory([]);
+    }
+  }, [rootPath]);
+
+  // Watch .git/index + .git/HEAD via FSWatcher; refresh on change event
   useEffect(() => {
+    if (!rootPath) return;
+
     refreshStatus();
-    pollRef.current = setInterval(refreshStatus, 3000);
+    refreshHistory();
+
+    invoke("git_watch", { cwd: rootPath }).catch(() => {});
+
+    const unlistenPromise = listen<string>("git-changed", (event) => {
+      if (event.payload === rootPath) {
+        refreshStatus();
+        refreshHistory();
+      }
+    });
+
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      invoke("git_unwatch", { cwd: rootPath }).catch(() => {});
+      unlistenPromise.then((fn) => fn());
     };
-  }, [refreshStatus]);
+  }, [rootPath, refreshStatus, refreshHistory]);
 
   // File operations
   const handleStage = async (path: string) => {
@@ -151,6 +179,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       await invoke("git_commit", { cwd: rootPath, message: commitMsg.trim() });
       setCommitMsg("");
       await refreshStatus();
+      await refreshHistory();
     } catch (err) {
       console.error("Commit failed:", err);
     } finally {
@@ -208,8 +237,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         <h2 className="text-xl font-bold text-primary tracking-tight mb-4">Source Control</h2>
         <div className="flex flex-col items-center justify-center flex-1 text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="w-16 h-16 mb-4 text-gray-700/40">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M6 3v12M18 9a3 3 0 11-6 0 3 3 0 016 0zM6 21a3 3 0 110-6 3 3 0 010 6z" />
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="7" cy="5" r="2" style={{fill:'none'}} /><circle cx="7" cy="19" r="2" style={{fill:'none'}} /><circle cx="17" cy="12" r="2" style={{fill:'none'}} />
+              <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
             </svg>
           </div>
           <p className="text-xs text-muted italic">Select an agent to view source control.</p>
@@ -225,8 +255,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         <h2 className="text-xl font-bold text-primary tracking-tight mb-4">Source Control</h2>
         <div className="flex flex-col items-center justify-center flex-1 text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="w-16 h-16 mb-4 text-gray-700/40">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M6 3v12M18 9a3 3 0 11-6 0 3 3 0 016 0zM6 21a3 3 0 110-6 3 3 0 010 6z" />
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="7" cy="5" r="2" style={{fill:'none'}} /><circle cx="7" cy="19" r="2" style={{fill:'none'}} /><circle cx="17" cy="12" r="2" style={{fill:'none'}} />
+              <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
             </svg>
           </div>
           <h3 className="text-sm font-bold text-primary mb-2 tracking-wide">Not a Git Repository</h3>
@@ -257,8 +288,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
       {/* Branch bar */}
       <div className="flex items-center gap-2 py-1.5 mb-3 border-b border-wardian-border/30">
-        <svg className="w-4 h-4 text-[var(--color-wardian-accent)] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 3v12M18 9a3 3 0 11-6 0 3 3 0 016 0zM6 21a3 3 0 110-6 3 3 0 010 6z" />
+        <svg className="w-4 h-4 text-[var(--color-wardian-accent)] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="7" cy="5" r="2" style={{fill:'none'}} /><circle cx="7" cy="19" r="2" style={{fill:'none'}} /><circle cx="17" cy="12" r="2" style={{fill:'none'}} />
+          <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
         </svg>
         <span className="text-xs font-semibold text-primary truncate">{status.branch}</span>
         {status.ahead > 0 && (
@@ -467,6 +499,39 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
             </svg>
             <p className="text-xs text-muted italic">Working tree clean</p>
           </div>
+        )}
+
+        {/* Commit History */}
+        {history.length > 0 && (
+          <section className="mt-1 border-t border-wardian-border/30 pt-2">
+            <button
+              onClick={() => setHistoryOpen(!historyOpen)}
+              className="flex items-center gap-1.5 w-full text-left py-1"
+            >
+              <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${historyOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+              </svg>
+              <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">History</span>
+              <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
+                {history.length}
+              </span>
+            </button>
+            {historyOpen && (
+              <div className="flex flex-col">
+                {history.map((entry, i) => (
+                  <div key={entry.hash} className="flex items-center gap-2 py-[3px] px-1 hover:bg-wardian-card-bg-muted rounded group cursor-default">
+                    <div className="relative flex flex-col items-center shrink-0" style={{ width: 12 }}>
+                      {i > 0 && <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
+                      <div className={`w-2 h-2 rounded-full border shrink-0 z-10 ${i === 0 ? 'bg-[var(--color-wardian-accent)] border-[var(--color-wardian-accent)]' : 'bg-transparent border-[var(--color-wardian-text-muted)]'}`} />
+                      {i < history.length - 1 && <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
+                    </div>
+                    <span className="text-[11px] text-primary truncate flex-1 leading-snug">{entry.message}</span>
+                    <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">{entry.hash.slice(0, 7)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
         )}
       </div>
 

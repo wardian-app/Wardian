@@ -162,7 +162,9 @@ pub fn run() {
             commands::git::git_pull,
             commands::git::git_push,
             commands::git::git_create_worktree,
-            commands::git::git_remove_worktree
+            commands::git::git_remove_worktree,
+            commands::git::git_watch,
+            commands::git::git_unwatch
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -1,5 +1,8 @@
 use crate::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
+use crate::state::AppState;
 use crate::utils::process::new_headless_std_command;
+use notify::Watcher;
+use tauri::{AppHandle, Emitter};
 
 /// Run a git command in the given directory and return stdout as a String.
 ///
@@ -239,6 +242,80 @@ pub async fn git_create_worktree(
 #[tauri::command]
 pub async fn git_remove_worktree(cwd: String, path: String) -> Result<(), String> {
     run_git(&cwd, &["worktree", "remove", &path, "--force"])?;
+    Ok(())
+}
+
+/// Start watching a git repo's index and HEAD for changes.
+/// Emits `git-changed` (payload: cwd string) to the frontend on any change,
+/// debounced to 150 ms so rapid multi-file operations fire a single event.
+/// Replaces any existing watcher for the same path.
+#[tauri::command]
+pub async fn git_watch(
+    cwd: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let git_dir = std::path::Path::new(&cwd).join(".git");
+    let index_path = git_dir.join("index");
+    let head_path = git_dir.join("HEAD");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    // Only watch files that exist (non-git dirs won't have these)
+    if index_path.exists() {
+        watcher
+            .watch(&index_path, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| e.to_string())?;
+    }
+    if head_path.exists() {
+        watcher
+            .watch(&head_path, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Store watcher so it stays alive; dropping the old one automatically stops it
+    state.git_watchers.lock().await.insert(cwd.clone(), watcher);
+
+    // Debounce task: wait for first event, drain rapid follow-ups within 150 ms, then emit
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        loop {
+            if rx.recv().await.is_none() {
+                break; // watcher dropped (git_unwatch called or new watcher replaced this one)
+            }
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(150),
+                    rx.recv(),
+                )
+                .await
+                {
+                    Ok(Some(_)) => continue, // more events within window, reset timer
+                    Ok(None) => return,       // watcher dropped during debounce
+                    Err(_) => break,          // window elapsed, fire
+                }
+            }
+            let _ = app_handle.emit("git-changed", &cwd);
+        }
+    });
+
+    Ok(())
+}
+
+/// Stop watching a git repo path. Safe to call even if no watcher exists.
+#[tauri::command]
+pub async fn git_unwatch(
+    cwd: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state.git_watchers.lock().await.remove(&cwd);
     Ok(())
 }
 

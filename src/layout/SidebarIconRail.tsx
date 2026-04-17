@@ -39,11 +39,11 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       >
         {activeTab === "git" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
         <svg className="w-6 h-6 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="7" cy="5" r="2" fill="none" />
-          <circle cx="7" cy="19" r="2" fill="none" />
-          <circle cx="17" cy="12" r="2" fill="none" />
+          <circle cx="7" cy="5" r="2" style={{fill:'none'}} />
+          <circle cx="7" cy="19" r="2" style={{fill:'none'}} />
+          <circle cx="17" cy="12" r="2" style={{fill:'none'}} />
           <line x1="7" y1="7" x2="7" y2="17" />
-          <path fill="none" d="M7 17 C7 13 17 13 17 12" />
+          <path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
         </svg>
       </button>
 
