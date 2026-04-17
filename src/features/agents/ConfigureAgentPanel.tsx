@@ -142,6 +142,21 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             </select>
           </div>
           <div>
+            <label className="block text-[10px] font-bold text-muted-neutral mb-1">Regular Session Resume</label>
+            <select
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              value={config.session_persistence || "default"}
+              onChange={(e) => updateField("session_persistence", e.target.value as AgentConfig["session_persistence"])}
+            >
+              <option value="default">Use global default</option>
+              <option value="fresh">Start fresh on resume</option>
+              <option value="resume">Resume provider session</option>
+            </select>
+            <p className="mt-1 text-[10px] text-muted-neutral leading-relaxed">
+              Applies when this regular visible agent is resumed from Off. Workflow agent nodes use their own run mode.
+            </p>
+          </div>
+          <div>
             <div className="flex justify-between items-center mb-1">
               <label className="block text-[10px] font-bold text-muted-neutral">Session ID</label>
               <button 

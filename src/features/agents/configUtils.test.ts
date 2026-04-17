@@ -52,4 +52,10 @@ describe("requiresRestart", () => {
         const config2: AgentConfig = { ...baseConfig, system_include_directories: ["/new"] };
         expect(requiresRestart(config1, config2)).toBe(true);
     });
+
+    it("does not require restart when regular session persistence changes", () => {
+        const config1: AgentConfig = { ...baseConfig, session_persistence: "default" };
+        const config2: AgentConfig = { ...baseConfig, session_persistence: "fresh" };
+        expect(requiresRestart(config1, config2)).toBe(false);
+    });
 });

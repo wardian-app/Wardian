@@ -1,5 +1,5 @@
-use crate::models::provider::{AgentEvent, AgentProvider};
 use crate::models::AgentConfig;
+use crate::models::provider::{AgentEvent, AgentProvider};
 
 /// The concrete `AgentProvider` implementation for Claude Code CLI.
 pub struct ClaudeProvider;
@@ -200,9 +200,14 @@ impl AgentProvider for ClaudeProvider {
         }
 
         // Only set fresh-session identity on non-resume launches.
-        if !is_resume && !config.session_id.trim().is_empty() {
+        let fresh_session_id = config
+            .fresh_provider_session_id
+            .as_deref()
+            .unwrap_or(config.session_id.as_str())
+            .trim();
+        if !is_resume && !fresh_session_id.is_empty() {
             args.push("--session-id".into());
-            args.push(config.session_id.clone());
+            args.push(fresh_session_id.to_string());
         }
         if !is_resume && !config.session_name.trim().is_empty() {
             args.push("--name".into());
@@ -609,5 +614,19 @@ mod tests {
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--session-id".to_string()));
         assert!(args.contains(&"019d331a-0500-7592-969f-8f437886f42b".to_string()));
+    }
+
+    #[test]
+    fn fresh_spawn_prefers_transient_provider_session_id() {
+        let p = make_provider();
+        let config = AgentConfig {
+            session_id: "stable-wardian-id".into(),
+            fresh_provider_session_id: Some("fresh-claude-id".into()),
+            ..Default::default()
+        };
+        let args = p.get_spawn_args(&config, false);
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(args.contains(&"fresh-claude-id".to_string()));
+        assert!(!args.contains(&"stable-wardian-id".to_string()));
     }
 }

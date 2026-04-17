@@ -144,7 +144,17 @@ Add one global setting for regular interactive agents:
 
 This setting controls normal visible-agent resume behavior after an agent has been paused or is off. `resume` continues the provider-native session when possible. `fresh` restarts the agent without provider resume flags, reducing provider-context growth for ordinary agent restarts.
 
+Each regular agent also has an override:
+
+| Agent setting | Values | Default |
+| --- | --- | --- |
+| Regular Session Resume | `default`, `fresh`, `resume` | `default` |
+
+`default` inherits the global `Regular agent sessions` value. `fresh` and `resume` override the global value for that specific visible agent. This override is intentionally scoped to normal agent resume from Off; workflow agent nodes remain explicit through their own run mode.
+
 Workflow agent nodes do not inherit this global setting. Their behavior remains explicit through `ephemeral`, `inherit_fresh`, and `inherit_resume`, with new workflow nodes defaulting to `ephemeral` and legacy persistent nodes migrating to `inherit_fresh`.
+
+Claude has one extra runtime constraint: fresh resume must not reuse the old Claude `--session-id`. Wardian keeps the stable Wardian agent ID for UI state, scoped files, and telemetry, but generates a new Claude provider session ID for the fresh launch and then stores that provider ID as the next resumable session. This prevents Claude's "session ID is already in use" error while preserving the user's visible agent identity.
 
 ### Documentation
 

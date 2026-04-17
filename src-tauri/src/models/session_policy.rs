@@ -16,6 +16,15 @@ pub enum AgentSessionPersistence {
     Resume,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionPersistenceOverride {
+    #[default]
+    Default,
+    Fresh,
+    Resume,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentExecutionPolicy {
     pub mode: WorkflowAgentMode,

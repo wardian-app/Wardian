@@ -20,6 +20,7 @@ export interface AgentConfig {
     screen_reader?: boolean;
     output_format?: "text" | "json" | "stream-json";
     custom_args?: string;
+    session_persistence?: "default" | "fresh" | "resume";
 
     // Claude-specific fields
     permission_mode?: "default" | "plan" | "auto-accept";

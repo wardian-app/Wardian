@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::AgentSessionPersistenceOverride;
+
 fn default_provider() -> String {
     "claude".to_string()
 }
@@ -47,6 +49,10 @@ pub struct AgentConfig {
     pub output_format: Option<String>,
     #[serde(default)]
     pub custom_args: Option<String>,
+    #[serde(default)]
+    pub session_persistence: AgentSessionPersistenceOverride,
+    #[serde(default, skip)]
+    pub fresh_provider_session_id: Option<String>,
 
     // Claude-specific fields
     #[serde(default)]
@@ -100,6 +106,7 @@ pub struct AgentClassDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::AgentSessionPersistenceOverride;
 
     #[test]
     fn agent_config_serde_roundtrip() {
@@ -120,6 +127,16 @@ mod tests {
         assert_eq!(config.folder, deserialized.folder);
         assert_eq!(config.resume_session, deserialized.resume_session);
         assert_eq!(config.is_off, deserialized.is_off);
+    }
+
+    #[test]
+    fn agent_config_defaults_regular_session_persistence_to_global_default() {
+        let config: AgentConfig = serde_json::from_str(r#"{"session_id":"abc-123"}"#).unwrap();
+
+        assert_eq!(
+            config.session_persistence,
+            AgentSessionPersistenceOverride::Default
+        );
     }
 
     #[test]

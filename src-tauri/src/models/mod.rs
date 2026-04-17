@@ -12,5 +12,8 @@ pub use agent_telemetry::AgentTelemetry;
 pub use fs::*;
 pub use library::*;
 pub use provider::{AgentEvent, AgentProvider};
-pub use session_policy::{AgentExecutionPolicy, AgentSessionPersistence, WorkflowAgentMode};
+pub use session_policy::{
+    AgentExecutionPolicy, AgentSessionPersistence, AgentSessionPersistenceOverride,
+    WorkflowAgentMode,
+};
 pub use workflow::*;

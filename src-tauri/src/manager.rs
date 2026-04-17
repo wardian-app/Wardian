@@ -1,7 +1,7 @@
 use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentProvider, AgentTelemetry};
-use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
-use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
+use crate::providers::claude::{ClaudeUserEventKind, classify_claude_user_event};
+use crate::providers::opencode::OpenCodeProvider;
 use crate::state::{ActiveAgent, AppState};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -903,6 +903,14 @@ pub async fn spawn_agent(
                 {
                     sessions.push(resume_session.to_string());
                 }
+                if let Some(fresh_provider_session_id) = config
+                    .fresh_provider_session_id
+                    .as_ref()
+                    .map(|sid| sid.trim())
+                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
+                {
+                    sessions.push(fresh_provider_session_id.to_string());
+                }
                 sessions
             };
             let hook_current_status = current_status.clone();
@@ -1576,7 +1584,11 @@ pub async fn run_headless_with_options(
     log_debug(&format!(
         "[Wardian] run_headless: provider={}, session_id={}, cwd={}, prompt_len={}, output_format={}",
         provider_name,
-        if wardian_session_id.is_empty() { "<none>" } else { wardian_session_id },
+        if wardian_session_id.is_empty() {
+            "<none>"
+        } else {
+            wardian_session_id
+        },
         cwd.display(),
         prompt.len(),
         output_format
@@ -2081,7 +2093,7 @@ fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
         match payload_type {
             "exec_approval_request" => return Some("Action Needed".to_string()),
             "task_started" | "agent_message" | "exec_command_begin" | "exec_command_start" => {
-                return Some("Processing...".to_string())
+                return Some("Processing...".to_string());
             }
             "task_complete" => return Some("Idle".to_string()),
             _ => {}
