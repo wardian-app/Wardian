@@ -1,7 +1,7 @@
 import React from "react";
 import { Folder } from "lucide-react";
 
-export type SidebarTab = "explorer" | "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
+export type SidebarTab = "explorer" | "git" | "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
 
 interface SidebarIconRailProps {
   activeTab: SidebarTab;
@@ -29,6 +29,22 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       >
         {activeTab === "explorer" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
         <Folder className="w-6 h-6 group-hover:scale-110 transition-transform" strokeWidth={2} />
+      </button>
+
+      <button
+        data-testid="sidebar-tab-git"
+        onClick={() => handleTabClick("git")}
+        className={`relative p-3 rounded-xl transition-all group ${activeTab === "git" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
+        title="Source Control"
+      >
+        {activeTab === "git" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
+        <svg className="w-6 h-6 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="7" cy="5" r="2" fill="none" />
+          <circle cx="7" cy="19" r="2" fill="none" />
+          <circle cx="17" cy="12" r="2" fill="none" />
+          <line x1="7" y1="7" x2="7" y2="17" />
+          <path fill="none" d="M7 17 C7 13 17 13 17 12" />
+        </svg>
       </button>
 
       <button

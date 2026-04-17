@@ -1,6 +1,7 @@
 pub mod agent_config;
 pub mod agent_telemetry;
 pub mod fs;
+pub mod git;
 pub mod library;
 pub mod provider;
 pub mod workflow;

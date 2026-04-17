@@ -150,7 +150,19 @@ pub fn run() {
             commands::settings::list_available_shells,
             commands::settings::load_shell_settings,
             commands::settings::save_shell_settings,
-            commands::settings::save_opencode_theme
+            commands::settings::save_opencode_theme,
+            commands::git::git_status,
+            commands::git::git_current_branch,
+            commands::git::git_log,
+            commands::git::git_diff_file,
+            commands::git::git_stage,
+            commands::git::git_unstage,
+            commands::git::git_discard_changes,
+            commands::git::git_commit,
+            commands::git::git_pull,
+            commands::git::git_push,
+            commands::git::git_create_worktree,
+            commands::git::git_remove_worktree
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

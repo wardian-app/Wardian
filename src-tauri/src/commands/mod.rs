@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod class;
 pub mod fs;
+pub mod git;
 pub mod library;
 pub mod patch;
 pub mod settings;
