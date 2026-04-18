@@ -4,11 +4,11 @@ import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, So
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
 
 const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
-  status_label:   '56px',
-  query_count:    '24px',
-  uptime:         '44px',
-  provider_model: '68px',
-  last_queried:   '44px',
+  status_label:   '50px',
+  query_count:    '20px',
+  uptime:         '36px',
+  provider_model: '50px',
+  last_queried:   '36px',
 };
 import {
   reorderWithinList,
@@ -292,7 +292,7 @@ export default function AgentWatchlist({
   // ── Dynamic grid template: dot | name | [visible columns]
   const visibleCols = prefs.columns.filter(c => c.visible);
   const colFragment = visibleCols.map(c => COLUMN_WIDTHS[c.id]).join(' ');
-  const gridTemplate = `auto 1fr${colFragment ? ' ' + colFragment : ''}`;
+  const gridTemplate = `auto minmax(50px, 1fr)${colFragment ? ' ' + colFragment : ''}`;
 
   // ── Sorted agents ──────────────────────────────────────────────────
   const sortedAgents = sortAgents(displayedAgents, prefs.sort, telemetry, interactions);
