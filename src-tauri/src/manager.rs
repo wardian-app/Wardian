@@ -1658,33 +1658,31 @@ pub async fn run_headless_with_options(
         for line in output.lines() {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
                 match parsed.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-                    "item.completed" => {
+                    "item.completed"
                         if parsed
                             .get("item")
                             .and_then(|v| v.get("type"))
                             .and_then(|v| v.as_str())
-                            == Some("agent_message")
-                        {
-                            last_message = parsed
-                                .get("item")
-                                .and_then(|v| v.get("text"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
+                            == Some("agent_message") =>
+                    {
+                        last_message = parsed
+                            .get("item")
+                            .and_then(|v| v.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                     }
-                    "event_msg" => {
+                    "event_msg"
                         if parsed
                             .get("payload")
                             .and_then(|v| v.get("type"))
                             .and_then(|v| v.as_str())
-                            == Some("agent_message")
-                        {
-                            last_message = parsed
-                                .get("payload")
-                                .and_then(|v| v.get("message"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
+                            == Some("agent_message") =>
+                    {
+                        last_message = parsed
+                            .get("payload")
+                            .and_then(|v| v.get("message"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                     }
                     _ => {}
                 }
@@ -2151,10 +2149,8 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
                 return Some("Processing...".to_string());
             }
             Some("progress") => return Some("Processing...".to_string()),
-            Some("user") => {
-                if claude_is_real_user_query(line) {
-                    return Some("Processing...".to_string());
-                }
+            Some("user") if claude_is_real_user_query(line) => {
+                return Some("Processing...".to_string());
             }
             _ => {}
         }
