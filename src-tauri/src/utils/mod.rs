@@ -1,5 +1,6 @@
 pub mod fs;
 pub mod logging;
+pub mod migration;
 pub mod process;
 pub mod shell;
 pub mod terminal_input;
