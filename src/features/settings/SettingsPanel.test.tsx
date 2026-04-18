@@ -95,7 +95,45 @@ describe('SettingsPanel', () => {
       });
     });
 
-    expect(await screen.findByText('Runtime settings updated.')).toBeInTheDocument();
+    expect(await screen.findByText('Shell settings updated.')).toBeInTheDocument();
+  });
+
+  it('shows the auto-selected shell when default shell is auto', async () => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      switch (command) {
+        case 'load_shell_settings':
+          return {
+            shell_id: 'auto',
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: 'resume',
+          };
+        case 'list_available_shells':
+          return [
+            {
+              id: 'cmd',
+              label: 'Command Prompt',
+              executable: 'C:/Windows/System32/cmd.exe',
+              default_args: ['/C'],
+            },
+            {
+              id: 'pwsh',
+              label: 'PowerShell 7',
+              executable: 'C:/Program Files/PowerShell/7/pwsh.exe',
+              default_args: ['-NoProfile', '-Command'],
+            },
+          ];
+        case 'save_shell_settings':
+          return (args as { settings?: unknown } | undefined)?.settings;
+        default:
+          return null;
+      }
+    });
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Auto: PowerShell 7')).toBeInTheDocument();
+    expect(screen.getByText('C:/Program Files/PowerShell/7/pwsh.exe')).toBeInTheDocument();
   });
 
   it('saves global regular agent session persistence through tauri', async () => {
@@ -116,5 +154,8 @@ describe('SettingsPanel', () => {
         },
       });
     });
+
+    expect(await screen.findByText('Agent runtime updated.')).toBeInTheDocument();
+    expect(screen.queryByText('Shell settings updated.')).not.toBeInTheDocument();
   });
 });

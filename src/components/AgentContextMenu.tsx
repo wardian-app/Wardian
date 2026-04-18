@@ -112,7 +112,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
           onClose();
         }}
       >
-        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 7h16M10 11v6m4-6v6M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13M9 7V4h6v3" /></svg>
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 15l8-8a2 2 0 012.8 0l4.2 4.2a2 2 0 010 2.8l-5 5H8l-4-4zM13 19h7" /></svg>
         Clear
       </button>
 

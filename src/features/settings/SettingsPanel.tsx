@@ -4,6 +4,19 @@ import { useSettingsStore } from "../../store/useSettingsStore";
 
 interface SettingsPanelProps {}
 
+const windowsAutoShellIds = ['pwsh', 'powershell', 'cmd', 'git-bash', 'wsl', 'bash'];
+const posixAutoShellIds = ['zsh', 'bash', 'sh', 'fish'];
+
+const resolveAutoShell = <T extends { id: string }>(availableShells: T[]) => {
+  const hasWindowsShell = availableShells.some((option) =>
+    ['pwsh', 'powershell', 'cmd', 'git-bash', 'wsl'].includes(option.id),
+  );
+  const preferredIds = hasWindowsShell ? windowsAutoShellIds : posixAutoShellIds;
+  return preferredIds
+    .map((id) => availableShells.find((option) => option.id === id))
+    .find((option) => option !== undefined) ?? availableShells[0];
+};
+
 export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
   const {
     theme,
@@ -29,6 +42,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
   const [patchMessage, setPatchMessage] = useState("");
   const [shellStatus, setShellStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [shellMessage, setShellMessage] = useState("");
+  const [agentRuntimeStatus, setAgentRuntimeStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
+  const [agentRuntimeMessage, setAgentRuntimeMessage] = useState("");
 
   useEffect(() => {
     if (!shell_settings_loaded) {
@@ -62,7 +77,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     try {
       await saveShellSettings();
       setShellStatus("success");
-      setShellMessage("Runtime settings updated.");
+      setShellMessage("Shell settings updated.");
       setTimeout(() => {
         setShellStatus("idle");
         setShellMessage("");
@@ -73,7 +88,26 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     }
   };
 
+  const handleSaveAgentRuntime = async () => {
+    setAgentRuntimeStatus("saving");
+    setAgentRuntimeMessage("");
+    try {
+      await saveShellSettings();
+      setAgentRuntimeStatus("success");
+      setAgentRuntimeMessage("Agent runtime updated.");
+      setTimeout(() => {
+        setAgentRuntimeStatus("idle");
+        setAgentRuntimeMessage("");
+      }, 4000);
+    } catch (e: unknown) {
+      setAgentRuntimeStatus("error");
+      setAgentRuntimeMessage(`Agent runtime update failed: ${String(e)}`);
+    }
+  };
+
   const selectedShell = available_shells.find((option) => option.id === shell_id);
+  const autoSelectedShell = resolveAutoShell(available_shells);
+  const displayedShell = shell_id === 'auto' ? autoSelectedShell : selectedShell;
 
   return (
     <div data-testid="settings-panel" className="flex flex-col h-full">
@@ -159,17 +193,25 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
             <div className="flex justify-end">
               <button
                 type="button"
-                onClick={handleSaveShell}
-                disabled={!shell_settings_loaded || shellStatus === 'saving'}
+                onClick={handleSaveAgentRuntime}
+                disabled={!shell_settings_loaded || agentRuntimeStatus === 'saving'}
                 className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
-                  shellStatus === 'saving'
+                  agentRuntimeStatus === 'saving'
                     ? 'bg-wardian-border text-muted border-transparent cursor-not-allowed'
                     : 'bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
                 }`}
               >
-                {shellStatus === 'saving' ? 'Saving...' : 'Save Agent Runtime'}
+                {agentRuntimeStatus === 'saving' ? 'Saving...' : 'Save Agent Runtime'}
               </button>
             </div>
+            {agentRuntimeMessage && (
+              <div className={`p-2 mt-1 rounded border text-xs font-medium text-left ${
+                agentRuntimeStatus === 'success' ? 'bg-cyan-500/10 border-cyan-500/20 text-cyan-400' :
+                'bg-red-500/10 border-red-500/20 text-red-400'
+              }`}>
+                {agentRuntimeMessage}
+              </div>
+            )}
           </div>
         </div>
 
@@ -225,11 +267,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
             ) : (
               <div className="rounded-lg border border-wardian-border bg-wardian-bg px-3 py-2">
                 <p className="text-[11px] font-bold text-primary">
-                  {shell_id === 'auto' ? 'Wardian will choose the best available shell for this system.' : selectedShell?.label ?? 'Loading shell details...'}
+                  {shell_id === 'auto'
+                    ? (displayedShell ? `Auto: ${displayedShell.label}` : 'Auto: detecting shell...')
+                    : displayedShell?.label ?? 'Loading shell details...'}
                 </p>
-                {shell_id !== 'auto' && selectedShell && (
+                {displayedShell && (
                   <p className="text-[10px] text-muted-neutral mt-1 break-all">
-                    {selectedShell.executable}
+                    {displayedShell.executable}
                   </p>
                 )}
               </div>

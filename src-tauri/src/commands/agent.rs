@@ -31,7 +31,7 @@ fn persisted_resume_session_for_provider(
 }
 
 fn provider_uses_generated_session_id(provider_name: &str) -> bool {
-    matches!(provider_name, "claude")
+    matches!(provider_name, "claude" | "codex")
 }
 
 fn restore_runtime_state_after_resume(
@@ -53,6 +53,17 @@ fn restore_runtime_state_after_resume(
         (old_active.log_path.lock(), new_active.log_path.lock())
     {
         *new_path = old_path.clone();
+    }
+}
+
+fn restore_query_count_after_clear(
+    new_active: &mut crate::state::ActiveAgent,
+    old_active: &crate::state::ActiveAgent,
+) {
+    if let (Ok(old_count), Ok(mut new_count)) =
+        (old_active.query_count.lock(), new_active.query_count.lock())
+    {
+        *new_count = *old_count;
     }
 }
 
@@ -408,6 +419,7 @@ pub async fn clear_agent_session(
         );
 
         let mut new_active = manager::spawn_agent(app.clone(), agent.config.clone(), true).await?;
+        restore_query_count_after_clear(&mut new_active, agent);
         if agent.config.provider == "claude" {
             if let Some(fresh_provider_session_id) = agent.config.fresh_provider_session_id.take() {
                 agent.config.resume_session = Some(fresh_provider_session_id);
@@ -506,7 +518,8 @@ pub async fn reorder_agents(
 mod tests {
     use super::{
         persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
-        provider_uses_generated_session_id, restore_runtime_state_after_resume,
+        provider_uses_generated_session_id, restore_query_count_after_clear,
+        restore_runtime_state_after_resume,
     };
     use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
     use crate::state::ActiveAgent;
@@ -552,7 +565,7 @@ mod tests {
     #[test]
     fn claude_keeps_generated_session_ids() {
         assert!(provider_uses_generated_session_id("claude"));
-        assert!(!provider_uses_generated_session_id("codex"));
+        assert!(provider_uses_generated_session_id("codex"));
     }
 
     #[test]
@@ -575,6 +588,22 @@ mod tests {
             new_active.log_path.lock().unwrap().as_deref(),
             Some(std::path::Path::new("C:/tmp/session.json"))
         );
+    }
+
+    #[test]
+    fn clear_preserves_query_count_only() {
+        let old_active = make_test_agent();
+        *old_active.query_count.lock().unwrap() = 7;
+        *old_active.init_timestamp.lock().unwrap() = Some("2026-04-12T17:00:00.000Z".to_string());
+        *old_active.log_path.lock().unwrap() =
+            Some(std::path::PathBuf::from("C:/tmp/session.json"));
+
+        let mut new_active = make_test_agent();
+        restore_query_count_after_clear(&mut new_active, &old_active);
+
+        assert_eq!(*new_active.query_count.lock().unwrap(), 7);
+        assert_eq!(new_active.init_timestamp.lock().unwrap().as_deref(), None);
+        assert_eq!(new_active.log_path.lock().unwrap().as_deref(), None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::models::{AgentClassDefinition, AgentConfig, AgentEvent, AgentProvider, AgentTelemetry};
-use crate::providers::ProviderFactory;
-use crate::providers::claude::{ClaudeUserEventKind, classify_claude_user_event};
+use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::opencode::OpenCodeProvider;
+use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -14,6 +14,10 @@ pub use crate::utils::process::new_headless_command;
 #[cfg(windows)]
 pub use crate::utils::process::{find_wardian_session_process_roots, force_kill_process_tree};
 pub use crate::utils::shell::build_program_launch;
+
+fn session_bootstrap_prompt() -> &'static str {
+    "Introduce yourself"
+}
 
 #[cfg(windows)]
 fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
@@ -1765,7 +1769,7 @@ pub async fn obtain_session_id(
         }
 
         provider_args.push("--json".to_string());
-        provider_args.push("Introduce yourself".to_string());
+        provider_args.push(session_bootstrap_prompt().to_string());
     } else if provider_name == "opencode" {
         provider_args.push("run".to_string());
         if let Some(config) = config {
@@ -1775,7 +1779,7 @@ pub async fn obtain_session_id(
         provider_args.push("json".to_string());
         provider_args.push("--dir".to_string());
         provider_args.push(cwd.to_string_lossy().to_string());
-        provider_args.push("Introduce yourself".to_string());
+        provider_args.push(session_bootstrap_prompt().to_string());
     } else if provider_name == "claude" {
         // --print mode does not accept --input-format stream-json; strip it.
         if let Some(config) = config {
@@ -1788,10 +1792,10 @@ pub async fn obtain_session_id(
             provider_args.push("stream-json".to_string());
         }
         provider_args.push("--print".to_string());
-        provider_args.push("Introduce yourself".to_string());
+        provider_args.push(session_bootstrap_prompt().to_string());
     } else {
         provider_args.push("-p".to_string());
-        provider_args.push("Introduce yourself".to_string());
+        provider_args.push(session_bootstrap_prompt().to_string());
         provider_args.push("-o".to_string());
         provider_args.push("stream-json".to_string());
     }
@@ -2771,8 +2775,8 @@ mod tests {
         interactive_provider_cwd, interactive_provider_launch, migrate_codex_bootstrap_home,
         opencode_interactive_env, opencode_log_path_after, opencode_log_path_in,
         opencode_metrics_from_log, opencode_runtime_config_content,
-        opencode_should_fallback_to_idle, opencode_status_from_title, strip_flag_value_pairs,
-        strip_standalone_flag,
+        opencode_should_fallback_to_idle, opencode_status_from_title, session_bootstrap_prompt,
+        strip_flag_value_pairs, strip_standalone_flag,
     };
     use crate::models::AgentConfig;
     use std::path::Path;
@@ -3283,7 +3287,7 @@ mod tests {
                 "json".to_string(),
                 "--dir".to_string(),
                 "D:/Development/Wardian".to_string(),
-                "Introduce yourself".to_string(),
+                session_bootstrap_prompt().to_string(),
             ],
         )
         .expect("headless launch spec");
@@ -3297,7 +3301,12 @@ mod tests {
         assert_eq!(launch.args[1], "/c");
         assert!(launch.args[2].contains("opencode"));
         assert!(launch.args[2].contains("--format"));
-        assert!(launch.args[2].contains("Introduce yourself"));
+        assert!(launch.args[2].contains(session_bootstrap_prompt()));
+    }
+
+    #[test]
+    fn bootstrap_session_prompt_uses_intro_prompt_for_providers_that_need_bootstrap() {
+        assert_eq!(session_bootstrap_prompt(), "Introduce yourself");
     }
 
     #[test]
