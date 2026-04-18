@@ -7,7 +7,7 @@ const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
   status_label:   '50px',
   query_count:    '20px',
   uptime:         '36px',
-  provider_model: '50px',
+  provider_model: '62px',
   last_queried:   '36px',
 };
 import {
