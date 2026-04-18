@@ -27,6 +27,9 @@ pub fn run() {
         }
     }
 
+    // Migrate ~/.wardian layout to current schema version before anything else
+    crate::utils::migration::migrate_home_layout();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
