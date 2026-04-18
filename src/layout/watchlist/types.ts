@@ -24,11 +24,15 @@ export interface ContextMenuState {
   agentId: string | null;
 }
 
-// Optional columns — user can toggle visibility
-export type OptionalColumnId = 'uptime' | 'provider_model' | 'last_queried';
+// All toggleable columns (status_label and query_count are on by default)
+export type OptionalColumnId =
+  | 'status_label'
+  | 'query_count'
+  | 'uptime'
+  | 'provider_model'
+  | 'last_queried';
 
-// All sortable column IDs (optional + always-visible status_label and query_count)
-export type SortableColumnId = OptionalColumnId | 'status_label' | 'query_count';
+export type SortableColumnId = OptionalColumnId;
 
 export interface WatchlistColumnConfig {
   id: OptionalColumnId;
@@ -45,6 +49,8 @@ export type AgentInteractions = Record<string, string>;
 
 export const DEFAULT_WATCHLIST_PREFS: WatchlistPrefs = {
   columns: [
+    { id: 'status_label', visible: true },
+    { id: 'query_count', visible: true },
     { id: 'uptime', visible: false },
     { id: 'provider_model', visible: false },
     { id: 'last_queried', visible: true },

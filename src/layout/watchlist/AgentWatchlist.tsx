@@ -281,10 +281,10 @@ export default function AgentWatchlist({
     if (onPrefsChange) onPrefsChange({ ...prefs, sort: cycleSort(prefs.sort, columnId) });
   }
 
-  // ── Dynamic grid template: dot | name | [optional cols] | status | qry
-  const visibleOptional = prefs.columns.filter(c => c.visible);
-  const optionalCols = visibleOptional.map(() => 'auto').join(' ');
-  const gridTemplate = `auto 1fr${optionalCols ? ' ' + optionalCols : ''} auto auto`;
+  // ── Dynamic grid template: dot | name | [visible columns]
+  const visibleCols = prefs.columns.filter(c => c.visible);
+  const colFragment = visibleCols.map(() => 'auto').join(' ');
+  const gridTemplate = `auto 1fr${colFragment ? ' ' + colFragment : ''}`;
 
   // ── Sorted agents ──────────────────────────────────────────────────
   const sortedAgents = sortAgents(displayedAgents, prefs.sort, telemetry, interactions);
@@ -385,17 +385,16 @@ export default function AgentWatchlist({
         >
           <span></span>
           <span>Agent</span>
-          {prefs.columns.filter(c => c.visible).map(col => (
-            <SortableHeader
-              key={col.id}
-              columnId={col.id}
-              sort={prefs.sort}
-              onSort={handleSort}
-              label={col.id === 'uptime' ? 'Up' : col.id === 'provider_model' ? 'Provider' : 'Last'}
-            />
-          ))}
-          <SortableHeader columnId="status_label" sort={prefs.sort} onSort={handleSort} label="Status" />
-          <SortableHeader columnId="query_count" sort={prefs.sort} onSort={handleSort} label="Qry" />
+          {prefs.columns.filter(c => c.visible).map(col => {
+            const label =
+              col.id === 'status_label' ? 'Status' :
+              col.id === 'query_count'  ? 'Qry'    :
+              col.id === 'uptime'       ? 'Up'     :
+              col.id === 'provider_model' ? 'Provider' : 'Last';
+            return (
+              <SortableHeader key={col.id} columnId={col.id} sort={prefs.sort} onSort={handleSort} label={label} />
+            );
+          })}
         </div>
 
         {/* ── Agent Rows ─────────────────────────────────── */}
@@ -509,13 +508,21 @@ export default function AgentWatchlist({
                   </p>
                 </div>
                 {prefs.columns.filter(c => c.visible).map(col => {
-                  if (col.id === 'uptime') {
-                    return (
-                      <span key="uptime" className="label-small tabular-nums text-muted">
-                        {formatUptime(metrics?.init_timestamp ?? null)}
-                      </span>
-                    );
-                  }
+                  if (col.id === 'status_label') return (
+                    <span key="status_label" className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
+                      {getAgentStatusLabel(status, thought)}
+                    </span>
+                  );
+                  if (col.id === 'query_count') return (
+                    <span key="query_count" className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
+                      {metrics?.query_count ?? "–"}
+                    </span>
+                  );
+                  if (col.id === 'uptime') return (
+                    <span key="uptime" className="label-small tabular-nums text-muted">
+                      {formatUptime(metrics?.init_timestamp ?? null)}
+                    </span>
+                  );
                   if (col.id === 'provider_model') {
                     const provider = agent.provider ?? '–';
                     const model = agent.model ? ` · ${agent.model}` : '';
@@ -525,21 +532,13 @@ export default function AgentWatchlist({
                       </span>
                     );
                   }
-                  if (col.id === 'last_queried') {
-                    return (
-                      <span key="last_queried" className="label-small tabular-nums text-muted">
-                        {formatRelativeTime(interactions[agentId])}
-                      </span>
-                    );
-                  }
+                  if (col.id === 'last_queried') return (
+                    <span key="last_queried" className="label-small tabular-nums text-muted">
+                      {formatRelativeTime(interactions[agentId])}
+                    </span>
+                  );
                   return null;
                 })}
-                <span className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
-                  {getAgentStatusLabel(status, thought)}
-                </span>
-                <span className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
-                  {metrics?.query_count ?? "–"}
-                </span>
               </div>
             );
           })}

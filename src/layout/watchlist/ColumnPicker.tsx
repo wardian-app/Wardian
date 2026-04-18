@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import type { OptionalColumnId, WatchlistPrefs } from "./types";
 
 const COLUMN_LABELS: Record<OptionalColumnId, string> = {
+  status_label: "Status",
+  query_count: "Query Count",
   uptime: "Uptime",
   provider_model: "Provider / Model",
   last_queried: "Last Queried",
@@ -36,7 +38,8 @@ export function ColumnPicker({ prefs, onPrefsChange, onClose }: ColumnPickerProp
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full mt-1 z-50 bg-wardian-surface border border-wardian-border rounded shadow-lg p-2 min-w-[160px]"
+      className="absolute right-0 top-full mt-1 z-50 border border-[var(--color-wardian-border-heavy)] rounded-lg shadow-[0_8px_32px_rgba(0,0,0,0.2)] p-1 min-w-[160px]"
+      style={{ background: 'var(--color-wardian-sidebar-secondary)' }}
     >
       <p className="label-small text-muted mb-2">Columns</p>
       {prefs.columns.map(col => (
