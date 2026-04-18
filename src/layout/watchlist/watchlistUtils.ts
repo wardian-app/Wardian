@@ -1,5 +1,5 @@
-import type { Watchlist } from "./types";
-import type { AgentConfig } from "../../types";
+import type { Watchlist, AgentInteractions, SortableColumnId, WatchlistPrefs } from "./types";
+import type { AgentConfig, AgentTelemetry } from "../../types";
 
 /**
  * Reorders items within a list by moving an item from one index to another.
@@ -111,4 +111,83 @@ export function getListsNotContainingAgent(
   agentId: string,
 ): Watchlist[] {
   return lists.filter((l) => !l.agentIds.includes(agentId));
+}
+
+export function formatUptime(initTimestamp: string | null): string {
+  if (!initTimestamp) return '–';
+  const seconds = Math.floor((Date.now() - new Date(initTimestamp).getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainMins = minutes % 60;
+  if (hours < 24) return remainMins > 0 ? `${hours}h ${remainMins}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remainHours = hours % 24;
+  return remainHours > 0 ? `${days}d ${remainHours}h` : `${days}d`;
+}
+
+export function formatRelativeTime(isoTimestamp: string | undefined): string {
+  if (!isoTimestamp) return '–';
+  const seconds = Math.floor((Date.now() - new Date(isoTimestamp).getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+export function cycleSort(
+  current: WatchlistPrefs['sort'],
+  columnId: SortableColumnId,
+): WatchlistPrefs['sort'] {
+  if (!current || current.column_id !== columnId) {
+    return { column_id: columnId, direction: 'asc' };
+  }
+  if (current.direction === 'asc') {
+    return { column_id: columnId, direction: 'desc' };
+  }
+  return null;
+}
+
+export function sortAgents(
+  agents: AgentConfig[],
+  sort: WatchlistPrefs['sort'],
+  telemetry: Record<string, AgentTelemetry>,
+  interactions: AgentInteractions,
+): AgentConfig[] {
+  if (!sort) return agents;
+  const { column_id, direction } = sort;
+  const dir = direction === 'asc' ? 1 : -1;
+  return [...agents].sort((a, b) => {
+    let av: number | string = 0;
+    let bv: number | string = 0;
+    switch (column_id) {
+      case 'uptime':
+        av = telemetry[a.session_id]?.init_timestamp ?? '';
+        bv = telemetry[b.session_id]?.init_timestamp ?? '';
+        break;
+      case 'provider_model':
+        av = `${a.provider} ${a.model ?? ''}`.toLowerCase();
+        bv = `${b.provider} ${b.model ?? ''}`.toLowerCase();
+        break;
+      case 'last_queried':
+        av = interactions[a.session_id] ?? '';
+        bv = interactions[b.session_id] ?? '';
+        break;
+      case 'status_label':
+        av = telemetry[a.session_id]?.current_status ?? '';
+        bv = telemetry[b.session_id]?.current_status ?? '';
+        break;
+      case 'query_count':
+        av = telemetry[a.session_id]?.query_count ?? 0;
+        bv = telemetry[b.session_id]?.query_count ?? 0;
+        break;
+    }
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  });
 }

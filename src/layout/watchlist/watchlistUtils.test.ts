@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   reorderWithinList,
   addAgentToList,
@@ -8,9 +8,13 @@ import {
   createWatchlist,
   getListsContainingAgent,
   getListsNotContainingAgent,
+  formatUptime,
+  formatRelativeTime,
+  cycleSort,
+  sortAgents,
 } from "./watchlistUtils";
-import type { Watchlist } from "./types";
-import type { AgentConfig } from "../../types";
+import type { Watchlist, WatchlistPrefs } from "./types";
+import type { AgentConfig, AgentTelemetry } from "../../types";
 
 // ── reorderWithinList ──────────────────────────────────────────────────
 
@@ -178,5 +182,103 @@ describe("list membership queries", () => {
   it("getListsNotContainingAgent returns correct lists", () => {
     expect(getListsNotContainingAgent(lists, "a").map((l) => l.id)).toEqual(["l2", "l3"]);
     expect(getListsNotContainingAgent(lists, "c").map((l) => l.id)).toEqual(["l1"]);
+  });
+});
+
+// ── formatUptime ───────────────────────────────────────────────────────
+
+const makeAgent = (id: string, overrides: Partial<AgentConfig> = {}): AgentConfig => ({
+  session_id: id, session_name: id, agent_class: 'Coder', folder: '', is_off: false,
+  provider: 'claude', model: 'sonnet', ...overrides,
+} as AgentConfig);
+
+const makeTelemetry = (id: string, overrides: Partial<AgentTelemetry> = {}): AgentTelemetry => ({
+  session_id: id, query_count: 0, cpu_usage: 0, memory_mb: 0, uptime_seconds: 0,
+  init_timestamp: null, current_status: 'idle', log_path: null, ...overrides,
+});
+
+describe('formatUptime', () => {
+  it('returns "–" for null', () => {
+    expect(formatUptime(null)).toBe('–');
+  });
+  it('formats minutes', () => {
+    const ts = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    expect(formatUptime(ts)).toBe('5m');
+  });
+  it('formats hours and minutes', () => {
+    const ts = new Date(Date.now() - (2 * 3600 + 14 * 60) * 1000).toISOString();
+    expect(formatUptime(ts)).toBe('2h 14m');
+  });
+  it('formats days', () => {
+    const ts = new Date(Date.now() - (25 * 3600) * 1000).toISOString();
+    expect(formatUptime(ts)).toBe('1d 1h');
+  });
+});
+
+// ── formatRelativeTime ─────────────────────────────────────────────────
+
+describe('formatRelativeTime', () => {
+  it('returns "–" for undefined', () => {
+    expect(formatRelativeTime(undefined)).toBe('–');
+  });
+  it('formats seconds ago', () => {
+    const ts = new Date(Date.now() - 30 * 1000).toISOString();
+    expect(formatRelativeTime(ts)).toBe('30s ago');
+  });
+  it('formats minutes ago', () => {
+    const ts = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    expect(formatRelativeTime(ts)).toBe('3m ago');
+  });
+  it('formats hours ago', () => {
+    const ts = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    expect(formatRelativeTime(ts)).toBe('2h ago');
+  });
+});
+
+// ── cycleSort ──────────────────────────────────────────────────────────
+
+describe('cycleSort', () => {
+  it('goes none → asc', () => {
+    expect(cycleSort(null, 'query_count')).toEqual({ column_id: 'query_count', direction: 'asc' });
+  });
+  it('goes asc → desc on same column', () => {
+    const current: WatchlistPrefs['sort'] = { column_id: 'query_count', direction: 'asc' };
+    expect(cycleSort(current, 'query_count')).toEqual({ column_id: 'query_count', direction: 'desc' });
+  });
+  it('goes desc → none on same column', () => {
+    const current: WatchlistPrefs['sort'] = { column_id: 'query_count', direction: 'desc' };
+    expect(cycleSort(current, 'query_count')).toBeNull();
+  });
+  it('resets to asc when switching column', () => {
+    const current: WatchlistPrefs['sort'] = { column_id: 'query_count', direction: 'desc' };
+    expect(cycleSort(current, 'uptime')).toEqual({ column_id: 'uptime', direction: 'asc' });
+  });
+});
+
+// ── sortAgents ─────────────────────────────────────────────────────────
+
+describe('sortAgents', () => {
+  const agents = [makeAgent('a'), makeAgent('b'), makeAgent('c')];
+  const telemetry: Record<string, AgentTelemetry> = {
+    a: makeTelemetry('a', { query_count: 10 }),
+    b: makeTelemetry('b', { query_count: 5 }),
+    c: makeTelemetry('c', { query_count: 20 }),
+  };
+  const interactions = { a: '2026-01-03T00:00:00Z', b: '2026-01-01T00:00:00Z', c: '2026-01-02T00:00:00Z' };
+
+  it('returns original order when sort is null', () => {
+    expect(sortAgents(agents, null, telemetry, interactions).map(a => a.session_id)).toEqual(['a', 'b', 'c']);
+  });
+  it('sorts by query_count asc', () => {
+    const sort: WatchlistPrefs['sort'] = { column_id: 'query_count', direction: 'asc' };
+    expect(sortAgents(agents, sort, telemetry, interactions).map(a => a.session_id)).toEqual(['b', 'a', 'c']);
+  });
+  it('sorts by query_count desc', () => {
+    const sort: WatchlistPrefs['sort'] = { column_id: 'query_count', direction: 'desc' };
+    expect(sortAgents(agents, sort, telemetry, interactions).map(a => a.session_id)).toEqual(['c', 'a', 'b']);
+  });
+  it('sorts by last_queried desc (most recent first)', () => {
+    const sort: WatchlistPrefs['sort'] = { column_id: 'last_queried', direction: 'desc' };
+    expect(sortAgents(agents, sort, telemetry, interactions).map(a => a.session_id)).toEqual(['a', 'c', 'b']);
   });
 });
