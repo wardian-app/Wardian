@@ -162,7 +162,14 @@ function AppBody() {
 
       try {
         const prefs = await invoke<WatchlistPrefs | null>("load_watchlist_prefs");
-        if (prefs) setWatchlistPrefs(prefs);
+        if (prefs) {
+          // Merge saved prefs with defaults so newly-added columns always appear
+          const savedMap = new Map(prefs.columns.map(c => [c.id, c]));
+          setWatchlistPrefs({
+            ...prefs,
+            columns: DEFAULT_WATCHLIST_PREFS.columns.map(def => savedMap.get(def.id) ?? def),
+          });
+        }
       } catch { /* first run */ }
 
       try {
