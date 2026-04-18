@@ -23,8 +23,9 @@ The Left Sidebar provides the "Context" for your work. It consists of:
 
 - **Navigation Rail**: Vertical icon strip to switch between sidebar tabs:
   - **Explorer**: Browse the physical files of the selected agent or the Wardian home.
+  - **Source Control**: Stage, diff, commit, sync, and manage worktree mode for the selected agent workspace.
   - **Agent Configuration**: Quick settings for spawning and tuning agents.
-  - **Command**: Broadcast prompts to multiple agents simultaneously.
+  - **Command**: Broadcast text and run starred quick prompts against selected agents.
   - **Settings**: System-wide preferences, theme engine, and the default runtime shell used by agents and shell-based workflows.
 - **Content Pane**: Displays the detailed menu or tree for the active rail icon.
 
@@ -55,3 +56,9 @@ Wardian preserves terminal state across grid remounts so interactive TUIs, inclu
 - **Ctrl + Tab**: Cycle through main View Modes.
 - **Ctrl + Shift + Tab**: Cycle through main View Modes in reverse.
 - **Ctrl + B**: Toggle the Left Sidebar visibility.
+
+## Related Guides
+
+- [Command Panel](./command-panel.md)
+- [Source Control](./source-control.md)
+- [Settings](./settings.md)
