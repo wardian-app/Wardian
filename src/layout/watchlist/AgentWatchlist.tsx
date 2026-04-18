@@ -1,7 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { AgentConfig, AgentTelemetry } from "../../types";
-import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId } from "./types";
+import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId } from "./types";
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
+
+const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
+  status_label:   '56px',
+  query_count:    '24px',
+  uptime:         '44px',
+  provider_model: '68px',
+  last_queried:   '44px',
+};
 import {
   reorderWithinList,
   filterAgents,
@@ -283,7 +291,7 @@ export default function AgentWatchlist({
 
   // ── Dynamic grid template: dot | name | [visible columns]
   const visibleCols = prefs.columns.filter(c => c.visible);
-  const colFragment = visibleCols.map(() => 'auto').join(' ');
+  const colFragment = visibleCols.map(c => COLUMN_WIDTHS[c.id]).join(' ');
   const gridTemplate = `auto 1fr${colFragment ? ' ' + colFragment : ''}`;
 
   // ── Sorted agents ──────────────────────────────────────────────────
@@ -527,7 +535,7 @@ export default function AgentWatchlist({
                     const provider = agent.provider ?? '–';
                     const model = agent.model ? ` · ${agent.model}` : '';
                     return (
-                      <span key="provider_model" className="label-small text-muted truncate max-w-[80px]">
+                      <span key="provider_model" className="label-small text-muted truncate overflow-hidden">
                         {provider}{model}
                       </span>
                     );

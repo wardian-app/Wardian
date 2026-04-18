@@ -379,8 +379,19 @@ function AppBody() {
       for (const m of event.payload) mapping[m.session_id] = m;
       setTelemetry(prev => {
         const next = { ...prev };
+        const interactionUpdates: Record<string, string> = {};
         for (const [sessionId, metric] of Object.entries(mapping)) {
+          if ((metric.query_count ?? 0) > (prev[sessionId]?.query_count ?? 0)) {
+            interactionUpdates[sessionId] = new Date().toISOString();
+          }
           next[sessionId] = metric;
+        }
+        if (Object.keys(interactionUpdates).length > 0) {
+          setAgentInteractions(prevInteractions => {
+            const updated = { ...prevInteractions, ...interactionUpdates };
+            invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
+            return updated;
+          });
         }
         return next;
       });
