@@ -23,3 +23,31 @@ export interface ContextMenuState {
   y: number;
   agentId: string | null;
 }
+
+// Optional columns — user can toggle visibility
+export type OptionalColumnId = 'uptime' | 'provider_model' | 'last_queried';
+
+// All sortable column IDs (optional + always-visible status_label and query_count)
+export type SortableColumnId = OptionalColumnId | 'status_label' | 'query_count';
+
+export interface WatchlistColumnConfig {
+  id: OptionalColumnId;
+  visible: boolean;
+}
+
+export interface WatchlistPrefs {
+  columns: WatchlistColumnConfig[];
+  sort: { column_id: SortableColumnId; direction: 'asc' | 'desc' } | null;
+}
+
+// agentId → ISO 8601 timestamp of last query sent to that agent
+export type AgentInteractions = Record<string, string>;
+
+export const DEFAULT_WATCHLIST_PREFS: WatchlistPrefs = {
+  columns: [
+    { id: 'uptime', visible: false },
+    { id: 'provider_model', visible: false },
+    { id: 'last_queried', visible: true },
+  ],
+  sort: null,
+};
