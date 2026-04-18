@@ -2076,7 +2076,7 @@ pub async fn run_workflow(
                                 } else {
                                     if let Err(err) =
                                         crate::utils::terminal_input::submit_prompt_via_sender(
-                                            &tx, &prompt,
+                                            &tx, &prompt, &provider_name
                                         )
                                         .await
                                     {
