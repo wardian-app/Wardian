@@ -647,6 +647,9 @@ function AppBody() {
           activeListId={activeListId}
           onActiveListChange={setActiveListId}
           onWatchlistsChange={persistWatchlists}
+          prefs={watchlistPrefs}
+          onPrefsChange={persistWatchlistPrefs}
+          interactions={agentInteractions}
         />
       </div>
     </div>
