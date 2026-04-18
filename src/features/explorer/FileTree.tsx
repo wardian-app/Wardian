@@ -15,6 +15,7 @@ export interface FileTreeProps {
   onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
   depth?: number;
   gitStatusMap?: Record<string, string>;
+  changedDirectories?: Set<string>;
   explorerRoot?: string;
 }
 
@@ -45,7 +46,7 @@ const getFileIcon = (extension: string | null) => {
   return <FileText className="w-4 h-4 text-wardian-text-muted shrink-0" />;
 }
 
-export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMenu, depth = 0, gitStatusMap, explorerRoot }) => {
+export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMenu, depth = 0, gitStatusMap, changedDirectories, explorerRoot }) => {
   const [nodes, setNodes] = useState<FileNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -101,8 +102,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
       {nodes.map(node => {
         const relPath = explorerRoot ? toRelativePath(node.path, explorerRoot) : '';
         const fileStatus = gitStatusMap?.[relPath];
-        const dirHasChanges = node.is_dir && gitStatusMap &&
-          Object.keys(gitStatusMap).some(k => k.startsWith(relPath + '/'));
+        const dirHasChanges = node.is_dir && relPath !== '' && changedDirectories?.has(relPath);
         const gitColor = fileStatus
           ? GIT_STATUS_COLORS[fileStatus]
           : dirHasChanges ? GIT_STATUS_COLORS['M'] : undefined;
@@ -152,6 +152,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
                 onSelect={onSelect}
                 onContextMenu={onContextMenu}
                 gitStatusMap={gitStatusMap}
+                changedDirectories={changedDirectories}
                 explorerRoot={explorerRoot}
               />
             )}

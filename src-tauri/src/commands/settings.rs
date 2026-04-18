@@ -1,4 +1,5 @@
 use crate::utils::{ShellOption, ShellSettings};
+use crate::models::AgentSessionPersistence;
 
 #[tauri::command]
 pub fn list_available_shells() -> Result<Vec<ShellOption>, String> {
@@ -13,6 +14,13 @@ pub fn load_shell_settings() -> Result<ShellSettings, String> {
 #[tauri::command]
 pub fn save_shell_settings(settings: ShellSettings) -> Result<ShellSettings, String> {
     crate::utils::save_shell_settings(&settings)
+}
+
+#[tauri::command]
+pub fn save_agent_session_persistence(
+    persistence: AgentSessionPersistence,
+) -> Result<ShellSettings, String> {
+    crate::utils::save_agent_session_persistence(persistence)
 }
 
 #[tauri::command]

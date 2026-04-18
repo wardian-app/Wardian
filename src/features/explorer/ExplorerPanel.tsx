@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { FileTree, FileNode } from './FileTree';
@@ -13,6 +13,21 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
   const confirm = useConfirm();
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [gitStatusMap, setGitStatusMap] = useState<Record<string, string>>({});
+  const changedDirectories = useMemo(() => {
+    const directories = new Set<string>();
+    for (const filePath of Object.keys(gitStatusMap)) {
+      const segments = filePath.split('/').filter(Boolean);
+      if (segments.length <= 1) {
+        continue;
+      }
+      let prefix = '';
+      for (let i = 0; i < segments.length - 1; i++) {
+        prefix = prefix ? `${prefix}/${segments[i]}` : segments[i];
+        directories.add(prefix);
+      }
+    }
+    return directories;
+  }, [gitStatusMap]);
 
   // Context Menu State
   const [menuPos, setMenuPos] = useState<{x: number, y: number} | null>(null);
@@ -140,6 +155,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
             path={rootPath}
             onContextMenu={handleContextMenu}
             gitStatusMap={gitStatusMap}
+            changedDirectories={changedDirectories}
             explorerRoot={rootPath}
           />
         ) : (

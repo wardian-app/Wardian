@@ -37,6 +37,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     loadShellSettings,
     loadAvailableShells,
     saveShellSettings,
+    saveAgentSessionPersistence,
   } = useSettingsStore();
   const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "success" | "error">("idle");
   const [patchMessage, setPatchMessage] = useState("");
@@ -92,7 +93,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     setAgentRuntimeStatus("saving");
     setAgentRuntimeMessage("");
     try {
-      await saveShellSettings();
+      await saveAgentSessionPersistence();
       setAgentRuntimeStatus("success");
       setAgentRuntimeMessage("Agent runtime updated.");
       setTimeout(() => {

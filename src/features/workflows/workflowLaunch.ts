@@ -8,8 +8,13 @@ export interface WorkflowRoleTarget {
   nodeName: string;
 }
 
+const validWorkflowModes = new Set(['ephemeral', 'inherit_fresh', 'inherit_resume']);
+
 export function normalizeWorkflowAgentConfig(config: Record<string, unknown>): Record<string, unknown> {
   const normalized = { ...config };
+  if (typeof normalized.mode === 'string' && !validWorkflowModes.has(normalized.mode)) {
+    delete normalized.mode;
+  }
 
   if (typeof normalized.mode !== 'string') {
     if (normalized.session_type === 'temporary') {

@@ -26,6 +26,14 @@ fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// Parse `git status --porcelain=v1 -b` output into a GitStatusResult.
+fn parse_porcelain_path(raw_path: &str) -> String {
+    if let Some((_, new_path)) = raw_path.split_once(" -> ") {
+        return new_path.to_string();
+    }
+    raw_path.to_string()
+}
+
+/// Parse `git status --porcelain=v1 -b` output into a GitStatusResult.
 fn parse_porcelain_status(raw: &str) -> GitStatusResult {
     let mut branch = String::new();
     let mut ahead: u32 = 0;
@@ -63,7 +71,7 @@ fn parse_porcelain_status(raw: &str) -> GitStatusResult {
 
         let index_status = line.as_bytes()[0] as char;
         let worktree_status = line.as_bytes()[1] as char;
-        let path = line[3..].to_string();
+        let path = parse_porcelain_path(&line[3..]);
 
         // Staged entry (index has a real status, not ' ' or '?')
         if index_status != ' ' && index_status != '?' {
@@ -181,14 +189,14 @@ pub async fn git_discard_changes(cwd: String, paths: Vec<String>) -> Result<(), 
         if line.len() < 4 {
             continue;
         }
-        let file_path = &line[3..];
-        if !path_set.contains(file_path) {
+        let file_path = parse_porcelain_path(&line[3..]);
+        if !path_set.contains(file_path.as_str()) {
             continue;
         }
         if line.starts_with("??") {
-            untracked.push(file_path.to_string());
+            untracked.push(file_path);
         } else {
-            tracked.push(file_path.to_string());
+            tracked.push(file_path);
         }
     }
 
@@ -345,5 +353,14 @@ mod tests {
         assert_eq!(result.files.len(), 2);
         assert!(result.files[0].is_staged);
         assert!(!result.files[1].is_staged);
+    }
+
+    #[test]
+    fn parse_status_rename_uses_new_path() {
+        let raw = "## main\nR  old/path.rs -> new/path.rs\n";
+        let result = parse_porcelain_status(raw);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "new/path.rs");
+        assert!(result.files[0].is_staged);
     }
 }

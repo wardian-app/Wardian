@@ -71,6 +71,15 @@ pub fn save_shell_settings(settings: &ShellSettings) -> Result<ShellSettings, St
     save_shell_settings_to_path(&path, settings)
 }
 
+pub fn save_agent_session_persistence(
+    persistence: AgentSessionPersistence,
+) -> Result<ShellSettings, String> {
+    let path = shell_settings_path()?;
+    let mut settings = load_shell_settings_from_path(&path).unwrap_or_default();
+    settings.agent_session_persistence = persistence;
+    save_shell_settings_to_path(&path, &settings)
+}
+
 pub fn build_shell_command(command: &str) -> Result<ShellLaunchSpec, String> {
     let settings = load_shell_settings().unwrap_or_default();
     let available = list_available_shells();

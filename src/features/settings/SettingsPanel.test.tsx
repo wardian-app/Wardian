@@ -48,6 +48,13 @@ describe('SettingsPanel', () => {
           ];
         case 'save_shell_settings':
           return (args as { settings?: unknown } | undefined)?.settings;
+        case 'save_agent_session_persistence':
+          return {
+            shell_id: 'pwsh',
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: (args as { persistence?: 'fresh' | 'resume' } | undefined)?.persistence ?? 'resume',
+          };
         case 'run_gemini_patch':
           return 'ok';
         default:
@@ -125,6 +132,13 @@ describe('SettingsPanel', () => {
           ];
         case 'save_shell_settings':
           return (args as { settings?: unknown } | undefined)?.settings;
+        case 'save_agent_session_persistence':
+          return {
+            shell_id: 'auto',
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: (args as { persistence?: 'fresh' | 'resume' } | undefined)?.persistence ?? 'resume',
+          };
         default:
           return null;
       }
@@ -145,17 +159,13 @@ describe('SettingsPanel', () => {
     fireEvent.click(screen.getByText('Save Agent Runtime'));
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('save_shell_settings', {
-        settings: {
-          shell_id: 'pwsh',
-          custom_executable: null,
-          custom_args: null,
-          agent_session_persistence: 'fresh',
-        },
+      expect(mockInvoke).toHaveBeenCalledWith('save_agent_session_persistence', {
+        persistence: 'fresh',
       });
     });
 
     expect(await screen.findByText('Agent runtime updated.')).toBeInTheDocument();
     expect(screen.queryByText('Shell settings updated.')).not.toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith('save_shell_settings', expect.anything());
   });
 });

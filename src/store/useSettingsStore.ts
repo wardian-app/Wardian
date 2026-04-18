@@ -22,6 +22,7 @@ interface SettingsState {
   loadShellSettings: () => Promise<void>;
   loadAvailableShells: () => Promise<void>;
   saveShellSettings: () => Promise<void>;
+  saveAgentSessionPersistence: () => Promise<void>;
 }
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -87,6 +88,18 @@ export const useSettingsStore = create<SettingsState>()(
           agent_session_persistence: get().agent_session_persistence,
         };
         const saved = await invoke<ShellSettings>('save_shell_settings', { settings });
+        set({
+          shell_id: saved.shell_id,
+          custom_executable: saved.custom_executable ?? '',
+          custom_args: saved.custom_args ?? '',
+          agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
+          shell_settings_loaded: true,
+        });
+      },
+      saveAgentSessionPersistence: async () => {
+        const saved = await invoke<ShellSettings>('save_agent_session_persistence', {
+          persistence: get().agent_session_persistence,
+        });
         set({
           shell_id: saved.shell_id,
           custom_executable: saved.custom_executable ?? '',

@@ -35,6 +35,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
+  const isNotGitRepoError = (error ?? "").toLowerCase().includes("not a git repository");
   // Branch starts with "wardian/" when the agent is actively running inside a worktree
   const isWorktreeActive = status?.branch?.startsWith("wardian/") ?? false;
   const isAgentRunning = (telemetry[selectedAgentId ?? ""]?.current_status ?? "Off") !== "Off";
@@ -260,8 +261,14 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
             </svg>
           </div>
-          <h3 className="text-sm font-bold text-primary mb-2 tracking-wide">Not a Git Repository</h3>
-          <p className="text-xs text-muted italic px-4">The agent's workspace is not initialized as a git repository.</p>
+          <h3 className="text-sm font-bold text-primary mb-2 tracking-wide">
+            {isNotGitRepoError ? "Not a Git Repository" : "Unable to Load Source Control"}
+          </h3>
+          <p className="text-xs text-muted italic px-4">
+            {isNotGitRepoError
+              ? "The agent's workspace is not initialized as a git repository."
+              : error}
+          </p>
         </div>
       </div>
     );

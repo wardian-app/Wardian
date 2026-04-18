@@ -146,6 +146,16 @@ describe('workflowLaunch', () => {
     expect(normalized.nodes[0].config.mode).toBe('inherit_resume');
   });
 
+  it('falls back to legacy mapping when workflow mode value is invalid', () => {
+    const config = normalizeWorkflowAgentConfig({
+      mode: 'broken-mode',
+      session_type: 'persistent',
+      agent_id: 'agent-123',
+    });
+
+    expect(config.mode).toBe('inherit_fresh');
+  });
+
   it('preserves existing role mappings and role assignments while adding missing mappings', () => {
     const workflow: WorkflowDefinition = {
       ...baseWorkflow,
