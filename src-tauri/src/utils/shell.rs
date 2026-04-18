@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const SHELL_SETTINGS_FILE: &str = "shell_settings.json";
+const SHELL_SETTINGS_FILE: &str = "settings/shell.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellOption {
