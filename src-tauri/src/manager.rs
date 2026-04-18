@@ -300,7 +300,8 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
     if let Ok(json) = serde_json::to_string_pretty(&configs) {
         if let Some(app_dir) = get_wardian_home() {
             let _ = std::fs::create_dir_all(&app_dir);
-            let state_path = app_dir.join("wardian_state.json");
+            let _ = std::fs::create_dir_all(app_dir.join("settings"));
+            let state_path = app_dir.join("settings/state.json");
             let _ = std::fs::write(state_path, json);
         }
     }

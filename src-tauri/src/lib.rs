@@ -27,6 +27,9 @@ pub fn run() {
         }
     }
 
+    // Migrate ~/.wardian layout to current schema version before anything else
+    crate::utils::migration::migrate_home_layout();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -57,7 +60,7 @@ pub fn run() {
                 workflow_engine::init_triggers(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
-                    let state_path = app_dir.join("wardian_state.json");
+                    let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
                             let mut agents_map = state.agents.lock().await;
@@ -116,6 +119,10 @@ pub fn run() {
             commands::class::reset_all_class_prompts,
             commands::watchlist::load_watchlists,
             commands::watchlist::save_watchlists,
+            commands::watchlist::load_watchlist_prefs,
+            commands::watchlist::save_watchlist_prefs,
+            commands::watchlist::load_agent_interactions,
+            commands::watchlist::save_agent_interactions,
             commands::fs::resolve_system_include_directories,
             commands::fs::validate_directory_path,
             commands::fs::get_explorer_root,
