@@ -19,6 +19,7 @@ Wardian is a governance layer for AI orchestration. It centralizes PTY managemen
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Documentation](#documentation)
 - [Supported Providers](#supported-providers)
 - [Why Wardian?](#why-wardian)
 - [Core Features](#core-features)
@@ -41,6 +42,17 @@ cd Wardian
 npm install
 npm run dev
 ```
+
+---
+
+## Documentation
+
+For complete user and developer docs, start here:
+
+- [Documentation Index](docs/index.md)
+- [User Guide Index](docs/guide/index.md)
+- [Workflow Reference](docs/workflows/index.md)
+- [Developer Index](docs/developer/index.md)
 
 ---
 

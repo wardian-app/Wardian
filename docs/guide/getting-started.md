@@ -38,4 +38,7 @@ Click **GRID** in the top bar to see all active agents in a high-density termina
 ## Next Steps
 - Learn how to manage reusable prompts in the [Library System](./library.md).
 - Browse your agent's local files in the [Explorer](./explorer.md).
+- Coordinate multi-agent instructions in the [Command Panel](./command-panel.md).
+- Manage per-agent Git operations in [Source Control](./source-control.md).
+- Configure runtime behavior and shell defaults in [Settings](./settings.md).
 - Automate complex tasks with [Visual Workflows](./workflows.md).
