@@ -392,7 +392,7 @@ export default function AgentWatchlist({
           style={{ gridTemplateColumns: gridTemplate }}
         >
           <span></span>
-          <span>Agent</span>
+          <SortableHeader columnId="agent_name" sort={prefs.sort} onSort={handleSort} label="Agent" />
           {prefs.columns.filter(c => c.visible).map(col => {
             const label =
               col.id === 'status_label' ? 'Status' :

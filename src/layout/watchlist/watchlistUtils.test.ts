@@ -266,6 +266,12 @@ describe('sortAgents', () => {
   };
   const interactions = { a: '2026-01-03T00:00:00Z', b: '2026-01-01T00:00:00Z', c: '2026-01-02T00:00:00Z' };
 
+  it('sorts by agent_name asc', () => {
+    const named = [makeAgent('x', { session_name: 'Zara' }), makeAgent('y', { session_name: 'Alpha' }), makeAgent('z', { session_name: 'Mike' })];
+    const sort: WatchlistPrefs['sort'] = { column_id: 'agent_name', direction: 'asc' };
+    expect(sortAgents(named, sort, {}, {}).map(a => a.session_name)).toEqual(['Alpha', 'Mike', 'Zara']);
+  });
+
   it('returns original order when sort is null', () => {
     expect(sortAgents(agents, null, telemetry, interactions).map(a => a.session_id)).toEqual(['a', 'b', 'c']);
   });

@@ -165,6 +165,10 @@ export function sortAgents(
     let av: number | string = 0;
     let bv: number | string = 0;
     switch (column_id) {
+      case 'agent_name':
+        av = a.session_name.toLowerCase();
+        bv = b.session_name.toLowerCase();
+        break;
       case 'uptime':
         av = telemetry[a.session_id]?.init_timestamp ?? '';
         bv = telemetry[b.session_id]?.init_timestamp ?? '';

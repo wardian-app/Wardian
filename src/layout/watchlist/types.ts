@@ -32,7 +32,7 @@ export type OptionalColumnId =
   | 'provider_model'
   | 'last_queried';
 
-export type SortableColumnId = OptionalColumnId;
+export type SortableColumnId = OptionalColumnId | 'agent_name';
 
 export interface WatchlistColumnConfig {
   id: OptionalColumnId;
