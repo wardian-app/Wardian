@@ -60,7 +60,7 @@ pub fn run() {
                 workflow_engine::init_triggers(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
-                    let state_path = app_dir.join("wardian_state.json");
+                    let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
                             let mut agents_map = state.agents.lock().await;
