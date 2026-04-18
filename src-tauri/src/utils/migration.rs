@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const MIGRATIONS_FILE: &str = "settings/migrations.json";
 
-fn get_schema_version(home: &PathBuf) -> u32 {
+fn get_schema_version(home: &Path) -> u32 {
     let path = home.join(MIGRATIONS_FILE);
     if let Ok(data) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -13,7 +13,7 @@ fn get_schema_version(home: &PathBuf) -> u32 {
     0
 }
 
-fn set_schema_version(home: &PathBuf, version: u32) -> std::io::Result<()> {
+fn set_schema_version(home: &Path, version: u32) -> std::io::Result<()> {
     let path = home.join(MIGRATIONS_FILE);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -29,7 +29,7 @@ pub fn migrate_home_layout() {
 }
 
 /// Testable inner function — accepts home dir directly.
-fn run_migration(home: &PathBuf) {
+fn run_migration(home: &Path) {
     let version = get_schema_version(home);
     if version >= CURRENT_SCHEMA_VERSION {
         return;
@@ -77,7 +77,7 @@ fn move_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-fn run_migration_1(home: &PathBuf) {
+fn run_migration_1(home: &Path) {
     move_file(&home.join("watchlists.json"),     &home.join("watchlists/index.json"));
     move_file(&home.join("wardian_state.json"),  &home.join("settings/state.json"));
     move_file(&home.join("shell_settings.json"), &home.join("settings/shell.json"));
@@ -89,6 +89,7 @@ fn run_migration_1(home: &PathBuf) {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     fn temp_home(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wardian-migration-test-{}", name));
