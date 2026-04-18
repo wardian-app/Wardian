@@ -34,6 +34,20 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
 
       {showAdvanced && (
         <div className="flex flex-col gap-4 pt-2">
+          <div>
+              <label htmlFor="regular-session-resume" className="block text-[10px] font-bold text-muted-neutral mb-1">Regular Session Resume</label>
+              <select
+              id="regular-session-resume"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              value={config.session_persistence || "default"}
+              onChange={(e) => updateField("session_persistence", e.target.value as AgentConfig["session_persistence"])}
+              >
+                  <option value="default">Use global default</option>
+                  <option value="fresh">Start fresh on resume</option>
+                  <option value="resume">Resume provider session</option>
+              </select>
+          </div>
+
           {/* Gemini CLI Properties */}
           <div className="flex flex-col gap-4">
               <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-1 border-b border-wardian-border pb-1">Provider Parameters</h4>

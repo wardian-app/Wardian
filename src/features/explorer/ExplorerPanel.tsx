@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
+import { GitStatusResult } from '../../types';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
@@ -11,7 +12,23 @@ interface ExplorerPanelProps {
 export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }) => {
   const confirm = useConfirm();
   const [rootPath, setRootPath] = useState<string | null>(null);
-  
+  const [gitStatusMap, setGitStatusMap] = useState<Record<string, string>>({});
+  const changedDirectories = useMemo(() => {
+    const directories = new Set<string>();
+    for (const filePath of Object.keys(gitStatusMap)) {
+      const segments = filePath.split('/').filter(Boolean);
+      if (segments.length <= 1) {
+        continue;
+      }
+      let prefix = '';
+      for (let i = 0; i < segments.length - 1; i++) {
+        prefix = prefix ? `${prefix}/${segments[i]}` : segments[i];
+        directories.add(prefix);
+      }
+    }
+    return directories;
+  }, [gitStatusMap]);
+
   // Context Menu State
   const [menuPos, setMenuPos] = useState<{x: number, y: number} | null>(null);
   const [activeNode, setActiveNode] = useState<FileNode | null>(null);
@@ -34,6 +51,28 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
     };
     fetchPath();
   }, [selectedAgentId]);
+
+  useEffect(() => {
+    if (!rootPath) return;
+    let isMounted = true;
+    const poll = async () => {
+      try {
+        const result = await invoke<GitStatusResult>('git_status', { cwd: rootPath });
+        if (!isMounted) return;
+        const map: Record<string, string> = {};
+        for (const f of result.files) {
+          const key = f.path.replace(/\\/g, '/');
+          if (!map[key] || f.is_staged) map[key] = f.status;
+        }
+        setGitStatusMap(map);
+      } catch {
+        if (isMounted) setGitStatusMap({});
+      }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { isMounted = false; clearInterval(id); };
+  }, [rootPath]);
 
   useEffect(() => {
     const handleClick = () => setMenuPos(null);
@@ -111,10 +150,13 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
       
       <div className="flex-1 overflow-auto w-full relative min-h-0 -mx-3 px-3">
         {rootPath ? (
-          <FileTree 
+          <FileTree
             key={refreshKey}
-            path={rootPath} 
-            onContextMenu={handleContextMenu} 
+            path={rootPath}
+            onContextMenu={handleContextMenu}
+            gitStatusMap={gitStatusMap}
+            changedDirectories={changedDirectories}
+            explorerRoot={rootPath}
           />
         ) : (
           <div className="text-sm text-wardian-text-muted animate-pulse border border-transparent">Mapping directory...</div>

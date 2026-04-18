@@ -20,6 +20,7 @@ export interface AgentConfig {
     screen_reader?: boolean;
     output_format?: "text" | "json" | "stream-json";
     custom_args?: string;
+    session_persistence?: "default" | "fresh" | "resume";
 
     // Claude-specific fields
     permission_mode?: "default" | "plan" | "auto-accept";
@@ -41,6 +42,30 @@ export interface AgentConfig {
     // OpenCode-specific fields
     opencode_agent?: string;
     opencode_port?: number;
+
+    // Git isolation
+    git_worktree?: boolean;
+
+}
+
+export interface GitFileEntry {
+    path: string;
+    status: string;
+    is_staged: boolean;
+}
+
+export interface GitStatusResult {
+    branch: string;
+    files: GitFileEntry[];
+    ahead: number;
+    behind: number;
+}
+
+export interface GitLogEntry {
+    hash: string;
+    message: string;
+    author: string;
+    date: string;
 }
 
 export * from "./workflow";

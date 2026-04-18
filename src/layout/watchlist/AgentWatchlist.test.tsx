@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import AgentWatchlist from './AgentWatchlist';
 import type { AgentConfig, AgentTelemetry } from '../../types';
 import type { Watchlist } from './types';
@@ -27,6 +27,7 @@ describe('AgentWatchlist', () => {
   const mockOnQuery = vi.fn();
   const mockOnPause = vi.fn();
   const mockOnRestart = vi.fn();
+  const mockOnClear = vi.fn();
   const mockOnDelete = vi.fn();
   const mockOnActiveListChange = vi.fn();
   const mockOnWatchlistsChange = vi.fn(async () => {});
@@ -59,6 +60,7 @@ describe('AgentWatchlist', () => {
     onQuery: mockOnQuery,
     onPause: mockOnPause,
     onRestart: mockOnRestart,
+    onClear: mockOnClear,
     onDelete: mockOnDelete,
     onAddToList: vi.fn(),
     onRemoveFromList: vi.fn(),
@@ -99,7 +101,18 @@ describe('AgentWatchlist', () => {
     expect(screen.getByText('Rename')).toBeInTheDocument();
     expect(screen.getByText('Pause')).toBeInTheDocument();
     expect(screen.getByText('Restart')).toBeInTheDocument();
+    expect(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clear' })).toBeInTheDocument();
     expect(screen.getByText('Delete')).toBeInTheDocument();
+  });
+
+  it('triggers onClear action from the context menu', async () => {
+    render(<AgentWatchlist {...defaultProps} />);
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row');
+
+    fireEvent.contextMenu(agentRow!);
+    fireEvent.click(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clear' }));
+
+    expect(mockOnClear).toHaveBeenCalledWith('agent-1');
   });
 
   it('disables Pause for already off agents', async () => {

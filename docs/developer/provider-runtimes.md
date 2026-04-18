@@ -8,6 +8,11 @@ This document captures the practical runtime differences between Wardian's suppo
 - Every provider receives Wardian's `system_include_directories`, which are resolved from `common`, `classes/<class>`, and `agents/<session_id>`.
 - Headless execution and interactive execution use the same provider-specific assumptions where possible. Differences should stay explicit in `manager.rs` instead of being hidden in frontend state.
 - Provider-native instruction discovery matters more than Wardian's abstract model. The backend adapts Wardian's files and directories to each CLI instead of expecting the CLI to understand Wardian directly.
+- Workflow Agent nodes expose one run mode: `ephemeral`, `inherit_fresh`, or `inherit_resume`. Provider resume flags are emitted only for `inherit_resume`.
+- `inherit_fresh` clones the selected agent's runtime configuration and scoped read context, but writes workflow artifacts under a workflow-run session ID and clears provider resume state.
+- Workflow-spawned fresh runs skip interactive startup prompts. The workflow node prompt is the first provider input.
+- Regular visible agents use the global `Regular agent sessions` setting unless the agent config sets `session_persistence` to `fresh` or `resume`. The agent-level `default` value inherits the global setting.
+- The regular-agent context menu `Clear` action forces a fresh provider launch for that one action and clears both the backend PTY output buffer and frontend terminal scrollback cache.
 
 ## Quick Comparison
 
@@ -52,6 +57,7 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 - Fresh Claude spawns use an explicit Wardian-generated `--session-id`.
 - This avoids a bootstrap phase just to discover the provider session ID.
 - Resume launches use `--resume <session_id>` and do not resend `--session-id` or `--name`.
+- Fresh resume of an existing Wardian agent uses a new transient Claude provider session ID while keeping the Wardian agent ID stable. After launch, Wardian stores the transient Claude ID as the next `resume_session`.
 
 ### Instruction and skill discovery
 

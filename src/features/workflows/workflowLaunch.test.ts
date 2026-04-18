@@ -4,6 +4,7 @@ import {
   buildScheduledRunFromWorkflow,
   getWorkflowLaunchKind,
   getWorkflowRoleTargets,
+  normalizeWorkflowAgentConfig,
   normalizeWorkflowForLaunch,
   setWorkflowTriggerStatus,
   synthesizeWorkflowRole,
@@ -75,6 +76,84 @@ describe('workflowLaunch', () => {
       },
     ]);
     expect(workflowNeedsRunConfig(workflow, false)).toBe(true);
+  });
+
+  it('does not create run modal role targets for ephemeral agent nodes', () => {
+    const workflow: WorkflowDefinition = {
+      ...baseWorkflow,
+      nodes: [
+        { id: 'agent-1', type: 'agent', name: 'Scratch Agent', config: { mode: 'ephemeral', agent_class: 'Coder' } },
+      ],
+    };
+
+    expect(getWorkflowRoleTargets(workflow)).toEqual([]);
+    expect(workflowNeedsRunConfig(workflow, false)).toBe(false);
+  });
+
+  it('treats legacy temporary agent nodes as ephemeral for run config needs', () => {
+    const workflow: WorkflowDefinition = {
+      ...baseWorkflow,
+      nodes: [
+        { id: 'agent-1', type: 'agent', name: 'Temporary Agent', config: { session_type: 'temporary', agent_id: 'agent-123' } },
+      ],
+    };
+
+    expect(getWorkflowRoleTargets(workflow)).toEqual([]);
+    expect(workflowNeedsRunConfig(workflow, false)).toBe(false);
+  });
+
+  it('maps legacy temporary agent nodes to ephemeral mode', () => {
+    const config = normalizeWorkflowAgentConfig({ session_type: 'temporary', agent_class: 'Coder' });
+
+    expect(config).toMatchObject({
+      session_type: 'temporary',
+      mode: 'ephemeral',
+      agent_class: 'Coder',
+    });
+    expect(config).not.toHaveProperty('session_persistence');
+  });
+
+  it('maps legacy persistent agent nodes to inherit_fresh mode', () => {
+    const config = normalizeWorkflowAgentConfig({ session_type: 'persistent', agent_id: 'agent-123' });
+
+    expect(config).toMatchObject({
+      session_type: 'persistent',
+      mode: 'inherit_fresh',
+      agent_id: 'agent-123',
+    });
+    expect(config).not.toHaveProperty('session_persistence');
+  });
+
+  it('maps legacy direct agent nodes without session_type to inherit_fresh mode', () => {
+    const config = normalizeWorkflowAgentConfig({ agent_id: 'agent-123' });
+
+    expect(config).toMatchObject({
+      mode: 'inherit_fresh',
+      agent_id: 'agent-123',
+    });
+  });
+
+  it('preserves explicit workflow agent mode during launch normalization', () => {
+    const workflow: WorkflowDefinition = {
+      ...baseWorkflow,
+      nodes: [
+        { id: 'agent-1', type: 'agent', name: 'Resume Agent', config: { session_type: 'persistent', mode: 'inherit_resume', agent_id: 'agent-123' } },
+      ],
+    };
+
+    const normalized = normalizeWorkflowForLaunch(workflow);
+
+    expect(normalized.nodes[0].config.mode).toBe('inherit_resume');
+  });
+
+  it('falls back to legacy mapping when workflow mode value is invalid', () => {
+    const config = normalizeWorkflowAgentConfig({
+      mode: 'broken-mode',
+      session_type: 'persistent',
+      agent_id: 'agent-123',
+    });
+
+    expect(config.mode).toBe('inherit_fresh');
   });
 
   it('preserves existing role mappings and role assignments while adding missing mappings', () => {

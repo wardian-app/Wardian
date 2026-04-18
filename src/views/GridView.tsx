@@ -5,6 +5,7 @@ import type { Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useGridResize } from "../features/grid/useGridResize";
+import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
 interface GridViewProps {
   filteredAgents: AgentConfig[];
@@ -37,6 +38,7 @@ interface GridViewProps {
   onQuery: (agentId: string) => void;
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
+  onClear: (agentId: string) => void;
 }
 
 export const GridView: React.FC<GridViewProps> = ({
@@ -70,11 +72,23 @@ export const GridView: React.FC<GridViewProps> = ({
   onQuery,
   onPause,
   onRestart,
+  onClear,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { layout, resetLayout } = useLayoutStore();
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+
+  const [bgContextMenu, setBgContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
+    x: 0, y: 0, visible: false
+  });
+
+  const handleBackgroundContextMenu = (e: React.MouseEvent) => {
+    // Only trigger if we click the grid background itself (gaps/padding)
+    if (e.target !== containerRef.current) return;
+    e.preventDefault();
+    setBgContextMenu({ x: e.clientX, y: e.clientY, visible: true });
+  };
 
   useEffect(() => {
     const handleResize = () => setWindowWidth(window.innerWidth);
@@ -109,17 +123,26 @@ export const GridView: React.FC<GridViewProps> = ({
     gridTemplateColumns: (isMaximized || isMobile) 
       ? '1fr' 
       : layout.column_tracks.map(t => `${t}fr`).join(' '),
-    gridAutoRows: `${layout.row_height}px`,
-    gap: (isMaximized || isMobile) ? '16px' : '8px',
+    gridAutoRows: (isMaximized || isMobile) ? '100%' : `${layout.row_height}px`,
+    gap: (isMaximized || isMobile) ? '0' : '8px',
     background: 'transparent',
-    padding: (isMaximized || isMobile) ? '16px' : '8px',
-    paddingBottom: '200px',
+    padding: (isMaximized || isMobile) ? '0' : '8px',
+    height: (isMaximized || isMobile) ? '100%' : 'auto',
   };
+
+  const bgMenuItems: ContextMenuItem[] = [
+    {
+      label: "Reset Grid Layout",
+      onClick: resetLayout,
+      icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+    }
+  ];
 
   return (
     <div 
       ref={containerRef}
       style={gridStyle}
+      onContextMenu={handleBackgroundContextMenu}
       className={`w-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
     >
       {visibleAgents.map((agent: AgentConfig, _idx: number) => {
@@ -150,13 +173,13 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'fixed inset-0 z-50 rounded-none border-none transition-none' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'h-full w-full rounded-none border-none transition-none z-10' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
           >
             <div 
               onMouseEnter={() => onMouseEnterCard(agentId)}
               onMouseDown={(e) => { if (e.button === 0) onMouseDown(agentId); }}
               onClick={(e) => { e.stopPropagation(); if (!isAgentMaximized) onCardClick(e, agentId); }}
-              onContextMenu={(e) => { if (!isAgentMaximized) handleContextMenu(e, agentId); }}
+              onContextMenu={(e) => handleContextMenu(e, agentId)}
               className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none flex ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
             >
               <div className="flex items-center gap-3">
@@ -277,11 +300,20 @@ export const GridView: React.FC<GridViewProps> = ({
           onQuery={onQuery}
           onPause={onPause}
           onRestart={onRestart}
+          onClear={onClear}
           onAddToList={onAddToList}
           onRemoveFromList={onRemoveFromList}
           onDelete={onDelete}
-          onResetLayout={resetLayout}
           onClose={() => setContextMenu({ ...contextMenu, visible: false })}
+        />
+      )}
+
+      {bgContextMenu.visible && (
+        <ContextMenu
+          x={bgContextMenu.x}
+          y={bgContextMenu.y}
+          items={bgMenuItems}
+          onClose={() => setBgContextMenu({ ...bgContextMenu, visible: false })}
         />
       )}
 

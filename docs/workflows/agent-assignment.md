@@ -40,14 +40,17 @@ For each agent role, the modal shows:
 
 This lets one workflow template be reused across different agent rosters or different scheduled instances.
 
-## Persistent vs Temporary Agent Nodes
+## Agent Run Modes
 
-Agent nodes support two user-facing modes in the builder:
+Agent nodes use one run mode selector:
 
-- **Persistent**: target a real agent session that already exists
-- **Temporary**: choose an agent class and workspace so Wardian can execute against a temporary agent context
+- **Ephemeral**: build a fresh workflow execution from an agent class and workspace. It does not need launch-time agent assignment.
+- **Inherit Fresh**: clone provider, class, workspace, skill, and scoped-memory read configuration from an existing agent, but start a fresh provider session for this workflow run.
+- **Inherit Resume**: continue the selected agent's provider session and mutable runtime state. Use this only when the workflow should deliberately add to that agent's conversation history.
 
-From a user perspective, the important difference is that persistent mode is about targeting an existing agent, while temporary mode is about launching work from a class-based configuration.
+From a user perspective, the important distinction is whether the workflow needs an existing agent. Ephemeral runs do not. Inherited runs do, so they can appear in the Agent Assignments section when no direct agent is already selected.
+
+Workflow-spawned agent runs do not receive an automatic "introduce yourself" startup prompt. The first provider input is the workflow node prompt.
 
 ## Off Agents and Headless Execution
 
@@ -56,7 +59,7 @@ If a target agent is off, Wardian can still execute the workflow through headles
 What users should expect:
 
 - the workflow still attempts to run if the provider supports headless execution
-- role mappings still matter even if the target agent is not currently open in a visible terminal
+- role mappings still matter for inherited runs even if the target agent is not currently open in a visible terminal
 - provider-specific quirks can affect the outcome, especially for structured output or approvals
 
 ## Scheduled Assignment
@@ -79,8 +82,12 @@ Use **roles** when:
 
 Use **direct agent targeting** when:
 
-- the workflow truly belongs to one specific long-lived agent
+- the workflow should inherit from or resume one specific long-lived agent
 - reusability is not important for that automation
+
+Prefer **Inherit Fresh** when you want an existing agent's profile without conversation-history token growth. Reserve **Inherit Resume** for workflows whose purpose is to continue that exact agent session.
+
+The global regular-agent session setting does not change workflow Agent node behavior. Workflow runs follow the node's run mode.
 
 ## Related References
 

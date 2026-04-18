@@ -10,6 +10,7 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
 pub async fn submit_prompt_via_sender(
     tx: &Sender<Vec<u8>>,
     prompt: &str,
+    provider_name: &str,
 ) -> Result<(), String> {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     if normalized.is_empty() {
@@ -22,7 +23,13 @@ pub async fn submit_prompt_via_sender(
 
     tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
 
-    tx.send(TERMINAL_SUBMIT_KEY.to_vec())
+    let submit_key = if provider_name == "codex" {
+        b"\x1b\r".as_slice()
+    } else {
+        TERMINAL_SUBMIT_KEY
+    };
+
+    tx.send(submit_key.to_vec())
         .await
         .map_err(|e| format!("Failed to send prompt submit key: {}", e))?;
 
@@ -45,7 +52,7 @@ mod tests {
     async fn submit_prompt_sends_text_then_submit_key() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
 
-        submit_prompt_via_sender(&tx, "hello\nworld")
+        submit_prompt_via_sender(&tx, "hello\nworld", "gemini")
             .await
             .expect("submit prompt");
 

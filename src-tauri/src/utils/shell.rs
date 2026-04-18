@@ -1,4 +1,5 @@
 use crate::utils::get_wardian_home;
+use crate::models::AgentSessionPersistence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,8 @@ pub struct ShellSettings {
     pub custom_executable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_args: Option<String>,
+    #[serde(default)]
+    pub agent_session_persistence: AgentSessionPersistence,
 }
 
 impl Default for ShellSettings {
@@ -29,6 +32,7 @@ impl Default for ShellSettings {
             shell_id: "auto".to_string(),
             custom_executable: None,
             custom_args: None,
+            agent_session_persistence: AgentSessionPersistence::Resume,
         }
     }
 }
@@ -65,6 +69,15 @@ pub fn load_shell_settings() -> Result<ShellSettings, String> {
 pub fn save_shell_settings(settings: &ShellSettings) -> Result<ShellSettings, String> {
     let path = shell_settings_path()?;
     save_shell_settings_to_path(&path, settings)
+}
+
+pub fn save_agent_session_persistence(
+    persistence: AgentSessionPersistence,
+) -> Result<ShellSettings, String> {
+    let path = shell_settings_path()?;
+    let mut settings = load_shell_settings_from_path(&path).unwrap_or_default();
+    settings.agent_session_persistence = persistence;
+    save_shell_settings_to_path(&path, &settings)
 }
 
 pub fn build_shell_command(command: &str) -> Result<ShellLaunchSpec, String> {
@@ -701,6 +714,7 @@ mod tests {
             shell_id: "custom".to_string(),
             custom_executable: Some("C:/Program Files/PowerShell/7/pwsh.exe".to_string()),
             custom_args: Some("-NoProfile -Command".to_string()),
+            ..Default::default()
         };
 
         let saved = save_shell_settings_to_path(&path, &settings).expect("save settings");
@@ -720,6 +734,7 @@ mod tests {
                 "/bin/bash".to_string()
             }),
             custom_args: None,
+            ..Default::default()
         };
 
         let spec = build_shell_command_with_settings("echo hello", &settings, &[])
@@ -756,6 +771,7 @@ mod tests {
                 shell_id: "pwsh".to_string(),
                 custom_executable: None,
                 custom_args: None,
+                ..Default::default()
             },
             &available,
         )
@@ -789,6 +805,7 @@ mod tests {
                 shell_id: "pwsh".to_string(),
                 custom_executable: None,
                 custom_args: None,
+                ..Default::default()
             },
             &available,
         )
@@ -869,6 +886,7 @@ mod tests {
                 shell_id: "git-bash".to_string(),
                 custom_executable: None,
                 custom_args: None,
+                ..Default::default()
             },
             &available,
         )
@@ -909,6 +927,7 @@ mod tests {
                 shell_id: "git-bash".to_string(),
                 custom_executable: None,
                 custom_args: None,
+                ..Default::default()
             },
             &available,
         )
@@ -944,6 +963,7 @@ mod tests {
                 shell_id: "wsl".to_string(),
                 custom_executable: None,
                 custom_args: None,
+                ..Default::default()
             },
             &available,
         )

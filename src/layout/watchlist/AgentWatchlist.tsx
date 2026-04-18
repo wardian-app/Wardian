@@ -9,7 +9,6 @@ import {
 } from "./watchlistUtils";
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
-import { useLayoutStore } from "../../store/useLayoutStore";
 
 interface AgentWatchlistProps {
   agents: AgentConfig[];
@@ -25,6 +24,7 @@ interface AgentWatchlistProps {
   onQuery: (agentId: string) => void;
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
+  onClear: (agentId: string) => void;
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
   onDelete: (agentId: string) => void;
@@ -49,6 +49,7 @@ export default function AgentWatchlist({
   onQuery,
   onPause,
   onRestart,
+  onClear,
   onAddToList,
   onRemoveFromList,
   onDelete,
@@ -58,7 +59,6 @@ export default function AgentWatchlist({
   onActiveListChange,
   onWatchlistsChange,
 }: AgentWatchlistProps) {
-  const { resetLayout } = useLayoutStore();
   // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
@@ -485,6 +485,7 @@ export default function AgentWatchlist({
           onQuery={onQuery}
           onPause={onPause}
           onRestart={onRestart}
+          onClear={onClear}
           onAddToList={(listId, agentId) => {
             onAddToList(listId, agentId);
             setContextMenu(p => ({ ...p, visible: false }));
@@ -494,7 +495,6 @@ export default function AgentWatchlist({
             setContextMenu(p => ({ ...p, visible: false }));
           }}
           onDelete={onDelete}
-          onResetLayout={resetLayout}
           onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
         />
       )}

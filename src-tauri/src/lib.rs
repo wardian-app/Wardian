@@ -16,8 +16,8 @@ use tauri::{Emitter, Manager};
 pub fn run() {
     #[cfg(windows)]
     {
-        use windows::core::PCWSTR;
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        use windows::core::PCWSTR;
         let aumid: Vec<u16> = "org.wardian.desktop"
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -97,6 +97,7 @@ pub fn run() {
             commands::agent::kill_agent,
             commands::agent::pause_agent,
             commands::agent::resume_agent,
+            commands::agent::clear_agent_session,
             commands::agent::rename_agent,
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
@@ -150,7 +151,22 @@ pub fn run() {
             commands::settings::list_available_shells,
             commands::settings::load_shell_settings,
             commands::settings::save_shell_settings,
-            commands::settings::save_opencode_theme
+            commands::settings::save_agent_session_persistence,
+            commands::settings::save_opencode_theme,
+            commands::git::git_status,
+            commands::git::git_current_branch,
+            commands::git::git_log,
+            commands::git::git_diff_file,
+            commands::git::git_stage,
+            commands::git::git_unstage,
+            commands::git::git_discard_changes,
+            commands::git::git_commit,
+            commands::git::git_pull,
+            commands::git::git_push,
+            commands::git::git_create_worktree,
+            commands::git::git_remove_worktree,
+            commands::git::git_watch,
+            commands::git::git_unwatch
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

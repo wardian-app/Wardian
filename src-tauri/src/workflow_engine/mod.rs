@@ -1,3 +1,4 @@
+pub mod agent_execution;
 mod migrate;
 
 use crate::manager::log_debug;
@@ -1775,6 +1776,11 @@ pub async fn run_workflow(
                     } else {
                         direct_id
                     };
+                    let mode = crate::models::AgentExecutionPolicy::from_legacy_session_type(
+                        node.config.get("session_type").and_then(|v| v.as_str()),
+                        node.config.get("mode").and_then(|v| v.as_str()),
+                    )
+                    .mode;
 
                     let mut prompt = node
                         .config
@@ -1784,46 +1790,62 @@ pub async fn run_workflow(
                         .to_string();
                     prompt = interpolate_string(&prompt, &registry);
 
-                    if agent_id.is_empty() {
+                    if agent_id.is_empty() && mode != crate::models::WorkflowAgentMode::Ephemeral {
                         node_error = Some(if !role.is_empty() {
                             format!("Role '{}' not mapped to an agent. Set role_mappings before running.", role)
                         } else {
                             "Missing agent_id or role".to_string()
                         });
                     } else {
-                        // Resolve provider name from live agent state or saved config
-                        let provider_name = {
+                        let target_agent_config = if agent_id.is_empty() {
+                            None
+                        } else {
                             let state = app.state::<crate::state::AppState>();
                             let agents_map = state.agents.lock().await;
                             if let Some(agent) = agents_map.get(agent_id) {
-                                agent.config.provider.clone()
-                            } else {
-                                // Fallback: read from persisted state
-                                let mut found = "gemini".to_string();
-                                if let Some(home) = get_wardian_home() {
-                                    if let Ok(data) =
-                                        std::fs::read_to_string(home.join("wardian_state.json"))
+                                Some(agent.config.clone())
+                            } else if let Some(home) = get_wardian_home() {
+                                if let Ok(data) =
+                                    std::fs::read_to_string(home.join("wardian_state.json"))
+                                {
+                                    if let Ok(configs) =
+                                        serde_json::from_str::<Vec<crate::models::AgentConfig>>(
+                                            &data,
+                                        )
                                     {
-                                        if let Ok(configs) =
-                                            serde_json::from_str::<Vec<crate::models::AgentConfig>>(
-                                                &data,
-                                            )
-                                        {
-                                            if let Some(cfg) =
-                                                configs.iter().find(|c| c.session_id == agent_id)
-                                            {
-                                                found = cfg.provider.clone();
-                                            }
-                                        }
+                                        configs.into_iter().find(|c| c.session_id == agent_id)
+                                    } else {
+                                        None
                                     }
+                                } else {
+                                    None
                                 }
-                                found
+                            } else {
+                                None
                             }
                         };
+                        let node_config = node
+                            .config
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default();
+                        let exec_ctx = match agent_execution::resolve_agent_execution_context(
+                            &node.id,
+                            &node_config,
+                            target_agent_config.as_ref(),
+                            &run_instance_id,
+                        ) {
+                            Ok(ctx) => Some(ctx),
+                            Err(err) => {
+                                node_error = Some(err);
+                                None
+                            }
+                        };
+                        if let Some(exec_ctx) = exec_ctx {
+                        let provider_name = exec_ctx.config.provider.clone();
                         let output_format = node
                             .config
                             .get("output_format")
-                            .or_else(|| node.config.get("mode"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("text");
 
@@ -1860,14 +1882,46 @@ pub async fn run_workflow(
                         ));
 
                         // 1. Resolve CWD logic (Shared between modes)
-                        let folder = node
-                            .config
-                            .get("folder")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let cwd = crate::utils::fs::resolve_cwd(folder, agent_id);
+                        let cwd = crate::utils::fs::resolve_cwd(
+                            &exec_ctx.config.folder,
+                            &exec_ctx.execution_session_id,
+                        );
 
-                        if output_format == "json" {
+                        if exec_ctx.mode != crate::models::WorkflowAgentMode::InheritResume {
+                            let run_result = tokio::time::timeout(
+                                std::time::Duration::from_millis(timeout_ms),
+                                crate::manager::run_headless_with_options(
+                                    crate::manager::HeadlessRunOptions {
+                                        cwd: &cwd,
+                                        prompt: &prompt,
+                                        wardian_session_id: &exec_ctx.execution_session_id,
+                                        resume_session: None,
+                                        output_format,
+                                        provider_name: &provider_name,
+                                        config_override: Some(&exec_ctx.config),
+                                    },
+                                ),
+                            )
+                            .await;
+
+                            let run_result = match run_result {
+                                Ok(res) => res,
+                                Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
+                            };
+
+                            match run_result {
+                                Ok(data) => {
+                                    output_payload = flatten_headless_response(data);
+                                }
+                                Err(e) => {
+                                    log_debug(&format!(
+                                        "[Wardian] Fresh workflow agent run failed: {}",
+                                        e
+                                    ));
+                                    node_error = Some(e);
+                                }
+                            }
+                        } else if output_format == "json" {
                             // --- HEADLESS JSON MODE (Always kills PTY for clean structured output) ---
                             let state = app.state::<crate::state::AppState>();
                             let mut was_online = false;
@@ -1898,13 +1952,16 @@ pub async fn run_workflow(
 
                             let run_result = tokio::time::timeout(
                                 std::time::Duration::from_millis(timeout_ms),
-                                crate::manager::run_headless_with_config(
-                                    &cwd,
-                                    &prompt,
-                                    agent_id,
-                                    output_format,
-                                    &provider_name,
-                                    agent_cfg.as_ref(),
+                                crate::manager::run_headless_with_options(
+                                    crate::manager::HeadlessRunOptions {
+                                        cwd: &cwd,
+                                        prompt: &prompt,
+                                        wardian_session_id: &exec_ctx.execution_session_id,
+                                        resume_session: exec_ctx.resume_session.as_deref(),
+                                        output_format,
+                                        provider_name: &provider_name,
+                                        config_override: Some(&exec_ctx.config),
+                                    },
                                 ),
                             )
                             .await;
@@ -1985,13 +2042,16 @@ pub async fn run_workflow(
                                 if provider_name == "opencode" {
                                     let run_result = tokio::time::timeout(
                                         std::time::Duration::from_millis(timeout_ms),
-                                        crate::manager::run_headless_with_config(
-                                            &cwd,
-                                            &prompt,
-                                            agent_id,
-                                            output_format,
-                                            &provider_name,
-                                            None,
+                                        crate::manager::run_headless_with_options(
+                                            crate::manager::HeadlessRunOptions {
+                                                cwd: &cwd,
+                                                prompt: &prompt,
+                                                wardian_session_id: &exec_ctx.execution_session_id,
+                                                resume_session: exec_ctx.resume_session.as_deref(),
+                                                output_format,
+                                                provider_name: &provider_name,
+                                                config_override: Some(&exec_ctx.config),
+                                            },
                                         ),
                                     )
                                     .await;
@@ -2016,7 +2076,7 @@ pub async fn run_workflow(
                                 } else {
                                     if let Err(err) =
                                         crate::utils::terminal_input::submit_prompt_via_sender(
-                                            &tx, &prompt,
+                                            &tx, &prompt, &provider_name
                                         )
                                         .await
                                     {
@@ -2079,13 +2139,16 @@ pub async fn run_workflow(
                                 let _ = app.emit("agents-updated", ());
                                 let run_result = tokio::time::timeout(
                                     std::time::Duration::from_millis(timeout_ms),
-                                    crate::manager::run_headless_with_config(
-                                        &cwd,
-                                        &prompt,
-                                        agent_id,
-                                        output_format,
-                                        &provider_name,
-                                        None,
+                                    crate::manager::run_headless_with_options(
+                                        crate::manager::HeadlessRunOptions {
+                                            cwd: &cwd,
+                                            prompt: &prompt,
+                                            wardian_session_id: &exec_ctx.execution_session_id,
+                                            resume_session: exec_ctx.resume_session.as_deref(),
+                                            output_format,
+                                            provider_name: &provider_name,
+                                            config_override: Some(&exec_ctx.config),
+                                        },
                                     ),
                                 )
                                 .await;
@@ -2119,6 +2182,7 @@ pub async fn run_workflow(
                                 let _ = app.emit("agents-updated", ());
                             }
                         }
+                    }
                     }
                 }
                 "communication" | "notify" => {

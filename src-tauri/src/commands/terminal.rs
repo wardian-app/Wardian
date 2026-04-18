@@ -302,7 +302,7 @@ pub async fn submit_prompt_to_agent(
         return Ok(());
     }
 
-    submit_prompt_via_sender(&tx, &prompt).await
+    submit_prompt_via_sender(&tx, &prompt, &provider_name).await
 }
 
 #[tauri::command]

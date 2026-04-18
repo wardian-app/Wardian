@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { AgentConfig, AgentTelemetry, AgentClassDefinition, AgentOutputPayload, AgentJsonEvent } from "./index";
+import type { WorkflowAgentMode, WorkflowNode } from "./workflow";
 
 describe("TypeScript Interface Shape Tests", () => {
   describe("AgentConfig", () => {
@@ -36,6 +37,28 @@ describe("TypeScript Interface Shape Tests", () => {
         is_off: false,
       };
       expect(config.resume_session).toBeUndefined();
+    });
+
+  });
+
+  describe("WorkflowAgentMode", () => {
+    it("accepts the three workflow agent run modes", () => {
+      const modes: WorkflowAgentMode[] = ["ephemeral", "inherit_fresh", "inherit_resume"];
+
+      expect(modes).toEqual(["ephemeral", "inherit_fresh", "inherit_resume"]);
+    });
+
+    it("accepts workflow agent nodes without a separate session persistence field", () => {
+      const node: WorkflowNode = {
+        id: "agent-1",
+        type: "agent",
+        config: {
+          mode: "inherit_resume",
+          agent_id: "agent-123",
+        },
+      };
+
+      expect(node.config.mode).toBe("inherit_resume");
     });
   });
 

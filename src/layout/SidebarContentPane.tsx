@@ -8,6 +8,7 @@ import { CommandPanel } from "../features/commands/CommandPanel";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
 import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
+import { GitPanel } from "../features/git/GitPanel";
 
 interface SidebarContentPaneProps {
   activeTab: SidebarTab;
@@ -45,6 +46,15 @@ interface SidebarContentPaneProps {
         <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)] flex flex-col min-h-0 h-full">
         {activeTab === "explorer" && (
           <ExplorerPanel selectedAgentIds={selectedAgentIds} />
+        )}
+
+        {activeTab === "git" && (
+          <GitPanel
+            selectedAgentIds={selectedAgentIds}
+            agents={agents}
+            onAgentsUpdated={onAgentsUpdated}
+            telemetry={telemetry}
+          />
         )}
 
         {activeTab === "agent-config" && (

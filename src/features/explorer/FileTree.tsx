@@ -14,6 +14,24 @@ export interface FileTreeProps {
   onSelect?: (path: string, is_dir: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
   depth?: number;
+  gitStatusMap?: Record<string, string>;
+  changedDirectories?: Set<string>;
+  explorerRoot?: string;
+}
+
+const GIT_STATUS_COLORS: Record<string, string> = {
+  M: 'var(--color-wardian-warning)',
+  A: 'var(--color-wardian-success)',
+  D: 'var(--color-wardian-error)',
+  R: 'var(--color-wardian-warning)',
+  C: 'var(--color-wardian-processing)',
+  '?': 'var(--color-wardian-success)',
+};
+
+function toRelativePath(nodePath: string, root: string): string {
+  const n = nodePath.replace(/\\/g, '/');
+  const r = root.replace(/\\/g, '/').replace(/\/$/, '');
+  return n.startsWith(r) ? n.slice(r.length).replace(/^\//, '') : n;
 }
 
 const getFileIcon = (extension: string | null) => {
@@ -28,7 +46,7 @@ const getFileIcon = (extension: string | null) => {
   return <FileText className="w-4 h-4 text-wardian-text-muted shrink-0" />;
 }
 
-export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMenu, depth = 0 }) => {
+export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMenu, depth = 0, gitStatusMap, changedDirectories, explorerRoot }) => {
   const [nodes, setNodes] = useState<FileNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -81,45 +99,66 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
 
   return (
     <div className={`flex flex-col ${depth === 0 ? 'w-full h-full' : ''}`}>
-      {nodes.map(node => (
-        <React.Fragment key={node.path}>
-          <div 
-            className="flex items-center shrink-0 gap-1.5 py-[2px] pr-2 hover:bg-wardian-card-bg-muted cursor-pointer rounded-md text-[13px] whitespace-nowrap overflow-hidden select-none group w-full"
-            style={{ paddingLeft: `${(depth * 14) + 2}px` }}
-            onClick={(e) => handleClick(e, node)}
-            onContextMenu={(e) => onContextMenu && onContextMenu(e, node)}
-          >
-            {node.is_dir ? (
-              <span className="text-wardian-text-muted cursor-pointer hover:text-wardian-text shrink-0 flex items-center justify-center w-4 h-4" onClick={(e) => { e.stopPropagation(); toggleFolder(node.path); }}>
-                {expanded[node.path] ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-              </span>
-            ) : (
-              <span className="w-4 h-4 shrink-0 inline-block" />
-            )}
-            
-            <span className="text-wardian-text-muted flex items-center shrink-0">
-              {node.is_dir ? (
-                <Folder className={`w-4 h-4 ${expanded[node.path] ? 'fill-wardian-accent/20 text-wardian-accent' : 'text-wardian-processing'}`} />
-              ) : (
-                getFileIcon(node.extension)
-              )}
-            </span>
-            
-            <span className={`truncate flex-1 ${node.is_dir ? 'text-wardian-text font-medium' : 'text-wardian-text-muted group-hover:text-wardian-text'} transition-colors`}>
-              {node.name}
-            </span>
-          </div>
+      {nodes.map(node => {
+        const relPath = explorerRoot ? toRelativePath(node.path, explorerRoot) : '';
+        const fileStatus = gitStatusMap?.[relPath];
+        const dirHasChanges = node.is_dir && relPath !== '' && changedDirectories?.has(relPath);
+        const gitColor = fileStatus
+          ? GIT_STATUS_COLORS[fileStatus]
+          : dirHasChanges ? GIT_STATUS_COLORS['M'] : undefined;
 
-          {node.is_dir && expanded[node.path] && (
-            <FileTree 
-              path={node.path} 
-              depth={depth + 1} 
-              onSelect={onSelect} 
-              onContextMenu={onContextMenu} 
-            />
-          )}
-        </React.Fragment>
-      ))}
+        return (
+          <React.Fragment key={node.path}>
+            <div
+              className="flex items-center shrink-0 gap-1.5 py-[2px] pr-2 hover:bg-wardian-card-bg-muted cursor-pointer rounded-md text-[13px] whitespace-nowrap overflow-hidden select-none group w-full"
+              style={{ paddingLeft: `${(depth * 14) + 2}px` }}
+              onClick={(e) => handleClick(e, node)}
+              onContextMenu={(e) => onContextMenu && onContextMenu(e, node)}
+            >
+              {node.is_dir ? (
+                <span className="text-wardian-text-muted cursor-pointer hover:text-wardian-text shrink-0 flex items-center justify-center w-4 h-4" onClick={(e) => { e.stopPropagation(); toggleFolder(node.path); }}>
+                  {expanded[node.path] ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                </span>
+              ) : (
+                <span className="w-4 h-4 shrink-0 inline-block" />
+              )}
+
+              <span className="text-wardian-text-muted flex items-center shrink-0">
+                {node.is_dir ? (
+                  <Folder className={`w-4 h-4 ${expanded[node.path] ? 'fill-wardian-accent/20 text-wardian-accent' : 'text-wardian-processing'}`} />
+                ) : (
+                  getFileIcon(node.extension)
+                )}
+              </span>
+
+              <span
+                className={`truncate flex-1 ${node.is_dir ? 'font-medium' : ''} ${!gitColor ? (node.is_dir ? 'text-wardian-text' : 'text-wardian-text-muted group-hover:text-wardian-text') : ''} transition-colors`}
+                style={gitColor ? { color: gitColor } : undefined}
+              >
+                {node.name}
+              </span>
+
+              {fileStatus && (
+                <span className="shrink-0 text-[10px] font-bold ml-1 opacity-80" style={{ color: gitColor }}>
+                  {fileStatus}
+                </span>
+              )}
+            </div>
+
+            {node.is_dir && expanded[node.path] && (
+              <FileTree
+                path={node.path}
+                depth={depth + 1}
+                onSelect={onSelect}
+                onContextMenu={onContextMenu}
+                gitStatusMap={gitStatusMap}
+                changedDirectories={changedDirectories}
+                explorerRoot={explorerRoot}
+              />
+            )}
+          </React.Fragment>
+        );
+      })}
     </div>
   );
 };

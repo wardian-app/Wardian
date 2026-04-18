@@ -116,9 +116,8 @@ test.describe("Wardian Core Feature Tests", () => {
   });
 
   test("14. Grid view container exists", async ({ page }) => {
-    // The grid container should exist even with no agents
-    const gridContainer = page.locator('.flex-1.min-h-full');
-    await expect(gridContainer.first()).toBeAttached();
+    await page.getByRole("button", { name: "Grid" }).click();
+    await expect(page.getByText("No Active Instances")).toBeVisible();
   });
 
   test("15. Watchlist shows empty state message", async ({ page }) => {

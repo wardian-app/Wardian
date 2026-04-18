@@ -29,7 +29,7 @@ When you click a node, Wardian opens the node settings drawer. That drawer shows
 Examples:
 
 - Scheduled Trigger shows different fields depending on whether you pick `Minutes`, `Hours`, `Daily`, `Weekly`, or `One-Time`.
-- Agent shows different targeting fields depending on whether the session type is `persistent` or `temporary`.
+- Agent shows different targeting fields depending on whether the run mode is `ephemeral`, `inherit_fresh`, or `inherit_resume`.
 - Loop shows different fields for `count` versus `conditional` mode.
 
 ## Connections and Flow
@@ -64,7 +64,7 @@ Wardian opens the run modal when the workflow needs extra launch-time input.
 That usually means one or both of these are true:
 
 - the workflow has a **Manual Trigger** with an input schema
-- the workflow contains **Agent** nodes that need role-to-agent assignments
+- the workflow contains **Agent** nodes in an inherited run mode that need role-to-agent assignments
 
 If neither is needed, the workflow launches immediately based on its trigger type.
 
