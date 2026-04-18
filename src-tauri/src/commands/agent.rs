@@ -540,6 +540,7 @@ mod tests {
             terminal_title: Arc::new(Mutex::new(String::new())),
             last_output_at: Arc::new(Mutex::new(None)),
             log_path: Arc::new(Mutex::new(None)),
+            log_last_modified: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
             job_object: None,
         }
