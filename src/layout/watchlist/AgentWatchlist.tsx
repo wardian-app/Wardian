@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { AgentConfig, AgentTelemetry } from "../../types";
-import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId } from "./types";
+import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId, AgentTeam, WatchlistDisplayItem } from "./types";
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
 
 const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
@@ -11,18 +11,29 @@ const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
   last_queried:   '32px',
 };
 import {
-  reorderWithinList,
   filterAgents,
-  getAgentsForList,
   createWatchlist,
   formatUptime,
   formatRelativeTime,
   cycleSort,
   sortAgents,
+  getDisplayItemsForList,
+  flattenDisplayItems,
+  getWatchlistEntries,
 } from "./watchlistUtils";
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
 import { ColumnPicker } from "./ColumnPicker";
+
+type DragSource =
+  | { type: "agent"; agentId: string }
+  | { type: "team"; teamId: string };
+
+type DropPosition = "before" | "after";
+
+type DropTarget =
+  | { type: "agent"; agentId: string; position: DropPosition }
+  | { type: "team"; teamId: string; position: "before" | "inside" | "after" };
 
 function SortableHeader({ columnId, sort, onSort, label }: {
   columnId: SortableColumnId;
@@ -64,6 +75,12 @@ interface AgentWatchlistProps {
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
   onDelete: (agentId: string) => void;
+  onCreateTeam?: (agentIds: string[]) => void;
+  onUngroupTeam?: (teamId: string) => void;
+  onRenameTeam?: (teamId: string, newName: string) => Promise<void>;
+  onAddAgentToTeam?: (teamId: string, agentId: string) => void;
+  onRemoveAgentFromTeam?: (teamId: string, agentId: string, targetAgentId?: string, position?: DropPosition) => void;
+  onReorderTeamMember?: (teamId: string, draggedAgentId: string, targetAgentId: string, position?: DropPosition) => void;
   collapsed: boolean;
   watchlists: Watchlist[];
   activeListId: string;
@@ -72,6 +89,7 @@ interface AgentWatchlistProps {
   prefs?: WatchlistPrefs;
   onPrefsChange?: (prefs: WatchlistPrefs) => void;
   interactions?: AgentInteractions;
+  teams?: AgentTeam[];
 }
 
 export default function AgentWatchlist({
@@ -92,6 +110,12 @@ export default function AgentWatchlist({
   onAddToList,
   onRemoveFromList,
   onDelete,
+  onCreateTeam,
+  onUngroupTeam,
+  onRenameTeam,
+  onAddAgentToTeam,
+  onRemoveAgentFromTeam,
+  onReorderTeamMember,
   collapsed,
   watchlists,
   activeListId,
@@ -100,6 +124,7 @@ export default function AgentWatchlist({
   prefs = DEFAULT_WATCHLIST_PREFS,
   onPrefsChange,
   interactions = {},
+  teams = [],
 }: AgentWatchlistProps) {
   // ── Column picker state ────────────────────────────────────────────
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -107,21 +132,30 @@ export default function AgentWatchlist({
   // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
-  const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
+  const [draggedTeamId, setDraggedTeamId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     visible: false,
     x: 0,
     y: 0,
     agentId: null,
+    agentIds: undefined,
   });
   const [editingListId, setEditingListId] = useState<string | null>(null);
   const [editingListName, setEditingListName] = useState("");
   const [tabContextMenu, setTabContextMenu] = useState<{ visible: boolean; x: number; y: number; listId: string | null }>({
     visible: false, x: 0, y: 0, listId: null,
   });
+  const [teamContextMenu, setTeamContextMenu] = useState<{ visible: boolean; x: number; y: number; teamId: string | null }>({
+    visible: false, x: 0, y: 0, teamId: null,
+  });
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [editingAgentName, setEditingAgentName] = useState("");
+  const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
+  const [editingTeamName, setEditingTeamName] = useState("");
   const [isRenaming, setIsRenaming] = useState(false);
+  const dragSourceRef = useRef<DragSource | null>(null);
+  const dropTargetRef = useRef<DropTarget | null>(null);
+  const [dropTarget, setDropTargetState] = useState<DropTarget | null>(null);
   const wasDragging = useRef(false);
   const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
@@ -141,11 +175,11 @@ export default function AgentWatchlist({
     const validIds = new Set(agents.map((a) => a.session_id));
     const pruned = watchlists.map((wl) => ({
       ...wl,
-      agentIds: wl.agentIds.filter((id: string) => validIds.has(id)),
+      entries: getWatchlistEntries(wl).filter((entry) => entry.type === "team" || validIds.has(entry.agentId)),
     }));
     // Only persist if something actually changed
     const changed = pruned.some(
-      (wl, i) => wl.agentIds.length !== watchlists[i]?.agentIds.length
+      (wl, i) => getWatchlistEntries(wl).length !== getWatchlistEntries(watchlists[i]).length
     );
     if (changed) {
       persistWatchlists(pruned);
@@ -168,8 +202,46 @@ export default function AgentWatchlist({
       ? null
       : watchlists.find((l) => l.id === activeListId) || null;
 
-  const listAgents = getAgentsForList(agents, activeList);
-  const displayedAgents = filterAgents(listAgents, searchTerm);
+  const baseDisplayItems = getDisplayItemsForList(agents, activeList, teams);
+  const filteredDisplayItems = baseDisplayItems
+    .map((item): WatchlistDisplayItem | null => {
+      if (!searchTerm.trim()) return item;
+      const term = searchTerm.toLowerCase();
+      if (item.type === "team") {
+        const matchingAgents = filterAgents(item.agents, searchTerm);
+        if (item.team.name.toLowerCase().includes(term) || matchingAgents.length > 0) {
+          return { ...item, agents: matchingAgents.length > 0 ? matchingAgents : item.agents };
+        }
+        return null;
+      }
+      return filterAgents([item.agent], searchTerm).length > 0 ? item : null;
+    })
+    .filter((item): item is WatchlistDisplayItem => Boolean(item));
+  const unsortedDisplayedAgents = flattenDisplayItems(filteredDisplayItems);
+  const sortedDisplayedAgents = sortAgents(unsortedDisplayedAgents, prefs.sort, telemetry, interactions);
+  const sortedAgentRanks = new Map(sortedDisplayedAgents.map((agent, index) => [agent.session_id, index]));
+  const sortedDisplayItems = prefs.sort
+    ? [...filteredDisplayItems]
+        .map((item) => {
+          if (item.type === "agent") return item;
+          return {
+            ...item,
+            agents: [...item.agents].sort(
+              (a, b) => (sortedAgentRanks.get(a.session_id) ?? 0) - (sortedAgentRanks.get(b.session_id) ?? 0),
+            ),
+          };
+        })
+        .sort((a, b) => {
+          const aRank = a.type === "agent"
+            ? sortedAgentRanks.get(a.agent.session_id) ?? 0
+            : Math.min(...a.agents.map((agent) => sortedAgentRanks.get(agent.session_id) ?? 0));
+          const bRank = b.type === "agent"
+            ? sortedAgentRanks.get(b.agent.session_id) ?? 0
+            : Math.min(...b.agents.map((agent) => sortedAgentRanks.get(agent.session_id) ?? 0));
+          return aRank - bRank;
+        })
+    : filteredDisplayItems;
+  const displayedAgents = flattenDisplayItems(sortedDisplayItems);
 
   // ── Handlers ───────────────────────────────────────────────────────
   const handleCreateList = async () => {
@@ -209,6 +281,20 @@ export default function AgentWatchlist({
     setEditingAgentId(null);
   };
 
+  const handleRenameTeamCommit = async (teamId: string) => {
+    if (isRenaming || !editingTeamId) return;
+    const trimmed = editingTeamName.trim();
+    if (trimmed) {
+      setIsRenaming(true);
+      try {
+        await onRenameTeam?.(teamId, trimmed);
+      } finally {
+        setIsRenaming(false);
+      }
+    }
+    setEditingTeamId(null);
+  };
+
   const handleTabContextMenu = (e: React.MouseEvent, listId: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -220,55 +306,229 @@ export default function AgentWatchlist({
 
   // ── Mouse-based Drag & Drop (WebView2-compatible) ──────────────────
   const handleMouseDown = (agentId: string) => {
+    dragSourceRef.current = { type: "agent", agentId };
     setDraggedAgentId(agentId);
+    setDraggedTeamId(null);
   };
 
-  const handleMouseEnterRow = (agentId: string) => {
-    if (draggedAgentId && draggedAgentId !== agentId) {
-      setDragOverAgentId(agentId);
+  const setDropTarget = (target: DropTarget | null) => {
+    dropTargetRef.current = target;
+    setDropTargetState(target);
+  };
+
+  const resetDragState = () => {
+    dragSourceRef.current = null;
+    setDropTarget(null);
+    setDraggedAgentId(null);
+    setDraggedTeamId(null);
+  };
+
+  const rowDropPosition = (e: React.MouseEvent): DropPosition => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.height <= 0) return "before";
+    return e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  };
+
+  const teamDropPosition = (e: React.MouseEvent): "before" | "inside" | "after" => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.height <= 0) return "inside";
+    const ratio = (e.clientY - rect.top) / rect.height;
+    if (ratio < 0.25) return "before";
+    if (ratio > 0.75) return "after";
+    return "inside";
+  };
+
+  const targetTeamForAgent = (agentId: string) => teams.find((team) => team.agentIds.includes(agentId));
+
+  const updateAgentRowDropTarget = (targetAgentId: string, e?: React.MouseEvent) => {
+    const source = dragSourceRef.current;
+    const targetTeam = targetTeamForAgent(targetAgentId);
+    const position = e ? rowDropPosition(e) : "before";
+
+    if (source?.type === "team") {
+      setDropTarget(targetTeam ? { type: "team", teamId: targetTeam.id, position } : { type: "agent", agentId: targetAgentId, position });
+      return;
+    }
+
+    if (source?.type === "agent") {
+      const sourceTeam = targetTeamForAgent(source.agentId);
+      if (targetTeam && sourceTeam?.id === targetTeam.id) {
+        setDropTarget(source.agentId === targetAgentId ? null : { type: "agent", agentId: targetAgentId, position });
+        return;
+      }
+      if (targetTeam) {
+        const teamPosition = e ? teamDropPosition(e) : "inside";
+        setDropTarget({ type: "team", teamId: targetTeam.id, position: teamPosition });
+        return;
+      }
+      setDropTarget(source.agentId === targetAgentId ? null : { type: "agent", agentId: targetAgentId, position });
     }
   };
 
-  const handleMouseUp = async () => {
-    if (draggedAgentId && dragOverAgentId && draggedAgentId !== dragOverAgentId) {
-      if (activeListId === "all") {
+  const handleMouseEnterRow = (agentId: string, e: React.MouseEvent) => {
+    updateAgentRowDropTarget(agentId, e);
+  };
+
+  const insertAgentAroundTeam = (draggedAgentId: string, teamId: string, position: "before" | "after") => {
+    const team = teams.find((candidate) => candidate.id === teamId);
+    if (!team) return;
+    const newOrder = agents.map((agent) => agent.session_id).filter((id) => id !== draggedAgentId);
+    const indexes = team.agentIds.map((id) => newOrder.indexOf(id)).filter((index) => index !== -1);
+    if (indexes.length === 0) return;
+    const targetIndex = position === "before" ? Math.min(...indexes) : Math.max(...indexes) + 1;
+    newOrder.splice(targetIndex, 0, draggedAgentId);
+    onReorderAgents(newOrder);
+  };
+
+  const updateActiveEntries = async (nextEntries: ReturnType<typeof getWatchlistEntries>) => {
+    if (!activeList) return;
+    await persistWatchlists(watchlists.map((list) =>
+      list.id === activeList.id
+        ? { ...list, entries: nextEntries, agentIds: nextEntries.filter((entry) => entry.type === "agent").map((entry) => entry.agentId) }
+        : list,
+    ));
+  };
+
+  const moveAgentEntryInActiveList = async (draggedAgentId: string, target: DropTarget) => {
+    if (!activeList) return;
+    const entries = getWatchlistEntries(activeList);
+    const fromIndex = entries.findIndex((entry) => entry.type === "agent" && entry.agentId === draggedAgentId);
+    const toIndex = entries.findIndex((entry) => {
+      if (target.type === "agent") return entry.type === "agent" && entry.agentId === target.agentId;
+      return entry.type === "team" && entry.teamId === target.teamId;
+    });
+    if (fromIndex === -1 || toIndex === -1) return;
+    const nextEntries = [...entries];
+    const [dragged] = nextEntries.splice(fromIndex, 1);
+    const adjustedTargetIndex = nextEntries.findIndex((entry) => {
+      if (target.type === "agent") return entry.type === "agent" && entry.agentId === target.agentId;
+      return entry.type === "team" && entry.teamId === target.teamId;
+    });
+    const insertIndex = adjustedTargetIndex + (target.position === "after" ? 1 : 0);
+    nextEntries.splice(insertIndex, 0, dragged);
+    await updateActiveEntries(nextEntries);
+  };
+
+  const moveTeamEntry = async (draggedTeamId: string, target: DropTarget) => {
+    if (activeListId === "all") {
+      const draggedTeam = teams.find((team) => team.id === draggedTeamId);
+      if (!draggedTeam) return;
+      const draggedIds = new Set(draggedTeam.agentIds);
+      const remaining = agents.map((agent) => agent.session_id).filter((id) => !draggedIds.has(id));
+      let targetIndex = -1;
+      if (target.type === "team") {
+        const targetTeam = teams.find((team) => team.id === target.teamId);
+        const indexes = targetTeam?.agentIds.map((id) => remaining.indexOf(id)).filter((index) => index !== -1) ?? [];
+        if (indexes.length > 0) targetIndex = target.position === "after" ? Math.max(...indexes) + 1 : Math.min(...indexes);
+      } else {
+        const rowIndex = remaining.indexOf(target.agentId);
+        if (rowIndex !== -1) targetIndex = rowIndex + (target.position === "after" ? 1 : 0);
+      }
+      if (targetIndex === -1) return;
+      const newOrder = [...remaining];
+      newOrder.splice(targetIndex, 0, ...draggedTeam.agentIds);
+      onReorderAgents(newOrder);
+      return;
+    }
+
+    if (!activeList) return;
+    const entries = getWatchlistEntries(activeList);
+    const fromIndex = entries.findIndex((entry) => entry.type === "team" && entry.teamId === draggedTeamId);
+    const toIndex = entries.findIndex((entry) => {
+      if (target.type === "team") return entry.type === "team" && entry.teamId === target.teamId;
+      return entry.type === "agent" && entry.agentId === target.agentId;
+    });
+    if (fromIndex === -1 || toIndex === -1) return;
+    const nextEntries = [...entries];
+    const [moved] = nextEntries.splice(fromIndex, 1);
+    const adjustedTargetIndex = nextEntries.findIndex((entry) => {
+      if (target.type === "team") return entry.type === "team" && entry.teamId === target.teamId;
+      return entry.type === "agent" && entry.agentId === target.agentId;
+    });
+    const insertIndex = adjustedTargetIndex + (target.position === "after" ? 1 : 0);
+    nextEntries.splice(insertIndex, 0, moved);
+    await updateActiveEntries(nextEntries);
+  };
+
+  const handleMouseUp = async (target = dropTargetRef.current) => {
+    const source = dragSourceRef.current;
+    if (source?.type === "team" && target) {
+      await moveTeamEntry(source.teamId, target);
+      wasDragging.current = true;
+    } else if (source?.type === "agent" && target) {
+      const draggedAgentId = source.agentId;
+      const sourceTeam = targetTeamForAgent(draggedAgentId);
+      if (target.type === "team" && target.position === "inside") {
+        if (!sourceTeam || sourceTeam.id !== target.teamId) {
+          onAddAgentToTeam?.(target.teamId, draggedAgentId);
+          wasDragging.current = true;
+        }
+      } else if (target.type === "team" && target.position !== "inside") {
+        if (sourceTeam) onRemoveAgentFromTeam?.(sourceTeam.id, draggedAgentId);
+        if (activeListId === "all") insertAgentAroundTeam(draggedAgentId, target.teamId, target.position);
+        else await moveAgentEntryInActiveList(draggedAgentId, target);
+        wasDragging.current = true;
+      } else if (target.type === "agent" && sourceTeam?.agentIds.includes(target.agentId)) {
+        onReorderTeamMember?.(sourceTeam.id, draggedAgentId, target.agentId, target.position);
+        wasDragging.current = true;
+      } else if (target.type === "agent" && sourceTeam) {
+        onRemoveAgentFromTeam?.(sourceTeam.id, draggedAgentId, target.agentId, target.position);
+        if (activeListId === "all") {
+          const remaining = agents.map((agent) => agent.session_id).filter((id) => id !== draggedAgentId);
+          const targetIndex = remaining.indexOf(target.agentId);
+          if (targetIndex !== -1) {
+            const newOrder = [...remaining];
+            newOrder.splice(targetIndex + (target.position === "after" ? 1 : 0), 0, draggedAgentId);
+            onReorderAgents(newOrder);
+          }
+        }
+        wasDragging.current = true;
+      } else if (target.type === "agent" && activeListId === "all") {
         const fromIndex = agents.findIndex(a => a.session_id === draggedAgentId);
-        const toIndex = agents.findIndex(a => a.session_id === dragOverAgentId);
+        const toIndex = agents.findIndex(a => a.session_id === target.agentId);
         if (fromIndex !== -1 && toIndex !== -1) {
           const newOrder = [...agents.map(a => a.session_id)];
           const [dragged] = newOrder.splice(fromIndex, 1);
-          newOrder.splice(toIndex, 0, dragged);
+          const adjustedTargetIndex = newOrder.indexOf(target.agentId);
+          newOrder.splice(adjustedTargetIndex + (target.position === "after" ? 1 : 0), 0, dragged);
           onReorderAgents(newOrder);
           wasDragging.current = true;
         }
-      } else if (activeList) {
-        const fromIndex = activeList.agentIds.indexOf(draggedAgentId);
-        const toIndex = activeList.agentIds.indexOf(dragOverAgentId);
-        if (fromIndex !== -1 && toIndex !== -1) {
-          const reordered = reorderWithinList(activeList.agentIds, fromIndex, toIndex);
-          const updated = watchlists.map((l) =>
-            l.id === activeList.id ? { ...l, agentIds: reordered } : l,
-          );
-          await persistWatchlists(updated);
-          wasDragging.current = true;
-        }
+      } else if (target.type === "agent") {
+        await moveAgentEntryInActiveList(draggedAgentId, target);
+        wasDragging.current = true;
       }
     }
+    resetDragState();
+  };
+
+  const handleTeamMouseDown = (teamId: string) => {
+    dragSourceRef.current = { type: "team", teamId };
+    setDraggedTeamId(teamId);
     setDraggedAgentId(null);
-    setDragOverAgentId(null);
+  };
+
+  const handleTeamDropZone = (teamId: string, position: "before" | "inside" | "after") => {
+    const source = dragSourceRef.current;
+    if (!source) return;
+    if (source.type === "team" && source.teamId === teamId) return;
+    if (source.type === "agent") {
+      const team = teams.find((candidate) => candidate.id === teamId);
+      if (!team || (position === "inside" && team.agentIds.includes(source.agentId))) return;
+    }
+    setDropTarget({ type: "team", teamId, position });
   };
 
   // Cancel drag if mouse leaves the list area
   useEffect(() => {
     const cancelDrag = () => {
-      if (draggedAgentId) {
-        setDraggedAgentId(null);
-        setDragOverAgentId(null);
+      if (dragSourceRef.current) {
+        resetDragState();
       }
     };
     window.addEventListener("mouseup", cancelDrag);
     return () => window.removeEventListener("mouseup", cancelDrag);
-  }, [draggedAgentId]);
+  }, [draggedAgentId, draggedTeamId]);
 
   const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
     e.preventDefault();
@@ -276,7 +536,29 @@ export default function AgentWatchlist({
     const menuW = 200, menuH = 280;
     const x = Math.min(e.clientX, window.innerWidth - menuW - 8);
     const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
-    setContextMenu({ visible: true, x, y, agentId });
+    const isInsideMultiSelection = selectedAgentIds.size > 1 && selectedAgentIds.has(agentId);
+    if (!isInsideMultiSelection && !selectedAgentIds.has(agentId)) {
+      onSelectionChange(new Set([agentId]));
+    }
+    setContextMenu({
+      visible: true,
+      x,
+      y,
+      agentId,
+      agentIds: isInsideMultiSelection ? Array.from(selectedAgentIds) : [agentId],
+    });
+  };
+
+  const handleTeamContextMenu = (e: React.MouseEvent, teamId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuW = 200, menuH = 160;
+    setTeamContextMenu({
+      visible: true,
+      x: Math.min(e.clientX, window.innerWidth - menuW - 8),
+      y: Math.min(e.clientY, window.innerHeight - menuH - 8),
+      teamId,
+    });
   };
 
   // ── Status derivation helper ───────────────────────────────────────
@@ -298,8 +580,151 @@ export default function AgentWatchlist({
   const colFragment = visibleCols.map(c => COLUMN_WIDTHS[c.id]).join(' ');
   const gridTemplate = `auto minmax(50px, 1fr)${colFragment ? ' ' + colFragment : ''}`;
 
-  // ── Sorted agents ──────────────────────────────────────────────────
-  const sortedAgents = sortAgents(displayedAgents, prefs.sort, telemetry, interactions);
+  const renderAgentRow = (agent: AgentConfig, options: { nested?: boolean } = {}) => {
+    const agentId = agent.session_id;
+    const isSelected = selectedAgentIds.has(agentId);
+    const { status, thought } = getAgentStatus(agentId);
+    const statusColor = getStatusColorClass(status);
+    const metrics = telemetry[agentId];
+    const team = teams.find((candidate) => candidate.agentIds.includes(agentId));
+    const isDragTarget = dropTarget?.type === "agent" && dropTarget.agentId === agentId && draggedAgentId !== agentId;
+    const isBeingDragged = draggedAgentId === agentId;
+    const isNestedTeamDropTarget = options.nested && dropTarget?.type === "team" && team?.id === dropTarget.teamId;
+
+    return (
+      <div
+        key={agentId}
+        onMouseDown={() => handleMouseDown(agentId)}
+        onMouseEnter={(e) => { e.stopPropagation(); handleMouseEnterRow(agentId, e); }}
+        onMouseMove={(e) => { e.stopPropagation(); updateAgentRowDropTarget(agentId, e); }}
+        onMouseUp={(e) => {
+          e.stopPropagation();
+          updateAgentRowDropTarget(agentId, e);
+          handleMouseUp();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (wasDragging.current) { wasDragging.current = false; return; }
+
+          const now = Date.now();
+          const DOUBLE_CLICK_TOLERANCE = 450;
+          const isDoubleClick = lastClickRef.current &&
+                               lastClickRef.current.id === agentId &&
+                               (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
+
+          lastClickRef.current = { id: agentId, time: now };
+
+          if (e.shiftKey && lastSelectedIdRef.current) {
+            const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
+            const lastIndex = displayedAgents.findIndex(a => a.session_id === lastSelectedIdRef.current);
+
+            if (currentIndex !== -1 && lastIndex !== -1) {
+              const start = Math.min(currentIndex, lastIndex);
+              const end = Math.max(currentIndex, lastIndex);
+              const rangeIds = displayedAgents.slice(start, end + 1).map(a => a.session_id);
+
+              const next = (e.ctrlKey || e.metaKey)
+                ? new Set([...selectedAgentIds, ...rangeIds])
+                : new Set(rangeIds);
+
+              onSelectionChange(next);
+              return;
+            }
+          }
+
+          if (e.ctrlKey || e.metaKey) {
+            const next = new Set(selectedAgentIds);
+            if (next.has(agentId)) next.delete(agentId);
+            else next.add(agentId);
+            onSelectionChange(next);
+            lastSelectedIdRef.current = agentId;
+          } else {
+            if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
+              if (!isDoubleClick) {
+                onSelectionChange(new Set());
+                lastSelectedIdRef.current = null;
+              } else {
+                onAgentClick(agentId);
+                onSelectionChange(new Set([agentId]));
+                lastSelectedIdRef.current = agentId;
+              }
+            } else {
+              onSelectionChange(new Set([agentId]));
+              lastSelectedIdRef.current = agentId;
+            }
+          }
+        }}
+        onContextMenu={(e) => handleContextMenu(e, agentId)}
+        className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? `drag-over-${dropTarget?.type === "agent" ? dropTarget.position : "before"}` : ""} ${isNestedTeamDropTarget ? "bg-[var(--color-wardian-accent)]/10" : ""} ${isBeingDragged ? "opacity-50" : ""} ${options.nested ? "ml-2 border-l border-wardian-border/40" : ""} select-none`}
+        style={{ cursor: "grab", gridTemplateColumns: gridTemplate }}
+      >
+        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
+        <div className="flex-1 min-w-0">
+          {editingAgentId === agentId ? (
+            <input
+              className="text-xs font-bold text-primary bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none w-full"
+              autoFocus
+              value={editingAgentName}
+              onChange={(e) => setEditingAgentName(e.target.value)}
+              onBlur={() => handleRenameAgentCommit(agentId)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleRenameAgentCommit(agentId);
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setEditingAgentId(null);
+                }
+                e.stopPropagation();
+              }}
+              onClick={e => e.stopPropagation()}
+              onMouseDown={e => e.stopPropagation()}
+            />
+          ) : (
+            <p className="text-xs font-bold truncate text-bright-neutral">
+              {agent.session_name}
+            </p>
+          )}
+          <p className="text-[10px] text-primary/50 font-medium truncate tracking-wide">
+            {agent.agent_class}
+          </p>
+        </div>
+        {prefs.columns.filter(c => c.visible).map(col => {
+          if (col.id === 'status_label') return (
+            <span key="status_label" className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
+              {getAgentStatusLabel(status, thought)}
+            </span>
+          );
+          if (col.id === 'query_count') return (
+            <span key="query_count" className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
+              {metrics?.query_count ?? "–"}
+            </span>
+          );
+          if (col.id === 'uptime') return (
+            <span key="uptime" className="label-small tabular-nums text-muted">
+              {formatUptime(metrics?.init_timestamp ?? null)}
+            </span>
+          );
+          if (col.id === 'provider_model') {
+            const provider = agent.provider ?? '–';
+            const model = agent.model ? ` · ${agent.model}` : '';
+            return (
+              <span key="provider_model" className="label-small text-muted truncate overflow-hidden">
+                {provider}{model}
+              </span>
+            );
+          }
+          if (col.id === 'last_queried') return (
+            <span key="last_queried" className="label-small tabular-nums text-muted">
+              {formatRelativeTime(interactions[agentId])}
+            </span>
+          );
+          return null;
+        })}
+      </div>
+    );
+  };
 
   // ── Render ─────────────────────────────────────────────────────────
   return (
@@ -414,146 +839,95 @@ export default function AgentWatchlist({
           className="flex-1 overflow-y-auto no-scrollbar"
           onClick={() => onSelectionChange(new Set())}
         >
-          {sortedAgents.map((agent) => {
-            const agentId = agent.session_id;
-            const isSelected = selectedAgentIds.has(agentId);
-            const { status, thought } = getAgentStatus(agentId);
-            const statusColor = getStatusColorClass(status);
-            const metrics = telemetry[agentId];
-            const isDragTarget = dragOverAgentId === agentId && draggedAgentId !== null && draggedAgentId !== agentId;
-            const isBeingDragged = draggedAgentId === agentId;
-
-            return (
-              <div
-                key={agentId}
-                onMouseDown={() => handleMouseDown(agentId)}
-                onMouseEnter={() => handleMouseEnterRow(agentId)}
-                onMouseUp={(e) => { e.stopPropagation(); handleMouseUp(); }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (wasDragging.current) { wasDragging.current = false; return; }
-
-                  const now = Date.now();
-                  const DOUBLE_CLICK_TOLERANCE = 450;
-                  const isDoubleClick = lastClickRef.current &&
-                                       lastClickRef.current.id === agentId &&
-                                       (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
-
-                  lastClickRef.current = { id: agentId, time: now };
-
-                  if (e.shiftKey && lastSelectedIdRef.current) {
-                    const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
-                    const lastIndex = displayedAgents.findIndex(a => a.session_id === lastSelectedIdRef.current);
-
-                    if (currentIndex !== -1 && lastIndex !== -1) {
-                      const start = Math.min(currentIndex, lastIndex);
-                      const end = Math.max(currentIndex, lastIndex);
-                      const rangeIds = displayedAgents.slice(start, end + 1).map(a => a.session_id);
-
-                      const next = (e.ctrlKey || e.metaKey)
-                        ? new Set([...selectedAgentIds, ...rangeIds])
-                        : new Set(rangeIds);
-
-                      onSelectionChange(next);
-                      return;
-                    }
-                  }
-
-                  if (e.ctrlKey || e.metaKey) {
-                    const next = new Set(selectedAgentIds);
-                    if (next.has(agentId)) next.delete(agentId);
-                    else next.add(agentId);
-                    onSelectionChange(next);
-                    lastSelectedIdRef.current = agentId;
-                  } else {
-                    // Selection logic
-                    if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-                      if (!isDoubleClick) {
-                        onSelectionChange(new Set());
-                        lastSelectedIdRef.current = null;
-                      } else {
-                        // Double click -> Ensure it stays selected and scroll
-                        onAgentClick(agentId);
-                        onSelectionChange(new Set([agentId])); // Safety re-assert
-                        lastSelectedIdRef.current = agentId;
-                      }
-                    } else {
-                      onSelectionChange(new Set([agentId]));
-                      lastSelectedIdRef.current = agentId;
-                    }
-                  }
-                }}
-                onContextMenu={(e) => handleContextMenu(e, agentId)}
-                className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? "drag-over" : ""} ${isBeingDragged ? "opacity-50" : ""} select-none`}
-                style={{ cursor: activeListId !== "all" ? "grab" : "pointer", gridTemplateColumns: gridTemplate }}
-              >
-                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
-                <div className="flex-1 min-w-0">
-                  {editingAgentId === agentId ? (
-                    <input
-                      className="text-xs font-bold text-primary bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none w-full"
-                      autoFocus
-                      value={editingAgentName}
-                      onChange={(e) => setEditingAgentName(e.target.value)}
-                      onBlur={() => handleRenameAgentCommit(agentId)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          handleRenameAgentCommit(agentId);
-                        }
-                        if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setEditingAgentId(null);
-                        }
+          {teams.length === 0
+            ? displayedAgents.map((agent) => renderAgentRow(agent))
+            : sortedDisplayItems.map((item) => {
+                if (item.type === "agent") return renderAgentRow(item.agent);
+                return (
+                  <div
+                    key={item.team.id}
+                    data-testid={`team-block-${item.team.id}`}
+                    className={`mb-2 rounded-lg border border-wardian-border bg-wardian-card-bg-muted/40 overflow-hidden ${dropTarget?.type === "team" && dropTarget.teamId === item.team.id ? `team-drop-${dropTarget.position}` : ""}`}
+                    onMouseEnter={() => handleTeamDropZone(item.team.id, "inside")}
+                    onMouseMove={() => handleTeamDropZone(item.team.id, "inside")}
+                    onMouseUp={(e) => {
+                      e.stopPropagation();
+                      handleMouseUp();
+                    }}
+                  >
+                    <div
+                      data-testid={`team-drop-before-${item.team.id}`}
+                      className="team-edge-drop-zone"
+                      onMouseEnter={(e) => { e.stopPropagation(); handleTeamDropZone(item.team.id, "before"); }}
+                      onMouseMove={(e) => { e.stopPropagation(); handleTeamDropZone(item.team.id, "before"); }}
+                      onMouseUp={(e) => {
                         e.stopPropagation();
+                        handleTeamDropZone(item.team.id, "before");
+                        handleMouseUp();
                       }}
-                      onClick={e => e.stopPropagation()}
-                      onMouseDown={e => e.stopPropagation()}
                     />
-                  ) : (
-                    <p className="text-xs font-bold truncate text-bright-neutral">
-                      {agent.session_name}
-                    </p>
-                  )}
-                  <p className="text-[10px] text-primary/50 font-medium truncate tracking-wide">
-                    {agent.agent_class}
-                  </p>
-                </div>
-                {prefs.columns.filter(c => c.visible).map(col => {
-                  if (col.id === 'status_label') return (
-                    <span key="status_label" className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
-                      {getAgentStatusLabel(status, thought)}
-                    </span>
-                  );
-                  if (col.id === 'query_count') return (
-                    <span key="query_count" className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
-                      {metrics?.query_count ?? "–"}
-                    </span>
-                  );
-                  if (col.id === 'uptime') return (
-                    <span key="uptime" className="label-small tabular-nums text-muted">
-                      {formatUptime(metrics?.init_timestamp ?? null)}
-                    </span>
-                  );
-                  if (col.id === 'provider_model') {
-                    const provider = agent.provider ?? '–';
-                    const model = agent.model ? ` · ${agent.model}` : '';
-                    return (
-                      <span key="provider_model" className="label-small text-muted truncate overflow-hidden">
-                        {provider}{model}
-                      </span>
-                    );
-                  }
-                  if (col.id === 'last_queried') return (
-                    <span key="last_queried" className="label-small tabular-nums text-muted">
-                      {formatRelativeTime(interactions[agentId])}
-                    </span>
-                  );
-                  return null;
-                })}
-              </div>
-            );
-          })}
+                    <div
+                      data-testid={`team-header-${item.team.id}`}
+                      className="px-2 py-1.5 border-b border-wardian-border/60 bg-wardian-card-bg-muted cursor-grab"
+                      onMouseDown={() => handleTeamMouseDown(item.team.id)}
+                      onMouseEnter={(e) => { e.stopPropagation(); handleTeamDropZone(item.team.id, "inside"); }}
+                      onMouseMove={(e) => { e.stopPropagation(); handleTeamDropZone(item.team.id, "inside"); }}
+                      onContextMenu={(e) => handleTeamContextMenu(e, item.team.id)}
+                      onMouseUp={(e) => {
+                        e.stopPropagation();
+                        handleTeamDropZone(item.team.id, "inside");
+                        handleMouseUp();
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectionChange(new Set(item.agents.map((agent) => agent.session_id)));
+                      }}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        {editingTeamId === item.team.id ? (
+                          <input
+                            className="text-xs font-bold text-primary bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none min-w-0 flex-1"
+                            autoFocus
+                            value={editingTeamName}
+                            onChange={(e) => setEditingTeamName(e.target.value)}
+                            onBlur={() => handleRenameTeamCommit(item.team.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleRenameTeamCommit(item.team.id);
+                              }
+                              if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setEditingTeamId(null);
+                              }
+                              e.stopPropagation();
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <span className="text-xs font-bold text-primary truncate">{item.team.name}</span>
+                        )}
+                        <span className="label-small !tracking-normal">{item.agents.length} agents</span>
+                      </div>
+                    </div>
+                    <div className="py-1">
+                      {item.agents.map((agent) => renderAgentRow(agent, { nested: true }))}
+                    </div>
+                    <div
+                      data-testid={`team-drop-after-${item.team.id}`}
+                      className="team-edge-drop-zone"
+                      onMouseEnter={(e) => { e.stopPropagation(); handleTeamDropZone(item.team.id, "after"); }}
+                      onMouseMove={(e) => { e.stopPropagation(); handleTeamDropZone(item.team.id, "after"); }}
+                      onMouseUp={(e) => {
+                        e.stopPropagation();
+                        handleTeamDropZone(item.team.id, "after");
+                        handleMouseUp();
+                      }}
+                    />
+                  </div>
+                );
+              })}
 
           {displayedAgents.length === 0 && (
             <div className="py-8 text-center text-muted-neutral text-xs">
@@ -590,6 +964,8 @@ export default function AgentWatchlist({
           x={contextMenu.x}
           y={contextMenu.y}
           agentId={contextMenu.agentId}
+          agentIds={contextMenu.agentIds}
+          teams={teams}
           offAgentIds={offAgentIds}
           watchlists={watchlists}
           onInitiateRename={(id) => {
@@ -610,9 +986,52 @@ export default function AgentWatchlist({
             setContextMenu(p => ({ ...p, visible: false }));
           }}
           onDelete={onDelete}
+          onCreateTeam={onCreateTeam}
           onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
         />
       )}
+
+      {teamContextMenu.visible && teamContextMenu.teamId && (() => {
+        const team = teams.find((candidate) => candidate.id === teamContextMenu.teamId);
+        if (!team || team.agentIds.length === 0) return null;
+        return (
+          <AgentContextMenu
+            x={teamContextMenu.x}
+            y={teamContextMenu.y}
+            agentId={team.agentIds[0]}
+            agentIds={team.agentIds}
+            teams={teams}
+            menuKind="team"
+            teamId={team.id}
+            offAgentIds={offAgentIds}
+            watchlists={watchlists}
+            onInitiateRename={() => {}}
+            onInitiateTeamRename={() => {
+              setEditingTeamId(team.id);
+              setEditingTeamName(team.name);
+              setTeamContextMenu((p) => ({ ...p, visible: false }));
+            }}
+            onQuery={onQuery}
+            onPause={onPause}
+            onRestart={onRestart}
+            onClear={onClear}
+            onAddToList={(listId, id) => {
+              onAddToList(listId, id);
+              setTeamContextMenu((p) => ({ ...p, visible: false }));
+            }}
+            onRemoveFromList={(listId, id) => {
+              onRemoveFromList(listId, id);
+              setTeamContextMenu((p) => ({ ...p, visible: false }));
+            }}
+            onDelete={onDelete}
+            onUngroupTeam={(id) => {
+              onUngroupTeam?.(id);
+              setTeamContextMenu((p) => ({ ...p, visible: false }));
+            }}
+            onClose={() => setTeamContextMenu((p) => ({ ...p, visible: false }))}
+          />
+        );
+      })()}
 
       {/* ── Tab Context Menu (right-click on watchlist tab) ──── */}
       {tabContextMenu.visible && tabContextMenu.listId && (

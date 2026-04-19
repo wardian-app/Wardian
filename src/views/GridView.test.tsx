@@ -53,6 +53,21 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
 }
 
 describe('GridView maximize behavior', () => {
+  it('does not size each mobile card to the full viewport height', () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
+
+    const { container } = renderGrid(null);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.gridTemplateColumns).toBe('1fr');
+    expect(root.style.gridAutoRows).not.toBe('100%');
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+  });
+
   it('maximized terminals fill the grid container', () => {
     renderGrid('agent-1');
 

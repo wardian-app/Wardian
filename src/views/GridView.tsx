@@ -123,11 +123,11 @@ export const GridView: React.FC<GridViewProps> = ({
     gridTemplateColumns: (isMaximized || isMobile) 
       ? '1fr' 
       : layout.column_tracks.map(t => `${t}fr`).join(' '),
-    gridAutoRows: (isMaximized || isMobile) ? '100%' : `${layout.row_height}px`,
+    gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
     gap: (isMaximized || isMobile) ? '0' : '8px',
     background: 'transparent',
     padding: (isMaximized || isMobile) ? '0' : '8px',
-    height: (isMaximized || isMobile) ? '100%' : 'auto',
+    height: isMaximized ? '100%' : 'auto',
   };
 
   const bgMenuItems: ContextMenuItem[] = [

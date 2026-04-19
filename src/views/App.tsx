@@ -6,8 +6,18 @@ import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
 import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
-import { getAgentsForList, addAgentToList, removeAgentFromList } from "../layout/watchlist/watchlistUtils";
-import type { Watchlist, WatchlistPrefs, AgentInteractions } from "../layout/watchlist/types";
+import {
+  getAgentsForList,
+  addAgentsToList,
+  removeAgentsFromList,
+  normalizeWatchlistState,
+  createTeamFromAgents,
+  ungroupTeam,
+  addAgentToTeam,
+  removeAgentFromTeam,
+  reorderTeamMember,
+} from "../layout/watchlist/watchlistUtils";
+import type { Watchlist, WatchlistPrefs, AgentInteractions, AgentTeam, WatchlistState } from "../layout/watchlist/types";
 import { DEFAULT_WATCHLIST_PREFS } from "../layout/watchlist/types";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -120,6 +130,7 @@ function AppBody() {
   const { theme } = useSettingsStore();
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
+  const [teams, setTeams] = useState<AgentTeam[]>([]);
   const [activeListId, setActiveListId] = useState<string>("all");
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
@@ -156,8 +167,10 @@ function AppBody() {
   useEffect(() => {
     (async () => {
       try {
-        const data = await invoke<Watchlist[]>("load_watchlists");
-        if (data && data.length > 0) setWatchlists(data);
+        const data = await invoke<unknown>("load_watchlists");
+        const state = normalizeWatchlistState(data);
+        setWatchlists(state.watchlists);
+        setTeams(state.teams);
       } catch { /* first run */ }
 
       try {
@@ -184,12 +197,18 @@ function AppBody() {
     }
   }, []);
 
-  const persistWatchlists = useCallback(async (lists: Watchlist[]) => {
-    setWatchlists(lists);
+  const persistWatchlistState = useCallback(async (state: WatchlistState) => {
+    const normalized = normalizeWatchlistState(state);
+    setWatchlists(normalized.watchlists);
+    setTeams(normalized.teams);
     try {
-      await invoke("save_watchlists", { watchlists: lists });
+      await invoke("save_watchlists", { watchlists: normalized });
     } catch { /* non-critical */ }
   }, []);
+
+  const persistWatchlists = useCallback(async (lists: Watchlist[]) => {
+    await persistWatchlistState({ version: 2, watchlists: lists, teams });
+  }, [persistWatchlistState, teams]);
 
   const persistWatchlistPrefs = useCallback(async (prefs: WatchlistPrefs) => {
     setWatchlistPrefs(prefs);
@@ -200,20 +219,53 @@ function AppBody() {
 
   const handleAddToList = async (listId: string, agentId: string) => {
     const updated = watchlists.map((l) =>
-      l.id === listId ? addAgentToList(l, agentId) : l,
+      l.id === listId ? addAgentsToList(l, [agentId], teams) : l,
     );
     await persistWatchlists(updated);
   };
 
   const handleRemoveFromList = async (listId: string, agentId: string) => {
     const updated = watchlists.map((l) =>
-      l.id === listId ? removeAgentFromList(l, agentId) : l,
+      l.id === listId ? removeAgentsFromList(l, [agentId], teams) : l,
     );
     await persistWatchlists(updated);
   };
 
+  const handleCreateTeam = async (agentIds: string[]) => {
+    const next = createTeamFromAgents(
+      { version: 2, watchlists, teams },
+      crypto.randomUUID(),
+      agentIds,
+    );
+    await persistWatchlistState(next);
+  };
+
+  const handleUngroupTeam = async (teamId: string) => {
+    await persistWatchlistState(ungroupTeam({ version: 2, watchlists, teams }, teamId));
+  };
+
+  const handleRenameTeam = async (teamId: string, newName: string) => {
+    await persistWatchlistState({
+      version: 2,
+      watchlists,
+      teams: teams.map((team) => team.id === teamId ? { ...team, name: newName } : team),
+    });
+  };
+
+  const handleAddAgentToTeam = async (teamId: string, agentId: string) => {
+    await persistWatchlistState(addAgentToTeam({ version: 2, watchlists, teams }, teamId, agentId));
+  };
+
+  const handleRemoveAgentFromTeam = async (teamId: string, agentId: string, targetAgentId?: string, position: "before" | "after" = "before") => {
+    await persistWatchlistState(removeAgentFromTeam({ version: 2, watchlists, teams }, teamId, agentId, targetAgentId, position));
+  };
+
+  const handleReorderTeamMember = async (teamId: string, draggedAgentId: string, targetAgentId: string, position: "before" | "after" = "before") => {
+    await persistWatchlistState(reorderTeamMember({ version: 2, watchlists, teams }, teamId, draggedAgentId, targetAgentId, position));
+  };
+
   const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
-  const filteredAgents = getAgentsForList(agents, activeList);
+  const filteredAgents = getAgentsForList(agents, activeList, teams);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
@@ -304,7 +356,7 @@ function AppBody() {
         newDisplayList.splice(toIndex, 0, draggedItem);
         const newOrder = newDisplayList.map(a => a.session_id);
         if (activeListId !== 'all') {
-          const updatedWatchlists = watchlists.map(l => l.id === activeListId ? { ...l, agentIds: newOrder } : l);
+          const updatedWatchlists = watchlists.map(l => l.id === activeListId ? { ...l, entries: newOrder.map(agentId => ({ type: "agent" as const, agentId })) } : l);
           await persistWatchlists(updatedWatchlists);
         } else {
           setAgents(newDisplayList);
@@ -591,8 +643,8 @@ function AppBody() {
                 editingAgentId={editingAgentId}
                 tempName={tempName}
                 theme={theme}
-                watchlists={watchlists}
-                onAddToList={handleAddToList}
+          watchlists={watchlists}
+          onAddToList={handleAddToList}
                 onRemoveFromList={handleRemoveFromList}
                 onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
                 onPause={onPause}
@@ -665,6 +717,13 @@ function AppBody() {
           activeListId={activeListId}
           onActiveListChange={setActiveListId}
           onWatchlistsChange={persistWatchlists}
+          teams={teams}
+          onCreateTeam={handleCreateTeam}
+          onUngroupTeam={handleUngroupTeam}
+          onRenameTeam={handleRenameTeam}
+          onAddAgentToTeam={handleAddAgentToTeam}
+          onRemoveAgentFromTeam={handleRemoveAgentFromTeam}
+          onReorderTeamMember={handleReorderTeamMember}
           prefs={watchlistPrefs}
           onPrefsChange={persistWatchlistPrefs}
           interactions={agentInteractions}

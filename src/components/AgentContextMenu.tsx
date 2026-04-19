@@ -1,14 +1,19 @@
 import React, { useState, useRef, useEffect } from "react";
-import type { Watchlist } from "../layout/watchlist/types";
+import type { AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { getListsContainingAgent, getListsNotContainingAgent } from "../layout/watchlist/watchlistUtils";
 
 export interface AgentContextMenuProps {
   x: number;
   y: number;
   agentId: string;
+  agentIds?: string[];
+  teams?: AgentTeam[];
+  menuKind?: "agent" | "team";
+  teamId?: string;
   offAgentIds: Set<string>;
   watchlists: Watchlist[];
   onInitiateRename: (agentId: string) => void;
+  onInitiateTeamRename?: (teamId: string) => void;
   onQuery: (agentId: string) => void;
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
@@ -16,6 +21,8 @@ export interface AgentContextMenuProps {
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
   onDelete: (agentId: string) => void;
+  onCreateTeam?: (agentIds: string[]) => void;
+  onUngroupTeam?: (teamId: string) => void;
   onClose: () => void;
 }
 
@@ -23,9 +30,14 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   x,
   y,
   agentId,
+  agentIds,
+  teams = [],
+  menuKind = "agent",
+  teamId,
   offAgentIds,
   watchlists,
   onInitiateRename,
+  onInitiateTeamRename,
   onQuery,
   onPause,
   onRestart,
@@ -33,10 +45,22 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   onAddToList,
   onRemoveFromList,
   onDelete,
+  onCreateTeam,
+  onUngroupTeam,
   onClose,
 }) => {
   const [subMenuListId, setSubMenuListId] = useState<string | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const targetAgentIds = agentIds?.length ? agentIds : [agentId];
+  const isTeam = menuKind === "team";
+  const isBulk = targetAgentIds.length > 1;
+  const allTargetsOff = targetAgentIds.every((id) => offAgentIds.has(id));
+  const anyTargetOff = targetAgentIds.some((id) => offAgentIds.has(id));
+  const anyTargetRunning = targetAgentIds.some((id) => !offAgentIds.has(id));
+
+  const forEachTarget = (handler: (id: string) => void) => {
+    for (const id of targetAgentIds) handler(id);
+  };
 
   useEffect(() => {
     const handleClick = () => onClose();
@@ -58,84 +82,120 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
     >
       <button
-        className="context-menu-item"
+        className={`context-menu-item ${isBulk && !isTeam ? 'opacity-50 cursor-not-allowed' : ''}`}
+        disabled={isBulk && !isTeam}
         onClick={() => {
+          if (isTeam && teamId) {
+            onInitiateTeamRename?.(teamId);
+            onClose();
+            return;
+          }
+          if (isBulk) return;
           onInitiateRename(agentId);
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-        Rename
+        {isTeam ? 'Rename Team' : 'Rename'}
       </button>
       <button
         className="context-menu-item"
         onClick={() => {
-          onQuery(agentId);
+          forEachTarget(onQuery);
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
-        Query
+        {isTeam ? 'Query Team' : isBulk ? 'Query Selected' : 'Query'}
       </button>
 
       <div className="context-menu-divider" />
 
+      {!isTeam && onCreateTeam && (
+        <button
+          className="context-menu-item"
+          onClick={() => {
+            onCreateTeam(targetAgentIds);
+            onClose();
+          }}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a4 4 0 00-4-4h-1M9 20H4v-2a4 4 0 014-4h1m0-4a4 4 0 100-8 4 4 0 000 8zm8 0a4 4 0 100-8 4 4 0 000 8z" /></svg>
+          Create Team
+        </button>
+      )}
+
+      {!isTeam && onCreateTeam && <div className="context-menu-divider" />}
+
       <button
         data-testid="context-pause"
-        className={`context-menu-item ${offAgentIds.has(agentId) ? 'opacity-50 cursor-not-allowed' : ''}`}
-        disabled={offAgentIds.has(agentId)}
+        className={`context-menu-item ${!anyTargetRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
+        disabled={!anyTargetRunning}
         onClick={() => {
-          if (offAgentIds.has(agentId)) return;
-          onPause(agentId);
+          if (!anyTargetRunning) return;
+          forEachTarget((id) => { if (!offAgentIds.has(id)) onPause(id); });
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-        Pause
+        {isTeam ? 'Pause Team' : isBulk ? 'Pause Selected' : 'Pause'}
       </button>
       <button
         data-testid="context-start"
         className="context-menu-item"
         onClick={() => {
-          onRestart(agentId);
+          forEachTarget(onRestart);
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-        {offAgentIds.has(agentId) ? 'Start' : 'Restart'}
+        {isTeam
+          ? anyTargetOff && anyTargetRunning
+            ? 'Restart / Start Team'
+            : allTargetsOff
+              ? 'Start Team'
+              : 'Restart Team'
+          : isBulk
+          ? anyTargetOff && anyTargetRunning
+            ? 'Restart / Start Selected'
+            : allTargetsOff
+              ? 'Start Selected'
+              : 'Restart Selected'
+          : offAgentIds.has(agentId) ? 'Start' : 'Restart'}
       </button>
       <button
         data-testid="context-clear"
         className="context-menu-item"
         onClick={() => {
-          onClear(agentId);
+          forEachTarget(onClear);
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 15l8-8a2 2 0 012.8 0l4.2 4.2a2 2 0 010 2.8l-5 5H8l-4-4zM13 19h7" /></svg>
-        Clear
+        {isTeam ? 'Clear Team' : isBulk ? 'Clear Selected' : 'Clear'}
       </button>
 
       <div className="context-menu-divider" />
 
-      {getListsNotContainingAgent(watchlists, agentId).length > 0 && (
+      {watchlists.some((list) => targetAgentIds.some((id) => getListsNotContainingAgent([list], id, teams).length > 0)) && (
         <div className="context-menu-submenu">
           <button
             className="context-menu-item"
             onMouseEnter={() => setSubMenuListId("add")}
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
-            Add to List
+            {isTeam ? 'Add Team to List' : isBulk ? 'Add Selected to List' : 'Add to List'}
             <svg className="w-3 h-3 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
           </button>
           {subMenuListId === "add" && (
             <div className={`context-submenu ${x > window.innerWidth / 2 ? 'flip-left' : ''}`}>
-              {getListsNotContainingAgent(watchlists, agentId).map((l, i) => (
+              {watchlists
+                .filter((list) => targetAgentIds.some((id) => getListsNotContainingAgent([list], id, teams).length > 0))
+                .map((l, i) => (
                 <button
                   key={l.id}
                   className="context-menu-item"
                   onClick={() => {
-                    onAddToList(l.id, agentId);
+                    forEachTarget((id) => onAddToList(l.id, id));
                     onClose();
                   }}
                 >
@@ -147,24 +207,26 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
         </div>
       )}
 
-      {getListsContainingAgent(watchlists, agentId).length > 0 && (
+      {watchlists.some((list) => targetAgentIds.some((id) => getListsContainingAgent([list], id, teams).length > 0)) && (
         <div className="context-menu-submenu">
           <button
             className="context-menu-item text-wardian-error"
             onMouseEnter={() => setSubMenuListId("remove")}
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 12H4" /></svg>
-            Remove from List
+            {isTeam ? 'Remove Team from List' : isBulk ? 'Remove Selected from List' : 'Remove from List'}
             <svg className="w-3 h-3 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
           </button>
           {subMenuListId === "remove" && (
             <div className={`context-submenu ${x > window.innerWidth / 2 ? 'flip-left' : ''}`}>
-              {getListsContainingAgent(watchlists, agentId).map((l, i) => (
+              {watchlists
+                .filter((list) => targetAgentIds.some((id) => getListsContainingAgent([list], id, teams).length > 0))
+                .map((l, i) => (
                 <button
                   key={l.id}
                   className="context-menu-item"
                   onClick={() => {
-                    onRemoveFromList(l.id, agentId);
+                    forEachTarget((id) => onRemoveFromList(l.id, id));
                     onClose();
                   }}
                 >
@@ -178,15 +240,29 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
 
       <div className="context-menu-divider" />
 
+      {isTeam && teamId && onUngroupTeam && (
+        <button
+          className="context-menu-item"
+          onClick={() => {
+            onUngroupTeam(teamId);
+            onClose();
+          }}
+        >
+          Ungroup Team
+        </button>
+      )}
+
+      {isTeam && <div className="context-menu-divider" />}
+
       <button
         className="context-menu-item text-wardian-error hover:!bg-wardian-error/20"
         onClick={() => {
-          onDelete(agentId);
+          forEachTarget(onDelete);
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-        Delete
+        {isTeam ? 'Delete Team' : isBulk ? 'Delete Selected' : 'Delete'}
       </button>
     </div>
   );

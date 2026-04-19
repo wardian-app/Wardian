@@ -1,20 +1,21 @@
 use tauri::AppHandle;
 
 #[tauri::command]
-pub async fn load_watchlists(_app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+pub async fn load_watchlists(_app: AppHandle) -> Result<serde_json::Value, String> {
     if let Some(app_dir) = crate::utils::fs::get_wardian_home() {
         let path = app_dir.join("watchlists/index.json");
         if let Ok(data) = std::fs::read_to_string(&path) {
-            let parsed: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&data).unwrap_or_else(|_| serde_json::json!([]));
             return Ok(parsed);
         }
     }
-    Ok(Vec::new())
+    Ok(serde_json::json!([]))
 }
 
 #[tauri::command]
 pub async fn save_watchlists(
-    watchlists: Vec<serde_json::Value>,
+    watchlists: serde_json::Value,
     _app: AppHandle,
 ) -> Result<(), String> {
     let app_dir = crate::utils::fs::get_wardian_home()
