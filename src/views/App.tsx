@@ -425,11 +425,11 @@ function AppBody() {
     try {
       await submitInputToAgent(sessionId, cmd);
       const timestamp = new Date().toISOString();
-      const updated = { ...agentInteractions, [sessionId]: timestamp };
-      setAgentInteractions(updated);
-      try {
-        await invoke("save_agent_interactions", { interactions: updated });
-      } catch { /* non-critical */ }
+      setAgentInteractions(prev => {
+        const updated = { ...prev, [sessionId]: timestamp };
+        invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
+        return updated;
+      });
     } catch (e) {
       console.error(e);
     }

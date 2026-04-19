@@ -178,6 +178,6 @@ describe('AgentWatchlist', () => {
         interactions={defaultInteractions}
       />
     );
-    expect(screen.queryByText('Uptime')).not.toBeInTheDocument();
+    expect(screen.queryByText('Up')).not.toBeInTheDocument();
   });
 });

@@ -1097,7 +1097,7 @@ fn persisted_agent_config(session_id: &str) -> Option<AgentConfig> {
     }
 
     let wardian_home = get_wardian_home()?;
-    let state_path = wardian_home.join("wardian_state.json");
+    let state_path = wardian_home.join("settings/state.json");
     let contents = std::fs::read_to_string(state_path).ok()?;
     let configs = serde_json::from_str::<Vec<AgentConfig>>(&contents).ok()?;
     configs
@@ -2513,19 +2513,23 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             // Provider-aware log parsing for status/query enrichment
             if let Some(ref path) = *log_path_lock {
                 let mut should_parse = true;
+                let mut new_mtime = None;
                 if let Ok(metadata) = std::fs::metadata(path) {
                     if let Ok(modified) = metadata.modified() {
-                        let mut last_mod = snap.log_last_modified.lock().unwrap();
-                        if *last_mod == Some(modified) {
+                        let last_mod = snap.log_last_modified.lock().unwrap().clone();
+                        if last_mod == Some(modified) {
                             should_parse = false;
                         } else {
-                            *last_mod = Some(modified);
+                            new_mtime = Some(modified);
                         }
                     }
                 }
 
                 if should_parse {
                     if let Ok(content) = std::fs::read_to_string(path) {
+                        if let Some(mtime) = new_mtime {
+                            *snap.log_last_modified.lock().unwrap() = Some(mtime);
+                        }
                         match snap.provider.as_str() {
                             "codex" => {
                                 let lines: Vec<serde_json::Value> = content

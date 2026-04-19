@@ -1806,7 +1806,7 @@ pub async fn run_workflow(
                                 Some(agent.config.clone())
                             } else if let Some(home) = get_wardian_home() {
                                 if let Ok(data) =
-                                    std::fs::read_to_string(home.join("wardian_state.json"))
+                                    std::fs::read_to_string(home.join("settings/state.json"))
                                 {
                                     if let Ok(configs) =
                                         serde_json::from_str::<Vec<crate::models::AgentConfig>>(

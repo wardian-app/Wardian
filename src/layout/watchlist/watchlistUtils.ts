@@ -169,10 +169,16 @@ export function sortAgents(
         av = a.session_name.toLowerCase();
         bv = b.session_name.toLowerCase();
         break;
-      case 'uptime':
-        av = telemetry[a.session_id]?.init_timestamp ?? '';
-        bv = telemetry[b.session_id]?.init_timestamp ?? '';
+      case 'uptime': {
+        const now = Date.now();
+        av = telemetry[a.session_id]?.init_timestamp
+          ? now - new Date(telemetry[a.session_id].init_timestamp!).getTime()
+          : 0;
+        bv = telemetry[b.session_id]?.init_timestamp
+          ? now - new Date(telemetry[b.session_id].init_timestamp!).getTime()
+          : 0;
         break;
+      }
       case 'provider_model':
         av = `${a.provider} ${a.model ?? ''}`.toLowerCase();
         bv = `${b.provider} ${b.model ?? ''}`.toLowerCase();

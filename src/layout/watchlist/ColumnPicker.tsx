@@ -24,8 +24,8 @@ export function ColumnPicker({ prefs, onPrefsChange, onClose }: ColumnPickerProp
         onClose();
       }
     }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
   }, [onClose]);
 
   function toggleColumn(id: OptionalColumnId) {

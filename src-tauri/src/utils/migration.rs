@@ -34,22 +34,24 @@ fn run_migration(home: &Path) {
     if version >= CURRENT_SCHEMA_VERSION {
         return;
     }
-    if version < 1 {
-        run_migration_1(home);
-    }
-    if let Err(e) = set_schema_version(home, CURRENT_SCHEMA_VERSION) {
-        eprintln!("[migration] Failed to write version marker: {e}");
+    let success = version < 1 && run_migration_1(home);
+    if success {
+        if let Err(e) = set_schema_version(home, CURRENT_SCHEMA_VERSION) {
+            eprintln!("[migration] Failed to write version marker: {e}");
+        }
+    } else if version < 1 {
+        eprintln!("[migration] Migration 1 incomplete — will retry next launch");
     }
 }
 
-/// Copy src to dst then delete src. Skips if src missing or dst already exists.
-fn move_file(src: &std::path::Path, dst: &std::path::Path) {
-    if !src.exists() { return; }
-    if dst.exists() { return; }
+/// Copy src to dst then delete src. Returns true if succeeded or src was absent/already moved.
+fn move_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
+    if !src.exists() { return true; }
+    if dst.exists() { return true; }
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("[migration] Could not create dir {:?}: {e}", parent);
-            return;
+            return false;
         }
     }
     match std::fs::copy(src, dst) {
@@ -59,30 +61,33 @@ fn move_file(src: &std::path::Path, dst: &std::path::Path) {
             } else {
                 println!("[migration] Moved {:?} \u{2192} {:?}", src, dst);
             }
+            true
         }
-        Err(e) => eprintln!("[migration] Failed to copy {:?}: {e}", src),
+        Err(e) => { eprintln!("[migration] Failed to copy {:?}: {e}", src); false }
     }
 }
 
-/// Rename directory src → dst. Skips if src missing or dst already exists.
-fn move_dir(src: &std::path::Path, dst: &std::path::Path) {
-    if !src.exists() { return; }
-    if dst.exists() { return; }
+/// Rename directory src → dst. Returns true if succeeded or src was absent/already moved.
+fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> bool {
+    if !src.exists() { return true; }
+    if dst.exists() { return true; }
     if let Some(parent) = dst.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::rename(src, dst) {
-        Ok(_) => println!("[migration] Moved dir {:?} \u{2192} {:?}", src, dst),
-        Err(e) => eprintln!("[migration] Failed to move dir {:?}: {e}", src),
+        Ok(_) => { println!("[migration] Moved dir {:?} \u{2192} {:?}", src, dst); true }
+        Err(e) => { eprintln!("[migration] Failed to move dir {:?}: {e}", src); false }
     }
 }
 
-fn run_migration_1(home: &Path) {
-    move_file(&home.join("watchlists.json"),     &home.join("watchlists/index.json"));
-    move_file(&home.join("wardian_state.json"),  &home.join("settings/state.json"));
-    move_file(&home.join("shell_settings.json"), &home.join("settings/shell.json"));
-    move_file(&home.join("scheduled_runs.json"), &home.join("scheduled_workflows.json"));
-    move_dir( &home.join("workflow_logs"),        &home.join("logs/workflows"));
+fn run_migration_1(home: &Path) -> bool {
+    [
+        move_file(&home.join("watchlists.json"),     &home.join("watchlists/index.json")),
+        move_file(&home.join("wardian_state.json"),  &home.join("settings/state.json")),
+        move_file(&home.join("shell_settings.json"), &home.join("settings/shell.json")),
+        move_file(&home.join("scheduled_runs.json"), &home.join("scheduled_workflows.json")),
+        move_dir( &home.join("workflow_logs"),        &home.join("logs/workflows")),
+    ].iter().all(|&ok| ok)
 }
 
 #[cfg(test)]
