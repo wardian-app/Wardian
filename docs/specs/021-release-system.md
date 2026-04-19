@@ -73,7 +73,7 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 2. `build` — matrix over four runners, all running `tauri-apps/tauri-action@v0` with `releaseId` pointing at the draft from step 1:
    - `windows-latest`: produces NSIS `.exe`.
    - `macos-latest` (arm64): produces `.dmg` for Apple Silicon.
-   - `macos-13` (x86_64): produces `.dmg` for Intel Macs.
+   - `macos-latest` (arm64 runner, cross-compiled to `x86_64-apple-darwin`): produces `.dmg` for Intel Macs. The previously-specified `macos-13` runner is being retired by GitHub and queues indefinitely; cross-compiling from the arm64 runner avoids that.
    - `ubuntu-22.04`: produces `.AppImage` and `.deb`. Pinned to 22.04 (not `ubuntu-latest`) for glibc compatibility on older Linux distros.
 3. `publish` — depends on all `build` matrix jobs succeeding. Flips the draft release to published.
 
