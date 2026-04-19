@@ -4,11 +4,11 @@ import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, So
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
 
 const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
-  status_label:   '50px',
+  status_label:   '42px',
   query_count:    '20px',
-  uptime:         '36px',
-  provider_model: '62px',
-  last_queried:   '36px',
+  uptime:         '30px',
+  provider_model: '54px',
+  last_queried:   '32px',
 };
 import {
   reorderWithinList,
@@ -31,13 +31,17 @@ function SortableHeader({ columnId, sort, onSort, label }: {
   label: string;
 }) {
   const active = sort?.column_id === columnId;
-  const arrow = active ? (sort?.direction === 'asc' ? ' ↑' : ' ↓') : '';
+  const dir = active ? sort?.direction : null;
   return (
     <button
-      className="label-small text-left cursor-pointer hover:text-wardian-text"
+      className={`label-small text-left cursor-pointer hover:text-wardian-text border-[var(--color-wardian-accent)] ${
+        dir === 'asc'  ? 'border-b-2' :
+        dir === 'desc' ? 'border-t-2' :
+        'border-b-2 border-transparent'
+      }`}
       onClick={() => onSort(columnId)}
     >
-      {label}{arrow}
+      {label}
     </button>
   );
 }
