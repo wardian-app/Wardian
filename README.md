@@ -34,7 +34,7 @@ Wardian is a governance layer for AI orchestration. It centralizes PTY managemen
 
 ## Quick Start
 
-Ensure you have Rust, Node.js (v18+), and a supported provider CLI (e.g. `@google/gemini-cli` or `@anthropic-ai/claude-code`) installed.
+Ensure you have Rust, Node.js (v18+), and at least one supported provider CLI installed, such as `@google/gemini-cli`, `@anthropic-ai/claude-code`, `@openai/codex`, or `opencode`.
 
 ```bash
 git clone https://github.com/tangemicioglu/Wardian.git
@@ -65,7 +65,7 @@ Wardian abstracts the differences between varied agent runtimes into a unified i
 | **Gemini CLI**  | ✅ Stable  | Patched skill discovery; stream-based turn detection.    |
 | **Claude Code** | ✅ Stable  | Custom permission hooks; explicit session ID management. |
 | **Codex**       | 🧪 Beta    | Habitat-based state migration; bootstrap isolation.      |
-| **OpenCode**    | 📅 Planned | TBD.                                                     |
+| **OpenCode**    | 🧪 Beta    | Real-workspace runtime config injection.                |
 | **OpenClaw**    | 📅 Planned | TBD.                                                     |
 
 > See [Provider Runtime Notes](docs/providers.md) for a deep dive into provider-specific discovery and lifecycle management.
@@ -166,7 +166,7 @@ Wardian is built with a focus on modularity, thread safety, and separation of co
 
 1. **Rust**: Install [rustup.rs](https://rustup.rs/) (latest stable).
 2. **Node.js**: Ensure Node.js (v18+) is installed.
-3. **Agent CLIs**: Install supported providers globally (e.g., `npm install -g @google/gemini-cli`) and ensure they are successfully authenticated in your terminal first.
+3. **Agent CLIs**: Install supported providers globally (e.g., `npm install -g @google/gemini-cli @anthropic-ai/claude-code @openai/codex`) and install the OpenCode CLI separately if you plan to use that beta provider. Ensure each provider is successfully authenticated in your terminal first.
 4. **Clone & Install**:
    ```bash
    git clone https://github.com/tangemicioglu/Wardian.git

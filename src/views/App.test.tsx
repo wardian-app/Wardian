@@ -28,14 +28,21 @@ const mockInvoke = vi.mocked(invoke);
 
 // Helper to set up mock return values for the initial load
 let currentAgents: AgentConfig[] = [];
+let currentWatchlists: unknown = [];
 function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefinition[] = []) {
   currentAgents = [...agents];
+  currentWatchlists = [];
   mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
     switch (cmd) {
       case "list_agents":
         return currentAgents;
       case "list_agent_classes":
         return classes;
+      case "load_watchlists":
+        return currentWatchlists;
+      case "save_watchlists":
+        currentWatchlists = args?.watchlists;
+        return null;
       case "pause_agent":
         if (args?.sessionId) {
           currentAgents = currentAgents.map(a => 
@@ -62,12 +69,23 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return [];
       case "get_library_tree":
         return { type: "Folder", path: "", name: "Root", children: [] };
+      case "list_deployed_skills":
+        return [];
       case "load_workflow_library":
         return { folders: [], rootWorkflowIds: [] };
       default:
         return null;
     }
   });
+}
+
+function setupDefaultMocksWithWatchlists(
+  agents: AgentConfig[],
+  classes: AgentClassDefinition[],
+  watchlists: unknown,
+) {
+  setupDefaultMocks(agents, classes);
+  currentWatchlists = watchlists;
 }
 
 const defaultClasses: AgentClassDefinition[] = [
@@ -257,6 +275,70 @@ describe("Agent Watchlist Sidebar", () => {
       expect(screen.getByText("Agent")).toBeInTheDocument();
       expect(screen.getByText("Status")).toBeInTheDocument();
       expect(screen.getByText("Qry")).toBeInTheDocument();
+    });
+  });
+
+  it("loads versioned team watchlist state into the roster", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    });
+    await act(async () => {
+      render(<App />);
+    });
+
+    expect(await screen.findByText("Core Dev Swarm")).toBeInTheDocument();
+  });
+
+  it("renders team members in the main grid when a watchlist contains a team entry", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [
+        {
+          id: "today",
+          name: "Today",
+          entries: [{ type: "team", teamId: "team-1" }],
+        },
+      ],
+    });
+    await act(async () => {
+      render(<App />);
+    });
+
+    fireEvent.click(await screen.findByTitle("Today"));
+
+    await waitFor(() => {
+      const cards = screen.getAllByTestId("agent-card");
+      expect(cards).toHaveLength(2);
+      expect(screen.getAllByText("Alpha").length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText("Beta").length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("renders team members in the main grid from snake_case persisted team state", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agent_ids: ["agent-1", "agent-2"] }],
+      watchlists: [
+        {
+          id: "today",
+          name: "Today",
+          entries: [{ type: "team", team_id: "team-1" }],
+        },
+      ],
+    });
+    await act(async () => {
+      render(<App />);
+    });
+
+    fireEvent.click(await screen.findByTitle("Today"));
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("agent-card")).toHaveLength(2);
+      expect(screen.getAllByText("Alpha").length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText("Beta").length).toBeGreaterThanOrEqual(2);
     });
   });
 });

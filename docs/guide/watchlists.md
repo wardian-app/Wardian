@@ -4,7 +4,7 @@ The **Agent Watchlist** (Right Sidebar) is your primary high-fidelity tool for m
 
 ## 🕵️ Real-Time Monitoring
 
-### 1. Status Indicators
+### Status Indicators
 Every agent in the watchlist has a distinct status light:
 - **Emerald (Idle)**: Ready for a new task.
 - **Cyan (Processing)**: Currently executing or thinking.
@@ -12,8 +12,26 @@ Every agent in the watchlist has a distinct status light:
 - **Gray (Off)**: Session is paused or hibernating.
 - **Red (Error)**: Encountered a fatal process error.
 
-### 2. Live Thought Bubbles
+### Live Thought Bubbles
 Wardian captures the agent's internal telemetry and displays it as a "Thought Bubble" next to the agent's name. This allows you to see what the agent is currently working on without reading the full terminal log.
+
+## 📊 Customizable Columns
+
+Click the **gear icon** (⚙) in the watchlist header to open the column picker. Each column can be toggled on or off independently:
+
+| Column | Default | Description |
+|---|---|---|
+| Status | On | Current agent status label |
+| Query Count | On | Number of prompts sent this session |
+| Uptime | Off | Time since the agent process started |
+| Provider / Model | Off | Provider name and model identifier |
+| Last Queried | On | Time elapsed since the last prompt was sent |
+
+### Sorting
+Click any column header to sort by that column. Clicking again cycles through ascending → descending → unsorted. The **Agent** column header sorts alphabetically by name. Sorting applies on top of your custom watchlist order; drag-to-reorder still works when no sort is active.
+
+### Persistence
+Column visibility and sort state are saved to `~/.wardian/watchlists/prefs.json` and restored on next launch.
 
 ## 🗂️ Organizing with Watchlists
 As your swarm grows, a single list becomes difficult to manage. Wardian allows you to group agents into custom **Watchlists**.
@@ -25,7 +43,7 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 
 ### Managing Agents
 - **Reordering**: Drag and drop agent cards within a watchlist to prioritize your view.
-- **Filtering**: Click a watchlist tab to focus only on that group of agents. 
+- **Filtering**: Click a watchlist tab to focus only on that group of agents.
 - **Bulk Selection**: Use `Ctrl+Click` to select multiple agents within a watchlist for broadcast commands.
 
 ## 🖱️ Remote Management

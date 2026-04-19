@@ -480,8 +480,26 @@
   background: rgba(16, 185, 129, 0.08);
   border-color: rgba(16, 185, 129, 0.3);
 }
-.watchlist-row.drag-over {
+.watchlist-row.drag-over-before {
   border-top: 2px solid var(--color-wardian-accent);
+}
+.watchlist-row.drag-over-after {
+  border-bottom: 2px solid var(--color-wardian-accent);
+}
+.team-drop-inside {
+  box-shadow: 0 0 0 1px var(--color-wardian-accent);
+}
+.team-drop-before {
+  border-top-color: var(--color-wardian-accent);
+  box-shadow: 0 -2px 0 0 var(--color-wardian-accent);
+}
+.team-drop-after {
+  border-bottom-color: var(--color-wardian-accent);
+  box-shadow: 0 2px 0 0 var(--color-wardian-accent);
+}
+.team-edge-drop-zone {
+  height: 8px;
+  margin: -1px 0;
 }
 
 /* ── Context Menu ─────────────────────────────────────── */

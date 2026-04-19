@@ -1,8 +1,29 @@
 export interface Watchlist {
   id: string;
   name: string;
+  entries?: WatchlistEntry[];
+  agentIds?: string[];
+}
+
+export interface AgentTeam {
+  id: string;
+  name: string;
   agentIds: string[];
 }
+
+export type WatchlistEntry =
+  | { type: "agent"; agentId: string }
+  | { type: "team"; teamId: string };
+
+export interface WatchlistState {
+  version: 2;
+  watchlists: Watchlist[];
+  teams: AgentTeam[];
+}
+
+export type WatchlistDisplayItem =
+  | { type: "agent"; agent: import("../../types").AgentConfig }
+  | { type: "team"; team: AgentTeam; agents: import("../../types").AgentConfig[] };
 
 /**
  * Context menu action types available for agent rows.
@@ -22,6 +43,7 @@ export interface ContextMenuState {
   x: number;
   y: number;
   agentId: string | null;
+  agentIds?: string[];
 }
 
 // All toggleable columns (status_label and query_count are on by default)

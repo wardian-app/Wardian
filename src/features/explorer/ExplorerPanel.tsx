@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { FolderOpen } from 'lucide-react';
 import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { GitStatusResult } from '../../types';
@@ -104,6 +105,15 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
     setMenuPos(null);
   };
 
+  const handleOpenRoot = async () => {
+    if (!rootPath) return;
+    try {
+      await invoke('reveal_in_explorer', { path: rootPath });
+    } catch (err) {
+      console.error("Open explorer root failed:", err);
+    }
+  };
+
   const handlePreview = async () => {
     if (activeNode && !activeNode.is_dir) {
       try {
@@ -142,9 +152,18 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
       
       {rootPath && (
         <div className="flex items-center gap-1.5 py-1 mb-2 border-b border-wardian-border/30 w-full group">
-          <span className="label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors" title={rootPath}>
+          <span className="label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors flex-1 min-w-0" title={rootPath}>
             {rootPath}
           </span>
+          <button
+            type="button"
+            aria-label="Open in local file system"
+            title="Open in local file system"
+            onClick={handleOpenRoot}
+            className="shrink-0 rounded-md border border-wardian-border p-1 text-muted hover:text-primary hover:bg-wardian-card-bg-muted transition-colors"
+          >
+            <FolderOpen aria-hidden="true" size={14} strokeWidth={2} />
+          </button>
         </div>
       )}
       

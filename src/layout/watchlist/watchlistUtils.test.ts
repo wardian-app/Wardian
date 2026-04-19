@@ -12,8 +12,19 @@ import {
   formatRelativeTime,
   cycleSort,
   sortAgents,
+  normalizeWatchlistState,
+  getWatchlistEntries,
+  getDisplayItemsForList,
+  addAgentsToList,
+  removeAgentsFromList,
+  createTeamFromAgents,
+  ungroupTeam,
+  addAgentToTeam,
+  removeAgentFromTeam,
+  removeAgentFromTeamAtEntry,
+  reorderTeamMember,
 } from "./watchlistUtils";
-import type { Watchlist, WatchlistPrefs } from "./types";
+import type { Watchlist, WatchlistEntry, WatchlistPrefs, WatchlistState } from "./types";
 import type { AgentConfig, AgentTelemetry } from "../../types";
 
 // ── reorderWithinList ──────────────────────────────────────────────────
@@ -48,6 +59,357 @@ describe("reorderWithinList", () => {
     const copy = [...original];
     reorderWithinList(original, 0, 2);
     expect(original).toEqual(copy);
+  });
+});
+
+// ── team-aware watchlist state ─────────────────────────────────────────
+
+describe("normalizeWatchlistState", () => {
+  it("migrates legacy watchlist arrays into versioned state", () => {
+    const state = normalizeWatchlistState([
+      { id: "l1", name: "List 1", agentIds: ["a", "b"] },
+    ]);
+
+    expect(state).toEqual({
+      version: 2,
+      teams: [],
+      watchlists: [
+        {
+          id: "l1",
+          name: "List 1",
+          entries: [
+            { type: "agent", agentId: "a" },
+            { type: "agent", agentId: "b" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("normalizes watchlists to full team inclusion", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b", "c"] }],
+      watchlists: [
+        {
+          id: "today",
+          name: "Today",
+          entries: [{ type: "agent", agentId: "b" }, { type: "agent", agentId: "x" }],
+        },
+      ],
+    });
+
+    expect(getWatchlistEntries(state.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "x" },
+    ]);
+  });
+
+  it("normalizes snake_case persisted team and entry fields", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agent_ids: ["a", "b"] }],
+      watchlists: [
+        {
+          id: "l1",
+          name: "List 1",
+          entries: [{ type: "team", team_id: "team-1" }],
+        },
+      ],
+    });
+
+    expect(state.teams).toEqual([{ id: "team-1", name: "Core", agentIds: ["a", "b"] }]);
+    expect(getWatchlistEntries(state.watchlists[0])).toEqual([{ type: "team", teamId: "team-1" }]);
+  });
+
+  it("normalizes legacy snake_case agent_ids lists", () => {
+    const state = normalizeWatchlistState([
+      { id: "l1", name: "List 1", agent_ids: ["a", "b"] },
+    ]);
+
+    expect(getWatchlistEntries(state.watchlists[0])).toEqual([
+      { type: "agent", agentId: "a" },
+      { type: "agent", agentId: "b" },
+    ]);
+  });
+});
+
+describe("team display helpers", () => {
+  const agents: AgentConfig[] = [
+    { session_id: "a", session_name: "Alpha", agent_class: "Coder", folder: "", is_off: false },
+    { session_id: "b", session_name: "Beta", agent_class: "QA", folder: "", is_off: false },
+    { session_id: "c", session_name: "Gamma", agent_class: "Coder", folder: "", is_off: false },
+    { session_id: "x", session_name: "Solo", agent_class: "Coder", folder: "", is_off: false },
+  ];
+  const state: WatchlistState = normalizeWatchlistState({
+    version: 2,
+    teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b", "c"] }],
+    watchlists: [
+      {
+        id: "today",
+        name: "Today",
+        entries: [{ type: "team", teamId: "team-1" }, { type: "agent", agentId: "x" }],
+      },
+    ],
+  });
+
+  it("returns grouped display items and full team members", () => {
+    const items = getDisplayItemsForList(agents, state.watchlists[0], state.teams);
+
+    expect(items).toEqual([
+      { type: "team", team: state.teams[0], agents: [agents[0], agents[1], agents[2]] },
+      { type: "agent", agent: agents[3] },
+    ]);
+  });
+
+  it("bulk-adds selected agents by converting team members to team entries", () => {
+    const updated = addAgentsToList(state.watchlists[0], ["b", "x"], state.teams);
+
+    expect(getWatchlistEntries(updated)).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "x" },
+    ]);
+  });
+
+  it("detects duplicate entries by fields instead of object serialization order", () => {
+    const list: Watchlist = {
+      id: "l1",
+      name: "List 1",
+      entries: [{ agentId: "x", type: "agent" } as unknown as WatchlistEntry],
+    };
+
+    const updated = addAgentsToList(list, ["x"], []);
+
+    expect(getWatchlistEntries(updated)).toEqual([{ type: "agent", agentId: "x" }]);
+  });
+
+  it("bulk-removes selected agents and removes the whole team when a member is removed", () => {
+    const updated = removeAgentsFromList(state.watchlists[0], ["b"], state.teams);
+
+    expect(getWatchlistEntries(updated)).toEqual([{ type: "agent", agentId: "x" }]);
+  });
+});
+
+describe("team mutations", () => {
+  it("creates a default-named global team from selected agents", () => {
+    const state = normalizeWatchlistState([
+      { id: "l1", name: "List 1", agentIds: ["a", "b", "c"] },
+    ]);
+
+    const next = createTeamFromAgents(state, "team-1", ["a", "b"]);
+
+    expect(next.teams).toEqual([{ id: "team-1", name: "Team 1", agentIds: ["a", "b"] }]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "c" },
+    ]);
+  });
+
+  it("creates a one-agent team", () => {
+    const state = normalizeWatchlistState([
+      { id: "l1", name: "List 1", agentIds: ["a", "b"] },
+    ]);
+
+    const next = createTeamFromAgents(state, "team-1", ["a"]);
+
+    expect(next.teams).toEqual([{ id: "team-1", name: "Team 1", agentIds: ["a"] }]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "b" },
+    ]);
+  });
+
+  it("moves only selected members out of existing teams when creating a new team", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [
+        {
+          id: "l1",
+          name: "List 1",
+          entries: [{ type: "team", teamId: "team-1" }, { type: "agent", agentId: "c" }],
+        },
+      ],
+    });
+
+    const next = createTeamFromAgents(state, "team-2", ["a", "c"]);
+
+    expect(next.teams).toEqual([
+      { id: "team-1", name: "Core", agentIds: ["b"] },
+      { id: "team-2", name: "Team 2", agentIds: ["a", "c"] },
+    ]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "team", teamId: "team-2" },
+    ]);
+  });
+
+  it("ungroups a team back into solo entries anywhere the team appears", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }] }],
+    });
+
+    const next = ungroupTeam(state, "team-1");
+
+    expect(next.teams).toEqual([]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "agent", agentId: "a" },
+      { type: "agent", agentId: "b" },
+    ]);
+  });
+
+  it("adds a solo agent to a team and normalizes watchlists to the full team", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a"] }],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }, { type: "agent", agentId: "b" }] }],
+    });
+
+    const next = addAgentToTeam(state, "team-1", "b");
+
+    expect(next.teams[0].agentIds).toEqual(["a", "b"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([{ type: "team", teamId: "team-1" }]);
+  });
+
+  it("removes a member from a team and keeps the removed agent near the team", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }] }],
+    });
+
+    const next = removeAgentFromTeam(state, "team-1", "b");
+
+    expect(next.teams[0].agentIds).toEqual(["a"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "b" },
+    ]);
+  });
+
+  it("removes a member from a team and places it at the drop target in a watchlist", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [
+        {
+          id: "l1",
+          name: "List 1",
+          entries: [{ type: "team", teamId: "team-1" }, { type: "agent", agentId: "x" }],
+        },
+      ],
+    });
+
+    const next = removeAgentFromTeam(state, "team-1", "a", "x");
+
+    expect(next.teams[0].agentIds).toEqual(["b"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "a" },
+      { type: "agent", agentId: "x" },
+    ]);
+  });
+
+  it("moves a member between teams without deleting unselected teammates", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [
+        { id: "team-1", name: "Core", agentIds: ["a", "b"] },
+        { id: "team-2", name: "Support", agentIds: ["c"] },
+      ],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }, { type: "team", teamId: "team-2" }] }],
+    });
+
+    const next = addAgentToTeam(state, "team-2", "a");
+
+    expect(next.teams).toEqual([
+      { id: "team-1", name: "Core", agentIds: ["b"] },
+      { id: "team-2", name: "Support", agentIds: ["c", "a"] },
+    ]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "team", teamId: "team-2" },
+    ]);
+  });
+
+  it("reorders members within a team", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b", "c"] }],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }] }],
+    });
+
+    const next = reorderTeamMember(state, "team-1", "c", "a");
+
+    expect(next.teams[0].agentIds).toEqual(["c", "a", "b"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([{ type: "team", teamId: "team-1" }]);
+  });
+
+  it("reorders a team member after the target member", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b", "c"] }],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }] }],
+    });
+
+    const next = reorderTeamMember(state, "team-1", "a", "c", "after");
+
+    expect(next.teams[0].agentIds).toEqual(["b", "c", "a"]);
+  });
+
+  it("removes a team member after the target solo agent", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [
+        {
+          id: "l1",
+          name: "List 1",
+          entries: [{ type: "team", teamId: "team-1" }, { type: "agent", agentId: "c" }],
+        },
+      ],
+    });
+
+    const next = removeAgentFromTeam(state, "team-1", "a", "c", "after");
+
+    expect(next.teams[0].agentIds).toEqual(["b"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "c" },
+      { type: "agent", agentId: "a" },
+    ]);
+  });
+
+  it("removes a member from a team and places it before a team entry in one watchlist mutation", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [
+        { id: "today", name: "Today", entries: [{ type: "team", teamId: "team-1" }] },
+        { id: "later", name: "Later", entries: [{ type: "team", teamId: "team-1" }] },
+      ],
+    });
+
+    const next = removeAgentFromTeamAtEntry(
+      state,
+      "team-1",
+      "a",
+      { type: "team", teamId: "team-1" },
+      "before",
+      "today",
+    );
+
+    expect(next.teams[0].agentIds).toEqual(["b"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "agent", agentId: "a" },
+      { type: "team", teamId: "team-1" },
+    ]);
+    expect(getWatchlistEntries(next.watchlists[1])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "a" },
+    ]);
   });
 });
 
