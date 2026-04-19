@@ -1,14 +1,50 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { AgentConfig, AgentTelemetry } from "../../types";
-import type { Watchlist, ContextMenuState } from "./types";
+import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId } from "./types";
+import { DEFAULT_WATCHLIST_PREFS } from "./types";
+
+const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
+  status_label:   '42px',
+  query_count:    '20px',
+  uptime:         '30px',
+  provider_model: '54px',
+  last_queried:   '32px',
+};
 import {
   reorderWithinList,
   filterAgents,
   getAgentsForList,
   createWatchlist,
+  formatUptime,
+  formatRelativeTime,
+  cycleSort,
+  sortAgents,
 } from "./watchlistUtils";
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
+import { ColumnPicker } from "./ColumnPicker";
+
+function SortableHeader({ columnId, sort, onSort, label }: {
+  columnId: SortableColumnId;
+  sort: WatchlistPrefs['sort'];
+  onSort: (id: SortableColumnId) => void;
+  label: string;
+}) {
+  const active = sort?.column_id === columnId;
+  const dir = active ? sort?.direction : null;
+  return (
+    <button
+      className={`label-small text-left cursor-pointer hover:text-wardian-text border-[var(--color-wardian-accent)] ${
+        dir === 'asc'  ? 'border-b-2' :
+        dir === 'desc' ? 'border-t-2' :
+        'border-b-2 border-transparent'
+      }`}
+      onClick={() => onSort(columnId)}
+    >
+      {label}
+    </button>
+  );
+}
 
 interface AgentWatchlistProps {
   agents: AgentConfig[];
@@ -33,6 +69,9 @@ interface AgentWatchlistProps {
   activeListId: string;
   onActiveListChange: (id: string) => void;
   onWatchlistsChange: (lists: Watchlist[]) => Promise<void>;
+  prefs?: WatchlistPrefs;
+  onPrefsChange?: (prefs: WatchlistPrefs) => void;
+  interactions?: AgentInteractions;
 }
 
 export default function AgentWatchlist({
@@ -58,7 +97,13 @@ export default function AgentWatchlist({
   activeListId,
   onActiveListChange,
   onWatchlistsChange,
+  prefs = DEFAULT_WATCHLIST_PREFS,
+  onPrefsChange,
+  interactions = {},
 }: AgentWatchlistProps) {
+  // ── Column picker state ────────────────────────────────────────────
+  const [pickerOpen, setPickerOpen] = useState(false);
+
   // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
@@ -243,6 +288,19 @@ export default function AgentWatchlist({
     return deriveCurrentThought(rawTitle, thought, metrics, isOff);
   };
 
+  // ── Column sort handler ────────────────────────────────────────────
+  function handleSort(columnId: SortableColumnId) {
+    if (onPrefsChange) onPrefsChange({ ...prefs, sort: cycleSort(prefs.sort, columnId) });
+  }
+
+  // ── Dynamic grid template: dot | name | [visible columns]
+  const visibleCols = prefs.columns.filter(c => c.visible);
+  const colFragment = visibleCols.map(c => COLUMN_WIDTHS[c.id]).join(' ');
+  const gridTemplate = `auto minmax(50px, 1fr)${colFragment ? ' ' + colFragment : ''}`;
+
+  // ── Sorted agents ──────────────────────────────────────────────────
+  const sortedAgents = sortAgents(displayedAgents, prefs.sort, telemetry, interactions);
+
   // ── Render ─────────────────────────────────────────────────────────
   return (
     <aside
@@ -264,6 +322,26 @@ export default function AgentWatchlist({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
               </svg>
             </button>
+            <div className="relative">
+              <button
+                className="p-1 text-primary hover:text-[var(--color-wardian-accent)] transition-colors"
+                title="Customize columns"
+                onClick={(e) => { e.stopPropagation(); setPickerOpen(v => !v); }}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </button>
+              {pickerOpen && onPrefsChange && (
+                <ColumnPicker
+                  prefs={prefs}
+                  onPrefsChange={onPrefsChange}
+                  onClose={() => setPickerOpen(false)}
+                />
+              )}
+            </div>
           </div>
         </div>
 
@@ -313,11 +391,22 @@ export default function AgentWatchlist({
         </div>
 
         {/* ── Column Headers ─────────────────────────────── */}
-        <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-2 py-1 label-small border-b border-wardian-border mb-1">
+        <div
+          className="grid gap-2 px-2 py-1 label-small border-b border-wardian-border mb-1"
+          style={{ gridTemplateColumns: gridTemplate }}
+        >
           <span></span>
-          <span>Agent</span>
-          <span>Status</span>
-          <span>Qry</span>
+          <SortableHeader columnId="agent_name" sort={prefs.sort} onSort={handleSort} label="Agent" />
+          {prefs.columns.filter(c => c.visible).map(col => {
+            const label =
+              col.id === 'status_label' ? 'Status' :
+              col.id === 'query_count'  ? 'Qry'    :
+              col.id === 'uptime'       ? 'Up'     :
+              col.id === 'provider_model' ? 'Provider' : 'Last';
+            return (
+              <SortableHeader key={col.id} columnId={col.id} sort={prefs.sort} onSort={handleSort} label={label} />
+            );
+          })}
         </div>
 
         {/* ── Agent Rows ─────────────────────────────────── */}
@@ -325,7 +414,7 @@ export default function AgentWatchlist({
           className="flex-1 overflow-y-auto no-scrollbar"
           onClick={() => onSelectionChange(new Set())}
         >
-          {displayedAgents.map((agent) => {
+          {sortedAgents.map((agent) => {
             const agentId = agent.session_id;
             const isSelected = selectedAgentIds.has(agentId);
             const { status, thought } = getAgentStatus(agentId);
@@ -396,7 +485,7 @@ export default function AgentWatchlist({
                 }}
                 onContextMenu={(e) => handleContextMenu(e, agentId)}
                 className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? "drag-over" : ""} ${isBeingDragged ? "opacity-50" : ""} select-none`}
-                style={{ cursor: activeListId !== "all" ? "grab" : "pointer" }}
+                style={{ cursor: activeListId !== "all" ? "grab" : "pointer", gridTemplateColumns: gridTemplate }}
               >
                 <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
                 <div className="flex-1 min-w-0">
@@ -430,12 +519,38 @@ export default function AgentWatchlist({
                     {agent.agent_class}
                   </p>
                 </div>
-                <span className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
-                  {getAgentStatusLabel(status, thought)}
-                </span>
-                <span className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
-                  {metrics?.query_count ?? "–"}
-                </span>
+                {prefs.columns.filter(c => c.visible).map(col => {
+                  if (col.id === 'status_label') return (
+                    <span key="status_label" className={`text-[9px] truncate max-w-[60px] ${getAgentStatusTextClass(status)}`}>
+                      {getAgentStatusLabel(status, thought)}
+                    </span>
+                  );
+                  if (col.id === 'query_count') return (
+                    <span key="query_count" className="text-[9px] text-muted-neutral tabular-nums w-4 text-right">
+                      {metrics?.query_count ?? "–"}
+                    </span>
+                  );
+                  if (col.id === 'uptime') return (
+                    <span key="uptime" className="label-small tabular-nums text-muted">
+                      {formatUptime(metrics?.init_timestamp ?? null)}
+                    </span>
+                  );
+                  if (col.id === 'provider_model') {
+                    const provider = agent.provider ?? '–';
+                    const model = agent.model ? ` · ${agent.model}` : '';
+                    return (
+                      <span key="provider_model" className="label-small text-muted truncate overflow-hidden">
+                        {provider}{model}
+                      </span>
+                    );
+                  }
+                  if (col.id === 'last_queried') return (
+                    <span key="last_queried" className="label-small tabular-nums text-muted">
+                      {formatRelativeTime(interactions[agentId])}
+                    </span>
+                  );
+                  return null;
+                })}
               </div>
             );
           })}

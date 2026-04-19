@@ -7,7 +7,8 @@ import "../styles/App.css";
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
 import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
 import { getAgentsForList, addAgentToList, removeAgentFromList } from "../layout/watchlist/watchlistUtils";
-import type { Watchlist } from "../layout/watchlist/types";
+import type { Watchlist, WatchlistPrefs, AgentInteractions } from "../layout/watchlist/types";
+import { DEFAULT_WATCHLIST_PREFS } from "../layout/watchlist/types";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { useConfirm } from "../components/ConfirmDialog";
@@ -120,6 +121,8 @@ function AppBody() {
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [activeListId, setActiveListId] = useState<string>("all");
+  const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
+  const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
   const hasAutoPatched = useRef(false);
 
   useEffect(() => {
@@ -156,6 +159,23 @@ function AppBody() {
         const data = await invoke<Watchlist[]>("load_watchlists");
         if (data && data.length > 0) setWatchlists(data);
       } catch { /* first run */ }
+
+      try {
+        const prefs = await invoke<WatchlistPrefs | null>("load_watchlist_prefs");
+        if (prefs) {
+          // Merge saved prefs with defaults so newly-added columns always appear
+          const savedMap = new Map(prefs.columns.map(c => [c.id, c]));
+          setWatchlistPrefs({
+            ...prefs,
+            columns: DEFAULT_WATCHLIST_PREFS.columns.map(def => savedMap.get(def.id) ?? def),
+          });
+        }
+      } catch { /* first run */ }
+
+      try {
+        const interactions = await invoke<AgentInteractions>("load_agent_interactions");
+        if (interactions) setAgentInteractions(interactions);
+      } catch { /* first run */ }
     })();
 
     if (useSettingsStore.getState().autoPatchGemini && !hasAutoPatched.current) {
@@ -168,6 +188,13 @@ function AppBody() {
     setWatchlists(lists);
     try {
       await invoke("save_watchlists", { watchlists: lists });
+    } catch { /* non-critical */ }
+  }, []);
+
+  const persistWatchlistPrefs = useCallback(async (prefs: WatchlistPrefs) => {
+    setWatchlistPrefs(prefs);
+    try {
+      await invoke("save_watchlist_prefs", { prefs });
     } catch { /* non-critical */ }
   }, []);
 
@@ -352,8 +379,19 @@ function AppBody() {
       for (const m of event.payload) mapping[m.session_id] = m;
       setTelemetry(prev => {
         const next = { ...prev };
+        const interactionUpdates: Record<string, string> = {};
         for (const [sessionId, metric] of Object.entries(mapping)) {
+          if ((metric.query_count ?? 0) > (prev[sessionId]?.query_count ?? 0)) {
+            interactionUpdates[sessionId] = new Date().toISOString();
+          }
           next[sessionId] = metric;
+        }
+        if (Object.keys(interactionUpdates).length > 0) {
+          setAgentInteractions(prevInteractions => {
+            const updated = { ...prevInteractions, ...interactionUpdates };
+            invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
+            return updated;
+          });
         }
         return next;
       });
@@ -386,6 +424,12 @@ function AppBody() {
   async function sendCommand(sessionId: string, cmd: string) {
     try {
       await submitInputToAgent(sessionId, cmd);
+      const timestamp = new Date().toISOString();
+      setAgentInteractions(prev => {
+        const updated = { ...prev, [sessionId]: timestamp };
+        invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
+        return updated;
+      });
     } catch (e) {
       console.error(e);
     }
@@ -621,6 +665,9 @@ function AppBody() {
           activeListId={activeListId}
           onActiveListChange={setActiveListId}
           onWatchlistsChange={persistWatchlists}
+          prefs={watchlistPrefs}
+          onPrefsChange={persistWatchlistPrefs}
+          interactions={agentInteractions}
         />
       </div>
     </div>

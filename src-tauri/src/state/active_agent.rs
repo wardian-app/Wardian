@@ -18,6 +18,7 @@ pub struct ActiveAgent {
     pub terminal_title: Arc<Mutex<String>>,
     pub last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
     pub log_path: Arc<Mutex<Option<PathBuf>>>,
+    pub log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
     #[cfg(windows)]
     pub job_object: Option<win32job::Job>,
 }

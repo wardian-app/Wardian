@@ -167,7 +167,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
           </div>
           <div className="mt-3 px-1">
             <p className="text-[10px] text-muted-neutral leading-relaxed">
-              <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> For complete terminal synchronization, update the gemini CLI theme as well, and then restart the application.
+              <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> Gemini agents may require a manual theme change and restart.
             </p>
           </div>
         </div>

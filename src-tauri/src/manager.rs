@@ -300,7 +300,8 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
     if let Ok(json) = serde_json::to_string_pretty(&configs) {
         if let Some(app_dir) = get_wardian_home() {
             let _ = std::fs::create_dir_all(&app_dir);
-            let state_path = app_dir.join("wardian_state.json");
+            let _ = std::fs::create_dir_all(app_dir.join("settings"));
+            let state_path = app_dir.join("settings/state.json");
             let _ = std::fs::write(state_path, json);
         }
     }
@@ -336,6 +337,7 @@ pub async fn spawn_agent(
             terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
             log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(windows)]
             job_object: None,
         });
@@ -1011,6 +1013,7 @@ pub async fn spawn_agent(
         terminal_title,
         last_output_at,
         log_path,
+        log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
         #[cfg(windows)]
         job_object,
     })
@@ -1094,7 +1097,7 @@ fn persisted_agent_config(session_id: &str) -> Option<AgentConfig> {
     }
 
     let wardian_home = get_wardian_home()?;
-    let state_path = wardian_home.join("wardian_state.json");
+    let state_path = wardian_home.join("settings/state.json");
     let contents = std::fs::read_to_string(state_path).ok()?;
     let configs = serde_json::from_str::<Vec<AgentConfig>>(&contents).ok()?;
     configs
@@ -2342,6 +2345,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         current_status: std::sync::Arc<std::sync::Mutex<String>>,
         last_output_at: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
         log_path: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+        log_last_modified: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     }
 
     let snapshots: Vec<AgentSnapshot> = {
@@ -2359,6 +2363,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 current_status: agent.current_status.clone(),
                 last_output_at: agent.last_output_at.clone(),
                 log_path: agent.log_path.clone(),
+                log_last_modified: agent.log_last_modified.clone(),
             })
             .collect()
     };
@@ -2507,99 +2512,126 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 
             // Provider-aware log parsing for status/query enrichment
             if let Some(ref path) = *log_path_lock {
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    match snap.provider.as_str() {
-                        "codex" => {
-                            let lines: Vec<serde_json::Value> = content
-                                .lines()
-                                .filter_map(|l| serde_json::from_str(l).ok())
-                                .collect();
-
-                            q_count = lines
-                                .iter()
-                                .filter(|l| {
-                                    l.get("type").and_then(|v| v.as_str()) == Some("event_msg")
-                                        && l.get("payload")
-                                            .and_then(|v| v.get("type"))
-                                            .and_then(|v| v.as_str())
-                                            == Some("user_message")
-                                })
-                                .count();
-
-                            if let Some(meta) = lines.iter().find(|l| {
-                                l.get("type").and_then(|v| v.as_str()) == Some("session_meta")
-                            }) {
-                                if let Some(ts) = meta
-                                    .get("payload")
-                                    .and_then(|v| v.get("timestamp"))
-                                    .and_then(|v| v.as_str())
-                                {
-                                    i_ts = Some(ts.to_string());
-                                }
-                            }
-
-                            if let Some(status) = codex_status_from_log(&lines) {
-                                *snap.current_status.lock().unwrap() = status;
-                            }
+                let mut should_parse = true;
+                let mut new_mtime = None;
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    if let Ok(modified) = metadata.modified() {
+                        let last_mod = *snap.log_last_modified.lock().unwrap();
+                        if last_mod == Some(modified) {
+                            should_parse = false;
+                        } else {
+                            new_mtime = Some(modified);
                         }
-                        "claude" => {
-                            // Claude logs are JSONL — one JSON object per line
-                            let lines: Vec<serde_json::Value> = content
-                                .lines()
-                                .filter_map(|l| serde_json::from_str(l).ok())
-                                .collect();
+                    }
+                }
 
-                            q_count = lines
-                                .iter()
-                                .filter(|l| {
-                                    l.get("type").and_then(|v| v.as_str()) == Some("user")
-                                        && claude_is_real_user_query(l)
-                                })
-                                .count();
+                if should_parse {
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        if let Some(mtime) = new_mtime {
+                            *snap.log_last_modified.lock().unwrap() = Some(mtime);
+                        }
+                        match snap.provider.as_str() {
+                            "codex" => {
+                                let lines: Vec<serde_json::Value> = content
+                                    .lines()
+                                    .filter_map(|l| serde_json::from_str(l).ok())
+                                    .collect();
 
-                            if let Some(first) = lines.first() {
-                                if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
-                                    i_ts = Some(ts.to_string());
-                                } else if let Some(ts_num) =
-                                    first.get("timestamp").and_then(|v| v.as_i64())
-                                {
-                                    // Fallback if timestamp is an epoch number
-                                    if let Some(dt) =
-                                        chrono::DateTime::from_timestamp_millis(ts_num)
+                                q_count = lines
+                                    .iter()
+                                    .filter(|l| {
+                                        l.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+                                            && l.get("payload")
+                                                .and_then(|v| v.get("type"))
+                                                .and_then(|v| v.as_str())
+                                                == Some("user_message")
+                                    })
+                                    .count();
+
+                                if let Some(meta) = lines.iter().find(|l| {
+                                    l.get("type").and_then(|v| v.as_str()) == Some("session_meta")
+                                }) {
+                                    if let Some(ts) = meta
+                                        .get("payload")
+                                        .and_then(|v| v.get("timestamp"))
+                                        .and_then(|v| v.as_str())
                                     {
-                                        i_ts = Some(
-                                            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                                        );
+                                        i_ts = Some(ts.to_string());
                                     }
                                 }
-                            }
 
-                            let current_status = snap.current_status.lock().unwrap().clone();
-                            if current_status != "Action Needed" {
-                                if let Some(status) = claude_status_from_log(&lines) {
+                                if let Some(status) = codex_status_from_log(&lines) {
                                     *snap.current_status.lock().unwrap() = status;
                                 }
                             }
-                        }
-                        "opencode" => {
-                            // OpenCode status and query count come from PTY events now.
-                            // Keep the discovered storage path for diagnostics only.
-                        }
-                        _ => {
-                            // Gemini logs are a single JSON object with a messages array
-                            if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
-                                if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
-                                    q_count = msgs
-                                        .iter()
-                                        .filter(|m| {
-                                            m.get("type").and_then(|v| v.as_str()) == Some("user")
-                                                || m.get("role").and_then(|v| v.as_str())
-                                                    == Some("user")
-                                        })
-                                        .count();
+                            "claude" => {
+                                // Claude logs are JSONL — one JSON object per line
+                                let lines: Vec<serde_json::Value> = content
+                                    .lines()
+                                    .filter_map(|l| serde_json::from_str(l).ok())
+                                    .collect();
+
+                                q_count = lines
+                                    .iter()
+                                    .filter(|l| {
+                                        l.get("type").and_then(|v| v.as_str()) == Some("user")
+                                            && claude_is_real_user_query(l)
+                                    })
+                                    .count();
+
+                                if let Some(first) = lines.first() {
+                                    if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
+                                        i_ts = Some(ts.to_string());
+                                    } else if let Some(ts_num) =
+                                        first.get("timestamp").and_then(|v| v.as_i64())
+                                    {
+                                        // Fallback if timestamp is an epoch number
+                                        if let Some(dt) =
+                                            chrono::DateTime::from_timestamp_millis(ts_num)
+                                        {
+                                            i_ts = Some(
+                                                dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                            );
+                                        }
+                                    }
                                 }
-                                if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
-                                    i_ts = Some(st.to_string());
+
+                                let current_status = snap.current_status.lock().unwrap().clone();
+                                if current_status != "Action Needed" {
+                                    if let Some(status) = claude_status_from_log(&lines) {
+                                        *snap.current_status.lock().unwrap() = status;
+                                    }
+                                }
+                            }
+                            "opencode" => {
+                                // OpenCode status and query count come from PTY events now.
+                                // Keep the discovered storage path for diagnostics only.
+                            }
+                            _ => {
+                                // Gemini logs are a single JSON object with a messages array
+                                if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
+                                    if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
+                                        q_count = msgs
+                                            .iter()
+                                            .filter(|m| {
+                                                m.get("type").and_then(|v| v.as_str()) == Some("user")
+                                                    || m.get("role").and_then(|v| v.as_str())
+                                                        == Some("user")
+                                            })
+                                            .count();
+                                        
+                                        if let Some(last_msg) = msgs.last() {
+                                            let msg_type = last_msg.get("type").and_then(|v| v.as_str()).or_else(|| last_msg.get("role").and_then(|v| v.as_str()));
+                                            if msg_type == Some("user") {
+                                                *snap.current_status.lock().unwrap() = "Processing...".to_string();
+                                            } else if msg_type == Some("gemini") || msg_type == Some("assistant") {
+                                                *snap.current_status.lock().unwrap() = "Idle".to_string();
+                                            }
+                                        }
+                                    }
+                                    if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
+                                        i_ts = Some(st.to_string());
+                                    }
                                 }
                             }
                         }

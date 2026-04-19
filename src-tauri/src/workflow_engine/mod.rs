@@ -148,7 +148,7 @@ pub fn get_workflows_dir() -> Option<PathBuf> {
 }
 
 pub fn get_scheduled_runs_path() -> Option<PathBuf> {
-    get_wardian_home().map(|h| h.join("scheduled_runs.json"))
+    get_wardian_home().map(|h| h.join("scheduled_workflows.json"))
 }
 
 pub fn load_scheduled_runs() -> Vec<crate::models::ScheduledRun> {
@@ -445,7 +445,7 @@ fn describe_schedule(schedule: &crate::models::ScheduleDefinition) -> String {
 }
 
 pub fn get_logs_dir(workflow_id: &str) -> Option<PathBuf> {
-    get_wardian_home().map(|h| h.join("workflow_logs").join(workflow_id))
+    get_wardian_home().map(|h| h.join("logs/workflows").join(workflow_id))
 }
 
 pub fn get_library_path() -> Option<PathBuf> {
@@ -1806,7 +1806,7 @@ pub async fn run_workflow(
                                 Some(agent.config.clone())
                             } else if let Some(home) = get_wardian_home() {
                                 if let Ok(data) =
-                                    std::fs::read_to_string(home.join("wardian_state.json"))
+                                    std::fs::read_to_string(home.join("settings/state.json"))
                                 {
                                     if let Ok(configs) =
                                         serde_json::from_str::<Vec<crate::models::AgentConfig>>(

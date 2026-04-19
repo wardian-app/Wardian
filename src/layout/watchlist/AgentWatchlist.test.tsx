@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import AgentWatchlist from './AgentWatchlist';
 import type { AgentConfig, AgentTelemetry } from '../../types';
-import type { Watchlist } from './types';
+import type { Watchlist, WatchlistPrefs, AgentInteractions } from './types';
 
 // Mock matchMedia
 Object.defineProperty(window, 'matchMedia', {
@@ -70,6 +70,17 @@ describe('AgentWatchlist', () => {
     onActiveListChange: mockOnActiveListChange,
     onWatchlistsChange: mockOnWatchlistsChange,
   };
+
+  const defaultPrefs: WatchlistPrefs = {
+    columns: [
+      { id: 'uptime', visible: false },
+      { id: 'provider_model', visible: false },
+      { id: 'last_queried', visible: true },
+    ],
+    sort: null,
+  };
+  const defaultInteractions: AgentInteractions = {};
+  const mockOnPrefsChange = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -139,10 +150,34 @@ describe('AgentWatchlist', () => {
   it('shows Start instead of Restart for off agents', async () => {
     render(<AgentWatchlist {...defaultProps} />);
     const agentRow = screen.getByText('Beta').closest('.watchlist-row');
-    
+
     fireEvent.contextMenu(agentRow!);
-    
+
     expect(screen.getByText('Start')).toBeInTheDocument();
     expect(screen.queryByText('Restart')).not.toBeInTheDocument();
+  });
+
+  it('shows last_queried column header when visible in prefs', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        prefs={defaultPrefs}
+        onPrefsChange={mockOnPrefsChange}
+        interactions={defaultInteractions}
+      />
+    );
+    expect(screen.getByText('Last')).toBeInTheDocument();
+  });
+
+  it('hides uptime column when not visible in prefs', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        prefs={defaultPrefs}
+        onPrefsChange={mockOnPrefsChange}
+        interactions={defaultInteractions}
+      />
+    );
+    expect(screen.queryByText('Up')).not.toBeInTheDocument();
   });
 });
