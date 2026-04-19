@@ -1,0 +1,26 @@
+# User Guide Index
+
+Use this index to find user-facing documentation by task.
+
+## First-Time Setup
+
+- [Getting Started](./getting-started.md)
+- [UI Overview](./ui-overview.md)
+
+## Agent Operations
+
+- [Class Management](./class-management.md)
+- [Library](./library.md)
+- [Command Panel](./command-panel.md)
+- [Watchlists](./watchlists.md)
+- [Explorer](./explorer.md)
+
+## Source Control and Runtime Settings
+
+- [Source Control](./source-control.md)
+- [Settings](./settings.md)
+
+## Workflows
+
+- [Workflow View](./workflows.md)
+- [Workflow Reference](../workflows/index.md)
