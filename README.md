@@ -16,6 +16,17 @@ Wardian is a governance layer for AI orchestration. It centralizes PTY managemen
 
 ---
 
+## Download
+
+Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are available from the [Releases page](https://github.com/tangemicioglu/Wardian/releases).
+
+> **Note:** Wardian binaries are currently unsigned. On first launch:
+> - **Windows:** SmartScreen will show a warning. Click "More info" → "Run anyway."
+> - **macOS:** Gatekeeper will refuse to open the app. Right-click the app and choose "Open," or run `xattr -cr /Applications/Wardian.app` from Terminal.
+> - **Linux:** `.AppImage` is portable (`chmod +x` and run); `.deb` installs via `sudo dpkg -i wardian_*.deb`.
+
+---
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
