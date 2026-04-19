@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-04-19
-- **Decider:** Tan Gemicioglu
+- **Decider:** Wardian Claude
 
 ## Context and Problem Statement
 
@@ -17,6 +17,7 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 ### Scope
 
 **In scope:**
+
 - Synchronized version bumps across `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`.
 - Automated CHANGELOG.md generation from Conventional Commits, via release-please.
 - GitHub Actions workflow that builds unsigned multi-OS bundles on tag push and publishes them to a GitHub Release.
@@ -24,6 +25,7 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 - Pipeline-level awareness of future CLI binaries (stubbed but disabled).
 
 **Out of scope (deferred to follow-up specs):**
+
 - Windows EV code-signing and macOS Developer ID + notarization.
 - Tauri auto-updater (`tauri-plugin-updater`).
 - OS package managers: winget, Scoop, AUR, Homebrew Cask, Flathub.
@@ -34,16 +36,19 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 **Tooling:** `googleapis/release-please-action@v4` runs on every push to `main`.
 
 **Files introduced at repo root:**
+
 - `release-please-config.json` — configures Wardian as a single-package manifest release, enables CHANGELOG generation with Keep-a-Changelog section taxonomy (Features, Bug Fixes, Performance, Documentation, Miscellaneous), and uses `extra-files` to keep `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` in sync with `package.json`.
 - `.release-please-manifest.json` — tracks the current version (`0.2.1`).
 - `CHANGELOG.md` — Keep-a-Changelog format, seeded with the `[0.2.1]` entry so release-please has a known anchor.
 
 **Flow:**
+
 1. Every push to `main` updates a single long-lived "chore(main): release X.Y.Z" PR. The PR accumulates CHANGELOG entries and bumps version numbers in all three files.
 2. Maintainer merges the Release PR when a release is desired. The action creates a git tag `v{version}` and a draft GitHub Release pointing at that tag.
 3. Tag push triggers the build workflow (Component 2).
 
 **Semver mapping** (enforced at commit time by convention, not tooling):
+
 - `feat:` → minor.
 - `fix:` / `perf:` → patch.
 - `feat!:` / `BREAKING CHANGE:` footer → major (suppressed to minor while `<1.0.0` via release-please's `bump-minor-pre-major` option).
@@ -58,10 +63,12 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 **File:** `.github/workflows/release.yml` (new, independent of `ci.yml`).
 
 **Triggers:**
+
 - `push` of tags matching `v*`.
 - `workflow_dispatch` for dry-run validation from a feature branch (produces artifacts, does not create a release).
 
 **Jobs:**
+
 1. `create-release` — runs once on a Linux runner. Creates a draft GitHub Release from the tag. Extracts the CHANGELOG entry for this version and sets it as the release body. Detects prerelease suffix and sets the `prerelease` flag accordingly.
 2. `build` — matrix over four runners, all running `tauri-apps/tauri-action@v0` with `releaseId` pointing at the draft from step 1:
    - `windows-latest`: produces NSIS `.exe`.
@@ -73,6 +80,7 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 **Failure behavior:** if any matrix entry fails, the release stays as a draft. Maintainer fixes the issue and either re-runs the workflow against the same tag or pushes a new patch tag.
 
 **Artifacts produced per release (5):**
+
 - `Wardian_{version}_x64-setup.exe` (Windows NSIS)
 - `Wardian_{version}_aarch64.dmg` (macOS Apple Silicon)
 - `Wardian_{version}_x64.dmg` (macOS Intel)
@@ -90,12 +98,14 @@ The Tauri bundle configuration (`src-tauri/tauri.conf.json` → `bundle.resource
 ### File Changes Introduced
 
 **New:**
+
 - `.github/workflows/release.yml`
 - `release-please-config.json`
 - `.release-please-manifest.json`
 - `CHANGELOG.md`
 
 **Modified:**
+
 - `README.md` — add a "Download" section linking to the GitHub Releases page.
 - `src-tauri/tauri.conf.json` — verify `bundle.targets` is set to produce NSIS (not MSI) on Windows and both `.deb` and `.appimage` on Linux.
 
@@ -107,6 +117,7 @@ The Tauri bundle configuration (`src-tauri/tauri.conf.json` → `bundle.resource
 4. **First preview release**: cut `v0.3.0-preview.1` shortly after to validate the prerelease marking path.
 
 **Rollout order on the implementation branch:**
+
 1. Add `CHANGELOG.md` stub entry for `0.2.1`.
 2. Add release-please config and workflow. Merge → confirm Release PR opens.
 3. Add `release.yml`. Validate via `workflow_dispatch`.
