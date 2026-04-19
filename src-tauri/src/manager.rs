@@ -2516,7 +2516,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 let mut new_mtime = None;
                 if let Ok(metadata) = std::fs::metadata(path) {
                     if let Ok(modified) = metadata.modified() {
-                        let last_mod = snap.log_last_modified.lock().unwrap().clone();
+                        let last_mod = *snap.log_last_modified.lock().unwrap();
                         if last_mod == Some(modified) {
                             should_parse = false;
                         } else {
