@@ -23,6 +23,9 @@ describe('ExplorerPanel', () => {
     render(<ExplorerPanel selectedAgentIds={new Set()} />);
 
     const openButton = await screen.findByRole('button', { name: 'Open in local file system' });
+    expect(openButton).toBeInTheDocument();
+    expect(screen.queryByText('Open')).not.toBeInTheDocument();
+
     await userEvent.click(openButton);
 
     await waitFor(() => {

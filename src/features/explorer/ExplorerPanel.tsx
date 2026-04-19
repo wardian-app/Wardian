@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { FolderOpen } from 'lucide-react';
 import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { GitStatusResult } from '../../types';
@@ -159,9 +160,9 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
             aria-label="Open in local file system"
             title="Open in local file system"
             onClick={handleOpenRoot}
-            className="shrink-0 rounded-md border border-wardian-border px-2 py-1 text-[11px] font-bold text-muted hover:text-primary hover:bg-wardian-card-bg-muted transition-colors"
+            className="shrink-0 rounded-md border border-wardian-border p-1 text-muted hover:text-primary hover:bg-wardian-card-bg-muted transition-colors"
           >
-            Open
+            <FolderOpen aria-hidden="true" size={14} strokeWidth={2} />
           </button>
         </div>
       )}
