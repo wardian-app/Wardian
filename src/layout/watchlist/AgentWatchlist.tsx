@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { AgentConfig, AgentTelemetry } from "../../types";
-import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId, AgentTeam, WatchlistDisplayItem } from "./types";
+import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId, AgentTeam, WatchlistDisplayItem, WatchlistEntry } from "./types";
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
 
 const COLUMN_WIDTHS: Record<OptionalColumnId, string> = {
@@ -74,12 +74,15 @@ interface AgentWatchlistProps {
   onClear: (agentId: string) => void;
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
+  onAddAgentsToList?: (listId: string, agentIds: string[]) => void;
+  onRemoveAgentsFromList?: (listId: string, agentIds: string[]) => void;
   onDelete: (agentId: string) => void;
   onCreateTeam?: (agentIds: string[]) => void;
   onUngroupTeam?: (teamId: string) => void;
   onRenameTeam?: (teamId: string, newName: string) => Promise<void>;
   onAddAgentToTeam?: (teamId: string, agentId: string) => void;
   onRemoveAgentFromTeam?: (teamId: string, agentId: string, targetAgentId?: string, position?: DropPosition) => void;
+  onRemoveAgentFromTeamAtEntry?: (teamId: string, agentId: string, targetEntry: WatchlistEntry, position: DropPosition, targetListId: string) => void;
   onReorderTeamMember?: (teamId: string, draggedAgentId: string, targetAgentId: string, position?: DropPosition) => void;
   collapsed: boolean;
   watchlists: Watchlist[];
@@ -109,12 +112,15 @@ export default function AgentWatchlist({
   onClear,
   onAddToList,
   onRemoveFromList,
+  onAddAgentsToList,
+  onRemoveAgentsFromList,
   onDelete,
   onCreateTeam,
   onUngroupTeam,
   onRenameTeam,
   onAddAgentToTeam,
   onRemoveAgentFromTeam,
+  onRemoveAgentFromTeamAtEntry,
   onReorderTeamMember,
   collapsed,
   watchlists,
@@ -464,9 +470,25 @@ export default function AgentWatchlist({
           wasDragging.current = true;
         }
       } else if (target.type === "team" && target.position !== "inside") {
-        if (sourceTeam) onRemoveAgentFromTeam?.(sourceTeam.id, draggedAgentId);
-        if (activeListId === "all") insertAgentAroundTeam(draggedAgentId, target.teamId, target.position);
-        else await moveAgentEntryInActiveList(draggedAgentId, target);
+        if (sourceTeam) {
+          if (activeListId !== "all" && onRemoveAgentFromTeamAtEntry) {
+            onRemoveAgentFromTeamAtEntry(
+              sourceTeam.id,
+              draggedAgentId,
+              { type: "team", teamId: target.teamId },
+              target.position,
+              activeListId,
+            );
+          } else {
+            onRemoveAgentFromTeam?.(sourceTeam.id, draggedAgentId);
+            if (activeListId === "all") insertAgentAroundTeam(draggedAgentId, target.teamId, target.position);
+            else await moveAgentEntryInActiveList(draggedAgentId, target);
+          }
+        } else if (activeListId === "all") {
+          insertAgentAroundTeam(draggedAgentId, target.teamId, target.position);
+        } else {
+          await moveAgentEntryInActiveList(draggedAgentId, target);
+        }
         wasDragging.current = true;
       } else if (target.type === "agent" && sourceTeam?.agentIds.includes(target.agentId)) {
         onReorderTeamMember?.(sourceTeam.id, draggedAgentId, target.agentId, target.position);
@@ -985,6 +1007,14 @@ export default function AgentWatchlist({
             onRemoveFromList(listId, agentId);
             setContextMenu(p => ({ ...p, visible: false }));
           }}
+          onAddAgentsToList={onAddAgentsToList ? (listId, ids) => {
+            onAddAgentsToList(listId, ids);
+            setContextMenu(p => ({ ...p, visible: false }));
+          } : undefined}
+          onRemoveAgentsFromList={onRemoveAgentsFromList ? (listId, ids) => {
+            onRemoveAgentsFromList(listId, ids);
+            setContextMenu(p => ({ ...p, visible: false }));
+          } : undefined}
           onDelete={onDelete}
           onCreateTeam={onCreateTeam}
           onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
@@ -1023,6 +1053,14 @@ export default function AgentWatchlist({
               onRemoveFromList(listId, id);
               setTeamContextMenu((p) => ({ ...p, visible: false }));
             }}
+            onAddAgentsToList={onAddAgentsToList ? (listId, ids) => {
+              onAddAgentsToList(listId, ids);
+              setTeamContextMenu((p) => ({ ...p, visible: false }));
+            } : undefined}
+            onRemoveAgentsFromList={onRemoveAgentsFromList ? (listId, ids) => {
+              onRemoveAgentsFromList(listId, ids);
+              setTeamContextMenu((p) => ({ ...p, visible: false }));
+            } : undefined}
             onDelete={onDelete}
             onUngroupTeam={(id) => {
               onUngroupTeam?.(id);

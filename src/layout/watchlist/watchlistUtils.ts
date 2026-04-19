@@ -55,6 +55,13 @@ function dedupeEntries(entries: WatchlistEntry[]): WatchlistEntry[] {
   });
 }
 
+function sameWatchlistEntry(a: WatchlistEntry, b: WatchlistEntry): boolean {
+  if (a.type !== b.type) return false;
+  if (a.type === "team" && b.type === "team") return a.teamId === b.teamId;
+  if (a.type === "agent" && b.type === "agent") return a.agentId === b.agentId;
+  return false;
+}
+
 export function getWatchlistEntries(list: Watchlist): WatchlistEntry[] {
   const rawEntries = (list as Watchlist & { entries?: unknown }).entries;
   if (Array.isArray(rawEntries)) {
@@ -192,7 +199,7 @@ export function addAgentsToList(
   for (const agentId of agentIds) {
     const team = teamForAgent(teams, agentId);
     const entry: WatchlistEntry = team ? { type: "team", teamId: team.id } : { type: "agent", agentId };
-    if (!next.some((existing) => JSON.stringify(existing) === JSON.stringify(entry))) {
+    if (!next.some((existing) => sameWatchlistEntry(existing, entry))) {
       next.push(entry);
     }
   }
@@ -494,6 +501,67 @@ export function removeAgentFromTeam(
         });
 
         return inserted ? nextEntries : [...baseEntries, { type: "agent", agentId }];
+      })(),
+    })),
+  });
+}
+
+export function removeAgentFromTeamAtEntry(
+  state: WatchlistState,
+  teamId: string,
+  agentId: string,
+  targetEntry: WatchlistEntry,
+  position: "before" | "after",
+  targetListId: string,
+): WatchlistState {
+  const team = state.teams.find((candidate) => candidate.id === teamId);
+  if (!team || !team.agentIds.includes(agentId)) return state;
+  const remainingTeamMembers = team.agentIds.filter((id) => id !== agentId);
+  const teams = state.teams
+    .map((candidate) =>
+      candidate.id === teamId
+        ? { ...candidate, agentIds: remainingTeamMembers }
+        : candidate,
+    )
+    .filter((candidate) => candidate.agentIds.length > 0);
+
+  const removedAgentEntry: WatchlistEntry = { type: "agent", agentId };
+  return normalizeWatchlistState({
+    version: 2,
+    teams,
+    watchlists: state.watchlists.map((list) => ({
+      ...list,
+      entries: (() => {
+        const originalEntries = getWatchlistEntries(list);
+        const baseEntries = originalEntries.flatMap((entry): WatchlistEntry[] => {
+          if (entry.type === "team" && entry.teamId === teamId) {
+            return remainingTeamMembers.length > 0 ? [{ type: "team", teamId }] : [];
+          }
+          if (entry.type === "agent" && entry.agentId === agentId) return [];
+          return [entry];
+        });
+
+        if (list.id !== targetListId) {
+          let inserted = false;
+          const nextEntries = originalEntries.flatMap((entry): WatchlistEntry[] => {
+            if (entry.type === "team" && entry.teamId === teamId) {
+              inserted = true;
+              const teamEntry = remainingTeamMembers.length > 0 ? [{ type: "team" as const, teamId }] : [];
+              return [...teamEntry, removedAgentEntry];
+            }
+            if (entry.type === "agent" && entry.agentId === agentId) return [];
+            return [entry];
+          });
+          return inserted ? nextEntries : baseEntries;
+        }
+
+        let inserted = false;
+        const nextEntries = baseEntries.flatMap((entry): WatchlistEntry[] => {
+          if (!sameWatchlistEntry(entry, targetEntry)) return [entry];
+          inserted = true;
+          return position === "after" ? [entry, removedAgentEntry] : [removedAgentEntry, entry];
+        });
+        return inserted ? nextEntries : [...baseEntries, removedAgentEntry];
       })(),
     })),
   });

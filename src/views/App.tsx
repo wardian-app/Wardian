@@ -15,9 +15,10 @@ import {
   ungroupTeam,
   addAgentToTeam,
   removeAgentFromTeam,
+  removeAgentFromTeamAtEntry,
   reorderTeamMember,
 } from "../layout/watchlist/watchlistUtils";
-import type { Watchlist, WatchlistPrefs, AgentInteractions, AgentTeam, WatchlistState } from "../layout/watchlist/types";
+import type { Watchlist, WatchlistPrefs, AgentInteractions, AgentTeam, WatchlistState, WatchlistEntry } from "../layout/watchlist/types";
 import { DEFAULT_WATCHLIST_PREFS } from "../layout/watchlist/types";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -218,15 +219,23 @@ function AppBody() {
   }, []);
 
   const handleAddToList = async (listId: string, agentId: string) => {
+    await handleAddAgentsToList(listId, [agentId]);
+  };
+
+  const handleAddAgentsToList = async (listId: string, agentIds: string[]) => {
     const updated = watchlists.map((l) =>
-      l.id === listId ? addAgentsToList(l, [agentId], teams) : l,
+      l.id === listId ? addAgentsToList(l, agentIds, teams) : l,
     );
     await persistWatchlists(updated);
   };
 
   const handleRemoveFromList = async (listId: string, agentId: string) => {
+    await handleRemoveAgentsFromList(listId, [agentId]);
+  };
+
+  const handleRemoveAgentsFromList = async (listId: string, agentIds: string[]) => {
     const updated = watchlists.map((l) =>
-      l.id === listId ? removeAgentsFromList(l, [agentId], teams) : l,
+      l.id === listId ? removeAgentsFromList(l, agentIds, teams) : l,
     );
     await persistWatchlists(updated);
   };
@@ -258,6 +267,23 @@ function AppBody() {
 
   const handleRemoveAgentFromTeam = async (teamId: string, agentId: string, targetAgentId?: string, position: "before" | "after" = "before") => {
     await persistWatchlistState(removeAgentFromTeam({ version: 2, watchlists, teams }, teamId, agentId, targetAgentId, position));
+  };
+
+  const handleRemoveAgentFromTeamAtEntry = async (
+    teamId: string,
+    agentId: string,
+    targetEntry: WatchlistEntry,
+    position: "before" | "after",
+    targetListId: string,
+  ) => {
+    await persistWatchlistState(removeAgentFromTeamAtEntry(
+      { version: 2, watchlists, teams },
+      teamId,
+      agentId,
+      targetEntry,
+      position,
+      targetListId,
+    ));
   };
 
   const handleReorderTeamMember = async (teamId: string, draggedAgentId: string, targetAgentId: string, position: "before" | "after" = "before") => {
@@ -712,6 +738,8 @@ function AppBody() {
           onDelete={onDelete}
           onAddToList={handleAddToList}
           onRemoveFromList={handleRemoveFromList}
+          onAddAgentsToList={handleAddAgentsToList}
+          onRemoveAgentsFromList={handleRemoveAgentsFromList}
           collapsed={rightCollapsed}
           watchlists={watchlists}
           activeListId={activeListId}
@@ -723,6 +751,7 @@ function AppBody() {
           onRenameTeam={handleRenameTeam}
           onAddAgentToTeam={handleAddAgentToTeam}
           onRemoveAgentFromTeam={handleRemoveAgentFromTeam}
+          onRemoveAgentFromTeamAtEntry={handleRemoveAgentFromTeamAtEntry}
           onReorderTeamMember={handleReorderTeamMember}
           prefs={watchlistPrefs}
           onPrefsChange={persistWatchlistPrefs}

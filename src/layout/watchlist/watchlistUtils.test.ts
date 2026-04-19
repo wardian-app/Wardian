@@ -21,9 +21,10 @@ import {
   ungroupTeam,
   addAgentToTeam,
   removeAgentFromTeam,
+  removeAgentFromTeamAtEntry,
   reorderTeamMember,
 } from "./watchlistUtils";
-import type { Watchlist, WatchlistPrefs, WatchlistState } from "./types";
+import type { Watchlist, WatchlistEntry, WatchlistPrefs, WatchlistState } from "./types";
 import type { AgentConfig, AgentTelemetry } from "../../types";
 
 // ── reorderWithinList ──────────────────────────────────────────────────
@@ -168,6 +169,18 @@ describe("team display helpers", () => {
       { type: "team", teamId: "team-1" },
       { type: "agent", agentId: "x" },
     ]);
+  });
+
+  it("detects duplicate entries by fields instead of object serialization order", () => {
+    const list: Watchlist = {
+      id: "l1",
+      name: "List 1",
+      entries: [{ agentId: "x", type: "agent" } as unknown as WatchlistEntry],
+    };
+
+    const updated = addAgentsToList(list, ["x"], []);
+
+    expect(getWatchlistEntries(updated)).toEqual([{ type: "agent", agentId: "x" }]);
   });
 
   it("bulk-removes selected agents and removes the whole team when a member is removed", () => {
@@ -365,6 +378,36 @@ describe("team mutations", () => {
     expect(getWatchlistEntries(next.watchlists[0])).toEqual([
       { type: "team", teamId: "team-1" },
       { type: "agent", agentId: "c" },
+      { type: "agent", agentId: "a" },
+    ]);
+  });
+
+  it("removes a member from a team and places it before a team entry in one watchlist mutation", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [
+        { id: "today", name: "Today", entries: [{ type: "team", teamId: "team-1" }] },
+        { id: "later", name: "Later", entries: [{ type: "team", teamId: "team-1" }] },
+      ],
+    });
+
+    const next = removeAgentFromTeamAtEntry(
+      state,
+      "team-1",
+      "a",
+      { type: "team", teamId: "team-1" },
+      "before",
+      "today",
+    );
+
+    expect(next.teams[0].agentIds).toEqual(["b"]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "agent", agentId: "a" },
+      { type: "team", teamId: "team-1" },
+    ]);
+    expect(getWatchlistEntries(next.watchlists[1])).toEqual([
+      { type: "team", teamId: "team-1" },
       { type: "agent", agentId: "a" },
     ]);
   });

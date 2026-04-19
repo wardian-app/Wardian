@@ -20,6 +20,8 @@ export interface AgentContextMenuProps {
   onClear: (agentId: string) => void;
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
+  onAddAgentsToList?: (listId: string, agentIds: string[]) => void;
+  onRemoveAgentsFromList?: (listId: string, agentIds: string[]) => void;
   onDelete: (agentId: string) => void;
   onCreateTeam?: (agentIds: string[]) => void;
   onUngroupTeam?: (teamId: string) => void;
@@ -44,6 +46,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   onClear,
   onAddToList,
   onRemoveFromList,
+  onAddAgentsToList,
+  onRemoveAgentsFromList,
   onDelete,
   onCreateTeam,
   onUngroupTeam,
@@ -195,7 +199,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
                   key={l.id}
                   className="context-menu-item"
                   onClick={() => {
-                    forEachTarget((id) => onAddToList(l.id, id));
+                    if (onAddAgentsToList) onAddAgentsToList(l.id, targetAgentIds);
+                    else forEachTarget((id) => onAddToList(l.id, id));
                     onClose();
                   }}
                 >
@@ -226,7 +231,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
                   key={l.id}
                   className="context-menu-item"
                   onClick={() => {
-                    forEachTarget((id) => onRemoveFromList(l.id, id));
+                    if (onRemoveAgentsFromList) onRemoveAgentsFromList(l.id, targetAgentIds);
+                    else forEachTarget((id) => onRemoveFromList(l.id, id));
                     onClose();
                   }}
                 >

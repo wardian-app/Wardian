@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { GridView } from './GridView';
 import type { AgentConfig, AgentTelemetry } from '../types';
 
@@ -56,16 +56,24 @@ describe('GridView maximize behavior', () => {
   it('does not size each mobile card to the full viewport height', () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
 
-    const { container } = renderGrid(null);
+    try {
+      const { container } = renderGrid(null);
 
-    const root = container.firstElementChild as HTMLElement;
-    expect(root.style.gridTemplateColumns).toBe('1fr');
-    expect(root.style.gridAutoRows).not.toBe('100%');
-    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
-    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
-
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+      const root = container.firstElementChild as HTMLElement;
+      expect(root.style.gridTemplateColumns).toBe('1fr');
+      expect(root.style.gridAutoRows).not.toBe('100%');
+      expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+      expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+    }
   });
 
   it('maximized terminals fill the grid container', () => {

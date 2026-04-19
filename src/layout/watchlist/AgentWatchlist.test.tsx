@@ -29,10 +29,13 @@ describe('AgentWatchlist', () => {
   const mockOnRestart = vi.fn();
   const mockOnClear = vi.fn();
   const mockOnDelete = vi.fn();
+  const mockOnAddAgentsToList = vi.fn();
+  const mockOnRemoveAgentsFromList = vi.fn();
   const mockOnCreateTeam = vi.fn();
   const mockOnUngroupTeam = vi.fn();
   const mockOnAddAgentToTeam = vi.fn();
   const mockOnRemoveAgentFromTeam = vi.fn();
+  const mockOnRemoveAgentFromTeamAtEntry = vi.fn();
   const mockOnRenameTeam = vi.fn(async () => {});
   const mockOnReorderTeamMember = vi.fn();
   const mockOnActiveListChange = vi.fn();
@@ -76,6 +79,9 @@ describe('AgentWatchlist', () => {
     onReorderTeamMember: mockOnReorderTeamMember,
     onAddToList: vi.fn(),
     onRemoveFromList: vi.fn(),
+    onAddAgentsToList: mockOnAddAgentsToList,
+    onRemoveAgentsFromList: mockOnRemoveAgentsFromList,
+    onRemoveAgentFromTeamAtEntry: mockOnRemoveAgentFromTeamAtEntry,
     collapsed: false,
     watchlists: sampleWatchlists,
     activeListId: 'all',
@@ -273,8 +279,36 @@ describe('AgentWatchlist', () => {
     fireEvent.mouseEnter(addButton);
     fireEvent.click(screen.getByRole('button', { name: '1. Later' }));
 
-    expect(defaultProps.onAddToList).toHaveBeenCalledWith('later', 'agent-1');
-    expect(defaultProps.onAddToList).toHaveBeenCalledWith('later', 'agent-2');
+    expect(mockOnAddAgentsToList).toHaveBeenCalledWith('later', ['agent-1', 'agent-2']);
+    expect(defaultProps.onAddToList).not.toHaveBeenCalled();
+  });
+
+  it('batches list additions and removals from a multi-selection context menu', async () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        selectedAgentIds={new Set(['agent-1', 'agent-2'])}
+        watchlists={[
+          { id: 'inbox', name: 'Inbox', entries: [{ type: 'agent', agentId: 'agent-1' }, { type: 'agent', agentId: 'agent-2' }] },
+          { id: 'later', name: 'Later', entries: [] },
+        ]}
+      />
+    );
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row')!;
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Add Selected to List' }));
+    fireEvent.click(screen.getByRole('button', { name: '1. Later' }));
+
+    expect(mockOnAddAgentsToList).toHaveBeenCalledWith('later', ['agent-1', 'agent-2']);
+    expect(defaultProps.onAddToList).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Remove Selected from List' }));
+    fireEvent.click(screen.getByRole('button', { name: '1. Inbox' }));
+
+    expect(mockOnRemoveAgentsFromList).toHaveBeenCalledWith('inbox', ['agent-1', 'agent-2']);
+    expect(defaultProps.onRemoveFromList).not.toHaveBeenCalled();
   });
 
   it('renders team blocks even when a sort is active', async () => {
@@ -582,6 +616,38 @@ describe('AgentWatchlist', () => {
     fireEvent.mouseUp(screen.getByText('Gamma').closest('.watchlist-row')!);
 
     expect(mockOnRemoveAgentFromTeam).toHaveBeenCalledWith('team-1', 'agent-1', 'agent-3', 'before');
+  });
+
+  it('extracts a team member to a team edge in a watchlist with one atomic callback', async () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        watchlists={[
+          {
+            id: 'today',
+            name: 'Today',
+            entries: [{ type: 'team', teamId: 'team-1' }],
+          },
+        ]}
+        activeListId="today"
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+      />
+    );
+    const beforeZone = screen.getByTestId('team-drop-before-team-1');
+
+    fireEvent.mouseDown(within(screen.getByTestId('team-block-team-1')).getByText('Alpha').closest('.watchlist-row')!);
+    fireEvent.mouseEnter(beforeZone);
+    fireEvent.mouseUp(beforeZone);
+
+    expect(mockOnRemoveAgentFromTeamAtEntry).toHaveBeenCalledWith(
+      'team-1',
+      'agent-1',
+      { type: 'team', teamId: 'team-1' },
+      'before',
+      'today',
+    );
+    expect(mockOnRemoveAgentFromTeam).not.toHaveBeenCalled();
+    expect(mockOnWatchlistsChange).not.toHaveBeenCalled();
   });
 
   it('keeps a team member below the remaining team when dragged out in All Agents', async () => {
