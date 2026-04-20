@@ -24,6 +24,8 @@ import {
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
 import { ColumnPicker } from "./ColumnPicker";
+import { useLayoutStore } from "../../store/useLayoutStore";
+import { SidebarResizeHandle } from "../../components/SidebarResizeHandle";
 
 type DragSource =
   | { type: "agent"; agentId: string }
@@ -752,7 +754,7 @@ export default function AgentWatchlist({
   return (
     <aside
       data-testid="agent-watchlist"
-      className={`h-full bg-[var(--color-wardian-sidebar-secondary)] border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col z-10 select-none ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
+      className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)] border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col z-10 select-none ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
     >
       <div className="p-4 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
         {/* ── Header ─────────────────────────────────────── */}
@@ -1102,6 +1104,15 @@ export default function AgentWatchlist({
             Delete List
           </button>
         </div>
+      )}
+
+      {!collapsed && (
+        <SidebarResizeHandle
+          baseWidth={useLayoutStore.getState().rightSidebarWidth}
+          edge="left"
+          onResize={(px) => useLayoutStore.getState().setRightSidebarWidth(px)}
+          onReset={() => useLayoutStore.getState().setRightSidebarWidth(240)}
+        />
       )}
     </aside>
   );
