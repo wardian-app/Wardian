@@ -117,16 +117,18 @@ export const GridView: React.FC<GridViewProps> = ({
 
   const isMaximized = !!maximizedAgentId;
   const isMobile = windowWidth < 1000;
+  // While a stack-exit drag is in flight, render the multi-column preview even though gridStacked is still true.
+  const renderStacked = (gridStacked || isMobile) && resizeType !== 'stack-exit';
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: (isMaximized || isMobile || gridStacked)
+    gridTemplateColumns: (isMaximized || renderStacked)
       ? '1fr'
       : layout.column_tracks.map(t => `${t}fr`).join(' '),
     gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
-    gap: (isMaximized || isMobile || gridStacked) ? '0' : '8px',
+    gap: (isMaximized || renderStacked) ? '0' : '8px',
     background: 'transparent',
-    padding: (isMaximized || isMobile || gridStacked) ? '0' : '8px',
+    padding: (isMaximized || renderStacked) ? '0' : '8px',
     height: isMaximized ? '100%' : 'auto',
   };
 

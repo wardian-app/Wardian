@@ -66,10 +66,12 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
           break;
         }
       }
-      globalWeight = Math.max(0, Math.min(1, globalWeight));
+      globalWeight = Math.max(0.05, Math.min(0.95, globalWeight));
 
       lastGlobalWeightRef.current = globalWeight;
       setGuidePos(rect.left + (globalWeight * container.clientWidth));
+      // Live preview: render a 2-column split so the stacked cell shrinks with the drag.
+      setColumnTracks([globalWeight, 1 - globalWeight]);
     } else {
       const mouseY = e.clientY - rect.top;
       const SNAP_HEIGHTS = [300, 450, 600, 800];
@@ -113,13 +115,19 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
         setGridStacked(true);
       }
     } else if (current?.type === 'stack-exit') {
-      if (finalWeight !== null && finalWeight < STACK_THRESHOLD) {
+      const inExitRange = finalWeight !== null && finalWeight >= 1 - STACK_THRESHOLD && finalWeight < STACK_THRESHOLD;
+      if (inExitRange) {
+        // Commit exit. Prefer the saved pre-stacked layout (preserves N-column setups);
+        // fall back to the 2-column preview the user just shaped.
         const prev = useLayoutStore.getState().previousColumnTracks;
         if (prev && prev.length > 0) {
           setColumnTracks(prev);
         }
         setPreviousColumnTracks(null);
         setGridStacked(false);
+      } else if (snapshot && snapshot.length > 0) {
+        // Cancel: undo the live preview writes.
+        setColumnTracks(snapshot);
       }
     }
 
