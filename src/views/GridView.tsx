@@ -75,7 +75,7 @@ export const GridView: React.FC<GridViewProps> = ({
   onClear,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { layout, resetLayout } = useLayoutStore();
+  const { layout, resetLayout, gridStacked, setGridStacked } = useLayoutStore();
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
 
@@ -120,13 +120,13 @@ export const GridView: React.FC<GridViewProps> = ({
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: (isMaximized || isMobile) 
-      ? '1fr' 
+    gridTemplateColumns: (isMaximized || isMobile || gridStacked)
+      ? '1fr'
       : layout.column_tracks.map(t => `${t}fr`).join(' '),
     gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
-    gap: (isMaximized || isMobile) ? '0' : '8px',
+    gap: (isMaximized || isMobile || gridStacked) ? '0' : '8px',
     background: 'transparent',
-    padding: (isMaximized || isMobile) ? '0' : '8px',
+    padding: (isMaximized || isMobile || gridStacked) ? '0' : '8px',
     height: isMaximized ? '100%' : 'auto',
   };
 
@@ -139,8 +139,9 @@ export const GridView: React.FC<GridViewProps> = ({
   ];
 
   return (
-    <div 
+    <div
       ref={containerRef}
+      data-testid="agent-grid"
       style={gridStyle}
       onContextMenu={handleBackgroundContextMenu}
       className={`w-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
@@ -247,11 +248,12 @@ export const GridView: React.FC<GridViewProps> = ({
             const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
             const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
             return (
-              <div 
+              <div
                 key={`gutter-h-${i}`}
+                data-resize-handle="h"
                 className="absolute top-0 bottom-0 z-30 group/gutter flex justify-center"
-                style={{ 
-                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`, 
+                style={{
+                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`,
                   width: '12px',
                   cursor: 'col-resize'
                 }}
@@ -315,6 +317,16 @@ export const GridView: React.FC<GridViewProps> = ({
           items={bgMenuItems}
           onClose={() => setBgContextMenu({ ...bgContextMenu, visible: false })}
         />
+      )}
+
+      {gridStacked && !isMaximized && (
+        <button
+          type="button"
+          onClick={() => setGridStacked(false)}
+          className="absolute top-2 right-2 z-30 px-2 py-1 text-xs bg-[var(--color-wardian-sidebar-secondary)] border border-wardian-border rounded hover:text-[var(--color-wardian-accent)]"
+        >
+          Exit stacked
+        </button>
       )}
 
       {/* Visual Guide Lines */}

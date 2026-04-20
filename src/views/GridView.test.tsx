@@ -1,7 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { GridView } from './GridView';
 import type { AgentConfig, AgentTelemetry } from '../types';
+import { useLayoutStore } from '../store/useLayoutStore';
 
 vi.mock('../features/terminal/AgentTerminal', () => ({
   AgentTerminal: ({ sessionId }: { sessionId: string }) => <div data-testid={`terminal-${sessionId}`}>Terminal {sessionId}</div>,
@@ -93,5 +94,25 @@ describe('GridView maximize behavior', () => {
     // New grid implementation uses grid display
     expect((root as HTMLElement).style.display).toBe('grid');
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+  });
+});
+
+describe('GridView stacked mode', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    act(() => useLayoutStore.getState().resetLayout());
+  });
+
+  it('renders single column when gridStacked is true', () => {
+    act(() => useLayoutStore.getState().setGridStacked(true));
+    const { container } = renderGrid(null, agents);
+    const grid = container.firstElementChild as HTMLElement;
+    expect(grid.style.gridTemplateColumns).toBe('1fr');
+  });
+
+  it('renders an Exit Stacked button when gridStacked is true', () => {
+    act(() => useLayoutStore.getState().setGridStacked(true));
+    renderGrid(null, agents);
+    expect(screen.getByRole('button', { name: /exit stacked/i })).toBeInTheDocument();
   });
 });
