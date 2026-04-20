@@ -75,7 +75,7 @@ export const GridView: React.FC<GridViewProps> = ({
   onClear,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { layout, resetLayout } = useLayoutStore();
+  const { layout, resetLayout, gridStacked } = useLayoutStore();
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
 
@@ -117,16 +117,18 @@ export const GridView: React.FC<GridViewProps> = ({
 
   const isMaximized = !!maximizedAgentId;
   const isMobile = windowWidth < 1000;
+  // While a stack-exit drag is in flight, render the multi-column preview even though gridStacked is still true.
+  const renderStacked = (gridStacked || isMobile) && resizeType !== 'stack-exit';
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
-    gridTemplateColumns: (isMaximized || isMobile) 
-      ? '1fr' 
+    gridTemplateColumns: (isMaximized || renderStacked)
+      ? '1fr'
       : layout.column_tracks.map(t => `${t}fr`).join(' '),
     gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
-    gap: (isMaximized || isMobile) ? '0' : '8px',
+    gap: (isMaximized || renderStacked) ? '0' : '8px',
     background: 'transparent',
-    padding: (isMaximized || isMobile) ? '0' : '8px',
+    padding: (isMaximized || renderStacked) ? '0' : '8px',
     height: isMaximized ? '100%' : 'auto',
   };
 
@@ -139,8 +141,9 @@ export const GridView: React.FC<GridViewProps> = ({
   ];
 
   return (
-    <div 
+    <div
       ref={containerRef}
+      data-testid="agent-grid"
       style={gridStyle}
       onContextMenu={handleBackgroundContextMenu}
       className={`w-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
@@ -239,19 +242,49 @@ export const GridView: React.FC<GridViewProps> = ({
         );
       })}
 
+      {/* Per-cell stack-exit handle: in stacked mode, drag a cell's right edge inward to exit.
+          Use the same filter as the card render loop so handle positions align with visible rows. */}
+      {gridStacked && !isMaximized && (
+        <>
+          {visibleAgents
+            .filter((agent: AgentConfig) => !offAgentIds.has(agent.session_id.toString()))
+            .map((agent: AgentConfig, idx: number) => {
+              const agentId = agent.session_id.toString();
+              return (
+                <div
+                  key={`stack-exit-${agentId}`}
+                  data-resize-handle="stack-exit"
+                  className="absolute right-0 z-30 group/gutter flex justify-center"
+                  style={{
+                    top: `calc(${idx} * ${layout.row_height}px)`,
+                    height: `${layout.row_height}px`,
+                    width: '12px',
+                    cursor: 'col-resize',
+                  }}
+                  onMouseDown={(e) => { e.stopPropagation(); startResize('stack-exit', idx); }}
+                  title="Drag inward to exit stacked"
+                >
+                  <div className="w-[2px] h-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+                </div>
+              );
+            })}
+        </>
+      )}
+
       {/* Global Track Resize Overlays (Gutters) */}
-      {!isMaximized && !isMobile && (
+      {!isMaximized && !isMobile && !gridStacked && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
           {layout.column_tracks.slice(0, -1).map((_weight, i) => {
             const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
             const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
             return (
-              <div 
+              <div
                 key={`gutter-h-${i}`}
+                data-resize-handle="h"
                 className="absolute top-0 bottom-0 z-30 group/gutter flex justify-center"
-                style={{ 
-                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`, 
+                style={{
+                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`,
                   width: '12px',
                   cursor: 'col-resize'
                 }}
