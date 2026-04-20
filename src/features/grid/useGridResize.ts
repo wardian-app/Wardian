@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useLayoutStore } from '../../store/useLayoutStore';
 
 const SNAP_WEIGHTS = [0.333, 0.5, 0.666, 1.0];
@@ -6,9 +6,10 @@ const SNAP_THRESHOLD = 0.02; // 2% threshold for magnetic snapping
 const MIN_TRACK_PX = 400; // Slightly smaller than card min-width to allow tight packing
 
 export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | null>) => {
-  const { layout, setColumnTracks, setRowHeight } = useLayoutStore();
+  const { layout, setColumnTracks, setRowHeight, setGridStacked } = useLayoutStore();
   const [resizing, setResizing] = useState<{ type: 'h' | 'v', index: number } | null>(null);
   const [guidePos, setGuidePos] = useState<number | null>(null);
+  const lastGlobalWeightRef = useRef<number | null>(null);
 
   const startResize = useCallback((type: 'h' | 'v', index: number) => {
     setResizing({ type, index });
@@ -35,7 +36,8 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
           break;
         }
       }
-      
+
+      lastGlobalWeightRef.current = globalWeight;
       setGuidePos(rect.left + (globalWeight * container.clientWidth));
 
       // Calculate weight of tracks before the active handle
@@ -79,12 +81,18 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
       
       setRowHeight(Math.max(300, calculatedHeight));
     }
-  }, [resizing, containerRef, layout.column_tracks, setColumnTracks, setRowHeight]);
+  }, [resizing, containerRef, layout.column_tracks, setColumnTracks, setRowHeight, setGridStacked]);
 
   const stopResize = useCallback(() => {
+    if (resizing?.type === 'h' && lastGlobalWeightRef.current !== null) {
+      if (lastGlobalWeightRef.current >= 1.0 - 1e-6) {
+        setGridStacked(true);
+      }
+    }
+    lastGlobalWeightRef.current = null;
     setResizing(null);
     setGuidePos(null);
-  }, []);
+  }, [resizing, setGridStacked]);
 
   useEffect(() => {
     if (resizing) {
