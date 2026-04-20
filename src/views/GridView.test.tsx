@@ -110,9 +110,16 @@ describe('GridView stacked mode', () => {
     expect(grid.style.gridTemplateColumns).toBe('1fr');
   });
 
-  it('renders an Exit Stacked button when gridStacked is true', () => {
+  it('renders per-cell stack-exit handles when gridStacked is true', () => {
     act(() => useLayoutStore.getState().setGridStacked(true));
-    renderGrid(null, agents);
-    expect(screen.getByRole('button', { name: /exit stacked/i })).toBeInTheDocument();
+    const { container } = renderGrid(null, agents);
+    const handles = container.querySelectorAll('[data-resize-handle="stack-exit"]');
+    expect(handles.length).toBe(agents.length);
+  });
+
+  it('hides inter-column gutters when gridStacked is true', () => {
+    act(() => useLayoutStore.getState().setGridStacked(true));
+    const { container } = renderGrid(null, agents);
+    expect(container.querySelectorAll('[data-resize-handle="h"]').length).toBe(0);
   });
 });

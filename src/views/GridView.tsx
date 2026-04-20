@@ -75,7 +75,7 @@ export const GridView: React.FC<GridViewProps> = ({
   onClear,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { layout, resetLayout, gridStacked, setGridStacked } = useLayoutStore();
+  const { layout, resetLayout, gridStacked } = useLayoutStore();
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
 
@@ -240,8 +240,34 @@ export const GridView: React.FC<GridViewProps> = ({
         );
       })}
 
+      {/* Per-cell stack-exit handle: in stacked mode, drag a cell's right edge inward to exit. */}
+      {gridStacked && !isMaximized && (
+        <>
+          {visibleAgents.map((agent: AgentConfig, idx: number) => {
+            const agentId = agent.session_id.toString();
+            return (
+              <div
+                key={`stack-exit-${agentId}`}
+                data-resize-handle="stack-exit"
+                className="absolute right-0 z-30 group/gutter flex justify-center"
+                style={{
+                  top: `calc(${idx} * ${layout.row_height}px)`,
+                  height: `${layout.row_height}px`,
+                  width: '12px',
+                  cursor: 'col-resize',
+                }}
+                onMouseDown={(e) => { e.stopPropagation(); startResize('stack-exit', idx); }}
+                title="Drag inward to exit stacked"
+              >
+                <div className="w-[2px] h-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+              </div>
+            );
+          })}
+        </>
+      )}
+
       {/* Global Track Resize Overlays (Gutters) */}
-      {!isMaximized && !isMobile && (
+      {!isMaximized && !isMobile && !gridStacked && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
           {layout.column_tracks.slice(0, -1).map((_weight, i) => {
@@ -317,16 +343,6 @@ export const GridView: React.FC<GridViewProps> = ({
           items={bgMenuItems}
           onClose={() => setBgContextMenu({ ...bgContextMenu, visible: false })}
         />
-      )}
-
-      {gridStacked && !isMaximized && (
-        <button
-          type="button"
-          onClick={() => setGridStacked(false)}
-          className="absolute top-2 right-2 z-30 px-2 py-1 text-xs bg-[var(--color-wardian-sidebar-secondary)] border border-wardian-border rounded hover:text-[var(--color-wardian-accent)]"
-        >
-          Exit stacked
-        </button>
       )}
 
       {/* Visual Guide Lines */}

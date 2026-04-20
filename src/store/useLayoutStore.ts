@@ -22,11 +22,13 @@ interface LayoutState {
   leftSidebarWidth: number;
   rightSidebarWidth: number;
   gridStacked: boolean;
+  previousColumnTracks: number[] | null;
   setColumnTracks: (tracks: number[]) => void;
   setRowHeight: (height: number) => void;
   setLeftSidebarWidth: (px: number) => void;
   setRightSidebarWidth: (px: number) => void;
   setGridStacked: (v: boolean) => void;
+  setPreviousColumnTracks: (tracks: number[] | null) => void;
   resetLayout: () => void;
 }
 
@@ -37,16 +39,19 @@ export const useLayoutStore = create<LayoutState>()(
       leftSidebarWidth: DEFAULT_LEFT_SIDEBAR_WIDTH,
       rightSidebarWidth: DEFAULT_RIGHT_SIDEBAR_WIDTH,
       gridStacked: false,
+      previousColumnTracks: null,
       setColumnTracks: (column_tracks) => set((state) => ({ layout: { ...state.layout, column_tracks } })),
       setRowHeight: (row_height) => set((state) => ({ layout: { ...state.layout, row_height } })),
       setLeftSidebarWidth: (px) => set({ leftSidebarWidth: clampSidebarWidth(px) }),
       setRightSidebarWidth: (px) => set({ rightSidebarWidth: clampSidebarWidth(px) }),
       setGridStacked: (gridStacked) => set({ gridStacked }),
+      setPreviousColumnTracks: (previousColumnTracks) => set({ previousColumnTracks }),
       resetLayout: () => set({
         layout: DEFAULT_LAYOUT,
         leftSidebarWidth: DEFAULT_LEFT_SIDEBAR_WIDTH,
         rightSidebarWidth: DEFAULT_RIGHT_SIDEBAR_WIDTH,
         gridStacked: false,
+        previousColumnTracks: null,
       }),
     }),
     { name: 'wardian-layout' }
