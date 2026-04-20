@@ -56,10 +56,10 @@ when `windowWidth < 1000` ("mobile" mode), rendering all agents in a single
 column at natural `layout.row_height`. Reuse this rendering path as a
 user-controllable mode.
 
-Trigger: while dragging any column-resize handle in the grid, if the dragged
-cell's width crosses **2/3 of the main pane**, set `gridStacked: true` on
-release. Until release, render a subtle full-width drop-shadow preview at
-~60% to telegraph the snap.
+Trigger: `useGridResize` already supports magnetic snap weights of `[0.333,
+0.5, 0.666, 1.0]`. When the global drag weight snaps to `1.0` (i.e. the
+dragged track has consumed the entire row), set `gridStacked: true` on
+release. The existing guide line already telegraphs the snap visually.
 
 Behavior in stacked mode:
 
@@ -77,7 +77,9 @@ Behavior in stacked mode:
 
 ### State and persistence
 
-New slice `src/stores/useLayoutStore.ts`:
+Extend the **existing** `src/store/useLayoutStore.ts` (which today persists
+grid `column_tracks` and `row_height` under `localStorage` key
+`wardian-layout`):
 
 ```ts
 interface LayoutState {
@@ -91,8 +93,9 @@ interface LayoutState {
 }
 ```
 
-- Persisted via Zustand `persist` middleware to `localStorage` key
-  `wardian-layout-v1`.
+- Persisted via the existing Zustand `persist` middleware to `localStorage`
+  key `wardian-layout` (no key change — Zustand persist tolerates added
+  fields, missing ones fall back to defaults).
 - Per-installation, not per-workspace — laptop and desktop diverge naturally.
 - Setters clamp to `[200, 0.4 * window.innerWidth]` for sidebar widths.
 - A single `useEffect` in `App.tsx` writes `leftSidebarWidth` /
@@ -102,7 +105,8 @@ interface LayoutState {
 
 ### File-level changes
 
-- `src/stores/useLayoutStore.ts` (new).
+- `src/store/useLayoutStore.ts` (extend existing slice with sidebar widths
+  and `gridStacked`).
 - `src/styles/App.css` — keep CSS variables, drop hard-coded defaults if
   they conflict.
 - `src/views/App.tsx` — wire store → CSS variables; pass `gridStacked` to
