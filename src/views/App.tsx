@@ -35,6 +35,7 @@ import { LibraryView } from "./LibraryView";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
+import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 
 declare global {
@@ -307,6 +308,15 @@ function AppBody() {
     mediaQuery.addEventListener("change", applyTheme);
     return () => mediaQuery.removeEventListener("change", applyTheme);
   }, [theme]);
+
+  const leftSidebarWidth = useLayoutStore((s) => s.leftSidebarWidth);
+  const rightSidebarWidth = useLayoutStore((s) => s.rightSidebarWidth);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--sidebar-content-width', `${leftSidebarWidth}px`);
+    root.style.setProperty('--sidebar-secondary-width', `${rightSidebarWidth}px`);
+  }, [leftSidebarWidth, rightSidebarWidth]);
 
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
   const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
