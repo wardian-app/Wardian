@@ -54,6 +54,15 @@ export const useLayoutStore = create<LayoutState>()(
         previousColumnTracks: null,
       }),
     }),
-    { name: 'wardian-layout' }
+    {
+      name: 'wardian-layout',
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        // localStorage may hold values outside the current viewport's clamp range
+        // (e.g. user resized the window since last session). Re-clamp on load.
+        state.leftSidebarWidth = clampSidebarWidth(state.leftSidebarWidth);
+        state.rightSidebarWidth = clampSidebarWidth(state.rightSidebarWidth);
+      },
+    }
   )
 );

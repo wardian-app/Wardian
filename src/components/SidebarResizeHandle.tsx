@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 
 interface Props {
   baseWidth: number;
@@ -18,13 +18,17 @@ export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, edge, onResize
     onResize(next);
   }, [edge, onResize]);
 
-  const onPointerUp = useCallback(() => {
+  const endDrag = useCallback(() => {
     startXRef.current = null;
     window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', onPointerUp);
+    window.removeEventListener('pointerup', endDrag);
     document.body.style.userSelect = '';
     document.body.style.cursor = '';
   }, [onPointerMove]);
+
+  // If the handle unmounts mid-drag (e.g. sidebar collapses), clean up listeners
+  // and restore body styles so we don't leak handlers.
+  useEffect(() => endDrag, [endDrag]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     startXRef.current = e.clientX;
@@ -32,7 +36,7 @@ export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, edge, onResize
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
     window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointerup', endDrag);
   };
 
   return (

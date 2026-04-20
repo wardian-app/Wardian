@@ -56,10 +56,11 @@ when `windowWidth < 1000` ("mobile" mode), rendering all agents in a single
 column at natural `layout.row_height`. Reuse this rendering path as a
 user-controllable mode.
 
-Trigger: `useGridResize` already supports magnetic snap weights of `[0.333,
-0.5, 0.666, 1.0]`. When the global drag weight snaps to `1.0` (i.e. the
-dragged track has consumed the entire row), set `gridStacked: true` on
-release. The existing guide line already telegraphs the snap visually.
+Trigger: `useGridResize` keeps magnetic snap weights of `[0.333, 0.5,
+0.666]` (the prior `1.0` snap is removed). On release of any horizontal
+drag, if any resulting track exceeds `2/3 + ε` of the container width, set
+`gridStacked: true`. The `ε` (≈ 0.01) keeps the `0.666` snap as a valid
+2/3-1/3 layout the user can rest on without being forced into stacked.
 
 Behavior in stacked mode:
 
@@ -67,13 +68,17 @@ Behavior in stacked mode:
   `layout.row_height`. No special "lead" cell, no height variation. Exactly
   the same visual mode as the existing `windowWidth < 1000` auto-stack.
 - Main pane is vertically scrollable.
-- A small "Exit stacked" toolbar button (placed near the existing
-  reset-grid-layout affordance) clears `gridStacked`. Re-dragging a column
-  handle from past 2/3 back below threshold also clears it.
-- `maximizedAgentId` (full-screen single agent) is unchanged and orthogonal —
-  different feature, different button.
-- The auto `windowWidth < 1000` behavior is unchanged: stacked mode is
-  forced on if either `gridStacked` or `windowWidth < 1000` is true.
+- Exit is gesture-driven: each stacked cell renders a right-edge resize
+  handle. Dragging it inward and releasing below the entry threshold
+  (`< 2/3`) restores the saved pre-stacked `column_tracks` (or `[0.5, 0.5]`
+  if none) and clears `gridStacked`. There is no exit button — it
+  conflicted with existing per-card toolbar affordances.
+- During a stack-exit drag, the grid renders a live multi-column preview
+  so the dragged cell visibly shrinks; the preview is reverted on release
+  if the drag did not cross the exit threshold.
+- `maximizedAgentId` (full-screen single agent) is unchanged and orthogonal.
+- The auto `windowWidth < 1000` behavior is unchanged: stacked rendering is
+  used if either `gridStacked` or `windowWidth < 1000` is true.
 
 ### State and persistence
 

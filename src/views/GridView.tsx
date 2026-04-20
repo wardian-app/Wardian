@@ -242,29 +242,32 @@ export const GridView: React.FC<GridViewProps> = ({
         );
       })}
 
-      {/* Per-cell stack-exit handle: in stacked mode, drag a cell's right edge inward to exit. */}
+      {/* Per-cell stack-exit handle: in stacked mode, drag a cell's right edge inward to exit.
+          Use the same filter as the card render loop so handle positions align with visible rows. */}
       {gridStacked && !isMaximized && (
         <>
-          {visibleAgents.map((agent: AgentConfig, idx: number) => {
-            const agentId = agent.session_id.toString();
-            return (
-              <div
-                key={`stack-exit-${agentId}`}
-                data-resize-handle="stack-exit"
-                className="absolute right-0 z-30 group/gutter flex justify-center"
-                style={{
-                  top: `calc(${idx} * ${layout.row_height}px)`,
-                  height: `${layout.row_height}px`,
-                  width: '12px',
-                  cursor: 'col-resize',
-                }}
-                onMouseDown={(e) => { e.stopPropagation(); startResize('stack-exit', idx); }}
-                title="Drag inward to exit stacked"
-              >
-                <div className="w-[2px] h-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
-              </div>
-            );
-          })}
+          {visibleAgents
+            .filter((agent: AgentConfig) => !offAgentIds.has(agent.session_id.toString()))
+            .map((agent: AgentConfig, idx: number) => {
+              const agentId = agent.session_id.toString();
+              return (
+                <div
+                  key={`stack-exit-${agentId}`}
+                  data-resize-handle="stack-exit"
+                  className="absolute right-0 z-30 group/gutter flex justify-center"
+                  style={{
+                    top: `calc(${idx} * ${layout.row_height}px)`,
+                    height: `${layout.row_height}px`,
+                    width: '12px',
+                    cursor: 'col-resize',
+                  }}
+                  onMouseDown={(e) => { e.stopPropagation(); startResize('stack-exit', idx); }}
+                  title="Drag inward to exit stacked"
+                >
+                  <div className="w-[2px] h-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
+                </div>
+              );
+            })}
         </>
       )}
 

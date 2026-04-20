@@ -3,10 +3,11 @@ import { test, expect } from '@playwright/test';
 test.describe('responsive layout', () => {
   test('left sidebar width persists across reload', async ({ page }) => {
     await page.goto('/');
-    const sidebar = page.locator('aside').first();
+    // First aside is the fixed-width SidebarIconRail; the resize handle's parent aside is the resizable pane.
+    const handle = page.getByTestId('sidebar-resize-handle').first();
+    const sidebar = handle.locator('xpath=ancestor::aside[1]');
     const initial = await sidebar.evaluate((el) => el.getBoundingClientRect().width);
 
-    const handle = page.getByTestId('sidebar-resize-handle').first();
     const box = await handle.boundingBox();
     if (!box) throw new Error('handle not visible');
 
@@ -23,7 +24,7 @@ test.describe('responsive layout', () => {
     expect(Math.round(persisted)).toBe(Math.round(grown));
   });
 
-  test('grid drag past 2/3 enters stacked mode and exit restores', async ({ page }) => {
+  test('grid drag past 2/3 enters stacked mode; stack-exit drag restores multi-column', async ({ page }) => {
     await page.goto('/');
     // Pre-condition: at least 2 mock agents present in fixtures.
     const handle = page.locator('[data-resize-handle="h"]').first();
@@ -34,13 +35,23 @@ test.describe('responsive layout', () => {
     const handleBox = await handle.boundingBox();
     if (!gridBox || !handleBox) throw new Error('grid not visible');
 
+    // Drag the inter-column gutter past 2/3 of the grid → stacked.
     await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
     await page.mouse.down();
     await page.mouse.move(gridBox.x + gridBox.width - 5, handleBox.y, { steps: 20 });
     await page.mouse.up();
 
-    await expect(page.getByRole('button', { name: /exit stacked/i })).toBeVisible();
-    await page.getByRole('button', { name: /exit stacked/i }).click();
-    await expect(page.getByRole('button', { name: /exit stacked/i })).toBeHidden();
+    const exitHandle = page.locator('[data-resize-handle="stack-exit"]').first();
+    await expect(exitHandle).toBeVisible();
+
+    // Drag the stack-exit handle inward to the middle of the grid → exit stacked.
+    const exitBox = await exitHandle.boundingBox();
+    if (!exitBox) throw new Error('stack-exit handle not visible');
+    await page.mouse.move(exitBox.x + exitBox.width / 2, exitBox.y + exitBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(gridBox.x + gridBox.width / 2, exitBox.y + exitBox.height / 2, { steps: 20 });
+    await page.mouse.up();
+
+    await expect(page.locator('[data-resize-handle="stack-exit"]')).toHaveCount(0);
   });
 });

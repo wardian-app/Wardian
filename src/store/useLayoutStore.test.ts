@@ -1,11 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { act } from '@testing-library/react';
 import { useLayoutStore } from './useLayoutStore';
 
 describe('useLayoutStore — sidebar widths', () => {
+  const originalInnerWidth = window.innerWidth;
+
   beforeEach(() => {
     localStorage.clear();
     act(() => useLayoutStore.getState().resetLayout());
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, 'innerWidth', { value: originalInnerWidth, configurable: true });
   });
 
   it('exposes default sidebar widths', () => {

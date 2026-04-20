@@ -3,7 +3,9 @@ import { useLayoutStore } from '../../store/useLayoutStore';
 
 const SNAP_WEIGHTS = [0.333, 0.5, 0.666];
 const SNAP_THRESHOLD = 0.02; // 2% threshold for magnetic snapping
-const STACK_THRESHOLD = 2 / 3; // Any track exceeding this fraction of container enters stacked mode.
+// Entry into stacked mode requires a clearly-larger track than the 2/3 snap,
+// so users can still snap to a 2/3-1/3 layout without being forced stacked.
+const STACK_THRESHOLD = Math.max(...SNAP_WEIGHTS) + 0.01;
 
 type ResizeKind = 'h' | 'v' | 'stack-exit';
 
@@ -115,18 +117,16 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
         setGridStacked(true);
       }
     } else if (current?.type === 'stack-exit') {
-      const inExitRange = finalWeight !== null && finalWeight >= 1 - STACK_THRESHOLD && finalWeight < STACK_THRESHOLD;
-      if (inExitRange) {
-        // Commit exit. Prefer the saved pre-stacked layout (preserves N-column setups);
-        // fall back to the 2-column preview the user just shaped.
+      // Any release below the entry threshold means "exit". Restoring the saved
+      // pre-stacked layout preserves N-column setups; without one, fall back to
+      // a balanced default rather than the (possibly extreme) preview ratio so
+      // we can't immediately re-trigger the entry threshold.
+      if (finalWeight !== null && finalWeight < STACK_THRESHOLD) {
         const prev = useLayoutStore.getState().previousColumnTracks;
-        if (prev && prev.length > 0) {
-          setColumnTracks(prev);
-        }
+        setColumnTracks(prev && prev.length > 0 ? prev : [0.5, 0.5]);
         setPreviousColumnTracks(null);
         setGridStacked(false);
       } else if (snapshot && snapshot.length > 0) {
-        // Cancel: undo the live preview writes.
         setColumnTracks(snapshot);
       }
     }
