@@ -34,7 +34,7 @@ const EXECUTION_ADVANCED: BlockField[] = [
 ];
 
 const SIMPLE_ADVANCED: BlockField[] = [
-  { name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }
+  { name: 'timeout_ms', label: 'Timeout (optional)', type: 'text', placeholder: 'Blank or 0 = no timeout' }
 ];
 
 export const BLOCK_LIBRARY: BlockDefinition[] = [
@@ -180,7 +180,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     inputs: 'Multiple Temporal signals', 
     outputs: 'Sync Stamp', 
     ports: { inputs: 1, outputs: ['default'] }, // Input is implicitly multi-wired
-    fields: [{ name: 'timeout_ms', label: 'Timeout', type: 'text', placeholder: '30000' }]
+    fields: [{ name: 'timeout_ms', label: 'Timeout (optional)', type: 'text', placeholder: 'Blank or 0 = no timeout' }]
   },
   { 
     type: 'subflow', 

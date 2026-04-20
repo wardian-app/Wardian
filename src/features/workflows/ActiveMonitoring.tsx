@@ -74,8 +74,9 @@ function formatScheduleSummary(schedule: ScheduledRun['schedule']): string {
   return base;
 }
 
-function getScheduleStatus(schedule: ScheduledRun, isRunning: boolean): 'Paused' | 'Due' | 'Live' | 'Running' {
+function getScheduleStatus(schedule: ScheduledRun, isRunning: boolean): 'Paused' | 'Due' | 'Live' | 'Running' | 'Failed' {
   if (isRunning) return 'Running';
+  if (schedule.last_run_status === 'failed') return 'Failed';
   if (schedule.is_paused) return 'Paused';
   if (schedule.next_run_epoch_ms && schedule.next_run_epoch_ms <= Date.now()) return 'Due';
   return 'Live';
@@ -238,6 +239,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
               const status = getScheduleStatus(schedule, isRunning);
               const targetSummary = summarizeScheduleTarget(schedule, workflow, agents);
               const roleMappings = Object.entries(schedule.role_mappings || {});
+              const lastFailure = schedule.last_run_status === 'failed' ? schedule.last_run_error || 'Workflow failed' : null;
 
               return (
                 <div
@@ -258,7 +260,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                       <div className="flex items-center gap-1.5 min-w-0">
                         <div className="text-[var(--color-wardian-accent)] shrink-0"><ClockIcon /></div>
                         <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-primary leading-tight tracking-tight">{schedule.workflow_name}</span>
-                        <span className={`shrink-0 text-[8px] font-black px-1.5 py-0.5 rounded ${status === 'Paused' ? 'bg-amber-500/20 text-amber-500' : status === 'Due' ? 'bg-cyan-500/20 text-cyan-400' : status === 'Running' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                        <span className={`shrink-0 text-[8px] font-black px-1.5 py-0.5 rounded ${status === 'Paused' ? 'bg-amber-500/20 text-amber-500' : status === 'Failed' ? 'bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_80%)] text-[var(--color-wardian-error)]' : status === 'Due' ? 'bg-cyan-500/20 text-cyan-400' : status === 'Running' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
                           {status}
                         </span>
                       </div>
@@ -269,7 +271,9 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--color-wardian-accent)]/80">
                         <span>
-                          {status === 'Running'
+                          {lastFailure
+                            ? `Last failed: ${lastFailure}`
+                            : status === 'Running'
                             ? 'Running now'
                             : (() => {
                                 const label = formatNextRun(schedule.next_run_epoch_ms);

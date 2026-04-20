@@ -19,4 +19,15 @@ describe('workflow block library', () => {
     expect(fieldNames).not.toContain('session_type');
     expect(fieldNames).not.toContain('session_persistence');
   });
+
+  it('labels every timeout field as optional with the same unlimited hint', () => {
+    const timeoutFields = BLOCK_LIBRARY.flatMap((block) => [
+      ...(block.fields || []),
+      ...(block.advancedFields || []),
+    ]).filter((field) => field.name === 'timeout_ms');
+
+    expect(timeoutFields.length).toBeGreaterThan(0);
+    expect(timeoutFields.every((field) => field.label === 'Timeout (optional)')).toBe(true);
+    expect(timeoutFields.every((field) => field.placeholder === 'Blank or 0 = no timeout')).toBe(true);
+  });
 });

@@ -101,6 +101,12 @@ pub struct ScheduledRun {
     #[serde(default)]
     pub paused_remaining_ms: Option<u64>,
     pub is_paused: bool,
+    #[serde(default)]
+    pub last_run_status: Option<String>,
+    #[serde(default)]
+    pub last_run_error: Option<String>,
+    #[serde(default)]
+    pub last_run_completed_epoch_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

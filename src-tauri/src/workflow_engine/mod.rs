@@ -11,6 +11,7 @@ use notify::{Event, RecursiveMode, Watcher};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -65,12 +66,41 @@ where
     }
 }
 
+fn parse_optional_timeout_ms(node_config: &Value) -> Option<u64> {
+    let raw = node_config.get("timeout_ms")?;
+    let parsed = raw.as_u64().or_else(|| {
+        raw.as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| value.parse::<u64>().ok())
+    })?;
+    (parsed > 0).then_some(parsed)
+}
+
+async fn run_with_optional_timeout<T, F>(
+    timeout_ms: Option<u64>,
+    label: &str,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), future).await
+        {
+            Ok(result) => result,
+            Err(_) => Err(format!("{} timeout ({}ms)", label, ms)),
+        },
+        None => future.await,
+    }
+}
+
 async fn run_command_headless(
     executable: &str,
     args: Vec<String>,
     cwd: &Path,
     env: Option<&Value>,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
     let mut cmd = new_headless_command(executable);
     cmd.args(args)
@@ -94,7 +124,6 @@ async fn run_command_headless(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn process: {}", e))?;
-    let timeout = std::time::Duration::from_millis(if timeout_ms > 0 { timeout_ms } else { 30000 });
 
     // Take stdout/stderr before waiting so we retain mut access to child for kill.
     let stdout_pipe = child.stdout.take();
@@ -119,27 +148,38 @@ async fn run_command_headless(
         buf
     });
 
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => {
-            let stdout = stdout_task.await.unwrap_or_default();
-            let stderr = stderr_task.await.unwrap_or_default();
-            let exit_code = status.code().unwrap_or(-1);
+    let status = match timeout_ms {
+        Some(ms) => match tokio::time::timeout(
+            std::time::Duration::from_millis(ms),
+            child.wait(),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(format!("Command execution failed: {}", e)),
+            Err(_) => {
+                // Kill the child on timeout to prevent zombie processes.
+                let _ = child.kill().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(format!("Command timed out after {}ms", ms));
+            }
+        },
+        None => child
+            .wait()
+            .await
+            .map_err(|e| format!("Command execution failed: {}", e))?,
+    };
 
-            Ok(serde_json::json!({
-                "exit_code": exit_code,
-                "stdout": stdout,
-                "stderr": stderr
-            }))
-        }
-        Ok(Err(e)) => Err(format!("Command execution failed: {}", e)),
-        Err(_) => {
-            // Kill the child on timeout to prevent zombie processes.
-            let _ = child.kill().await;
-            stdout_task.abort();
-            stderr_task.abort();
-            Err(format!("Command timed out after {}ms", timeout.as_millis()))
-        }
-    }
+    let stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
+    let exit_code = status.code().unwrap_or(-1);
+
+    Ok(serde_json::json!({
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr
+    }))
 }
 
 
@@ -388,6 +428,9 @@ fn sync_scheduled_runs_for_workflow(
                 None
             },
             is_paused: previous.map(|run| run.is_paused).unwrap_or(false),
+            last_run_status: previous.and_then(|run| run.last_run_status.clone()),
+            last_run_error: previous.and_then(|run| run.last_run_error.clone()),
+            last_run_completed_epoch_ms: previous.and_then(|run| run.last_run_completed_epoch_ms),
         });
 
         if previous.is_none() {
@@ -399,6 +442,23 @@ fn sync_scheduled_runs_for_workflow(
     }
 
     synced_runs
+}
+
+fn record_scheduled_run_outcome(
+    runs: &mut [crate::models::ScheduledRun],
+    scheduled_run_id: &str,
+    status: &str,
+    error: Option<String>,
+    completed_epoch_ms: u64,
+) {
+    if let Some(run) = runs
+        .iter_mut()
+        .find(|scheduled_run| scheduled_run.id == scheduled_run_id)
+    {
+        run.last_run_status = Some(status.to_string());
+        run.last_run_error = error;
+        run.last_run_completed_epoch_ms = Some(completed_epoch_ms);
+    }
 }
 
 fn describe_schedule(schedule: &crate::models::ScheduleDefinition) -> String {
@@ -782,6 +842,9 @@ pub async fn start_scheduler(app: AppHandle) {
                         fresh_run.paused_remaining_ms = updated.paused_remaining_ms;
                         fresh_run.schedule.active = updated.schedule.active;
                         fresh_run.schedule.occurrence_count = updated.schedule.occurrence_count;
+                        fresh_run.last_run_status = updated.last_run_status.clone();
+                        fresh_run.last_run_error = updated.last_run_error.clone();
+                        fresh_run.last_run_completed_epoch_ms = updated.last_run_completed_epoch_ms;
                     }
                 }
                 let _ = save_scheduled_runs(&fresh);
@@ -1256,7 +1319,10 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_command_node_launch, sync_scheduled_runs_for_workflow};
+    use super::{
+        parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,
+        sync_scheduled_runs_for_workflow,
+    };
     use crate::models::{
         ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
     };
@@ -1346,6 +1412,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_optional_timeout_treats_absent_blank_null_and_zero_as_unlimited() {
+        assert_eq!(parse_optional_timeout_ms(&json!({})), None);
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": null })), None);
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "" })), None);
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "   " })), None);
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": 0 })), None);
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "0" })), None);
+    }
+
+    #[test]
+    fn parse_optional_timeout_accepts_positive_numeric_values() {
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": 5000 })), Some(5000));
+        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "60000" })), Some(60000));
+    }
+
+    #[test]
     fn sync_scheduled_runs_preserves_pause_state_for_active_schedule() {
         let workflow = workflow_with_schedule("active");
         let existing_runs = vec![ScheduledRun {
@@ -1372,6 +1454,9 @@ mod tests {
             next_run_epoch_ms: Some(1234),
             paused_remaining_ms: None,
             is_paused: true,
+            last_run_status: None,
+            last_run_error: None,
+            last_run_completed_epoch_ms: None,
         }];
 
         let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
@@ -1412,6 +1497,9 @@ mod tests {
             next_run_epoch_ms: Some(1234),
             paused_remaining_ms: None,
             is_paused: false,
+            last_run_status: None,
+            last_run_error: None,
+            last_run_completed_epoch_ms: None,
         }];
 
         let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
@@ -1448,11 +1536,61 @@ mod tests {
             next_run_epoch_ms: Some(1234),
             paused_remaining_ms: None,
             is_paused: false,
+            last_run_status: None,
+            last_run_error: None,
+            last_run_completed_epoch_ms: None,
         }];
 
         let runs = sync_scheduled_runs_for_workflow(&workflow, &existing_runs);
 
         assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn record_scheduled_run_outcome_marks_failed_run_with_error() {
+        let mut runs = vec![ScheduledRun {
+            id: "wf-1-trigger-1".to_string(),
+            workflow_id: "wf-1".to_string(),
+            workflow_name: "Morning Sync".to_string(),
+            schedule: ScheduleDefinition {
+                schedule_type: "daily".to_string(),
+                interval_minutes: None,
+                time_of_day: Some("09:00".to_string()),
+                days_of_week: None,
+                repeat_every: 1,
+                days_of_month: None,
+                specific_dates: None,
+                run_at: None,
+                end_condition: "never".to_string(),
+                end_date: None,
+                max_occurrences: None,
+                occurrence_count: 0,
+                active: true,
+            },
+            role_mappings: HashMap::new(),
+            description: "Daily at 09:00".to_string(),
+            next_run_epoch_ms: Some(1234),
+            paused_remaining_ms: None,
+            is_paused: false,
+            last_run_status: None,
+            last_run_error: None,
+            last_run_completed_epoch_ms: None,
+        }];
+
+        record_scheduled_run_outcome(
+            &mut runs,
+            "wf-1-trigger-1",
+            "failed",
+            Some("Agent timeout (60000ms)".to_string()),
+            42,
+        );
+
+        assert_eq!(runs[0].last_run_status.as_deref(), Some("failed"));
+        assert_eq!(
+            runs[0].last_run_error.as_deref(),
+            Some("Agent timeout (60000ms)")
+        );
+        assert_eq!(runs[0].last_run_completed_epoch_ms, Some(42));
     }
 }
 
@@ -1863,14 +2001,7 @@ pub async fn run_workflow(
                             }
                         }
 
-                        let timeout_ms = node
-                            .config
-                            .get("timeout_ms")
-                            .and_then(|v| {
-                                v.as_u64()
-                                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                            })
-                            .unwrap_or(60000);
+                        let timeout_ms = parse_optional_timeout_ms(&node.config);
 
                         log_debug(&format!(
                             "[Wardian] Agent node: agent_id={}, provider={}, output_format={}, prompt_len={}, prompt_preview='{}'",
@@ -1888,8 +2019,9 @@ pub async fn run_workflow(
                         );
 
                         if exec_ctx.mode != crate::models::WorkflowAgentMode::InheritResume {
-                            let run_result = tokio::time::timeout(
-                                std::time::Duration::from_millis(timeout_ms),
+                            let run_result = run_with_optional_timeout(
+                                timeout_ms,
+                                "Agent",
                                 crate::manager::run_headless_with_options(
                                     crate::manager::HeadlessRunOptions {
                                         cwd: &cwd,
@@ -1903,11 +2035,6 @@ pub async fn run_workflow(
                                 ),
                             )
                             .await;
-
-                            let run_result = match run_result {
-                                Ok(res) => res,
-                                Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
-                            };
 
                             match run_result {
                                 Ok(data) => {
@@ -1950,8 +2077,9 @@ pub async fn run_workflow(
                                 }
                             }
 
-                            let run_result = tokio::time::timeout(
-                                std::time::Duration::from_millis(timeout_ms),
+                            let run_result = run_with_optional_timeout(
+                                timeout_ms,
+                                "Agent",
                                 crate::manager::run_headless_with_options(
                                     crate::manager::HeadlessRunOptions {
                                         cwd: &cwd,
@@ -1965,11 +2093,6 @@ pub async fn run_workflow(
                                 ),
                             )
                             .await;
-
-                            let run_result = match run_result {
-                                Ok(res) => res,
-                                Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
-                            };
 
                             match run_result {
                                 Ok(data) => {
@@ -2040,8 +2163,9 @@ pub async fn run_workflow(
                                 }
 
                                 if provider_name == "opencode" {
-                                    let run_result = tokio::time::timeout(
-                                        std::time::Duration::from_millis(timeout_ms),
+                                    let run_result = run_with_optional_timeout(
+                                        timeout_ms,
+                                        "Agent",
                                         crate::manager::run_headless_with_options(
                                             crate::manager::HeadlessRunOptions {
                                                 cwd: &cwd,
@@ -2055,11 +2179,6 @@ pub async fn run_workflow(
                                         ),
                                     )
                                     .await;
-
-                                    let run_result = match run_result {
-                                        Ok(res) => res,
-                                        Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
-                                    };
 
                                     match run_result {
                                         Ok(data) => {
@@ -2101,12 +2220,20 @@ pub async fn run_workflow(
                                             }
                                         });
 
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_millis(timeout_ms),
-                                        completion_rx.recv(),
-                                    )
-                                    .await
-                                    {
+                                    let completion = match timeout_ms {
+                                        Some(ms) => match tokio::time::timeout(
+                                            std::time::Duration::from_millis(ms),
+                                            completion_rx.recv(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(value) => Ok(value),
+                                            Err(_) => Err(format!("Agent timeout ({}ms)", ms)),
+                                        },
+                                        None => Ok(completion_rx.recv().await),
+                                    };
+
+                                    match completion {
                                         Ok(_) => {
                                             let agents = state.agents.lock().await;
                                             if let Some(agent) = agents.get(agent_id) {
@@ -2116,10 +2243,7 @@ pub async fn run_workflow(
                                                 }
                                             }
                                         }
-                                        Err(_) => {
-                                            node_error =
-                                                Some(format!("Agent timeout ({}ms)", timeout_ms));
-                                        }
+                                        Err(err) => node_error = Some(err),
                                     }
                                     app.unlisten(handler_id);
                                 }
@@ -2137,8 +2261,9 @@ pub async fn run_workflow(
                                     }
                                 }
                                 let _ = app.emit("agents-updated", ());
-                                let run_result = tokio::time::timeout(
-                                    std::time::Duration::from_millis(timeout_ms),
+                                let run_result = run_with_optional_timeout(
+                                    timeout_ms,
+                                    "Agent",
                                     crate::manager::run_headless_with_options(
                                         crate::manager::HeadlessRunOptions {
                                             cwd: &cwd,
@@ -2152,11 +2277,6 @@ pub async fn run_workflow(
                                     ),
                                 )
                                 .await;
-
-                                let run_result = match run_result {
-                                    Ok(res) => res,
-                                    Err(_) => Err(format!("Agent timeout ({}ms)", timeout_ms)),
-                                };
 
                                 match run_result {
                                     Ok(data) => {
@@ -2248,14 +2368,7 @@ pub async fn run_workflow(
                     let interpolated_cmd = interpolate_string(cmd_str, &registry);
                     let cwd = resolve_cwd(&node.config, "");
                     let env = node.config.get("env");
-                    let timeout_ms = node
-                        .config
-                        .get("timeout_ms")
-                        .and_then(|v| {
-                            v.as_u64()
-                                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                        })
-                        .unwrap_or(30000);
+                    let timeout_ms = parse_optional_timeout_ms(&node.config);
 
                     match resolve_command_node_launch(&interpolated_cmd, build_shell_command) {
                         Ok(spec) => match run_command_headless(
@@ -2305,14 +2418,7 @@ pub async fn run_workflow(
                         .unwrap_or("");
                     let interpolated_args = interpolate_string(args_str, &registry);
                     let env = node.config.get("env");
-                    let timeout_ms = node
-                        .config
-                        .get("timeout_ms")
-                        .and_then(|v| {
-                            v.as_u64()
-                                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                        })
-                        .unwrap_or(30000);
+                    let timeout_ms = parse_optional_timeout_ms(&node.config);
                     let cwd = resolve_cwd(&node.config, "");
 
                     if file_path_str.is_empty() {
@@ -2494,13 +2600,29 @@ pub async fn run_workflow(
 
         // Emit workflow completion status
         let had_error = trace.iter().any(|e| e.status == "failed");
+        let final_status = if had_error { "failed" } else { "completed" };
+        let final_error = trace.iter().find_map(|event| event.error.clone());
+        if let Some(scheduled_run_id) = scheduled_run_id_for_completion.as_deref() {
+            let mut runs = load_scheduled_runs();
+            record_scheduled_run_outcome(
+                &mut runs,
+                scheduled_run_id,
+                final_status,
+                final_error.clone(),
+                Utc::now().timestamp_millis() as u64,
+            );
+            if save_scheduled_runs(&runs).is_ok() {
+                let _ = app.emit("scheduled-runs-updated", ());
+            }
+        }
         let _ = app.emit(
             "workflow-status-updated",
             serde_json::json!({
                 "workflow_id": wf.id,
                 "run_instance_id": run_instance_id_for_completion,
                 "scheduled_run_id": scheduled_run_id_for_completion,
-                "status": if had_error { "failed" } else { "completed" },
+                "status": final_status,
+                "error": final_error,
             }),
         );
 

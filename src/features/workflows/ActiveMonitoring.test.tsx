@@ -207,5 +207,32 @@ describe('ActiveMonitoring scheduled tasks', () => {
     expect(screen.getAllByText('Running')).toHaveLength(1);
     expect(screen.getAllByText('Live').length).toBeGreaterThan(0);
   });
-});
 
+  it('keeps a failed scheduled run visible with its last error', () => {
+    render(
+      <ActiveMonitoring
+        activeRuns={[]}
+        schedules={[
+          {
+            ...schedules[0],
+            last_run_status: 'failed',
+            last_run_error: 'Agent timeout (60000ms)',
+            last_run_completed_epoch_ms: Date.now() - 30_000,
+          },
+        ]}
+        activeWorkflows={[]}
+        availableWorkflows={workflows}
+        agents={agents}
+        onStopRun={vi.fn()}
+        onStopTrigger={vi.fn()}
+        onToggleSchedule={vi.fn()}
+        onDeleteSchedule={vi.fn()}
+        onRunNow={vi.fn()}
+        onOpenWorkflow={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText(/Last failed: Agent timeout \(60000ms\)/i)).toBeInTheDocument();
+  });
+});
