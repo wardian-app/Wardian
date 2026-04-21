@@ -284,13 +284,6 @@ impl AgentProvider for ClaudeProvider {
             }
         }
 
-        // Resume flag
-        let resume_id = config.resume_session.as_deref().unwrap_or("");
-        if is_resume && !resume_id.is_empty() {
-            args.push("--resume".into());
-            args.push(resume_id.to_string());
-        }
-
         args
     }
 
