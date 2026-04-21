@@ -90,6 +90,10 @@ fn set_agent_status(
     if let Ok(mut status) = current_status.lock() {
         if *status != next_status {
             *status = next_status.to_string();
+
+            // Phase 2: Persist status change to SQLite
+            let _ = crate::utils::db::update_agent_status(session_id, next_status, None);
+
             let _ = app.emit(
                 "agent-status-updated",
                 serde_json::json!({
@@ -408,6 +412,7 @@ pub async fn spawn_agent(
     }
     cmd.cwd(&provider_cwd);
     apply_terminal_identity_env(&mut cmd);
+    cmd.env("WARDIAN_SESSION_ID", &config.session_id);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
     // class/common/agent instruction files are loaded natively.
@@ -433,23 +438,27 @@ pub async fn spawn_agent(
         resume_id,
         is_restored
     ));
-    log_terminal_trace_note(
-        &config.session_id,
-        &config.provider,
-        &format!(
-            "spawn cwd={} restored={} args={:?}",
-            provider_cwd.display(),
-            is_restored,
-            provider_args
-        ),
-    );
 
+    // Phase 2: Record/Update agent in SQLite
+    let _ = crate::utils::db::upsert_agent(
+        &config.session_id,
+        &config.session_name,
+        &config.agent_class,
+        config.is_off,
+    );
     let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
 
     let process_id = child.process_id();
+
+    // Phase 2: Record/Update status in SQLite with the real PID
+    let _ = crate::utils::db::update_agent_status(
+        &config.session_id,
+        if config.is_off { "Off" } else { "Idle" },
+        process_id,
+    );
 
     #[cfg(windows)]
     let job_object = {

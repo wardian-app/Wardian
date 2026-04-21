@@ -524,12 +524,23 @@ function AppBody() {
   }
 
   async function renameAgent(sessionId: string, newName: string) {
-    if (!newName.trim()) return;
+    if (!newName.trim()) {
+      setEditingAgentId(null);
+      return;
+    }
+    const re = /^[a-zA-Z0-9_-]+$/;
+    if (!re.test(newName)) {
+      alert("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).");
+      return;
+    }
     try {
       await invoke("rename_agent", { sessionId, newName });
       setAgents(prev => prev.map(a => a.session_id === sessionId ? { ...a, session_name: newName } : a));
       setEditingAgentId(null);
-    } catch (e) { console.error(e); }
+    } catch (e: any) { 
+      console.error(e);
+      alert(e);
+    }
   }
 
   async function broadcastInput(e: React.FormEvent) {

@@ -119,6 +119,19 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn is_valid_name(name: &str) -> bool {
+    let re = regex::Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
+    re.is_match(name)
+}
+
+async fn is_name_unique(state: &AppState, name: &str, exclude_session_id: Option<&str>) -> bool {
+    let agents = state.agents.lock().await;
+    !agents.values().any(|a| {
+        a.config.session_name == name
+            && exclude_session_id.map_or(true, |id| a.config.session_id != id)
+    })
+}
+
 #[tauri::command]
 pub async fn spawn_agent(
     req: SpawnAgentRequest,
@@ -131,6 +144,14 @@ pub async fn spawn_agent(
     let resume_session = req.resume_session;
     let is_off = req.is_off;
     let config_override = req.config_override;
+
+    if !is_valid_name(&session_name) {
+        return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
+    }
+
+    if !is_name_unique(&state, &session_name, None).await {
+        return Err(format!("An agent with the name '{}' already exists.", session_name));
+    }
 
     manager::log_debug(&format!(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
@@ -263,6 +284,9 @@ pub async fn kill_agent(
         order.retain(|id| id != &session_id);
         manager::save_state(&app, &agents, &order);
         manager::terminate_active_agent_process(&mut agent);
+
+        // Phase 2: Remove from SQLite
+        let _ = crate::utils::db::delete_agent(&session_id);
 
         // Cleanup: remove the agent's private directory
         if let Some(home) = crate::utils::fs::get_wardian_home() {
@@ -453,11 +477,27 @@ pub async fn rename_agent(
         "[WARDIAN] rename_agent called for session {}: {}",
         session_id, new_name
     ));
+
+    if !is_valid_name(&new_name) {
+        return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
+    }
+
+    if !is_name_unique(&state, &new_name, Some(&session_id)).await {
+        return Err(format!("An agent with the name '{}' already exists.", new_name));
+    }
+
     let mut agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
         agent.config.session_name = new_name;
+        // Phase 2: Update agent metadata in SQLite
+        let _ = crate::utils::db::upsert_agent(
+            &agent.config.session_id,
+            &agent.config.session_name,
+            &agent.config.agent_class,
+            agent.config.is_off,
+        );
         manager::save_state(&app, &agents, &order);
         Ok(())
     } else {
