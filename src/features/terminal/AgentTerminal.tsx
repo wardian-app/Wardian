@@ -755,6 +755,28 @@ export const AgentTerminal = memo(function AgentTerminal({
       term.options.theme = termTheme;
       term.refresh(0, Math.max(term.rows - 1, 0));
     }
+    const entry = terminalSessionMap.get(sessionId);
+    if (!entry) {
+      return;
+    }
+    entry.currentTheme = termTheme;
+    if (entry.provider === "opencode") {
+      const toRgbTriplet = (hex: string, fallback: string) => {
+        const cleaned = String(hex ?? "").replace("#", "");
+        return cleaned.length === 6
+          ? `${cleaned.slice(0, 2)}/${cleaned.slice(2, 4)}/${cleaned.slice(4, 6)}`
+          : fallback;
+      };
+      const background = toRgbTriplet(termTheme.background, "02/04/02");
+      const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
+      const prefersLight = termTheme === LIGHT_TERM_THEME;
+      // Push unsolicited OSC updates so OpenCode repaints against the new
+      // Wardian theme without needing to re-query.
+      queueAgentInput(sessionId, `]11;rgb:${background}\\`);
+      queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
+      queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
+      queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
+    }
   }, [sessionId, termTheme]);
 
   useEffect(() => {
