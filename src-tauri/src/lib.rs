@@ -10,25 +10,54 @@ use crate::models::AgentConfig;
 use crate::state::AppState;
 use tauri::{Emitter, Manager};
 
-/// The main entry point for the Wardian Tauri application.
-/// Initializes plugins, state, and registers command handlers.
+pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use sysinfo::System;
+    
+    // Use new_all() to ensure we have process and environment data
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let agents = crate::utils::db::get_all_agents()?;
+    for agent in agents {
+        if agent.is_off { continue; }
+
+        let mut found_alive = false;
+        for process in sys.processes().values() {
+            for env_var in process.environ() {
+                let env_str = env_var.to_string_lossy();
+                if env_str.contains("WARDIAN_SESSION_ID=") && env_str.contains(&agent.session_id) {
+                    found_alive = true;
+                    let _ = crate::utils::db::update_agent_status(&agent.session_id, "Headless", Some(process.pid().as_u32()));
+                    break;
+                }
+            }
+            if found_alive { break; }
+        }
+
+        if !found_alive && agent.last_status.as_deref() != Some("Off") {
+            let _ = crate::utils::db::update_agent_status(&agent.session_id, "Off", None);
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
     {
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
         use windows::core::PCWSTR;
-        let aumid: Vec<u16> = "org.wardian.desktop"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let aumid: Vec<u16> = "org.wardian.desktop".encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
             let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR::from_raw(aumid.as_ptr()));
         }
     }
 
-    // Migrate ~/.wardian layout to current schema version before anything else
     crate::utils::migration::migrate_home_layout();
+
+    if let Err(e) = crate::utils::db::init_db() {
+        eprintln!("Failed to initialize database: {}", e);
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -37,11 +66,8 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             let app_handle = app.handle().clone();
-
-            // Generate Class Constraints globally inside AppData
             manager::init_agent_classes(&app_handle);
 
-            // Metrics push task
             let metrics_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -52,11 +78,11 @@ pub fn run() {
                 }
             });
 
-            // Restore agents from state
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
-
-                // Initialize Workflow Triggers
+                if let Err(e) = reconcile_headless_agents().await {
+                    eprintln!("Failed to reconcile headless agents: {}", e);
+                }
                 workflow_engine::init_triggers(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
@@ -65,18 +91,54 @@ pub fn run() {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
                             let mut agents_map = state.agents.lock().await;
                             let mut order_map = state.agent_order.lock().await;
-                            for mut config in configs {
-                                // Retroactively ensure the private agent directory is included
-                                config.system_include_directories =
-                                    Some(utils::fs::resolve_system_include_directories(
-                                        &config.agent_class,
-                                        &config.session_id,
-                                    ));
+                            let mut seen_names = std::collections::HashSet::new();
+// Fetch latest status from DB for all agents
+let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
+type DbStatus = (Option<String>, Option<u32>, Option<String>);
+let db_status_map: std::collections::HashMap<String, DbStatus> = 
+    db_agents.into_iter().map(|a| (a.session_id, (a.last_status, a.last_pid, a.created_at))).collect();
 
-                                if let Ok(agent) =
-                                    manager::spawn_agent(app_handle.clone(), config.clone(), true)
-                                        .await
-                                {
+                            for mut config in configs {
+                                // Sanitize name
+                                let mut sanitized_name = config.session_name.chars()
+                                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+                                    .collect::<String>();
+                                if sanitized_name.is_empty() { sanitized_name = "agent".to_string(); }
+                                let base_name = sanitized_name.clone();
+                                let mut counter = 1;
+                                while seen_names.contains(&sanitized_name) {
+                                    sanitized_name = format!("{}-{}", base_name, counter);
+                                    counter += 1;
+                                }
+                                seen_names.insert(sanitized_name.clone());
+                                config.session_name = sanitized_name;
+
+                                config.system_include_directories = Some(utils::fs::resolve_system_include_directories(&config.agent_class, &config.session_id));
+
+                                let (last_status, last_pid, last_born) = db_status_map.get(&config.session_id).cloned().unwrap_or((None, None, None));
+
+                                if last_status.as_deref() == Some("Headless") {
+                                    let agent = crate::state::ActiveAgent {
+                                        config: std::sync::Arc::new(std::sync::Mutex::new(config.clone())),
+                                        child_process: None,
+                                        background_processes: Vec::new(),
+                                        pty_master: None,
+                                        stdin_tx: None,
+                                        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+                                        process_id: last_pid,
+                                        query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(last_born)),
+                                        current_status: std::sync::Arc::new(std::sync::Mutex::new("Headless".to_string())),
+                                        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+                                        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                                        log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                                        log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                                        #[cfg(windows)]
+                                        job_object: None,
+                                    };
+                                    order_map.push(config.session_id.clone());
+                                    agents_map.insert(config.session_id.clone(), agent);
+                                } else if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true, last_born).await {
                                     if let Some(ref tx) = agent.stdin_tx {
                                         if let Ok(mut senders) = state.input_senders.write() {
                                             senders.insert(config.session_id.clone(), tx.clone());
@@ -86,6 +148,7 @@ pub fn run() {
                                     agents_map.insert(config.session_id.clone(), agent);
                                 }
                             }
+                            manager::save_state(&app_handle, &agents_map, &order_map);
                             let _ = app_handle.emit("agents-updated", ());
                         }
                     }
@@ -117,12 +180,6 @@ pub fn run() {
             commands::class::get_default_class_instruction,
             commands::class::reset_class_to_default,
             commands::class::reset_all_class_prompts,
-            commands::watchlist::load_watchlists,
-            commands::watchlist::save_watchlists,
-            commands::watchlist::load_watchlist_prefs,
-            commands::watchlist::save_watchlist_prefs,
-            commands::watchlist::load_agent_interactions,
-            commands::watchlist::save_agent_interactions,
             commands::fs::resolve_system_include_directories,
             commands::fs::validate_directory_path,
             commands::fs::get_explorer_root,
@@ -130,16 +187,36 @@ pub fn run() {
             commands::fs::delete_file,
             commands::fs::reveal_in_explorer,
             commands::fs::read_file_preview,
+            commands::git::git_status,
+            commands::git::git_current_branch,
+            commands::git::git_log,
+            commands::git::git_diff_file,
+            commands::git::git_stage,
+            commands::git::git_unstage,
+            commands::git::git_discard_changes,
+            commands::git::git_commit,
+            commands::git::git_pull,
+            commands::git::git_push,
+            commands::git::git_create_worktree,
+            commands::git::git_remove_worktree,
+            commands::git::git_watch,
+            commands::git::git_unwatch,
+            commands::watchlist::load_watchlists,
+            commands::watchlist::save_watchlists,
+            commands::watchlist::load_watchlist_prefs,
+            commands::watchlist::save_watchlist_prefs,
+            commands::watchlist::load_agent_interactions,
+            commands::watchlist::save_agent_interactions,
             commands::workflow::list_workflows,
             commands::workflow::save_workflow,
             commands::workflow::delete_workflow,
             commands::workflow::run_workflow,
             commands::workflow::stop_all_triggers,
+            commands::workflow::pause_all_triggers,
+            commands::workflow::resume_all_triggers,
             commands::workflow::stop_workflow_triggers,
             commands::workflow::stop_workflow_run,
             commands::workflow::run_scheduled_workflow_now,
-            commands::workflow::pause_all_triggers,
-            commands::workflow::resume_all_triggers,
             commands::workflow::load_workflow_library,
             commands::workflow::save_workflow_library,
             commands::workflow::list_scheduled_runs,
@@ -155,71 +232,12 @@ pub fn run() {
             commands::library::list_deployed_skills,
             commands::library::list_skill_deployments,
             commands::patch::run_gemini_patch,
-            commands::settings::list_available_shells,
             commands::settings::load_shell_settings,
+            commands::settings::list_available_shells,
             commands::settings::save_shell_settings,
             commands::settings::save_agent_session_persistence,
             commands::settings::save_opencode_theme,
-            commands::git::git_status,
-            commands::git::git_current_branch,
-            commands::git::git_log,
-            commands::git::git_diff_file,
-            commands::git::git_stage,
-            commands::git::git_unstage,
-            commands::git::git_discard_changes,
-            commands::git::git_commit,
-            commands::git::git_pull,
-            commands::git::git_push,
-            commands::git::git_create_worktree,
-            commands::git::git_remove_worktree,
-            commands::git::git_watch,
-            commands::git::git_unwatch
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                let state = app.state::<AppState>();
-
-                // Terminate all agent process trees on app exit to prevent zombies.
-                // We use try_lock to avoid deadlocking with background tasks during shutdown.
-                // If the lock is held, the agents will still be terminated when AppState
-                // drops, which triggers the `Drop` safety net on `ActiveAgent`.
-                {
-                    if let Ok(mut agents) = state.agents.try_lock() {
-                        for (_sid, agent) in agents.iter_mut() {
-                            manager::terminate_active_agent_process(agent);
-                        }
-                        agents.clear();
-                    }
-                }
-
-                // Abort all workflow triggers and running executions.
-                {
-                    if let Ok(mut triggers) = state.workflow_triggers.try_lock() {
-                        for (_wf_id, handles) in triggers.drain() {
-                            for handle in handles {
-                                handle.abort();
-                            }
-                        }
-                    }
-                }
-                {
-                    if let Ok(mut runs) = state.workflow_runs.try_lock() {
-                        for (_wf_id, handles) in runs.drain() {
-                            for handle in handles {
-                                handle.abort();
-                            }
-                        }
-                    }
-                }
-                {
-                    if let Ok(mut scheduler) = state.scheduler_handle.try_lock() {
-                        if let Some(h) = scheduler.take() {
-                            h.abort();
-                        }
-                    };
-                }
-            }
-        });
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }

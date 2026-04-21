@@ -10,7 +10,18 @@ interface Props {
 
 export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) => {
   const [newSessionName, setNewSessionName] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
   const [newAgentClass, setNewAgentClass] = useState("Generalist");
+
+  const validateName = (name: string) => {
+    if (!name.trim()) return "Name is required";
+    const re = /^[a-zA-Z0-9_-]+$/;
+    if (!re.test(name)) {
+      return "Names must be alphanumeric, underscores, or hyphens (no spaces).";
+    }
+    return null;
+  };
+
   const [newFolder, setNewFolder] = useState("");
   const [resumeSession, setResumeSession] = useState("");
   const [spawnAdvancedConfig, setSpawnAdvancedConfig] = useState<Partial<AgentConfig>>({});
@@ -29,6 +40,11 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
 
   const spawnAgent = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    const err = validateName(newSessionName);
+    if (err) {
+      setNameError(err);
+      return;
+    }
     setIsSpawning(true);
     try {
       await invoke<AgentConfig>("spawn_agent", {
@@ -42,6 +58,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
         },
       });
       setNewSessionName("");
+      setNameError(null);
       setNewAgentClass("Generalist");
       setNewFolder("");
       setResumeSession("");
@@ -67,11 +84,17 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
           </label>
           <input
             data-testid="spawn-agent-name"
-            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
-            placeholder="e.g. Coder_Alpha"
+            className={`w-full bg-[var(--color-wardian-input-bg)] border ${nameError ? 'border-wardian-error' : 'border-wardian-light'} rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors`}
+            placeholder="e.g. coder-alpha"
             value={newSessionName}
-            onChange={(e) => setNewSessionName(e.currentTarget.value)}
+            onChange={(e) => {
+              setNewSessionName(e.currentTarget.value);
+              setNameError(validateName(e.currentTarget.value));
+            }}
           />
+          {nameError && (
+            <p className="text-[10px] text-wardian-error mt-1">{nameError}</p>
+          )}
         </div>
         <div>
           <label className="block text-[10px] font-bold text-muted-neutral mb-1">

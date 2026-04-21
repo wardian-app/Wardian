@@ -83,7 +83,8 @@ pub async fn send_input_to_agent(
                 } else if is_submit {
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
-                        if agent.config.provider == "opencode" {
+                        let provider = agent.config.lock().unwrap().provider.clone();
+                        if provider == "opencode" {
                             let current_status = agent
                                 .current_status
                                 .lock()
@@ -173,6 +174,7 @@ pub async fn submit_prompt_to_agent(
         let agent = agents
             .get(&session_id)
             .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
+        let config = agent.config.lock().unwrap().clone();
         let tx = state
             .input_senders
             .try_read()
@@ -180,8 +182,8 @@ pub async fn submit_prompt_to_agent(
             .get(&session_id)
             .cloned();
         (
-            agent.config.provider.clone(),
-            agent.config.clone(),
+            config.provider.clone(),
+            config,
             tx,
         )
     };

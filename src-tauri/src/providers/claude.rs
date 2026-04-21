@@ -199,19 +199,21 @@ impl AgentProvider for ClaudeProvider {
             args.push(model.clone());
         }
 
-        // Only set fresh-session identity on non-resume launches.
-        let fresh_session_id = config
-            .fresh_provider_session_id
-            .as_deref()
-            .unwrap_or(config.session_id.as_str())
-            .trim();
-        if !is_resume && !fresh_session_id.is_empty() {
+        if is_resume {
+            // Rule: Old session -> --resume
+            let resume_id = config.resume_session.as_deref().unwrap_or(config.session_id.as_str());
+            args.push("--resume".into());
+            args.push(resume_id.to_string());
+        } else {
+            // Rule: New session -> --session-id
+            let new_id = config.fresh_provider_session_id.as_deref().unwrap_or(config.session_id.as_str());
             args.push("--session-id".into());
-            args.push(fresh_session_id.to_string());
-        }
-        if !is_resume && !config.session_name.trim().is_empty() {
-            args.push("--name".into());
-            args.push(config.session_name.clone());
+            args.push(new_id.to_string());
+
+            if !config.session_name.trim().is_empty() {
+                args.push("--name".into());
+                args.push(config.session_name.clone());
+            }
         }
 
         let mut final_includes = config
@@ -293,6 +295,13 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
+        let trimmed = line.trim();
+        if trimmed.contains("Do you want to proceed?") 
+            || trimmed.contains("Allow reading from")
+            || trimmed.contains("requires approval") {
+            return Some(AgentEvent::ActionRequired { message: "".into() });
+        }
+
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         let msg_type = parsed.get("type")?.as_str()?;
 

@@ -43,7 +43,8 @@ export interface WorkflowAgentNodeConfig {
   prompt?: string;
   output_format?: 'text' | 'json';
   json_schema?: Record<string, unknown>;
-  timeout_ms?: number | string;
+  /** Missing, blank, null, or 0 means no timeout. Positive values are milliseconds. */
+  timeout_ms?: number | string | null;
 }
 
 export interface WorkflowSettings {
@@ -114,6 +115,9 @@ export interface ScheduledRun {
   next_run_epoch_ms: number | null;
   paused_remaining_ms?: number | null;
   is_paused: boolean;
+  last_run_status?: 'completed' | 'failed' | string | null;
+  last_run_error?: string | null;
+  last_run_completed_epoch_ms?: number | null;
 }
 
 export interface ActiveRunTracker {

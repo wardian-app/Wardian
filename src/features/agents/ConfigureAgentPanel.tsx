@@ -163,7 +163,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             <input
               readOnly
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded px-3 py-2 text-xs text-muted-neutral font-mono focus:outline-none select-text cursor-text"
-              value={config.session_id}
+              value={config.resume_session || config.session_id}
             />
           </div>
           <div>
