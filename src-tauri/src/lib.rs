@@ -22,7 +22,7 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
         if agent.is_off { continue; }
 
         let mut found_alive = false;
-        for (_pid, process) in sys.processes() {
+        for process in sys.processes().values() {
             for env_var in process.environ() {
                 let env_str = env_var.to_string_lossy();
                 if env_str.contains("WARDIAN_SESSION_ID=") && env_str.contains(&agent.session_id) {
@@ -92,10 +92,11 @@ pub fn run() {
                             let mut agents_map = state.agents.lock().await;
                             let mut order_map = state.agent_order.lock().await;
                             let mut seen_names = std::collections::HashSet::new();
-
-                            let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
-                            let db_status_map: std::collections::HashMap<String, (Option<String>, Option<u32>, Option<String>)> = 
-                                db_agents.into_iter().map(|a| (a.session_id, (a.last_status, a.last_pid, a.created_at))).collect();
+// Fetch latest status from DB for all agents
+let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
+type DbStatus = (Option<String>, Option<u32>, Option<String>);
+let db_status_map: std::collections::HashMap<String, DbStatus> = 
+    db_agents.into_iter().map(|a| (a.session_id, (a.last_status, a.last_pid, a.created_at))).collect();
 
                             for mut config in configs {
                                 // Sanitize name
@@ -137,16 +138,14 @@ pub fn run() {
                                     };
                                     order_map.push(config.session_id.clone());
                                     agents_map.insert(config.session_id.clone(), agent);
-                                } else {
-                                    if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true, last_born).await {
-                                        if let Some(ref tx) = agent.stdin_tx {
-                                            if let Ok(mut senders) = state.input_senders.write() {
-                                                senders.insert(config.session_id.clone(), tx.clone());
-                                            }
+                                } else if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true, last_born).await {
+                                    if let Some(ref tx) = agent.stdin_tx {
+                                        if let Ok(mut senders) = state.input_senders.write() {
+                                            senders.insert(config.session_id.clone(), tx.clone());
                                         }
-                                        order_map.push(config.session_id.clone());
-                                        agents_map.insert(config.session_id.clone(), agent);
                                     }
+                                    order_map.push(config.session_id.clone());
+                                    agents_map.insert(config.session_id.clone(), agent);
                                 }
                             }
                             manager::save_state(&app_handle, &agents_map, &order_map);

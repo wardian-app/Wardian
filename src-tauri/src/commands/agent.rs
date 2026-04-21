@@ -118,7 +118,7 @@ async fn is_name_unique(state: &AppState, name: &str, exclude_session_id: Option
     !agents.values().any(|a| {
         let config = a.config.lock().unwrap();
         config.session_name == name
-            && exclude_session_id.map_or(true, |id| config.session_id != id)
+            && exclude_session_id.is_none_or(|id| config.session_id != id)
     })
 }
 
