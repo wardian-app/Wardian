@@ -317,6 +317,7 @@ pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
     is_restored: bool,
+    initial_timestamp: Option<String>,
 ) -> Result<ActiveAgent, String> {
     let provider = ProviderFactory::resolve(&config.provider)?;
 
@@ -338,7 +339,7 @@ pub async fn spawn_agent(
             output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             process_id: None,
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(initial_timestamp)),
             current_status: std::sync::Arc::new(std::sync::Mutex::new("Off".to_string())),
             terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -443,12 +444,16 @@ pub async fn spawn_agent(
         is_restored
     ));
 
-    // Phase 2: Record/Update agent in SQLite
+    // Phase 2: Record/Update agent in SQLite with explicit ISO 8601 timestamp
+    let born_to_save = initial_timestamp.clone().unwrap_or_else(|| {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    });
     let _ = crate::utils::db::upsert_agent(
         &config.session_id,
         &config.session_name,
         &config.agent_class,
         config.is_off,
+        Some(&born_to_save),
     );
     let child = pair
         .slave
@@ -527,9 +532,7 @@ pub async fn spawn_agent(
     let output_buffer_clone = output_buffer.clone();
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
     let query_count_clone = query_count.clone();
-    let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(Some(
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    )));
+    let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(Some(born_to_save)));
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
@@ -607,7 +610,13 @@ pub async fn spawn_agent(
                     for line in text.lines() {
                         if let Some(event) = pty_provider.parse_output(line) {
                             match event {
-                                AgentEvent::Init { session_id, .. } => {
+                                AgentEvent::Init { session_id, timestamp } => {
+                                    if let Some(ts) = timestamp {
+                                        let mut it = init_timestamp_clone.lock().unwrap();
+                                        if it.is_none() {
+                                            *it = Some(ts);
+                                        }
+                                    }
                                     if !session_id.trim().is_empty() {
                                         let mut config = config_lock_clone.lock().unwrap();
                                         if config.resume_session.as_deref() != Some(&session_id) {
@@ -620,8 +629,8 @@ pub async fn spawn_agent(
                                         }
                                     }
                                 }
-                                AgentEvent::ActionRequired { message } => {
-                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, &format!("Action Required: {}", message));
+                                AgentEvent::ActionRequired { message: _ } => {
+                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Action Needed");
                                 }
                                 AgentEvent::TurnCompleted | AgentEvent::ModelResponse => {
                                     set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
@@ -2180,36 +2189,65 @@ fn claude_permission_hook_matches_session(event: &serde_json::Value, session_id:
 }
 
 fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
+    let mut has_activity = false;
+
     for line in lines.iter().rev() {
-        match line.get("type").and_then(|v| v.as_str()) {
-            Some("system") => {
-                if let Some("permission_request") = line.get("subtype").and_then(|v| v.as_str()) {
+        let msg_type = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        
+        match msg_type {
+            "system" => {
+                let subtype = line.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                if subtype == "permission_request" {
                     return Some("Action Needed".to_string());
                 }
-            }
-            Some("assistant") => {
-                let stop_reason = line
-                    .get("message")
-                    .and_then(|v| v.get("stop_reason"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if stop_reason == "end_turn" || stop_reason == "stop_sequence" {
+                if subtype == "turn_duration" {
                     return Some("Idle".to_string());
                 }
-                return Some("Processing...".to_string());
             }
-            Some("progress") => return Some("Processing...".to_string()),
-            Some("user") => {
-                let kind = classify_claude_user_event(line);
-                if kind == ClaudeUserEventKind::RealQuery || kind == ClaudeUserEventKind::ToolResult {
+            "result" => {
+                return Some("Idle".to_string());
+            }
+            "assistant" => {
+                let stop_reason = line
+                    .get("message")
+                    .and_then(|m| m.get("stop_reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                
+                if !stop_reason.is_empty() {
+                    if stop_reason == "tool_use" {
+                        // Activity signal, but keep searching for permission_request in this turn
+                        has_activity = true;
+                    } else {
+                        // Definitive end of turn (end_turn, stop_sequence, etc.)
+                        return Some("Idle".to_string());
+                    }
+                } else {
+                    // Streaming or incomplete assistant message
                     return Some("Processing...".to_string());
                 }
+            }
+            "user" => {
+                let kind = classify_claude_user_event(line);
+                if kind == ClaudeUserEventKind::RealQuery || kind == ClaudeUserEventKind::ToolResult {
+                    // Start of turn or handled tool result
+                    return Some("Processing...".to_string());
+                }
+                // Other user events are just activity
+                has_activity = true;
+            }
+            "progress" => {
+                return Some("Processing...".to_string());
             }
             _ => {}
         }
     }
 
-    None
+    if has_activity {
+        Some("Processing...".to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -2468,6 +2506,22 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     &mut mem,
                     &mut uptime,
                 );
+
+                // Phase 3: Uptime Alignment
+                // If we have a 'Born' date, calculate total lifetime uptime while active.
+                // Otherwise, fallback to the OS process runtime gathered above.
+                if let Ok(born_lock) = snap.init_timestamp.lock() {
+                    if let Some(ref born_str) = *born_lock {
+                        if let Ok(born_dt) = chrono::DateTime::parse_from_rfc3339(born_str) {
+                            let now = chrono::Utc::now();
+                            let duration = now.signed_duration_since(born_dt.with_timezone(&chrono::Utc));
+                            let secs = duration.num_seconds();
+                            if secs > 0 {
+                                uptime = secs as u64;
+                            }
+                        }
+                    }
+                }
             }
 
             // Detect whether the agent process is still alive
@@ -2662,8 +2716,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     }
                                 }
 
-                                let current_status = snap.current_status.lock().unwrap().clone();
-                                if current_status != "Action Needed" {
+                                let current_status_snap = snap.current_status.lock().unwrap().clone();
+                                if !current_status_snap.starts_with("Action Required") {
                                     if let Some(status) = claude_status_from_log(&lines) {
                                         *snap.current_status.lock().unwrap() = status;
                                     }
@@ -2712,7 +2766,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 *snap.init_timestamp.lock().unwrap() = Some(ts);
             }
 
-            if snap.provider == "opencode" {
+            if snap.provider == "opencode" || snap.provider == "claude" {
                 let current_status = snap.current_status.lock().unwrap().clone();
                 let last_output_at = *snap.last_output_at.lock().unwrap();
                 if opencode_should_fallback_to_idle(
@@ -3562,7 +3616,49 @@ mod tests {
     }
 
     #[test]
-    fn claude_interactive_spawn_drops_stream_json_flags() {
+    fn claude_status_from_log_does_not_look_past_turn_boundary() {
+        let lines = vec![
+            serde_json::json!({ "type": "system", "subtype": "turn_duration" }), // Turn 1
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "Query 2" }
+            }), // Turn 2 start
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [], "stop_reason": "tool_use" }
+            }), // Turn 2 tool use
+        ];
+
+        // Should be Processing..., NOT Idle (from turn 1)
+        assert_eq!(
+            claude_status_from_log(&lines),
+            Some("Processing...".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_status_from_log_detects_action_needed_in_current_turn() {
+        let lines = vec![
+            serde_json::json!({ "type": "system", "subtype": "turn_duration" }), // Turn 1
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "Query 2" }
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [], "stop_reason": "tool_use" }
+            }),
+            serde_json::json!({ "type": "system", "subtype": "permission_request" }),
+        ];
+
+        assert_eq!(
+            claude_status_from_log(&lines),
+            Some("Action Needed".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_interactive_spawn_preserves_stream_json_flags() {
         let args = finalize_interactive_spawn_args(
             "claude",
             true,
@@ -3578,9 +3674,18 @@ mod tests {
             ],
         );
 
+        // Phase 3: We now preserve these flags so PTY output can be parsed for status
         assert_eq!(
             args,
-            vec!["--resume".to_string(), "claude-session".to_string(),]
+            vec![
+                "--verbose".to_string(),
+                "--input-format".to_string(),
+                "stream-json".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--resume".to_string(),
+                "claude-session".to_string(),
+            ]
         );
     }
 

@@ -193,7 +193,7 @@ pub async fn spawn_agent(
         &agent_class,
         &session_id,
     ));
-    let active_agent = manager::spawn_agent(app.clone(), config.clone(), false).await?;
+    let active_agent = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
     if config.provider == "codex" && actual_resume.is_none() {
         for _ in 0..40 {
@@ -382,9 +382,12 @@ pub async fn resume_agent(
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
-        let mut config = agent.config.lock().unwrap().clone();
+        let (mut config, born) = {
+            let config_lock = agent.config.lock().unwrap();
+            (config_lock.clone(), agent.init_timestamp.lock().unwrap().clone())
+        };
         prepare_resume_config(&mut config)?;
-        let mut new_active = manager::spawn_agent(app.clone(), config, true).await?;
+        let mut new_active = manager::spawn_agent(app.clone(), config, true, born).await?;
         restore_runtime_state_after_resume(&mut new_active, agent);
         
         {
@@ -461,7 +464,8 @@ pub async fn clear_agent_session(
 
         // 5. Spawn a FRESH process (is_restored = false)
         // This ensures Claude uses --session-id and others start clean.
-        let new_active = manager::spawn_agent(app.clone(), config, false).await?;
+        let born = agent.init_timestamp.lock().unwrap().clone();
+        let new_active = manager::spawn_agent(app.clone(), config, false, born).await?;
 
         {
             let mut new_config = new_active.config.lock().unwrap();
@@ -484,11 +488,13 @@ pub async fn clear_agent_session(
         // 7. Update agent metadata in SQLite
         {
             let config = agent.config.lock().unwrap();
+            let born = agent.init_timestamp.lock().unwrap();
             let _ = crate::utils::db::upsert_agent(
                 &config.session_id,
                 &config.session_name,
                 &config.agent_class,
                 config.is_off,
+                born.as_deref(),
             );
         }
 
@@ -536,10 +542,10 @@ pub async fn rename_agent(
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
-        let (sid, name, class, is_off) = {
+        let (sid, name, class, is_off, born) = {
             let mut config = agent.config.lock().unwrap();
             config.session_name = new_name;
-            (config.session_id.clone(), config.session_name.clone(), config.agent_class.clone(), config.is_off)
+            (config.session_id.clone(), config.session_name.clone(), config.agent_class.clone(), config.is_off, agent.init_timestamp.lock().unwrap().clone())
         };
 
         // Phase 2: Update agent metadata in SQLite
@@ -548,6 +554,7 @@ pub async fn rename_agent(
             &name,
             &class,
             is_off,
+            born.as_deref(),
         );
         manager::save_state(&app, &agents, &order);
         Ok(())

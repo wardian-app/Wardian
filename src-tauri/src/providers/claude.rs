@@ -295,6 +295,13 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
+        let trimmed = line.trim();
+        if trimmed.contains("Do you want to proceed?") 
+            || trimmed.contains("Allow reading from")
+            || trimmed.contains("requires approval") {
+            return Some(AgentEvent::ActionRequired { message: "".into() });
+        }
+
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         let msg_type = parsed.get("type")?.as_str()?;
 

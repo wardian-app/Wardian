@@ -2112,11 +2112,19 @@ pub async fn run_workflow(
                             // Restore state after headless run
                             if was_online {
                                 if let Some(cfg_lock) = agent_cfg {
-                                    let mut cfg = cfg_lock.lock().unwrap().clone();
+                                    let (cfg, born) = {
+                                        let config_guard = cfg_lock.lock().unwrap();
+                                        // Since we don't have direct access to the ActiveAgent struct here (it's being restored),
+                                        // we'll pass None for the timestamp if it's not in the config, letting spawn_agent 
+                                        // use the existing one if it finds it, or Now() if not.
+                                        // Actually, let's just pass None here as this path is for RE-SPAWNING after a headless run failure.
+                                        (config_guard.clone(), None) 
+                                    };
+                                    let mut cfg = cfg;
                                     cfg.is_off = false;
                                     log_debug(&format!("[Wardian] Restoring agent {} to Online state after headless run", agent_id));
                                     if let Ok(new_agent) =
-                                        crate::manager::spawn_agent(app.clone(), cfg, false).await
+                                        crate::manager::spawn_agent(app.clone(), cfg, false, born).await
                                     {
                                         let mut agents_map = state.agents.lock().await;
                                         if let Some(ref tx) = new_agent.stdin_tx {

@@ -94,8 +94,8 @@ pub fn run() {
                             let mut seen_names = std::collections::HashSet::new();
 
                             let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
-                            let db_status_map: std::collections::HashMap<String, (Option<String>, Option<u32>)> = 
-                                db_agents.into_iter().map(|a| (a.session_id, (a.last_status, a.last_pid))).collect();
+                            let db_status_map: std::collections::HashMap<String, (Option<String>, Option<u32>, Option<String>)> = 
+                                db_agents.into_iter().map(|a| (a.session_id, (a.last_status, a.last_pid, a.created_at))).collect();
 
                             for mut config in configs {
                                 // Sanitize name
@@ -114,11 +114,11 @@ pub fn run() {
 
                                 config.system_include_directories = Some(utils::fs::resolve_system_include_directories(&config.agent_class, &config.session_id));
 
-                                let (last_status, last_pid) = db_status_map.get(&config.session_id).cloned().unwrap_or((None, None));
+                                let (last_status, last_pid, last_born) = db_status_map.get(&config.session_id).cloned().unwrap_or((None, None, None));
 
                                 if last_status.as_deref() == Some("Headless") {
                                     let agent = crate::state::ActiveAgent {
-                                        config: config.clone(),
+                                        config: std::sync::Arc::new(std::sync::Mutex::new(config.clone())),
                                         child_process: None,
                                         background_processes: Vec::new(),
                                         pty_master: None,
@@ -126,7 +126,7 @@ pub fn run() {
                                         output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
                                         process_id: last_pid,
                                         query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(last_born)),
                                         current_status: std::sync::Arc::new(std::sync::Mutex::new("Headless".to_string())),
                                         terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
                                         last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -138,7 +138,7 @@ pub fn run() {
                                     order_map.push(config.session_id.clone());
                                     agents_map.insert(config.session_id.clone(), agent);
                                 } else {
-                                    if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true).await {
+                                    if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true, last_born).await {
                                         if let Some(ref tx) = agent.stdin_tx {
                                             if let Ok(mut senders) = state.input_senders.write() {
                                                 senders.insert(config.session_id.clone(), tx.clone());

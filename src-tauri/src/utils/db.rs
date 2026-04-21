@@ -65,16 +65,17 @@ pub fn upsert_agent(
     session_name: &str,
     agent_class: &str,
     is_off: bool,
+    created_at: Option<&str>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
         conn.execute(
-            "INSERT INTO agents (session_id, session_name, agent_class, is_off)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO agents (session_id, session_name, agent_class, is_off, created_at)
+             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, CURRENT_TIMESTAMP))
              ON CONFLICT(session_id) DO UPDATE SET
                 session_name = excluded.session_name,
                 agent_class = excluded.agent_class,
                 is_off = excluded.is_off",
-            params![session_id, session_name, agent_class, is_off],
+            params![session_id, session_name, agent_class, is_off, created_at],
         )?;
         Ok(())
     })
@@ -128,11 +129,12 @@ pub struct AgentRow {
     pub last_status: Option<String>,
     pub last_pid: Option<u32>,
     pub is_off: bool,
+    pub created_at: Option<String>,
 }
 
 pub fn get_all_agents() -> std::result::Result<Vec<AgentRow>, Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
-        let mut stmt = conn.prepare("SELECT session_id, session_name, last_status, last_pid, is_off FROM agents")?;
+        let mut stmt = conn.prepare("SELECT session_id, session_name, last_status, last_pid, is_off, created_at FROM agents")?;
         let rows = stmt.query_map([], |row| {
             Ok(AgentRow {
                 session_id: row.get(0)?,
@@ -140,6 +142,7 @@ pub fn get_all_agents() -> std::result::Result<Vec<AgentRow>, Box<dyn std::error
                 last_status: row.get(2)?,
                 last_pid: row.get(3)?,
                 is_off: row.get(4)?,
+                created_at: row.get(5)?,
             })
         })?;
         let mut results = Vec::new();

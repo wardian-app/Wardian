@@ -51,6 +51,8 @@ pub struct AgentConfig {
     pub custom_args: Option<String>,
     #[serde(default)]
     pub session_persistence: AgentSessionPersistenceOverride,
+    #[serde(default)]
+    pub init_timestamp: Option<String>,
     #[serde(default, skip)]
     pub fresh_provider_session_id: Option<String>,
 
