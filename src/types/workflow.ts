@@ -44,7 +44,7 @@ export interface WorkflowAgentNodeConfig {
   output_format?: 'text' | 'json';
   json_schema?: Record<string, unknown>;
   /** Missing, blank, null, or 0 means no timeout. Positive values are milliseconds. */
-  timeout_ms?: number | string;
+  timeout_ms?: number | string | null;
 }
 
 export interface WorkflowSettings {

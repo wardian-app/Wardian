@@ -537,9 +537,9 @@ function AppBody() {
       await invoke("rename_agent", { sessionId, newName });
       setAgents(prev => prev.map(a => a.session_id === sessionId ? { ...a, session_name: newName } : a));
       setEditingAgentId(null);
-    } catch (e: any) { 
+    } catch (e: unknown) { 
       console.error(e);
-      alert(e);
+      alert(e instanceof Error ? e.message : String(e));
     }
   }
 

@@ -92,7 +92,7 @@ pub fn update_agent_status(session_id: &str, status: &str, pid: Option<u32>) -> 
 
         if last_status.as_deref() != Some(status) {
             conn.execute(
-                "UPDATE agents SET last_status = ?1, last_pid = ?2 WHERE session_id = ?3",
+                "UPDATE agents SET last_status = ?1, last_pid = COALESCE(?2, last_pid) WHERE session_id = ?3",
                 params![status, pid, session_id],
             )?;
 

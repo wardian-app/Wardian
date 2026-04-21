@@ -235,6 +235,11 @@ function clearTerminalSession(sessionId: string) {
   } else {
     entry.parser.write("\u001bc");
   }
+
+  if (entry.renderer) {
+    entry.renderer.term.clear();
+    entry.renderer.term.write("\u001bc");
+  }
   
   entry.titleHandlerRef.current?.("");
 }

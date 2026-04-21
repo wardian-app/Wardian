@@ -2717,7 +2717,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 }
 
                                 let current_status_snap = snap.current_status.lock().unwrap().clone();
-                                if !current_status_snap.starts_with("Action Required") {
+                                if !current_status_snap.starts_with("Action Required")
+                                    && !current_status_snap.starts_with("Action Needed")
+                                {
                                     if let Some(status) = claude_status_from_log(&lines) {
                                         *snap.current_status.lock().unwrap() = status;
                                     }

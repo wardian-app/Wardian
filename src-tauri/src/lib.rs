@@ -100,7 +100,7 @@ pub fn run() {
                             for mut config in configs {
                                 // Sanitize name
                                 let mut sanitized_name = config.session_name.chars()
-                                    .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+                                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
                                     .collect::<String>();
                                 if sanitized_name.is_empty() { sanitized_name = "agent".to_string(); }
                                 let base_name = sanitized_name.clone();
@@ -232,6 +232,12 @@ pub fn run() {
             commands::library::remove_deployed_skill,
             commands::library::list_deployed_skills,
             commands::library::list_skill_deployments,
+            commands::patch::run_gemini_patch,
+            commands::settings::load_shell_settings,
+            commands::settings::list_available_shells,
+            commands::settings::save_shell_settings,
+            commands::settings::save_agent_session_persistence,
+            commands::settings::save_opencode_theme,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
