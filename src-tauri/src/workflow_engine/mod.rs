@@ -1940,8 +1940,9 @@ pub async fn run_workflow(
                         } else {
                             let state = app.state::<crate::state::AppState>();
                             let agents_map = state.agents.lock().await;
-                            if let Some(agent) = agents_map.get(agent_id) {
-                                Some(agent.config.clone())
+                            let existing_config = if let Some(agent) = agents_map.get(agent_id) {
+                                let config = agent.config.lock().unwrap().clone();
+                                Some(config)
                             } else if let Some(home) = get_wardian_home() {
                                 if let Ok(data) =
                                     std::fs::read_to_string(home.join("settings/state.json"))
@@ -1960,7 +1961,8 @@ pub async fn run_workflow(
                                 }
                             } else {
                                 None
-                            }
+                            };
+                            existing_config
                         };
                         let node_config = node
                             .config
@@ -2109,20 +2111,20 @@ pub async fn run_workflow(
 
                             // Restore state after headless run
                             if was_online {
-                                if let Some(mut cfg) = agent_cfg {
+                                if let Some(cfg_lock) = agent_cfg {
+                                    let mut cfg = cfg_lock.lock().unwrap().clone();
                                     cfg.is_off = false;
                                     log_debug(&format!("[Wardian] Restoring agent {} to Online state after headless run", agent_id));
-                                    if let Ok(agent) =
-                                        crate::manager::spawn_agent(app.clone(), cfg.clone(), false)
-                                            .await
+                                    if let Ok(new_agent) =
+                                        crate::manager::spawn_agent(app.clone(), cfg, false).await
                                     {
                                         let mut agents_map = state.agents.lock().await;
-                                        if let Some(ref tx) = agent.stdin_tx {
+                                        if let Some(ref tx) = new_agent.stdin_tx {
                                             if let Ok(mut senders) = state.input_senders.write() {
                                                 senders.insert(agent_id.to_string(), tx.clone());
                                             }
                                         }
-                                        agents_map.insert(agent_id.to_string(), agent);
+                                        agents_map.insert(agent_id.to_string(), new_agent);
                                         let order = state.agent_order.lock().await;
                                         crate::manager::save_state(&app, &agents_map, &order);
                                         let _ = app.emit("agents-updated", ());

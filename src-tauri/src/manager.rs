@@ -43,9 +43,10 @@ pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
     {
         if let Some(pid) = agent.process_id {
             if let Err(err) = force_kill_process_tree(pid) {
+                let sid = agent.config.lock().unwrap().session_id.clone();
                 log_debug(&format!(
                     "[Wardian] Failed to force-kill process tree for session {} via PID {}: {}",
-                    agent.config.session_id, pid, err
+                    sid, pid, err
                 ));
             }
         }
@@ -60,9 +61,10 @@ pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
         #[cfg(windows)]
         {
             if let Err(err) = force_kill_process_tree(child.id()) {
+                let sid = agent.config.lock().unwrap().session_id.clone();
                 log_debug(&format!(
                     "[Wardian] Failed to force-kill background process for session {} via PID {}: {}",
-                    agent.config.session_id,
+                    sid,
                     child.id(),
                     err
                 ));
@@ -297,7 +299,7 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
     let mut configs: Vec<AgentConfig> = Vec::new();
     for id in order {
         if let Some(agent) = agents.get(id) {
-            configs.push(agent.config.clone());
+            configs.push(agent.config.lock().unwrap().clone());
         }
     }
 
@@ -328,7 +330,7 @@ pub async fn spawn_agent(
 
     if config.is_off {
         return Ok(ActiveAgent {
-            config,
+            config: std::sync::Arc::new(std::sync::Mutex::new(config)),
             child_process: None,
             background_processes: Vec::new(),
             pty_master: None,
@@ -346,6 +348,8 @@ pub async fn spawn_agent(
             job_object: None,
         });
     }
+
+    let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 
     #[cfg(windows)]
     cleanup_stale_session_processes(&config.session_id, &config.provider);
@@ -539,6 +543,7 @@ pub async fn spawn_agent(
     let pty_provider = provider.clone();
     let sid_for_pty = sid_out.clone();
     let pty_emit_app = app.clone();
+    let config_lock_clone = config_lock.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -596,6 +601,39 @@ pub async fn spawn_agent(
                     if let Ok(mut stamp) = last_output_at_clone.lock() {
                         *stamp = Some(std::time::SystemTime::now());
                     }
+
+                    // Process stream events to capture Session ID / Status changes
+                    // Use a simple line-based approach for stream-json events
+                    for line in text.lines() {
+                        if let Some(event) = pty_provider.parse_output(line) {
+                            match event {
+                                AgentEvent::Init { session_id, .. } => {
+                                    if !session_id.trim().is_empty() {
+                                        let mut config = config_lock_clone.lock().unwrap();
+                                        if config.resume_session.as_deref() != Some(&session_id) {
+                                            log_debug(&format!("[Wardian] Session ID mapped for {}: {}", sid_for_pty, session_id));
+                                            config.resume_session = Some(session_id.clone());
+                                            
+                                            // Notify UI that metadata (resume_session ID) has changed
+                                            let _ = pty_emit_app.emit("agents-updated", ());
+                                            let _ = pty_emit_app.emit("agent-pty-output-ready", serde_json::json!({ "session_id": sid_for_pty }));
+                                        }
+                                    }
+                                }
+                                AgentEvent::ActionRequired { message } => {
+                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, &format!("Action Required: {}", message));
+                                }
+                                AgentEvent::TurnCompleted | AgentEvent::ModelResponse => {
+                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
+                                }
+                                AgentEvent::UserQuery | AgentEvent::Generating => {
+                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Processing...");
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
                         let _previous_title = terminal_title_clone
                             .lock()
@@ -1005,11 +1043,13 @@ pub async fn spawn_agent(
     }
 
     // ── OpenCode log-file watcher ─────────────────────────────────────────
+    {
+        let mut cfg = config_lock.lock().unwrap();
+        cfg.folder = expected_folder;
+    }
+
     Ok(ActiveAgent {
-        config: AgentConfig {
-            folder: expected_folder,
-            ..config
-        },
+        config: config_lock,
         child_process: Some(child),
         background_processes,
         pty_master: Some(pty_master),
@@ -1290,16 +1330,14 @@ fn interactive_provider_args(
 }
 
 fn finalize_interactive_spawn_args(
-    provider_name: &str,
+    _provider_name: &str,
     _is_restored: bool,
     _resume_session: &Option<String>,
-    mut provider_args: Vec<String>,
+    provider_args: Vec<String>,
 ) -> Vec<String> {
-    if provider_name == "claude" {
-        provider_args = strip_standalone_flag(provider_args, "--verbose");
-        provider_args = strip_flag_value_pairs(provider_args, "--input-format");
-        provider_args = strip_flag_value_pairs(provider_args, "--output-format");
-    }
+    // Phase 3 Fix: Do NOT strip --input-format/--output-format from Claude.
+    // We need stream-json events to capture session IDs and status changes
+    // even during interactive launches.
     provider_args
 }
 
@@ -2161,8 +2199,11 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
                 return Some("Processing...".to_string());
             }
             Some("progress") => return Some("Processing...".to_string()),
-            Some("user") if claude_is_real_user_query(line) => {
-                return Some("Processing...".to_string());
+            Some("user") => {
+                let kind = classify_claude_user_event(line);
+                if kind == ClaudeUserEventKind::RealQuery || kind == ClaudeUserEventKind::ToolResult {
+                    return Some("Processing...".to_string());
+                }
             }
             _ => {}
         }
@@ -2361,18 +2402,21 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         let agents = state.agents.lock().await;
         agents
             .iter()
-            .map(|(sid, agent)| AgentSnapshot {
-                session_id: sid.clone(),
-                provider: agent.config.provider.clone(),
-                folder: agent.config.folder.clone(),
-                resume_session: agent.config.resume_session.clone(),
-                process_id: agent.process_id,
-                query_count: agent.query_count.clone(),
-                init_timestamp: agent.init_timestamp.clone(),
-                current_status: agent.current_status.clone(),
-                last_output_at: agent.last_output_at.clone(),
-                log_path: agent.log_path.clone(),
-                log_last_modified: agent.log_last_modified.clone(),
+            .map(|(sid, agent)| {
+                let config = agent.config.lock().unwrap();
+                AgentSnapshot {
+                    session_id: sid.clone(),
+                    provider: config.provider.clone(),
+                    folder: config.folder.clone(),
+                    resume_session: config.resume_session.clone(),
+                    process_id: agent.process_id,
+                    query_count: agent.query_count.clone(),
+                    init_timestamp: agent.init_timestamp.clone(),
+                    current_status: agent.current_status.clone(),
+                    last_output_at: agent.last_output_at.clone(),
+                    log_path: agent.log_path.clone(),
+                    log_last_modified: agent.log_last_modified.clone(),
+                }
             })
             .collect()
     };
@@ -2453,6 +2497,21 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         }
                     }
                 }
+            } else if snap.provider == "claude" && snap.resume_session.is_some() {
+                // For Claude, if we have a resume_session (Conversation ID), always re-verify
+                // the path so it updates immediately after a Clear rotation.
+                if let Some(home) = dirs::home_dir() {
+                    let project_dir = claude_project_dir_name(&snap.folder);
+                    let session_id_to_find = snap.resume_session.as_deref().unwrap();
+                    let candidate = home
+                        .join(".claude")
+                        .join("projects")
+                        .join(&project_dir)
+                        .join(format!("{}.jsonl", session_id_to_find));
+                    if candidate.exists() {
+                        *log_path_lock = Some(candidate);
+                    }
+                }
             } else if log_path_lock.is_none() {
                 match snap.provider.as_str() {
                     "codex" => {
@@ -2467,9 +2526,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         }
                     }
                     "claude" => {
-                        // Claude Code stores sessions at:
-                        // ~/.claude/projects/<project_dir>/<session_id>.jsonl
-                        // where <project_dir> is the workspace path with :\/. replaced by -
+                        // Fallback for initial spawn where resume_session might not be set yet
                         if let Some(home) = dirs::home_dir() {
                             let project_dir = claude_project_dir_name(&snap.folder);
                             let candidate = home

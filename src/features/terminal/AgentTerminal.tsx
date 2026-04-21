@@ -215,7 +215,6 @@ function disposeTerminalSession(sessionId: string) {
   entry.parser.dispose();
   terminalSessionMap.delete(sessionId);
 }
-
 function clearTerminalSession(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
   if (!entry || entry.disposed) {
@@ -229,18 +228,14 @@ function clearTerminalSession(sessionId: string) {
   entry.transientHomeRedrawActive = false;
   entry.pendingResizeRedrawSuppression = false;
   entry.existingScrollbackLines = undefined;
+
   const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
   if (typeof parserWithReset.reset === "function") {
     parserWithReset.reset();
   } else {
     entry.parser.write("\u001bc");
   }
-  const rendererTerm = entry.renderer?.term as (Terminal & { reset?: () => void; clear?: () => void }) | undefined;
-  if (typeof rendererTerm?.reset === "function") {
-    rendererTerm.reset();
-  } else if (typeof rendererTerm?.clear === "function") {
-    rendererTerm.clear();
-  }
+  
   entry.titleHandlerRef.current?.("");
 }
 

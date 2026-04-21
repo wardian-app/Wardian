@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub struct ActiveAgent {
-    pub config: AgentConfig,
+    pub config: Arc<Mutex<AgentConfig>>,
     pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
     pub background_processes: Vec<std::process::Child>,
     pub pty_master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
