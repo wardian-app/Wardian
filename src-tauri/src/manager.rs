@@ -690,6 +690,11 @@ pub async fn spawn_agent(
                                                             .codex_cleared_provider_sessions
                                                             .clear();
                                                     }
+                                                    if provider_name_for_pty == "gemini" {
+                                                        config
+                                                            .gemini_cleared_provider_sessions
+                                                            .clear();
+                                                    }
 
                                                     // Notify UI that metadata (resume_session ID) has changed
                                                     let _ = pty_emit_app.emit("agents-updated", ());
@@ -2648,6 +2653,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         provider: String,
         folder: String,
         resume_session: Option<String>,
+        gemini_cleared_provider_sessions: Vec<String>,
         process_id: Option<u32>,
         query_count: std::sync::Arc<std::sync::Mutex<usize>>,
         init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -2668,6 +2674,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     provider: config.provider.clone(),
                     folder: config.folder.clone(),
                     resume_session: config.resume_session.clone(),
+                    gemini_cleared_provider_sessions: config.gemini_cleared_provider_sessions.clone(),
                     process_id: agent.process_id,
                     query_count: agent.query_count.clone(),
                     init_timestamp: agent.init_timestamp.clone(),
@@ -2824,6 +2831,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         if let Some(home) = dirs::home_dir() {
                             let tmp_dir = home.join(".gemini").join("tmp");
                             if let Ok(entries) = std::fs::read_dir(tmp_dir) {
+                                let mut best_path: Option<std::path::PathBuf> = None;
+                                let mut best_time: Option<String> = None;
+
                                 for entry in entries.flatten() {
                                     let chat_dir = entry.path().join("chats");
                                     if let Ok(chat_files) = std::fs::read_dir(chat_dir) {
@@ -2836,23 +2846,50 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                                         &content,
                                                     )
                                                 {
-                                                    let target_id = snap
-                                                        .resume_session
-                                                        .as_deref()
-                                                        .unwrap_or(&snap.session_id);
-                                                    if p.get("sessionId").and_then(|v| v.as_str())
-                                                        == Some(target_id)
+                                                    if let Some(session_id) =
+                                                        p.get("sessionId").and_then(|v| v.as_str())
                                                     {
-                                                        *log_path_lock = Some(chat_file.path());
-                                                        break;
+                                                        if let Some(ref rs) = snap.resume_session {
+                                                            if session_id == rs {
+                                                                best_path = Some(chat_file.path());
+                                                                break;
+                                                            }
+                                                        } else {
+                                                            // If no resume_session, find newest that isn't cleared.
+                                                            // Note: session_id can never match snap.session_id (Wardian UUID).
+                                                            let is_excluded = snap
+                                                                .gemini_cleared_provider_sessions
+                                                                .iter()
+                                                                .any(|s| s == session_id);
+                                                            if !is_excluded {
+                                                                let updated_at = p
+                                                                    .get("lastUpdated")
+                                                                    .and_then(|v| v.as_str())
+                                                                    .or_else(|| {
+                                                                        p.get("startTime")
+                                                                            .and_then(|v| v.as_str())
+                                                                    });
+                                                                if let Some(time) = updated_at {
+                                                                    if best_time.as_ref().is_none_or(|bt| time > bt.as_str()) {
+                                                                        best_time =
+                                                                            Some(time.to_string());
+                                                                        best_path =
+                                                                            Some(chat_file.path());
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    if log_path_lock.is_some() {
+                                    if snap.resume_session.is_some() && best_path.is_some() {
                                         break;
                                     }
+                                }
+                                if let Some(path) = best_path {
+                                    *log_path_lock = Some(path);
                                 }
                             }
                         }

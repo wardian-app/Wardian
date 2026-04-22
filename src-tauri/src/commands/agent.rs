@@ -98,6 +98,14 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
         })
     {
         config.resume_session = None;
+    } else if config.provider == "gemini"
+        && config.resume_session.as_deref().is_some_and(|rs| {
+            rs.trim().is_empty()
+                || rs == config.session_id
+                || !codex_provider_session_is_new(rs, &config.gemini_cleared_provider_sessions)
+        })
+    {
+        config.resume_session = None;
     }
 
     if config.resume_session.is_none() && config.provider == "codex" {
@@ -134,6 +142,7 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.resume_session = None;
     config.fresh_provider_session_id = None;
     config.codex_cleared_provider_sessions.clear();
+    config.gemini_cleared_provider_sessions.clear();
     if config.provider == "claude" {
         config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
@@ -536,9 +545,28 @@ pub async fn clear_agent_session(
         } else {
             Vec::new()
         };
+        let previous_gemini_provider_sessions = if config.provider == "gemini" {
+            let mut sessions = config.gemini_cleared_provider_sessions.clone();
+            if let Some(session_id) = config
+                .resume_session
+                .clone()
+                .filter(|session_id| !session_id.trim().is_empty())
+            {
+                if !sessions.iter().any(|existing| existing == &session_id) {
+                    sessions.push(session_id);
+                }
+            }
+            sessions
+        } else {
+            Vec::new()
+        };
+
         prepare_clear_config(&mut config)?;
         if config.provider == "codex" {
             config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
+        }
+        if config.provider == "gemini" {
+            config.gemini_cleared_provider_sessions = previous_gemini_provider_sessions;
         }
 
         // 3. Reset UI and in-memory buffers
