@@ -181,11 +181,7 @@ pub async fn submit_prompt_to_agent(
             .map_err(|_| "Input channel temporarily locked".to_string())?
             .get(&session_id)
             .cloned();
-        (
-            config.provider.clone(),
-            config,
-            tx,
-        )
+        (config.provider.clone(), config, tx)
     };
 
     let tx = match tx {
@@ -264,7 +260,11 @@ pub async fn submit_prompt_to_agent(
         manager::log_debug(&format!(
             "[Wardian] OpenCode headless submit response for session {}: {}",
             session_id,
-            if response_text.is_empty() { "<empty>" } else { response_text }
+            if response_text.is_empty() {
+                "<empty>"
+            } else {
+                response_text
+            }
         ));
 
         if !response_text.is_empty() {
@@ -400,20 +400,18 @@ pub async fn read_agent_pty(
 mod tests {
     #[test]
     fn terminal_prompt_normalization_flattens_newlines_for_submit() {
-        let normalized =
-            crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
-                "Line one\nLine two\r\nLine three",
-            );
+        let normalized = crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
+            "Line one\nLine two\r\nLine three",
+        );
 
         assert_eq!(normalized, "Line one Line two Line three");
     }
 
     #[test]
     fn terminal_prompt_normalization_trims_outer_whitespace() {
-        let normalized =
-            crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
-                "   hello world  \r\n",
-            );
+        let normalized = crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
+            "   hello world  \r\n",
+        );
 
         assert_eq!(normalized, "hello world");
     }

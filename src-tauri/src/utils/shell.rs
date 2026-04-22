@@ -1,5 +1,5 @@
-use crate::utils::get_wardian_home;
 use crate::models::AgentSessionPersistence;
+use crate::utils::get_wardian_home;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1004,7 +1004,10 @@ fn upsert_json_theme(path: &std::path::Path, schema: &str, theme: &str) -> Resul
         serde_json::Map::new()
     };
 
-    config.insert("$schema".to_string(), serde_json::Value::String(schema.to_string()));
+    config.insert(
+        "$schema".to_string(),
+        serde_json::Value::String(schema.to_string()),
+    );
     config.insert(
         "theme".to_string(),
         serde_json::Value::String(theme.to_string()),
@@ -1065,7 +1068,10 @@ mod opencode_theme_tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read config"))
                 .expect("parse config");
-        assert_eq!(parsed.get("theme").and_then(|value| value.as_str()), Some("system"));
+        assert_eq!(
+            parsed.get("theme").and_then(|value| value.as_str()),
+            Some("system")
+        );
         assert_eq!(
             parsed["provider"]["lmstudio"]["name"].as_str(),
             Some("LM Studio")

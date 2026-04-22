@@ -24,7 +24,9 @@ fn set_schema_version(home: &Path, version: u32) -> std::io::Result<()> {
 
 /// Public entry point — resolves WARDIAN_HOME and delegates to run_migration.
 pub fn migrate_home_layout() {
-    let Some(home) = crate::utils::fs::get_wardian_home() else { return };
+    let Some(home) = crate::utils::fs::get_wardian_home() else {
+        return;
+    };
     run_migration(&home);
 }
 
@@ -46,8 +48,12 @@ fn run_migration(home: &Path) {
 
 /// Copy src to dst then delete src. Returns true if succeeded or src was absent/already moved.
 fn move_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
-    if !src.exists() { return true; }
-    if dst.exists() { return true; }
+    if !src.exists() {
+        return true;
+    }
+    if dst.exists() {
+        return true;
+    }
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("[migration] Could not create dir {:?}: {e}", parent);
@@ -57,37 +63,67 @@ fn move_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
     match std::fs::copy(src, dst) {
         Ok(_) => {
             if let Err(e) = std::fs::remove_file(src) {
-                eprintln!("[migration] Copied {:?} but could not delete original: {e}", src);
+                eprintln!(
+                    "[migration] Copied {:?} but could not delete original: {e}",
+                    src
+                );
             } else {
                 println!("[migration] Moved {:?} \u{2192} {:?}", src, dst);
             }
             true
         }
-        Err(e) => { eprintln!("[migration] Failed to copy {:?}: {e}", src); false }
+        Err(e) => {
+            eprintln!("[migration] Failed to copy {:?}: {e}", src);
+            false
+        }
     }
 }
 
 /// Rename directory src → dst. Returns true if succeeded or src was absent/already moved.
 fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> bool {
-    if !src.exists() { return true; }
-    if dst.exists() { return true; }
+    if !src.exists() {
+        return true;
+    }
+    if dst.exists() {
+        return true;
+    }
     if let Some(parent) = dst.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::rename(src, dst) {
-        Ok(_) => { println!("[migration] Moved dir {:?} \u{2192} {:?}", src, dst); true }
-        Err(e) => { eprintln!("[migration] Failed to move dir {:?}: {e}", src); false }
+        Ok(_) => {
+            println!("[migration] Moved dir {:?} \u{2192} {:?}", src, dst);
+            true
+        }
+        Err(e) => {
+            eprintln!("[migration] Failed to move dir {:?}: {e}", src);
+            false
+        }
     }
 }
 
 fn run_migration_1(home: &Path) -> bool {
     [
-        move_file(&home.join("watchlists.json"),     &home.join("watchlists/index.json")),
-        move_file(&home.join("wardian_state.json"),  &home.join("settings/state.json")),
-        move_file(&home.join("shell_settings.json"), &home.join("settings/shell.json")),
-        move_file(&home.join("scheduled_runs.json"), &home.join("scheduled_workflows.json")),
-        move_dir( &home.join("workflow_logs"),        &home.join("logs/workflows")),
-    ].iter().all(|&ok| ok)
+        move_file(
+            &home.join("watchlists.json"),
+            &home.join("watchlists/index.json"),
+        ),
+        move_file(
+            &home.join("wardian_state.json"),
+            &home.join("settings/state.json"),
+        ),
+        move_file(
+            &home.join("shell_settings.json"),
+            &home.join("settings/shell.json"),
+        ),
+        move_file(
+            &home.join("scheduled_runs.json"),
+            &home.join("scheduled_workflows.json"),
+        ),
+        move_dir(&home.join("workflow_logs"), &home.join("logs/workflows")),
+    ]
+    .iter()
+    .all(|&ok| ok)
 }
 
 #[cfg(test)]
@@ -122,7 +158,7 @@ mod tests {
         fs::write(home.join("watchlists.json"), "[]").unwrap();
         set_schema_version(&home, CURRENT_SCHEMA_VERSION).unwrap();
         run_migration(&home); // call inner directly — no env var needed
-        // File should still be at old location — migration was skipped
+                              // File should still be at old location — migration was skipped
         assert!(home.join("watchlists.json").exists());
         assert!(!home.join("watchlists/index.json").exists());
     }
@@ -139,15 +175,36 @@ mod tests {
 
         run_migration(&home);
 
-        assert!(home.join("watchlists/index.json").exists(), "watchlists moved");
-        assert!(!home.join("watchlists.json").exists(), "old watchlists removed");
+        assert!(
+            home.join("watchlists/index.json").exists(),
+            "watchlists moved"
+        );
+        assert!(
+            !home.join("watchlists.json").exists(),
+            "old watchlists removed"
+        );
         assert!(home.join("settings/state.json").exists(), "state moved");
-        assert!(!home.join("wardian_state.json").exists(), "old state removed");
+        assert!(
+            !home.join("wardian_state.json").exists(),
+            "old state removed"
+        );
         assert!(home.join("settings/shell.json").exists(), "shell moved");
-        assert!(!home.join("shell_settings.json").exists(), "old shell removed");
-        assert!(home.join("scheduled_workflows.json").exists(), "scheduled renamed");
-        assert!(!home.join("scheduled_runs.json").exists(), "old scheduled removed");
-        assert!(home.join("logs/workflows/wf-1/run.log").exists(), "workflow logs moved");
+        assert!(
+            !home.join("shell_settings.json").exists(),
+            "old shell removed"
+        );
+        assert!(
+            home.join("scheduled_workflows.json").exists(),
+            "scheduled renamed"
+        );
+        assert!(
+            !home.join("scheduled_runs.json").exists(),
+            "old scheduled removed"
+        );
+        assert!(
+            home.join("logs/workflows/wf-1/run.log").exists(),
+            "workflow logs moved"
+        );
         assert_eq!(get_schema_version(&home), CURRENT_SCHEMA_VERSION);
     }
 

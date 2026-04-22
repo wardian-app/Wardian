@@ -1,5 +1,5 @@
-use crate::models::AgentConfig;
 use crate::models::provider::{AgentEvent, AgentProvider};
+use crate::models::AgentConfig;
 
 /// The concrete `AgentProvider` implementation for Claude Code CLI.
 pub struct ClaudeProvider;
@@ -201,12 +201,18 @@ impl AgentProvider for ClaudeProvider {
 
         if is_resume {
             // Rule: Old session -> --resume
-            let resume_id = config.resume_session.as_deref().unwrap_or(config.session_id.as_str());
+            let resume_id = config
+                .resume_session
+                .as_deref()
+                .unwrap_or(config.session_id.as_str());
             args.push("--resume".into());
             args.push(resume_id.to_string());
         } else {
             // Rule: New session -> --session-id
-            let new_id = config.fresh_provider_session_id.as_deref().unwrap_or(config.session_id.as_str());
+            let new_id = config
+                .fresh_provider_session_id
+                .as_deref()
+                .unwrap_or(config.session_id.as_str());
             args.push("--session-id".into());
             args.push(new_id.to_string());
 
@@ -289,9 +295,10 @@ impl AgentProvider for ClaudeProvider {
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
         let trimmed = line.trim();
-        if trimmed.contains("Do you want to proceed?") 
+        if trimmed.contains("Do you want to proceed?")
             || trimmed.contains("Allow reading from")
-            || trimmed.contains("requires approval") {
+            || trimmed.contains("requires approval")
+        {
             return Some(AgentEvent::ActionRequired { message: "".into() });
         }
 

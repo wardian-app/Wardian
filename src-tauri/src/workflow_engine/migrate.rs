@@ -1,5 +1,5 @@
 use crate::manager::log_debug;
-use crate::workflow_engine::{get_workflows_dir, get_scheduled_runs_path, list_workflows};
+use crate::workflow_engine::{get_scheduled_runs_path, get_workflows_dir, list_workflows};
 use std::collections::HashMap;
 
 fn synthesize_role_name(base: &str, node_id: &str, existing: &HashMap<String, String>) -> String {
@@ -136,11 +136,9 @@ fn migrate_scheduled_runs_if_needed() {
     };
 
     // Check if migration is needed: old format has "value" field in schedule
-    let needs_migration = runs.iter().any(|run| {
-        run.get("schedule")
-            .and_then(|s| s.get("value"))
-            .is_some()
-    });
+    let needs_migration = runs
+        .iter()
+        .any(|run| run.get("schedule").and_then(|s| s.get("value")).is_some());
 
     if !needs_migration {
         return;
@@ -155,10 +153,7 @@ fn migrate_scheduled_runs_if_needed() {
                         .get("schedule_type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let old_value = schedule
-                        .get("value")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let old_value = schedule.get("value").and_then(|v| v.as_str()).unwrap_or("");
                     let active = schedule
                         .get("active")
                         .and_then(|v| v.as_bool())

@@ -4,7 +4,11 @@ const TERMINAL_SUBMIT_DELAY_MS: u64 = 100;
 const TERMINAL_SUBMIT_KEY: &[u8] = b"\r";
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
-    prompt.replace("\r\n", " ").replace('\n', " ").trim().to_string()
+    prompt
+        .replace("\r\n", " ")
+        .replace('\n', " ")
+        .trim()
+        .to_string()
 }
 
 pub async fn submit_prompt_via_sender(

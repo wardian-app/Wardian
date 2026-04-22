@@ -91,31 +91,25 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
             }
         }
     } else if config.provider == "codex"
-        && config
-            .resume_session
-            .as_deref()
-            .is_some_and(|rs| {
-                rs.trim().is_empty()
-                    || rs == config.session_id
-                    || !codex_provider_session_is_new(
-                        rs,
-                        &config.codex_cleared_provider_sessions,
-                    )
-            })
+        && config.resume_session.as_deref().is_some_and(|rs| {
+            rs.trim().is_empty()
+                || rs == config.session_id
+                || !codex_provider_session_is_new(rs, &config.codex_cleared_provider_sessions)
+        })
     {
         config.resume_session = None;
     }
 
     if config.resume_session.is_none() && config.provider == "codex" {
-        if let Some((provider_session_id, _updated_at)) =
-            manager::latest_codex_session_index_entry(&config.session_id)?
-                .filter(|(provider_session_id, _updated_at)| {
-                    codex_provider_session_is_new(
-                        provider_session_id,
-                        &config.codex_cleared_provider_sessions,
-                    )
-                })
-        {
+        if let Some((provider_session_id, _updated_at)) = manager::latest_codex_session_index_entry(
+            &config.session_id,
+        )?
+        .filter(|(provider_session_id, _updated_at)| {
+            codex_provider_session_is_new(
+                provider_session_id,
+                &config.codex_cleared_provider_sessions,
+            )
+        }) {
             config.resume_session = Some(provider_session_id);
             config.codex_cleared_provider_sessions.clear();
         }
@@ -148,15 +142,17 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
 
 fn codex_provider_session_is_new(candidate: &str, excluded: &[String]) -> bool {
     let candidate = candidate.trim();
-    !candidate.is_empty() && !excluded.iter().any(|session_id| session_id.trim() == candidate)
+    !candidate.is_empty()
+        && !excluded
+            .iter()
+            .any(|session_id| session_id.trim() == candidate)
 }
 
 async fn is_name_unique(state: &AppState, name: &str, exclude_session_id: Option<&str>) -> bool {
     let agents = state.agents.lock().await;
     !agents.values().any(|a| {
         let config = a.config.lock().unwrap();
-        config.session_name == name
-            && exclude_session_id.is_none_or(|id| config.session_id != id)
+        config.session_name == name && exclude_session_id.is_none_or(|id| config.session_id != id)
     })
 }
 
@@ -178,7 +174,10 @@ pub async fn spawn_agent(
     }
 
     if !is_name_unique(&state, &session_name, None).await {
-        return Err(format!("An agent with the name '{}' already exists.", session_name));
+        return Err(format!(
+            "An agent with the name '{}' already exists.",
+            session_name
+        ));
     }
 
     manager::log_debug(&format!(
@@ -278,11 +277,11 @@ pub async fn spawn_agent(
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     }
-    
+
     let persisted_resume =
         persisted_resume_session_for_provider(&config.provider, actual_resume.clone(), &session_id);
     config.resume_session = persisted_resume.clone();
-    
+
     {
         let mut cfg = active_agent.config.lock().unwrap();
         config.opencode_port = cfg.opencode_port;
@@ -397,11 +396,15 @@ pub async fn pause_agent(
             let config = agent.config.lock().unwrap();
             config.provider.clone()
         };
-        
-        if provider == "opencode"
-        {
+
+        if provider == "opencode" {
             let mut config = agent.config.lock().unwrap();
-            if config.resume_session.as_deref().map(|s| !s.starts_with("ses_")).unwrap_or(true) {
+            if config
+                .resume_session
+                .as_deref()
+                .map(|s| !s.starts_with("ses_"))
+                .unwrap_or(true)
+            {
                 let log_path_snap = agent.log_path.lock().ok().and_then(|guard| guard.clone());
                 if let Some(log_path) = log_path_snap {
                     if let Some(ses_id) = manager::opencode_extract_created_session_id(&log_path) {
@@ -447,17 +450,21 @@ pub async fn resume_agent(
     if let Some(agent) = agents.get_mut(&session_id) {
         let (mut config, born) = {
             let config_lock = agent.config.lock().unwrap();
-            (config_lock.clone(), agent.init_timestamp.lock().unwrap().clone())
+            (
+                config_lock.clone(),
+                agent.init_timestamp.lock().unwrap().clone(),
+            )
         };
         prepare_resume_config(&mut config)?;
         let mut new_active = manager::spawn_agent(app.clone(), config, true, born).await?;
         restore_runtime_state_after_resume(&mut new_active, agent);
-        
+
         {
             let mut new_config = new_active.config.lock().unwrap();
             let mut old_config = agent.config.lock().unwrap();
             if old_config.provider == "claude" {
-                if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
+                if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take()
+                {
                     new_config.resume_session = Some(fresh_provider_session_id);
                 }
             }
@@ -568,7 +575,8 @@ pub async fn clear_agent_session(
             let mut new_config = new_active.config.lock().unwrap();
             let mut old_config = agent.config.lock().unwrap();
             if old_config.provider == "claude" {
-                if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
+                if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take()
+                {
                     new_config.resume_session = Some(fresh_provider_session_id);
                 }
             }
@@ -632,7 +640,10 @@ pub async fn rename_agent(
     }
 
     if !is_name_unique(&state, &new_name, Some(&session_id)).await {
-        return Err(format!("An agent with the name '{}' already exists.", new_name));
+        return Err(format!(
+            "An agent with the name '{}' already exists.",
+            new_name
+        ));
     }
 
     let mut agents = state.agents.lock().await;
@@ -642,17 +653,17 @@ pub async fn rename_agent(
         let (sid, name, class, is_off, born) = {
             let mut config = agent.config.lock().unwrap();
             config.session_name = new_name;
-            (config.session_id.clone(), config.session_name.clone(), config.agent_class.clone(), config.is_off, agent.init_timestamp.lock().unwrap().clone())
+            (
+                config.session_id.clone(),
+                config.session_name.clone(),
+                config.agent_class.clone(),
+                config.is_off,
+                agent.init_timestamp.lock().unwrap().clone(),
+            )
         };
 
         // Phase 2: Update agent metadata in SQLite
-        let _ = crate::utils::db::upsert_agent(
-            &sid,
-            &name,
-            &class,
-            is_off,
-            born.as_deref(),
-        );
+        let _ = crate::utils::db::upsert_agent(&sid, &name, &class, is_off, born.as_deref());
         manager::save_state(&app, &agents, &order);
         Ok(())
     } else {
@@ -720,9 +731,8 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_provider_session_is_new,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
-        provider_uses_generated_session_id,
+        codex_provider_session_is_new, persisted_resume_session_for_provider, prepare_clear_config,
+        prepare_resume_config, provider_uses_generated_session_id,
         restore_runtime_state_after_resume,
     };
     use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
@@ -1028,7 +1038,10 @@ mod tests {
 
         prepare_resume_config(&mut config).expect("prepare resume config");
 
-        assert_eq!(config.resume_session.as_deref(), Some(new_provider_session_id));
+        assert_eq!(
+            config.resume_session.as_deref(),
+            Some(new_provider_session_id)
+        );
         assert!(config.codex_cleared_provider_sessions.is_empty());
         assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");

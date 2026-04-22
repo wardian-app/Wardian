@@ -445,9 +445,9 @@ pub async fn spawn_agent(
     ));
 
     // Phase 2: Record/Update agent in SQLite with explicit ISO 8601 timestamp
-    let born_to_save = initial_timestamp.clone().unwrap_or_else(|| {
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-    });
+    let born_to_save = initial_timestamp
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     let _ = crate::utils::db::upsert_agent(
         &config.session_id,
         &config.session_name,
@@ -606,53 +606,7 @@ pub async fn spawn_agent(
                     }
 
                     // Process stream events to capture Session ID / Status changes
-                    // Use a simple line-based approach for stream-json events
-                    for line in text.lines() {
-                        if let Some(event) = pty_provider.parse_output(line) {
-                            match event {
-                                AgentEvent::Init { session_id, timestamp } => {
-                                    if let Some(ts) = timestamp {
-                                        let mut it = init_timestamp_clone.lock().unwrap();
-                                        if it.is_none() {
-                                            *it = Some(ts);
-                                        }
-                                    }
-                                    if !session_id.trim().is_empty() {
-                                        let mut config = config_lock_clone.lock().unwrap();
-                                        if provider_name_for_pty == "codex"
-                                            && codex_provider_session_is_excluded(
-                                                &session_id,
-                                                &config.codex_cleared_provider_sessions,
-                                            )
-                                        {
-                                            continue;
-                                        }
-                                        if config.resume_session.as_deref() != Some(&session_id) {
-                                            log_debug(&format!("[Wardian] Session ID mapped for {}: {}", sid_for_pty, session_id));
-                                            config.resume_session = Some(session_id.clone());
-                                            if provider_name_for_pty == "codex" {
-                                                config.codex_cleared_provider_sessions.clear();
-                                            }
-                                            
-                                            // Notify UI that metadata (resume_session ID) has changed
-                                            let _ = pty_emit_app.emit("agents-updated", ());
-                                            let _ = pty_emit_app.emit("agent-pty-output-ready", serde_json::json!({ "session_id": sid_for_pty }));
-                                        }
-                                    }
-                                }
-                                AgentEvent::ActionRequired { message: _ } => {
-                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Action Needed");
-                                }
-                                AgentEvent::TurnCompleted | AgentEvent::ModelResponse => {
-                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
-                                }
-                                AgentEvent::UserQuery | AgentEvent::Generating => {
-                                    set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Processing...");
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+                    // Use a buffered approach for stream-json events to handle chunk boundaries.
 
                     if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
                         let _previous_title = terminal_title_clone
@@ -703,15 +657,67 @@ pub async fn spawn_agent(
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
-                                        // Claude uses a dedicated log watcher for status, so
-                                        // only capture Init timestamps from its PTY JSON.
-                                        if provider_name_for_pty == "claude" {
-                                            if let AgentEvent::Init { timestamp, .. } = event {
-                                                if let Ok(mut ts) = init_timestamp_clone.lock() {
-                                                    *ts = timestamp;
+                                        if let AgentEvent::Init {
+                                            ref session_id,
+                                            ref timestamp,
+                                        } = event
+                                        {
+                                            if let Some(ts) = timestamp {
+                                                let mut it = init_timestamp_clone.lock().unwrap();
+                                                if it.is_none() {
+                                                    *it = Some(ts.clone());
                                                 }
                                             }
-                                        } else {
+                                            if !session_id.trim().is_empty() {
+                                                let mut config = config_lock_clone.lock().unwrap();
+                                                let is_excluded = provider_name_for_pty == "codex"
+                                                    && codex_provider_session_is_excluded(
+                                                        session_id,
+                                                        &config.codex_cleared_provider_sessions,
+                                                    );
+                                                if !is_excluded
+                                                    && config.resume_session.as_deref()
+                                                        != Some(session_id.as_str())
+                                                {
+                                                    log_debug(&format!(
+                                                        "[Wardian] Session ID mapped for {}: {}",
+                                                        sid_for_pty, session_id
+                                                    ));
+                                                    config.resume_session =
+                                                        Some(session_id.clone());
+                                                    if provider_name_for_pty == "codex" {
+                                                        config
+                                                            .codex_cleared_provider_sessions
+                                                            .clear();
+                                                    }
+
+                                                    // Notify UI that metadata (resume_session ID) has changed
+                                                    let _ = pty_emit_app.emit("agents-updated", ());
+                                                    let _ = pty_emit_app.emit(
+                                                        "agent-pty-output-ready",
+                                                        serde_json::json!({ "session_id": sid_for_pty }),
+                                                    );
+
+                                                    {
+                                                        use tauri::Manager;
+                                                        let app_state = pty_emit_app.state::<crate::state::app_state::AppState>();
+                                                        let agents =
+                                                            app_state.agents.blocking_lock();
+                                                        let order =
+                                                            app_state.agent_order.blocking_lock();
+                                                        crate::manager::save_state(
+                                                            &pty_emit_app,
+                                                            &agents,
+                                                            &order,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Claude uses a dedicated log watcher for status, so
+                                        // only capture Init timestamps from its PTY JSON.
+                                        if provider_name_for_pty != "claude" {
                                             apply_agent_event(
                                                 &pty_app,
                                                 &sid_for_pty,
@@ -2407,7 +2413,7 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
 
     for line in lines.iter().rev() {
         let msg_type = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        
+
         match msg_type {
             "system" => {
                 let subtype = line.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
@@ -2427,7 +2433,7 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
                     .and_then(|m| m.get("stop_reason"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                
+
                 if !stop_reason.is_empty() {
                     if stop_reason == "tool_use" {
                         // Activity signal, but keep searching for permission_request in this turn
@@ -2443,7 +2449,8 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
             }
             "user" => {
                 let kind = classify_claude_user_event(line);
-                if kind == ClaudeUserEventKind::RealQuery || kind == ClaudeUserEventKind::ToolResult {
+                if kind == ClaudeUserEventKind::RealQuery || kind == ClaudeUserEventKind::ToolResult
+                {
                     // Start of turn or handled tool result
                     return Some("Processing...".to_string());
                 }
@@ -2728,7 +2735,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     if let Some(ref born_str) = *born_lock {
                         if let Ok(born_dt) = chrono::DateTime::parse_from_rfc3339(born_str) {
                             let now = chrono::Utc::now();
-                            let duration = now.signed_duration_since(born_dt.with_timezone(&chrono::Utc));
+                            let duration =
+                                now.signed_duration_since(born_dt.with_timezone(&chrono::Utc));
                             let secs = duration.num_seconds();
                             if secs > 0 {
                                 uptime = secs as u64;
@@ -2922,7 +2930,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     .count();
 
                                 if let Some(first) = lines.first() {
-                                    if let Some(ts) = first.get("timestamp").and_then(|v| v.as_str()) {
+                                    if let Some(ts) =
+                                        first.get("timestamp").and_then(|v| v.as_str())
+                                    {
                                         i_ts = Some(ts.to_string());
                                     } else if let Some(ts_num) =
                                         first.get("timestamp").and_then(|v| v.as_i64())
@@ -2931,14 +2941,16 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                         if let Some(dt) =
                                             chrono::DateTime::from_timestamp_millis(ts_num)
                                         {
-                                            i_ts = Some(
-                                                dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                                            );
+                                            i_ts = Some(dt.to_rfc3339_opts(
+                                                chrono::SecondsFormat::Millis,
+                                                true,
+                                            ));
                                         }
                                     }
                                 }
 
-                                let current_status_snap = snap.current_status.lock().unwrap().clone();
+                                let current_status_snap =
+                                    snap.current_status.lock().unwrap().clone();
                                 if !current_status_snap.starts_with("Action Required")
                                     && !current_status_snap.starts_with("Action Needed")
                                 {
@@ -2954,22 +2966,33 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             _ => {
                                 // Gemini logs are a single JSON object with a messages array
                                 if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
-                                    if let Some(msgs) = p.get("messages").and_then(|v| v.as_array()) {
+                                    if let Some(msgs) = p.get("messages").and_then(|v| v.as_array())
+                                    {
                                         q_count = msgs
                                             .iter()
                                             .filter(|m| {
-                                                m.get("type").and_then(|v| v.as_str()) == Some("user")
+                                                m.get("type").and_then(|v| v.as_str())
+                                                    == Some("user")
                                                     || m.get("role").and_then(|v| v.as_str())
                                                         == Some("user")
                                             })
                                             .count();
-                                        
+
                                         if let Some(last_msg) = msgs.last() {
-                                            let msg_type = last_msg.get("type").and_then(|v| v.as_str()).or_else(|| last_msg.get("role").and_then(|v| v.as_str()));
+                                            let msg_type = last_msg
+                                                .get("type")
+                                                .and_then(|v| v.as_str())
+                                                .or_else(|| {
+                                                    last_msg.get("role").and_then(|v| v.as_str())
+                                                });
                                             if msg_type == Some("user") {
-                                                *snap.current_status.lock().unwrap() = "Processing...".to_string();
-                                            } else if msg_type == Some("gemini") || msg_type == Some("assistant") {
-                                                *snap.current_status.lock().unwrap() = "Idle".to_string();
+                                                *snap.current_status.lock().unwrap() =
+                                                    "Processing...".to_string();
+                                            } else if msg_type == Some("gemini")
+                                                || msg_type == Some("assistant")
+                                            {
+                                                *snap.current_status.lock().unwrap() =
+                                                    "Idle".to_string();
                                             }
                                         }
                                     }
@@ -3016,9 +3039,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 query_count: *snap.query_count.lock().unwrap(),
                 init_timestamp: snap.init_timestamp.lock().unwrap().clone(),
                 current_status: snap.current_status.lock().unwrap().clone(),
-                log_path: log_path_lock
-                    .as_ref()
-                    .map(|p| display_log_path(p)),
+                log_path: log_path_lock.as_ref().map(|p| display_log_path(p)),
             });
         }
         results
@@ -3142,12 +3163,12 @@ pub async fn kill_all_agents(state: &AppState) {
 mod tests {
     use super::{
         claude_permission_hook_matches_session, claude_status_from_log,
-        codex_bootstrap_launch_context, codex_log_lookup_session_id,
-        latest_codex_session_entry_in, display_log_path, extract_terminal_titles,
-        finalize_interactive_spawn_args, headless_provider_args, headless_provider_launch,
-        interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
-        migrate_codex_bootstrap_home, opencode_interactive_env, opencode_log_path_after,
-        opencode_log_path_in, opencode_metrics_from_log, opencode_runtime_config_content,
+        codex_bootstrap_launch_context, codex_log_lookup_session_id, display_log_path,
+        extract_terminal_titles, finalize_interactive_spawn_args, headless_provider_args,
+        headless_provider_launch, interactive_provider_args, interactive_provider_cwd,
+        interactive_provider_launch, latest_codex_session_entry_in, migrate_codex_bootstrap_home,
+        opencode_interactive_env, opencode_log_path_after, opencode_log_path_in,
+        opencode_metrics_from_log, opencode_runtime_config_content,
         opencode_should_fallback_to_idle, opencode_status_from_title, session_bootstrap_prompt,
         strip_flag_value_pairs, strip_standalone_flag,
     };
@@ -3175,7 +3196,9 @@ mod tests {
 
         let expected_path = log.canonicalize().unwrap();
         let expected_text = expected_path.to_string_lossy();
-        let expected = expected_text.strip_prefix(r"\\?\").unwrap_or(&expected_text);
+        let expected = expected_text
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&expected_text);
 
         assert_eq!(display_log_path(&indirect), expected);
     }
@@ -3232,8 +3255,16 @@ mod tests {
     fn latest_codex_session_entry_reads_newest_session_meta_when_history_is_missing() {
         let temp = tempfile::tempdir().expect("temp dir");
         let codex_home = temp.path();
-        let older_dir = codex_home.join("sessions").join("2026").join("04").join("20");
-        let newer_dir = codex_home.join("sessions").join("2026").join("04").join("21");
+        let older_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("20");
+        let newer_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("21");
         std::fs::create_dir_all(&older_dir).expect("create older dir");
         std::fs::create_dir_all(&newer_dir).expect("create newer dir");
         std::fs::write(

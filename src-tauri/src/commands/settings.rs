@@ -1,5 +1,5 @@
-use crate::utils::{ShellOption, ShellSettings};
 use crate::models::AgentSessionPersistence;
+use crate::utils::{ShellOption, ShellSettings};
 
 #[tauri::command]
 pub fn list_available_shells() -> Result<Vec<ShellOption>, String> {

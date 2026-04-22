@@ -11,11 +11,7 @@ fn mock_script_path() -> String {
         .join("..")
         .join("scripts")
         .join("mock-agent.cjs");
-    assert!(
-        script.exists(),
-        "mock-agent.cjs not found at {:?}",
-        script
-    );
+    assert!(script.exists(), "mock-agent.cjs not found at {:?}", script);
     script.to_string_lossy().to_string()
 }
 

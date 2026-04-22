@@ -107,7 +107,10 @@ fn parse_porcelain_status(raw: &str) -> GitStatusResult {
 
 #[tauri::command]
 pub async fn git_status(cwd: String) -> Result<GitStatusResult, String> {
-    let raw = run_git(&cwd, &["status", "--porcelain=v1", "-b", "--untracked-files=all"])?;
+    let raw = run_git(
+        &cwd,
+        &["status", "--porcelain=v1", "-b", "--untracked-files=all"],
+    )?;
     Ok(parse_porcelain_status(&raw))
 }
 
@@ -238,11 +241,7 @@ pub async fn git_push(cwd: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn git_create_worktree(
-    cwd: String,
-    path: String,
-    branch: String,
-) -> Result<(), String> {
+pub async fn git_create_worktree(cwd: String, path: String, branch: String) -> Result<(), String> {
     run_git(&cwd, &["worktree", "add", &path, "-b", &branch])?;
     Ok(())
 }
@@ -299,15 +298,10 @@ pub async fn git_watch(
                 break; // watcher dropped (git_unwatch called or new watcher replaced this one)
             }
             loop {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(150),
-                    rx.recv(),
-                )
-                .await
-                {
+                match tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await {
                     Ok(Some(_)) => continue, // more events within window, reset timer
-                    Ok(None) => return,       // watcher dropped during debounce
-                    Err(_) => break,          // window elapsed, fire
+                    Ok(None) => return,      // watcher dropped during debounce
+                    Err(_) => break,         // window elapsed, fire
                 }
             }
             let _ = app_handle.emit("git-changed", &cwd);
@@ -319,10 +313,7 @@ pub async fn git_watch(
 
 /// Stop watching a git repo path. Safe to call even if no watcher exists.
 #[tauri::command]
-pub async fn git_unwatch(
-    cwd: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn git_unwatch(cwd: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     state.git_watchers.lock().await.remove(&cwd);
     Ok(())
 }

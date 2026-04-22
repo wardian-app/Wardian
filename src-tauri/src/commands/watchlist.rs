@@ -14,10 +14,7 @@ pub async fn load_watchlists(_app: AppHandle) -> Result<serde_json::Value, Strin
 }
 
 #[tauri::command]
-pub async fn save_watchlists(
-    watchlists: serde_json::Value,
-    _app: AppHandle,
-) -> Result<(), String> {
+pub async fn save_watchlists(watchlists: serde_json::Value, _app: AppHandle) -> Result<(), String> {
     let app_dir = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Could not find home directory".to_string())?;
     let _ = std::fs::create_dir_all(&app_dir);
@@ -42,10 +39,7 @@ pub async fn load_watchlist_prefs(_app: AppHandle) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-pub async fn save_watchlist_prefs(
-    prefs: serde_json::Value,
-    _app: AppHandle,
-) -> Result<(), String> {
+pub async fn save_watchlist_prefs(prefs: serde_json::Value, _app: AppHandle) -> Result<(), String> {
     let home = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Could not find home directory".to_string())?;
     let _ = std::fs::create_dir_all(home.join("watchlists"));
