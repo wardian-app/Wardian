@@ -96,6 +96,7 @@ describe('AgentWatchlist', () => {
       { id: 'last_queried', visible: true },
     ],
     sort: null,
+    preserve_team_grouping_when_sorted: false,
   };
   const defaultInteractions: AgentInteractions = {};
   const mockOnPrefsChange = vi.fn();
@@ -311,11 +312,41 @@ describe('AgentWatchlist', () => {
     expect(defaultProps.onRemoveFromList).not.toHaveBeenCalled();
   });
 
-  it('renders team blocks even when a sort is active', async () => {
+  it('renders sorted team members as individual rows by default', async () => {
+    const agents: AgentConfig[] = [
+      { session_id: 'agent-1', session_name: 'Alpha', agent_class: 'Coder', folder: 'C:/test', is_off: false },
+      { session_id: 'agent-2', session_name: 'Beta', agent_class: 'Architect', folder: 'C:/test', is_off: false },
+      { session_id: 'agent-3', session_name: 'Gamma', agent_class: 'QA', folder: 'C:/test', is_off: false },
+    ];
+    const telemetry: Record<string, AgentTelemetry> = {
+      'agent-1': { ...sampleTelemetry['agent-1'], query_count: 10 },
+      'agent-2': { ...sampleTelemetry['agent-2'], query_count: 30, current_status: 'idle' },
+      'agent-3': { ...sampleTelemetry['agent-1'], session_id: 'agent-3', query_count: 20 },
+    };
+    const { container } = render(
+      <AgentWatchlist
+        {...defaultProps}
+        agents={agents}
+        telemetry={telemetry}
+        offAgentIds={new Set()}
+        prefs={{ ...defaultPrefs, sort: { column_id: 'query_count', direction: 'desc' } }}
+        onPrefsChange={mockOnPrefsChange}
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+      />
+    );
+
+    expect(screen.queryByTestId('team-block-team-1')).not.toBeInTheDocument();
+    const rowText = Array.from(container.querySelectorAll('.watchlist-row')).map((row) => row.textContent);
+    expect(rowText[0]).toContain('Beta');
+    expect(rowText[1]).toContain('Gamma');
+    expect(rowText[2]).toContain('Alpha');
+  });
+
+  it('renders team blocks when a sort is active and preserving sorted team grouping', async () => {
     render(
       <AgentWatchlist
         {...defaultProps}
-        prefs={{ ...defaultPrefs, sort: { column_id: 'agent_name', direction: 'asc' } }}
+        prefs={{ ...defaultPrefs, sort: { column_id: 'agent_name', direction: 'asc' }, preserve_team_grouping_when_sorted: true }}
         onPrefsChange={mockOnPrefsChange}
         teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
       />

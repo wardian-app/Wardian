@@ -181,6 +181,7 @@ function AppBody() {
           // Merge saved prefs with defaults so newly-added columns always appear
           const savedMap = new Map(prefs.columns.map(c => [c.id, c]));
           setWatchlistPrefs({
+            ...DEFAULT_WATCHLIST_PREFS,
             ...prefs,
             columns: DEFAULT_WATCHLIST_PREFS.columns.map(def => savedMap.get(def.id) ?? def),
           });
