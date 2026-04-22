@@ -619,9 +619,20 @@ pub async fn spawn_agent(
                                     }
                                     if !session_id.trim().is_empty() {
                                         let mut config = config_lock_clone.lock().unwrap();
+                                        if provider_name_for_pty == "codex"
+                                            && codex_provider_session_is_excluded(
+                                                &session_id,
+                                                &config.codex_cleared_provider_sessions,
+                                            )
+                                        {
+                                            continue;
+                                        }
                                         if config.resume_session.as_deref() != Some(&session_id) {
                                             log_debug(&format!("[Wardian] Session ID mapped for {}: {}", sid_for_pty, session_id));
                                             config.resume_session = Some(session_id.clone());
+                                            if provider_name_for_pty == "codex" {
+                                                config.codex_cleared_provider_sessions.clear();
+                                            }
                                             
                                             // Notify UI that metadata (resume_session ID) has changed
                                             let _ = pty_emit_app.emit("agents-updated", ());
@@ -747,6 +758,7 @@ pub async fn spawn_agent(
         let watcher_init_timestamp = init_timestamp.clone();
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
+        let watcher_config = config_lock.clone();
         let wardian_agent_dir = get_wardian_home()
             .map(|home| home.join("agents").join(&watcher_session))
             .filter(|path| path.exists())
@@ -754,6 +766,7 @@ pub async fn spawn_agent(
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
+            let mut last_lookup_session = String::new();
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -764,10 +777,72 @@ pub async fn spawn_agent(
                 }
 
                 let path = {
+                    let discovered_session = watcher_config.lock().ok().and_then(|mut cfg| {
+                        if cfg.resume_session.as_deref().is_some_and(|value| {
+                            codex_provider_session_is_excluded(
+                                value,
+                                &cfg.codex_cleared_provider_sessions,
+                            )
+                        }) {
+                            cfg.resume_session = None;
+                        }
+                        cfg.resume_session
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                    });
+                    let discovered_session = if discovered_session.is_some() {
+                        discovered_session
+                    } else {
+                        latest_codex_session_index_entry(&watcher_session)
+                            .ok()
+                            .flatten()
+                            .map(|(session_id, _updated_at)| session_id)
+                    };
+                    if let Some(discovered_session) = discovered_session.as_ref() {
+                        if let Ok(mut cfg) = watcher_config.lock() {
+                            if codex_provider_session_is_excluded(
+                                discovered_session,
+                                &cfg.codex_cleared_provider_sessions,
+                            ) {
+                                if cfg.resume_session.as_deref() == Some(discovered_session) {
+                                    cfg.resume_session = None;
+                                }
+                            } else if cfg.resume_session.as_deref() == Some(discovered_session)
+                                && !cfg.codex_cleared_provider_sessions.is_empty()
+                            {
+                                cfg.codex_cleared_provider_sessions.clear();
+                                let _ = watcher_app.emit("agents-updated", ());
+                            } else if cfg
+                                .resume_session
+                                .as_deref()
+                                .is_none_or(|value| value.trim().is_empty())
+                            {
+                                cfg.resume_session = Some(discovered_session.clone());
+                                cfg.codex_cleared_provider_sessions.clear();
+                                let _ = watcher_app.emit("agents-updated", ());
+                            }
+                        }
+                    }
+                    let lookup_session = watcher_config
+                        .lock()
+                        .ok()
+                        .map(|cfg| {
+                            codex_log_lookup_session_id(
+                                &watcher_session,
+                                cfg.resume_session.as_deref(),
+                            )
+                            .to_string()
+                        })
+                        .unwrap_or_else(|| watcher_session.clone());
                     let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
+                    if last_lookup_session != lookup_session {
+                        *lock = None;
+                        offset = 0;
+                        last_lookup_session = lookup_session.clone();
+                    }
                     if lock.is_none() {
                         *lock =
-                            codex_session_file_path(&watcher_session, wardian_agent_dir.as_deref());
+                            codex_session_file_path(&lookup_session, wardian_agent_dir.as_deref());
                     }
                     lock.clone()
                 };
@@ -2111,24 +2186,49 @@ fn codex_session_file_path(
     codex_session_file_path_in(&global_home, session_id)
 }
 
-pub fn latest_codex_session_index_entry(
-    wardian_session_id: &str,
-) -> Result<Option<(String, String)>, String> {
-    let wardian_home = get_wardian_home().ok_or("Could not resolve Wardian home")?;
-    let index_path = wardian_home
-        .join("agents")
-        .join(wardian_session_id)
-        .join("habitat")
-        .join(".codex")
-        .join("session_index.jsonl");
+fn codex_log_lookup_session_id<'a>(
+    wardian_session_id: &'a str,
+    resume_session: Option<&'a str>,
+) -> &'a str {
+    resume_session
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(wardian_session_id)
+}
 
+fn codex_provider_session_is_excluded(candidate: &str, excluded: &[String]) -> bool {
+    let candidate = candidate.trim();
+    !candidate.is_empty()
+        && excluded
+            .iter()
+            .any(|session_id| session_id.trim() == candidate)
+}
+
+fn display_log_path(path: &std::path::Path) -> String {
+    let display_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let display = display_path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        display
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&display)
+            .to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        display.to_string()
+    }
+}
+
+fn latest_codex_session_from_index(
+    index_path: &std::path::Path,
+) -> Result<Option<(String, String)>, String> {
     if !index_path.exists() {
         return Ok(None);
     }
 
-    let content = std::fs::read_to_string(&index_path)
+    let content = std::fs::read_to_string(index_path)
         .map_err(|e| format!("Failed to read Codex session index: {}", e))?;
-    let latest = content.lines().rev().find_map(|line| {
+    Ok(content.lines().rev().find_map(|line| {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return None;
@@ -2142,9 +2242,123 @@ pub fn latest_codex_session_index_entry(
         }
 
         Some((session_id.to_string(), updated_at.to_string()))
-    });
+    }))
+}
+
+fn latest_codex_session_from_history(
+    history_path: &std::path::Path,
+) -> Result<Option<(String, String)>, String> {
+    if !history_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(history_path)
+        .map_err(|e| format!("Failed to read Codex history: {}", e))?;
+    Ok(content.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        let session_id = parsed.get("session_id")?.as_str()?.trim();
+        if session_id.is_empty() {
+            return None;
+        }
+        let updated_at = parsed
+            .get("ts")
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .map(|value| value.to_string())
+                    .or_else(|| value.as_str().map(str::to_string))
+            })
+            .unwrap_or_default();
+
+        Some((session_id.to_string(), updated_at))
+    }))
+}
+
+fn latest_codex_session_from_logs(
+    codex_home: &std::path::Path,
+) -> Result<Option<(String, String)>, String> {
+    let sessions_root = codex_home.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(None);
+    }
+
+    let mut stack = vec![sessions_root];
+    let mut latest: Option<(String, String)> = None;
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some((session_id, updated_at)) = content.lines().find_map(|line| {
+                let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+                if parsed.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+                    return None;
+                }
+                let payload = parsed.get("payload")?;
+                let session_id = payload.get("id")?.as_str()?.trim();
+                let updated_at = payload
+                    .get("timestamp")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if session_id.is_empty() || updated_at.is_empty() {
+                    return None;
+                }
+                Some((session_id.to_string(), updated_at.to_string()))
+            }) else {
+                continue;
+            };
+            if latest
+                .as_ref()
+                .is_none_or(|(_latest_session_id, latest_at)| updated_at > *latest_at)
+            {
+                latest = Some((session_id, updated_at));
+            }
+        }
+    }
 
     Ok(latest)
+}
+
+fn latest_codex_session_entry_in(
+    codex_home: &std::path::Path,
+) -> Result<Option<(String, String)>, String> {
+    if let Some(entry) = latest_codex_session_from_index(&codex_home.join("session_index.jsonl"))? {
+        return Ok(Some(entry));
+    }
+    if let Some(entry) = latest_codex_session_from_history(&codex_home.join("history.jsonl"))? {
+        return Ok(Some(entry));
+    }
+    latest_codex_session_from_logs(codex_home)
+}
+
+pub fn latest_codex_session_index_entry(
+    wardian_session_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let wardian_home = get_wardian_home().ok_or("Could not resolve Wardian home")?;
+    let codex_home = wardian_home
+        .join("agents")
+        .join(wardian_session_id)
+        .join("habitat")
+        .join(".codex");
+
+    latest_codex_session_entry_in(&codex_home)
 }
 
 fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
@@ -2573,8 +2787,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             .map(|home| home.join("agents").join(&snap.session_id))
                             .filter(|path| path.exists())
                             .map(|path| path.to_string_lossy().to_string());
+                        let codex_session_id = codex_log_lookup_session_id(
+                            &snap.session_id,
+                            snap.resume_session.as_deref(),
+                        );
                         if let Some(path) =
-                            codex_session_file_path(&snap.session_id, agent_home.as_deref())
+                            codex_session_file_path(codex_session_id, agent_home.as_deref())
                         {
                             *log_path_lock = Some(path);
                         }
@@ -2796,7 +3014,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 current_status: snap.current_status.lock().unwrap().clone(),
                 log_path: log_path_lock
                     .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
+                    .map(|p| display_log_path(p)),
             });
         }
         results
@@ -2920,11 +3138,12 @@ pub async fn kill_all_agents(state: &AppState) {
 mod tests {
     use super::{
         claude_permission_hook_matches_session, claude_status_from_log,
-        codex_bootstrap_launch_context, extract_terminal_titles, finalize_interactive_spawn_args,
-        headless_provider_args, headless_provider_launch, interactive_provider_args,
-        interactive_provider_cwd, interactive_provider_launch, migrate_codex_bootstrap_home,
-        opencode_interactive_env, opencode_log_path_after, opencode_log_path_in,
-        opencode_metrics_from_log, opencode_runtime_config_content,
+        codex_bootstrap_launch_context, codex_log_lookup_session_id,
+        latest_codex_session_entry_in, display_log_path, extract_terminal_titles,
+        finalize_interactive_spawn_args, headless_provider_args, headless_provider_launch,
+        interactive_provider_args, interactive_provider_cwd, interactive_provider_launch,
+        migrate_codex_bootstrap_home, opencode_interactive_env, opencode_log_path_after,
+        opencode_log_path_in, opencode_metrics_from_log, opencode_runtime_config_content,
         opencode_should_fallback_to_idle, opencode_status_from_title, session_bootstrap_prompt,
         strip_flag_value_pairs, strip_standalone_flag,
     };
@@ -2938,6 +3157,98 @@ mod tests {
         assert_eq!(
             extract_terminal_titles(chunk),
             vec!["OpenCode".to_string(), "OC | Working".to_string()]
+        );
+    }
+
+    #[test]
+    fn display_log_path_canonicalizes_existing_paths_for_ui() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let nested = temp.path().join("sessions");
+        std::fs::create_dir_all(&nested).expect("sessions dir");
+        let log = nested.join("session.jsonl");
+        std::fs::write(&log, "{}\n").expect("log file");
+        let indirect = nested.join("..").join("sessions").join("session.jsonl");
+
+        let expected_path = log.canonicalize().unwrap();
+        let expected_text = expected_path.to_string_lossy();
+        let expected = expected_text.strip_prefix(r"\\?\").unwrap_or(&expected_text);
+
+        assert_eq!(display_log_path(&indirect), expected);
+    }
+
+    #[test]
+    fn display_log_path_preserves_missing_paths() {
+        let missing = Path::new("C:/path/that/does/not/exist/session.jsonl");
+
+        assert_eq!(display_log_path(missing), missing.to_string_lossy());
+    }
+
+    #[test]
+    fn codex_log_lookup_prefers_provider_thread_id_when_available() {
+        assert_eq!(
+            codex_log_lookup_session_id(
+                "22ff532b-007a-44c9-a4b4-9b7c0f546274",
+                Some("codex-thread-123")
+            ),
+            "codex-thread-123"
+        );
+        assert_eq!(
+            codex_log_lookup_session_id("22ff532b-007a-44c9-a4b4-9b7c0f546274", Some("   ")),
+            "22ff532b-007a-44c9-a4b4-9b7c0f546274"
+        );
+        assert_eq!(
+            codex_log_lookup_session_id("22ff532b-007a-44c9-a4b4-9b7c0f546274", None),
+            "22ff532b-007a-44c9-a4b4-9b7c0f546274"
+        );
+    }
+
+    #[test]
+    fn latest_codex_session_entry_reads_history_when_index_is_missing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp.path();
+        std::fs::write(
+            codex_home.join("history.jsonl"),
+            concat!(
+                "{\"session_id\":\"019db2df-5679-7e91-b553-ce7a434bc31c\",\"ts\":1776823760,\"text\":\"Test\"}\n",
+                "{\"session_id\":\"019db2f3-22de-7861-8bc6-1b86db1686db\",\"ts\":1776823781,\"text\":\"What was my last message?\"}\n",
+            ),
+        )
+        .expect("write history");
+
+        assert_eq!(
+            latest_codex_session_entry_in(codex_home).expect("latest entry"),
+            Some((
+                "019db2f3-22de-7861-8bc6-1b86db1686db".to_string(),
+                "1776823781".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn latest_codex_session_entry_reads_newest_session_meta_when_history_is_missing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp.path();
+        let older_dir = codex_home.join("sessions").join("2026").join("04").join("20");
+        let newer_dir = codex_home.join("sessions").join("2026").join("04").join("21");
+        std::fs::create_dir_all(&older_dir).expect("create older dir");
+        std::fs::create_dir_all(&newer_dir).expect("create newer dir");
+        std::fs::write(
+            older_dir.join("rollout-older.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"older-session\",\"timestamp\":\"2026-04-21T01:00:00.000Z\"}}\n",
+        )
+        .expect("write older log");
+        std::fs::write(
+            newer_dir.join("rollout-newer.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"newer-session\",\"timestamp\":\"2026-04-22T02:09:32.024Z\"}}\n",
+        )
+        .expect("write newer log");
+
+        assert_eq!(
+            latest_codex_session_entry_in(codex_home).expect("latest entry"),
+            Some((
+                "newer-session".to_string(),
+                "2026-04-22T02:09:32.024Z".to_string()
+            ))
         );
     }
 

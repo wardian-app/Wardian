@@ -83,6 +83,8 @@ pub struct AgentConfig {
     pub codex_skip_git_repo_check: Option<bool>,
     #[serde(default)]
     pub codex_ephemeral: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_cleared_provider_sessions: Vec<String>,
 
     // OpenCode-specific fields
     #[serde(default)]
@@ -116,6 +118,7 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "C:/project".into(),
             resume_session: Some("def-456".into()),
+            codex_cleared_provider_sessions: vec!["old-codex-session".into()],
             is_off: true,
             ..Default::default()
         };
@@ -126,6 +129,10 @@ mod tests {
         assert_eq!(config.agent_class, deserialized.agent_class);
         assert_eq!(config.folder, deserialized.folder);
         assert_eq!(config.resume_session, deserialized.resume_session);
+        assert_eq!(
+            config.codex_cleared_provider_sessions,
+            deserialized.codex_cleared_provider_sessions
+        );
         assert_eq!(config.is_off, deserialized.is_off);
     }
 

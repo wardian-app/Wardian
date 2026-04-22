@@ -38,6 +38,7 @@ export interface AgentConfig {
     codex_search?: boolean;
     codex_skip_git_repo_check?: boolean;
     codex_ephemeral?: boolean;
+    codex_cleared_provider_sessions?: string[];
 
     // OpenCode-specific fields
     opencode_agent?: string;
