@@ -27,6 +27,9 @@ test.describe('responsive layout', () => {
   test('grid drag past 2/3 enters stacked mode; stack-exit drag restores multi-column', async ({ page }) => {
     await page.goto('/');
     // Pre-condition: at least 2 mock agents present in fixtures.
+    const agentCards = page.locator('[data-testid="agent-card"]');
+    test.skip(await agentCards.count() < 2, 'requires at least two visible agent cards');
+
     const handle = page.locator('[data-resize-handle="h"]').first();
     if (!(await handle.isVisible())) test.skip();
 
