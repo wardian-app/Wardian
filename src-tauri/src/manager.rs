@@ -2828,8 +2828,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                                         &content,
                                                     )
                                                 {
+                                                    let target_id = snap
+                                                        .resume_session
+                                                        .as_deref()
+                                                        .unwrap_or(&snap.session_id);
                                                     if p.get("sessionId").and_then(|v| v.as_str())
-                                                        == Some(&snap.session_id)
+                                                        == Some(target_id)
                                                     {
                                                         *log_path_lock = Some(chat_file.path());
                                                         break;

@@ -124,7 +124,7 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     if config.resume_session.is_none() {
         let should_fallback = match config.provider.as_str() {
             "opencode" => config.session_id.starts_with("ses_"),
-            "codex" => false,
+            "codex" | "gemini" => false,
             _ => true,
         };
         if should_fallback {
@@ -872,8 +872,8 @@ mod tests {
     fn non_opencode_resume_clears_off_and_sets_resume_session() {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
-            provider: "gemini".to_string(),
-            session_id: "gemini-session".to_string(),
+            provider: "claude".to_string(),
+            session_id: "claude-session".to_string(),
             resume_session: None,
             is_off: true,
             ..Default::default()
@@ -881,7 +881,7 @@ mod tests {
 
         prepare_resume_config(&mut config).expect("prepare resume config");
 
-        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        assert_eq!(config.resume_session.as_deref(), Some("claude-session"));
         assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
@@ -1114,8 +1114,8 @@ mod tests {
         .expect("save shell settings");
 
         let mut config = AgentConfig {
-            provider: "gemini".to_string(),
-            session_id: "gemini-session".to_string(),
+            provider: "claude".to_string(),
+            session_id: "claude-session".to_string(),
             resume_session: None,
             session_persistence: AgentSessionPersistenceOverride::Resume,
             is_off: true,
@@ -1124,7 +1124,7 @@ mod tests {
 
         prepare_resume_config(&mut config).expect("prepare resume config");
 
-        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        assert_eq!(config.resume_session.as_deref(), Some("claude-session"));
         assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
