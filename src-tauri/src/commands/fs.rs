@@ -81,8 +81,9 @@ pub async fn delete_file(path: String) -> Result<(), String> {
 pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        let args = windows_explorer_args(Path::new(&path));
         std::process::Command::new("explorer")
-            .args(["/select,", &path])
+            .args(args)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -103,7 +104,47 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn windows_explorer_args(path: &Path) -> Vec<String> {
+    let normalized_path = path.to_string_lossy().replace('/', "\\");
+
+    if path.is_dir() {
+        vec![normalized_path]
+    } else {
+        vec!["/select,".to_string(), normalized_path]
+    }
+}
+
 #[tauri::command]
 pub async fn read_file_preview(path: String) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reveal_selects_files_with_normalized_separators() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file_path = temp.path().join("nested/file.txt");
+        fs::create_dir_all(file_path.parent().expect("file parent")).expect("create parent");
+        fs::write(&file_path, "test").expect("write file");
+
+        let args = windows_explorer_args(Path::new("D:/Development/Wardian/file.txt"));
+        assert_eq!(args, vec!["/select,".to_string(), "D:\\Development\\Wardian\\file.txt".to_string()]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reveal_opens_directories_instead_of_selecting_parent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir_path = temp.path().join("workspace");
+        fs::create_dir_all(&dir_path).expect("create dir");
+
+        let args = windows_explorer_args(&dir_path);
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], dir_path.to_string_lossy().replace('/', "\\"));
+    }
 }

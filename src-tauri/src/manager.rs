@@ -606,7 +606,77 @@ pub async fn spawn_agent(
                     }
 
                     // Process stream events to capture Session ID / Status changes
-                    // Use a buffered approach for stream-json events to handle chunk boundaries.
+                    // Use a simple line-based approach for stream-json events
+                    for line in text.lines() {
+                        if let Some(event) = pty_provider.parse_output(line) {
+                            match event {
+                                AgentEvent::Init {
+                                    session_id,
+                                    timestamp,
+                                } => {
+                                    if let Some(ts) = timestamp {
+                                        let mut it = init_timestamp_clone.lock().unwrap();
+                                        if it.is_none() {
+                                            *it = Some(ts);
+                                        }
+                                    }
+                                    if !session_id.trim().is_empty() {
+                                        let mut config = config_lock_clone.lock().unwrap();
+                                        if provider_name_for_pty == "codex"
+                                            && codex_provider_session_is_excluded(
+                                                &session_id,
+                                                &config.codex_cleared_provider_sessions,
+                                            )
+                                        {
+                                            continue;
+                                        }
+                                        if config.resume_session.as_deref() != Some(&session_id) {
+                                            log_debug(&format!(
+                                                "[Wardian] Session ID mapped for {}: {}",
+                                                sid_for_pty, session_id
+                                            ));
+                                            config.resume_session = Some(session_id.clone());
+                                            if provider_name_for_pty == "codex" {
+                                                config.codex_cleared_provider_sessions.clear();
+                                            }
+
+                                            // Notify UI that metadata (resume_session ID) has changed
+                                            let _ = pty_emit_app.emit("agents-updated", ());
+                                            let _ = pty_emit_app.emit(
+                                                "agent-pty-output-ready",
+                                                serde_json::json!({ "session_id": sid_for_pty }),
+                                            );
+                                        }
+                                    }
+                                }
+                                AgentEvent::ActionRequired { message: _ } => {
+                                    set_agent_status(
+                                        &pty_app,
+                                        &sid_for_pty,
+                                        &current_status_clone,
+                                        "Action Needed",
+                                    );
+                                }
+                                AgentEvent::TurnCompleted | AgentEvent::ModelResponse => {
+                                    set_agent_status(
+                                        &pty_app,
+                                        &sid_for_pty,
+                                        &current_status_clone,
+                                        "Idle",
+                                    );
+                                }
+                                AgentEvent::UserQuery | AgentEvent::Generating => {
+                                    set_agent_status(
+                                        &pty_app,
+                                        &sid_for_pty,
+                                        &current_status_clone,
+                                        "Processing...",
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
 
                     if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
                         let _previous_title = terminal_title_clone
@@ -688,11 +758,6 @@ pub async fn spawn_agent(
                                                     if provider_name_for_pty == "codex" {
                                                         config
                                                             .codex_cleared_provider_sessions
-                                                            .clear();
-                                                    }
-                                                    if provider_name_for_pty == "gemini" {
-                                                        config
-                                                            .gemini_cleared_provider_sessions
                                                             .clear();
                                                     }
 
@@ -2653,7 +2718,6 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         provider: String,
         folder: String,
         resume_session: Option<String>,
-        gemini_cleared_provider_sessions: Vec<String>,
         process_id: Option<u32>,
         query_count: std::sync::Arc<std::sync::Mutex<usize>>,
         init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -2674,7 +2738,6 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     provider: config.provider.clone(),
                     folder: config.folder.clone(),
                     resume_session: config.resume_session.clone(),
-                    gemini_cleared_provider_sessions: config.gemini_cleared_provider_sessions.clone(),
                     process_id: agent.process_id,
                     query_count: agent.query_count.clone(),
                     init_timestamp: agent.init_timestamp.clone(),
@@ -2831,9 +2894,6 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         if let Some(home) = dirs::home_dir() {
                             let tmp_dir = home.join(".gemini").join("tmp");
                             if let Ok(entries) = std::fs::read_dir(tmp_dir) {
-                                let mut best_path: Option<std::path::PathBuf> = None;
-                                let mut best_time: Option<String> = None;
-
                                 for entry in entries.flatten() {
                                     let chat_dir = entry.path().join("chats");
                                     if let Ok(chat_files) = std::fs::read_dir(chat_dir) {
@@ -2846,50 +2906,23 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                                         &content,
                                                     )
                                                 {
-                                                    if let Some(session_id) =
-                                                        p.get("sessionId").and_then(|v| v.as_str())
+                                                    let target_id = snap
+                                                        .resume_session
+                                                        .as_deref()
+                                                        .unwrap_or(&snap.session_id);
+                                                    if p.get("sessionId").and_then(|v| v.as_str())
+                                                        == Some(target_id)
                                                     {
-                                                        if let Some(ref rs) = snap.resume_session {
-                                                            if session_id == rs {
-                                                                best_path = Some(chat_file.path());
-                                                                break;
-                                                            }
-                                                        } else {
-                                                            // If no resume_session, find newest that isn't cleared.
-                                                            // Note: session_id can never match snap.session_id (Wardian UUID).
-                                                            let is_excluded = snap
-                                                                .gemini_cleared_provider_sessions
-                                                                .iter()
-                                                                .any(|s| s == session_id);
-                                                            if !is_excluded {
-                                                                let updated_at = p
-                                                                    .get("lastUpdated")
-                                                                    .and_then(|v| v.as_str())
-                                                                    .or_else(|| {
-                                                                        p.get("startTime")
-                                                                            .and_then(|v| v.as_str())
-                                                                    });
-                                                                if let Some(time) = updated_at {
-                                                                    if best_time.as_ref().is_none_or(|bt| time > bt.as_str()) {
-                                                                        best_time =
-                                                                            Some(time.to_string());
-                                                                        best_path =
-                                                                            Some(chat_file.path());
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
+                                                        *log_path_lock = Some(chat_file.path());
+                                                        break;
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    if snap.resume_session.is_some() && best_path.is_some() {
+                                    if log_path_lock.is_some() {
                                         break;
                                     }
-                                }
-                                if let Some(path) = best_path {
-                                    *log_path_lock = Some(path);
                                 }
                             }
                         }

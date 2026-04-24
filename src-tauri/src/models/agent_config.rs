@@ -86,9 +86,6 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub codex_cleared_provider_sessions: Vec<String>,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub gemini_cleared_provider_sessions: Vec<String>,
-
     // OpenCode-specific fields
     #[serde(default)]
     pub opencode_agent: Option<String>,

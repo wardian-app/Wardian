@@ -165,18 +165,6 @@ impl AgentProvider for GeminiProvider {
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
-        let trimmed = line.trim();
-        // If Gemini is running interactively, it outputs ANSI text, not JSON.
-        // We heuristically detect common permission prompts.
-        let lower = trimmed.to_lowercase();
-        if lower.contains("do you want to allow")
-            || lower.contains("approve tool call")
-            || lower.contains("permission required")
-            || lower.contains("blocked call: unauthorized tool call")
-        {
-            return Some(AgentEvent::ActionRequired { message: "".into() });
-        }
-
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         let msg_type = parsed.get("type")?.as_str()?;
 
