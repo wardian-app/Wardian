@@ -1525,6 +1525,24 @@ fn interactive_provider_launch(
     bin: &str,
     provider_args: &[String],
 ) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
+    #[cfg(windows)]
+    if provider_name == "opencode" {
+        let bin_path = std::path::Path::new(bin);
+        let is_native_exe = bin_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("exe"));
+        if !is_native_exe {
+            let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let mut fragments = vec![quote_cmd_arg(bin)];
+            fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
+            return Ok(crate::utils::shell::ShellLaunchSpec {
+                executable: cmd_host,
+                args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
+            });
+        }
+    }
+
     let _ = provider_name;
     Ok(crate::utils::shell::ShellLaunchSpec {
         executable: bin.to_string(),
@@ -3678,6 +3696,27 @@ mod tests {
         let args = interactive_provider_args("opencode", workspace_cwd, workspace_cwd, Vec::new());
 
         assert_eq!(args, vec!["D:/Development/Wardian".to_string()]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn opencode_interactive_launch_wraps_cmd_shims_through_cmd_exe() {
+        let launch = interactive_provider_launch(
+            "opencode",
+            r"C:\nvm4w\nodejs\opencode.cmd",
+            &["--session".to_string(), "ses_test".to_string()],
+        )
+        .expect("launch spec");
+
+        assert!(
+            launch.executable.ends_with(r"\cmd.exe") || launch.executable.eq_ignore_ascii_case("cmd"),
+            "expected cmd host, got {}",
+            launch.executable
+        );
+        assert_eq!(launch.args[..2], ["/d".to_string(), "/c".to_string()]);
+        assert!(launch.args[2].contains(r"C:\nvm4w\nodejs\opencode.cmd"));
+        assert!(launch.args[2].contains("--session"));
+        assert!(launch.args[2].contains("ses_test"));
     }
     #[test]
     fn strip_flag_value_pairs_removes_all_add_dir_arguments() {

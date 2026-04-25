@@ -63,21 +63,7 @@ impl OpenCodeProvider {
             }
 
             let bare = path.join("opencode");
-            if bare.exists() {
-                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
-                    return Some(executable);
-                }
-                return Some("opencode".to_string());
-            }
-
             let powershell = path.join("opencode.ps1");
-            if powershell.exists() {
-                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
-                    return Some(executable);
-                }
-                return Some("opencode".to_string());
-            }
-
             for ext in path_exts {
                 let candidate = path.join(format!("opencode{ext}"));
                 if candidate.exists() {
@@ -92,8 +78,22 @@ impl OpenCodeProvider {
                     if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
                         return Some(executable);
                     }
-                    return Some("opencode".to_string());
+                    return Some(candidate.to_string_lossy().to_string());
                 }
+            }
+
+            if bare.exists() {
+                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
+                    return Some(executable);
+                }
+                return Some("opencode".to_string());
+            }
+
+            if powershell.exists() {
+                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
+                    return Some(executable);
+                }
+                return Some("opencode".to_string());
             }
         }
 
@@ -454,6 +454,23 @@ mod tests {
         );
 
         assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_lookup_prefers_cmd_shim_when_packaged_executable_is_missing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bare = temp.path().join("opencode");
+        let cmd = temp.path().join("opencode.cmd");
+        std::fs::write(&bare, "#!/usr/bin/env node\n").expect("bare shim");
+        std::fs::write(&cmd, "@echo off\r\n").expect("cmd shim");
+
+        let resolved = OpenCodeProvider::find_windows_opencode_in_paths(
+            vec![temp.path().to_path_buf()],
+            &[".exe".into(), ".cmd".into(), ".bat".into()],
+        );
+
+        assert_eq!(resolved, Some(cmd.to_string_lossy().to_string()));
     }
 
     #[cfg(not(target_os = "windows"))]
