@@ -6,7 +6,7 @@ use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 use crate::utils::{
     build_shell_command, get_wardian_home, new_headless_command, validate_workspace_path,
 };
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{Datelike, Local, TimeZone, Utc};
 use notify::{Event, RecursiveMode, Watcher};
 use regex::Regex;
 use serde_json::Value;
@@ -845,11 +845,7 @@ pub async fn start_scheduler(app: AppHandle) {
                         }
                         modified = true;
 
-                        let payload = serde_json::json!({
-                            "timestamp": Utc::now().to_rfc3339(),
-                            "scheduled_run_id": run.id,
-                            "role_mappings": run.role_mappings,
-                        });
+                        let payload = scheduled_trigger_payload(&run.id, &run.role_mappings);
 
                         let _ =
                             run_workflow(app_clone.clone(), run.workflow_id.clone(), Some(payload))
@@ -1255,16 +1251,24 @@ pub async fn run_scheduled_workflow_now(app: AppHandle, run_id: String) -> Resul
         run.paused_remaining_ms = None;
     }
 
-    let payload = serde_json::json!({
-        "timestamp": Utc::now().to_rfc3339(),
-        "scheduled_run_id": run.id,
-        "role_mappings": run.role_mappings,
-    });
+    let payload = scheduled_trigger_payload(&run.id, &run.role_mappings);
     let workflow_id = run.workflow_id.clone();
 
     save_scheduled_runs(&runs)?;
     run_workflow(app, workflow_id, Some(payload)).await
 }
+
+fn scheduled_trigger_payload(
+    scheduled_run_id: &str,
+    role_mappings: &HashMap<String, String>,
+) -> Value {
+    serde_json::json!({
+        "timestamp": Local::now().to_rfc3339(),
+        "scheduled_run_id": scheduled_run_id,
+        "role_mappings": role_mappings,
+    })
+}
+
 pub async fn save_workflow(app: AppHandle, wf: WorkflowDefinition) -> Result<(), String> {
     let dir = get_workflows_dir().ok_or("Could not find Wardian home")?;
     if !dir.exists() {
@@ -1341,12 +1345,13 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 mod tests {
     use super::{
         parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,
-        sync_scheduled_runs_for_workflow,
+        scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
     };
     use crate::models::{
         ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
     };
     use crate::utils::ShellLaunchSpec;
+    use chrono::Local;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -1468,6 +1473,29 @@ mod tests {
         assert_eq!(
             parse_optional_timeout_ms(&json!({ "timeout_ms": "60000" })),
             Some(60000)
+        );
+    }
+
+    #[test]
+    fn scheduled_trigger_payload_uses_local_timestamp_offset() {
+        let payload = scheduled_trigger_payload(
+            "sched-1",
+            &HashMap::from([("analyst".to_string(), "agent-1".to_string())]),
+        );
+
+        let timestamp = payload
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .expect("timestamp string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).expect("valid rfc3339");
+
+        assert_eq!(
+            parsed.offset().local_minus_utc(),
+            Local::now().offset().local_minus_utc()
+        );
+        assert_eq!(
+            payload.get("scheduled_run_id").and_then(|value| value.as_str()),
+            Some("sched-1")
         );
     }
 
