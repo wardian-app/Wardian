@@ -184,6 +184,24 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("translates codex enter into the submit chord instead of a plain newline", async () => {
+    render(<AgentTerminal sessionId="codex-enter" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    const onData = instance.onData.mock.calls[0]?.[0] as ((data: string) => void);
+
+    onData("\r");
+
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-enter",
+      input: "\u001b\r",
+    });
+  });
+
   it("keeps xterm erase-in-display behavior at the default terminal semantics", async () => {
     render(<AgentTerminal sessionId="codex-3" provider="codex" theme="dark" />);
 

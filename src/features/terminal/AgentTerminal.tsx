@@ -33,6 +33,14 @@ const LIGHT_TERM_THEME = {
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
+function mapTerminalInputForProvider(provider: string | undefined, data: string): string {
+  if (provider === "codex" && data === "\r") {
+    return "\u001b\r";
+  }
+
+  return data;
+}
+
 type TitleHandlerRef = {
   current?: (title: string) => void;
 };
@@ -519,7 +527,10 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
-    invoke("send_input_to_agent", { sessionId, input: data }).catch(() => {});
+    invoke("send_input_to_agent", {
+      sessionId,
+      input: mapTerminalInputForProvider(entry.provider, data),
+    }).catch(() => {});
   });
 
   term.onBinary((data) => {
