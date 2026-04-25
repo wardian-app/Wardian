@@ -29,6 +29,7 @@ describe('AgentWatchlist', () => {
   const mockOnRestart = vi.fn();
   const mockOnClear = vi.fn();
   const mockOnDelete = vi.fn();
+  const mockOnDeleteAgents = vi.fn();
   const mockOnAddAgentsToList = vi.fn();
   const mockOnRemoveAgentsFromList = vi.fn();
   const mockOnCreateTeam = vi.fn();
@@ -71,6 +72,7 @@ describe('AgentWatchlist', () => {
     onRestart: mockOnRestart,
     onClear: mockOnClear,
     onDelete: mockOnDelete,
+    onDeleteAgents: mockOnDeleteAgents,
     onCreateTeam: mockOnCreateTeam,
     onUngroupTeam: mockOnUngroupTeam,
     onAddAgentToTeam: mockOnAddAgentToTeam,
@@ -179,8 +181,67 @@ describe('AgentWatchlist', () => {
 
     fireEvent.click(within(menu).getByRole('button', { name: 'Clear Selected' }));
 
-    expect(mockOnClear).toHaveBeenCalledWith('agent-1');
-    expect(mockOnClear).toHaveBeenCalledWith('agent-2');
+    await waitFor(() => {
+      expect(mockOnClear).toHaveBeenCalledWith('agent-1');
+      expect(mockOnClear).toHaveBeenCalledWith('agent-2');
+    });
+  });
+
+  it('applies bulk query, pause, restart, and delete actions to the full selection', async () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        selectedAgentIds={new Set(['agent-1', 'agent-2'])}
+        offAgentIds={new Set()}
+      />
+    );
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row')!;
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.click(screen.getByRole('button', { name: 'Query Selected' }));
+    await waitFor(() => {
+      expect(mockOnQuery).toHaveBeenCalledWith('agent-1');
+      expect(mockOnQuery).toHaveBeenCalledWith('agent-2');
+    });
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.click(screen.getByTestId('context-pause'));
+    await waitFor(() => {
+      expect(mockOnPause).toHaveBeenCalledWith('agent-1');
+      expect(mockOnPause).toHaveBeenCalledWith('agent-2');
+    });
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.click(screen.getByTestId('context-start'));
+    await waitFor(() => {
+      expect(mockOnRestart).toHaveBeenCalledWith('agent-1');
+      expect(mockOnRestart).toHaveBeenCalledWith('agent-2');
+    });
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Selected' }));
+    await waitFor(() => {
+      expect(mockOnDeleteAgents).toHaveBeenCalledWith(['agent-1', 'agent-2']);
+    });
+  });
+
+  it('uses one bulk delete action for a multi-selection', async () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        selectedAgentIds={new Set(['agent-1', 'agent-2'])}
+      />
+    );
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row')!;
+
+    fireEvent.contextMenu(agentRow);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Selected' }));
+
+    await waitFor(() => {
+      expect(mockOnDeleteAgents).toHaveBeenCalledWith(['agent-1', 'agent-2']);
+    });
+    expect(mockOnDeleteAgents).toHaveBeenCalledTimes(1);
+    expect(mockOnDelete).not.toHaveBeenCalled();
   });
 
   it('offers team creation for a multi-selection', async () => {
@@ -241,8 +302,10 @@ describe('AgentWatchlist', () => {
     expect(within(menu).getByRole('button', { name: 'Rename Team' })).toBeInTheDocument();
     fireEvent.click(within(menu).getByRole('button', { name: 'Query Team' }));
 
-    expect(mockOnQuery).toHaveBeenCalledWith('agent-1');
-    expect(mockOnQuery).toHaveBeenCalledWith('agent-2');
+    await waitFor(() => {
+      expect(mockOnQuery).toHaveBeenCalledWith('agent-1');
+      expect(mockOnQuery).toHaveBeenCalledWith('agent-2');
+    });
   });
 
   it('renames a team from the team context menu', async () => {
