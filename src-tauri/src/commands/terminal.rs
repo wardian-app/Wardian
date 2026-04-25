@@ -84,7 +84,7 @@ pub async fn send_input_to_agent(
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
                         let provider = agent.config.lock().unwrap().provider.clone();
-                        if provider == "opencode" {
+                        if provider == "opencode" || provider == "gemini" {
                             let current_status = agent
                                 .current_status
                                 .lock()

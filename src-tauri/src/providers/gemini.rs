@@ -185,7 +185,11 @@ impl AgentProvider for GeminiProvider {
                 })
             }
             "user" => Some(AgentEvent::UserQuery),
-            "gemini" | "model" | "info" => Some(AgentEvent::ModelResponse),
+            // These event types are streaming response chunks — emitted *during* generation,
+            // not at completion. Mapping them to ModelResponse (Idle) would overwrite
+            // "Processing..." mid-turn. Only "result" signals a completed turn.
+            "gemini" | "model" => Some(AgentEvent::Generating),
+            "info" => Some(AgentEvent::Unknown),
             "message" => {
                 let role = parsed.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role == "user" {
@@ -445,17 +449,25 @@ mod tests {
     #[test]
     fn parse_output_model_events() {
         let p = make_provider();
-        for msg_type in &["gemini", "model", "info"] {
+
+        // "gemini" and "model" are streaming response chunks emitted during generation;
+        // they must set Processing..., not Idle.
+        for msg_type in &["gemini", "model"] {
             let line = format!(r#"{{"type":"{}","content":"response"}}"#, msg_type);
             let event = p.parse_output(&line).unwrap();
             assert_eq!(
                 event,
-                AgentEvent::ModelResponse,
-                "Failed for type: {}",
+                AgentEvent::Generating,
+                "Expected Generating for type: {}",
                 msg_type
             );
         }
 
+        // "info" is a neutral informational event — no status change.
+        let line_info = r#"{"type":"info","content":"some info"}"#;
+        assert_eq!(p.parse_output(line_info).unwrap(), AgentEvent::Unknown);
+
+        // "result" is the true end-of-turn signal → Idle.
         let line_result = r#"{"type":"result","status":"success"}"#;
         assert_eq!(
             p.parse_output(line_result).unwrap(),

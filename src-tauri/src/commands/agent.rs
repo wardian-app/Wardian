@@ -34,6 +34,10 @@ fn provider_uses_generated_session_id(provider_name: &str) -> bool {
     matches!(provider_name, "claude" | "codex")
 }
 
+fn provider_needs_obtain_session_id_on_clear(provider_name: &str) -> bool {
+    matches!(provider_name, "gemini")
+}
+
 fn restore_runtime_state_after_resume(
     new_active: &mut crate::state::ActiveAgent,
     old_active: &crate::state::ActiveAgent,
@@ -541,6 +545,34 @@ pub async fn clear_agent_session(
             config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
         }
 
+        // For providers that bootstrap via obtain_session_id (e.g. Gemini), run the same
+        // bootstrap after clear so the fresh session gets a trackable provider session ID.
+        // Without this, resume_session stays None and log/status tracking breaks.
+        if provider_needs_obtain_session_id_on_clear(&config.provider) {
+            let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+            match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config)).await {
+                Ok(new_session_id) if !new_session_id.is_empty() => {
+                    manager::log_debug(&format!(
+                        "[WARDIAN] clear_agent_session: obtained fresh {} session ID: {}",
+                        config.provider, new_session_id
+                    ));
+                    config.resume_session = Some(new_session_id);
+                }
+                Ok(_) => {
+                    manager::log_debug(&format!(
+                        "[WARDIAN] clear_agent_session: obtain_session_id returned empty ID for {}",
+                        config.provider
+                    ));
+                }
+                Err(e) => {
+                    manager::log_debug(&format!(
+                        "[WARDIAN] clear_agent_session: failed to obtain fresh {} session ID: {}",
+                        config.provider, e
+                    ));
+                }
+            }
+        }
+
         // 3. Reset UI and in-memory buffers
         if let Ok(mut buf) = agent.output_buffer.lock() {
             buf.clear();
@@ -732,8 +764,8 @@ pub async fn reorder_agents(
 mod tests {
     use super::{
         codex_provider_session_is_new, persisted_resume_session_for_provider, prepare_clear_config,
-        prepare_resume_config, provider_uses_generated_session_id,
-        restore_runtime_state_after_resume,
+        prepare_resume_config, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, restore_runtime_state_after_resume,
     };
     use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
     use crate::state::ActiveAgent;
@@ -781,6 +813,14 @@ mod tests {
     fn claude_keeps_generated_session_ids() {
         assert!(provider_uses_generated_session_id("claude"));
         assert!(provider_uses_generated_session_id("codex"));
+    }
+
+    #[test]
+    fn gemini_needs_obtain_session_id_on_clear() {
+        assert!(provider_needs_obtain_session_id_on_clear("gemini"));
+        assert!(!provider_needs_obtain_session_id_on_clear("claude"));
+        assert!(!provider_needs_obtain_session_id_on_clear("codex"));
+        assert!(!provider_needs_obtain_session_id_on_clear("opencode"));
     }
 
     #[test]
