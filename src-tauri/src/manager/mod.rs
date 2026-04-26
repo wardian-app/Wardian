@@ -1,0 +1,650 @@
+pub(crate) mod classes;
+pub(crate) mod claude;
+pub(crate) mod codex;
+pub(crate) mod headless;
+pub(crate) mod opencode;
+pub(crate) mod spawn;
+pub(crate) mod telemetry;
+
+// ── Re-exports for backward compatibility ───────────────────────────
+// All external callers (lib.rs, commands/*) continue to use
+// crate::manager::* exactly as before.
+
+pub use classes::{
+    get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
+};
+pub use headless::{
+    obtain_session_id, run_headless, run_headless_with_config, run_headless_with_options, HeadlessRunOptions,
+};
+pub use opencode::opencode_extract_created_session_id;
+pub use codex::latest_codex_session_index_entry;
+pub use spawn::{resize_pty, spawn_agent};
+pub use telemetry::get_all_metrics;
+
+pub use crate::utils::fs::*;
+pub use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
+pub use crate::utils::process::new_headless_command;
+#[cfg(windows)]
+pub use crate::utils::process::{find_wardian_session_process_roots, force_kill_process_tree};
+pub use crate::utils::shell::build_program_launch;
+
+use crate::models::{AgentConfig, AgentEvent};
+use crate::state::ActiveAgent;
+use portable_pty::CommandBuilder;
+use std::collections::HashMap;
+use tauri::{AppHandle, Emitter};
+pub(crate) fn session_bootstrap_prompt() -> &'static str {
+    "Introduce yourself"
+}
+
+#[cfg(windows)]
+pub(crate) fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
+    for pid in find_wardian_session_process_roots(session_id, Some(std::process::id())) {
+        log_debug(&format!(
+            "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
+            provider, session_id, pid
+        ));
+        if let Err(err) = force_kill_process_tree(pid) {
+            log_debug(&format!(
+                "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
+                session_id, pid, err
+            ));
+        }
+    }
+}
+
+pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
+    // IMPORTANT: Kill the process tree FIRST while the parent is still alive.
+    // If we kill the PTY child (cmd.exe) first, its children (claude.exe, node.exe,
+    // etc.) become orphaned and taskkill /T can no longer enumerate them via parent PID.
+    #[cfg(windows)]
+    {
+        if let Some(pid) = agent.process_id {
+            if let Err(err) = force_kill_process_tree(pid) {
+                let sid = agent.config.lock().unwrap().session_id.clone();
+                log_debug(&format!(
+                    "[Wardian] Failed to force-kill process tree for session {} via PID {}: {}",
+                    sid, pid, err
+                ));
+            }
+        }
+    }
+
+    // Now kill the direct PTY child (may already be dead from the tree kill above).
+    if let Some(mut child) = agent.child_process.take() {
+        let _ = child.kill();
+    }
+
+    for mut child in agent.background_processes.drain(..) {
+        #[cfg(windows)]
+        {
+            if let Err(err) = force_kill_process_tree(child.id()) {
+                let sid = agent.config.lock().unwrap().session_id.clone();
+                log_debug(&format!(
+                    "[Wardian] Failed to force-kill background process for session {} via PID {}: {}",
+                    sid,
+                    child.id(),
+                    err
+                ));
+            }
+        }
+        let _ = child.kill();
+    }
+
+    // Drop the Job Object last as a final safety net — its KILL_ON_JOB_CLOSE flag
+    // will terminate any remaining processes still assigned to the job.
+    #[cfg(windows)]
+    {
+        let _ = agent.job_object.take();
+    }
+
+    agent.process_id = None;
+}
+
+pub(crate) fn set_agent_status(
+    app: &AppHandle,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    next_status: &str,
+) {
+    if let Ok(mut status) = current_status.lock() {
+        if *status != next_status {
+            *status = next_status.to_string();
+
+            // Phase 2: Persist status change to SQLite
+            let _ = crate::utils::db::update_agent_status(session_id, next_status, None);
+
+            let _ = app.emit(
+                "agent-status-updated",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "current_status": next_status,
+                }),
+            );
+        }
+    }
+}
+
+pub(crate) fn debug_preview_bytes(bytes: &[u8], limit: usize) -> String {
+    let mut out = String::new();
+    for &byte in bytes.iter().take(limit) {
+        match byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x1b => out.push_str("\\x1b"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{:02x}", byte)),
+        }
+    }
+    if bytes.len() > limit {
+        out.push_str("...");
+    }
+    out
+}
+
+pub(crate) fn extract_terminal_titles(chunk: &str) -> Vec<String> {
+    let bytes = chunk.as_bytes();
+    let mut titles = Vec::new();
+    let mut index = 0usize;
+
+    while index + 2 < bytes.len() {
+        if bytes[index] == 0x1b && bytes[index + 1] == b']' {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() && bytes[cursor] != b';' {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                break;
+            }
+
+            let code = String::from_utf8_lossy(&bytes[index + 2..cursor]);
+            if code != "0" && code != "2" {
+                index = cursor.saturating_add(1);
+                continue;
+            }
+
+            let value_start = cursor + 1;
+            let mut end = value_start;
+            while end < bytes.len() {
+                if bytes[end] == 0x07 {
+                    break;
+                }
+                if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\' {
+                    break;
+                }
+                end += 1;
+            }
+
+            let title = String::from_utf8_lossy(&bytes[value_start..end])
+                .trim()
+                .to_string();
+            if !title.is_empty() {
+                titles.push(title);
+            }
+
+            index = end.saturating_add(1);
+            continue;
+        }
+
+        index += 1;
+    }
+
+    titles
+}
+
+pub(crate) fn apply_agent_event(
+    app: &AppHandle,
+    session_id: &str,
+    event: AgentEvent,
+    query_count: &std::sync::Arc<std::sync::Mutex<usize>>,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    match event {
+        AgentEvent::UserQuery => {
+            if let Ok(mut count) = query_count.lock() {
+                *count += 1;
+            }
+            set_agent_status(app, session_id, current_status, "Processing...");
+        }
+        AgentEvent::Generating => {
+            set_agent_status(app, session_id, current_status, "Processing...");
+        }
+        AgentEvent::Init { timestamp, .. } => {
+            if let Ok(mut ts) = init_timestamp.lock() {
+                *ts = timestamp;
+            }
+        }
+        AgentEvent::ModelResponse => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::TurnCompleted => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::ActionRequired { .. } => {
+            set_agent_status(app, session_id, current_status, "Action Needed");
+        }
+        AgentEvent::Unknown => {}
+    }
+}
+
+pub(crate) fn apply_agent_status_event(
+    app: &AppHandle,
+    session_id: &str,
+    event: AgentEvent,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    match event {
+        AgentEvent::UserQuery | AgentEvent::Generating => {
+            set_agent_status(app, session_id, current_status, "Processing...");
+        }
+        AgentEvent::ModelResponse => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::TurnCompleted => {
+            set_agent_status(app, session_id, current_status, "Idle");
+        }
+        AgentEvent::ActionRequired { .. } => {
+            set_agent_status(app, session_id, current_status, "Action Needed");
+        }
+        AgentEvent::Init { .. } | AgentEvent::Unknown => {}
+    }
+}
+
+/// On macOS, GUI apps inherit a minimal PATH that excludes Homebrew, npm globals,
+/// Volta, and other user-level tool installs. Prepend the common locations so that
+/// `claude`, `gemini`, and similar CLIs can be found when spawning child processes.
+#[cfg(target_os = "macos")]
+fn macos_extended_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let extra = format!(
+        "{home}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:{home}/.npm-global/bin:{home}/.volta/bin",
+        home = home
+    );
+    if existing.is_empty() {
+        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", extra)
+    } else {
+        format!("{}:{}", extra, existing)
+    }
+}
+
+pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
+    let mut configs: Vec<AgentConfig> = Vec::new();
+    for id in order {
+        if let Some(agent) = agents.get(id) {
+            configs.push(agent.config.lock().unwrap().clone());
+        }
+    }
+
+    if let Ok(json) = serde_json::to_string_pretty(&configs) {
+        if let Some(app_dir) = get_wardian_home() {
+            let _ = std::fs::create_dir_all(&app_dir);
+            let _ = std::fs::create_dir_all(app_dir.join("settings"));
+            let state_path = app_dir.join("settings/state.json");
+            let _ = std::fs::write(state_path, json);
+        }
+    }
+}
+
+pub(crate) fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            let _ = iter.next();
+            continue;
+        }
+        stripped.push(arg);
+    }
+    stripped
+}
+
+pub(crate) fn strip_standalone_flag(args: Vec<String>, flag: &str) -> Vec<String> {
+    args.into_iter().filter(|arg| arg != flag).collect()
+}
+
+pub(crate) fn persisted_agent_config(session_id: &str) -> Option<AgentConfig> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+
+    let wardian_home = get_wardian_home()?;
+    let state_path = wardian_home.join("settings/state.json");
+    let contents = std::fs::read_to_string(state_path).ok()?;
+    let configs = serde_json::from_str::<Vec<AgentConfig>>(&contents).ok()?;
+    configs
+        .into_iter()
+        .find(|config| config.session_id == session_id)
+}
+
+pub(crate) fn interactive_provider_cwd(
+    provider_name: &str,
+    workspace_cwd: &std::path::Path,
+    habitat_root: Option<&std::path::Path>,
+    codex_bootstrap: Option<&(std::path::PathBuf, std::path::PathBuf)>,
+) -> std::path::PathBuf {
+    if let Some((provider_cwd, _)) = codex_bootstrap {
+        return provider_cwd.clone();
+    }
+
+    if provider_name == "codex" {
+        workspace_cwd.to_path_buf()
+    } else if provider_name == "opencode" {
+        habitat_root
+            .map(|root| root.to_path_buf())
+            .unwrap_or_else(|| workspace_cwd.to_path_buf())
+    } else {
+        habitat_root
+            .map(habitat_workspace_cwd)
+            .unwrap_or_else(|| workspace_cwd.to_path_buf())
+    }
+}
+
+pub(crate) fn interactive_provider_args(
+    provider_name: &str,
+    provider_cwd: &std::path::Path,
+    workspace_cwd: &std::path::Path,
+    mut provider_args: Vec<String>,
+) -> Vec<String> {
+    match provider_name {
+        "codex" => {
+            provider_args.push("--cd".to_string());
+            provider_args.push(provider_cwd.to_string_lossy().to_string());
+        }
+        "opencode" => {
+            let target_dir = if provider_cwd
+                .file_name()
+                .is_some_and(|name| name == "habitat")
+            {
+                habitat_workspace_cwd(provider_cwd)
+            } else {
+                workspace_cwd.to_path_buf()
+            };
+            provider_args.push(target_dir.to_string_lossy().replace('\\', "/"));
+        }
+        _ => {}
+    }
+
+    provider_args
+}
+
+pub(crate) fn finalize_interactive_spawn_args(
+    _provider_name: &str,
+    _is_restored: bool,
+    _resume_session: &Option<String>,
+    provider_args: Vec<String>,
+) -> Vec<String> {
+    // Phase 3 Fix: Do NOT strip --input-format/--output-format from Claude.
+    // We need stream-json events to capture session IDs and status changes
+    // even during interactive launches.
+    provider_args
+}
+
+pub(crate) fn interactive_provider_launch(
+    provider_name: &str,
+    bin: &str,
+    provider_args: &[String],
+) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
+    #[cfg(windows)]
+    if provider_name == "opencode" {
+        let bin_path = std::path::Path::new(bin);
+        let is_native_exe = bin_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("exe"));
+        if !is_native_exe {
+            let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let mut fragments = vec![quote_cmd_arg(bin)];
+            fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
+            return Ok(crate::utils::shell::ShellLaunchSpec {
+                executable: cmd_host,
+                args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
+            });
+        }
+    }
+
+    let _ = provider_name;
+    Ok(crate::utils::shell::ShellLaunchSpec {
+        executable: bin.to_string(),
+        args: provider_args.to_vec(),
+    })
+}
+
+pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM", "xterm-256color");
+}
+
+#[cfg(windows)]
+pub(crate) fn quote_cmd_arg(value: &str) -> String {
+    let escaped = value.replace('"', r#"\""#);
+    if escaped.is_empty()
+        || escaped
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '^' | '&' | '|' | '<' | '>' | '(' | ')'))
+    {
+        format!("\"{}\"", escaped)
+    } else {
+        escaped
+    }
+}
+
+pub(crate) fn display_log_path(path: &std::path::Path) -> String {
+    let display_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let display = display_path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        display
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&display)
+            .to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        display.to_string()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+        #[test]
+    fn extract_terminal_titles_reads_bel_and_st_sequences() {
+        let chunk = "\u{1b}]0;OpenCode\u{7}x\u{1b}]2;OC | Working\u{1b}\\";
+
+        assert_eq!(
+            extract_terminal_titles(chunk),
+            vec!["OpenCode".to_string(), "OC | Working".to_string()]
+        );
+    }
+
+        #[test]
+    fn display_log_path_canonicalizes_existing_paths_for_ui() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let nested = temp.path().join("sessions");
+        std::fs::create_dir_all(&nested).expect("sessions dir");
+        let log = nested.join("session.jsonl");
+        std::fs::write(&log, "{}\n").expect("log file");
+        let indirect = nested.join("..").join("sessions").join("session.jsonl");
+
+        let expected_path = log.canonicalize().unwrap();
+        let expected_text = expected_path.to_string_lossy();
+        let expected = expected_text
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&expected_text);
+
+        assert_eq!(display_log_path(&indirect), expected);
+    }
+
+    #[test]
+    fn display_log_path_preserves_missing_paths() {
+        let missing = Path::new("C:/path/that/does/not/exist/session.jsonl");
+
+        assert_eq!(display_log_path(missing), missing.to_string_lossy());
+    }
+
+        #[test]
+    fn strip_flag_value_pairs_removes_all_add_dir_arguments() {
+        let args = vec![
+            "--model".to_string(),
+            "gpt-5".to_string(),
+            "--add-dir".to_string(),
+            "C:/Users/test/.wardian/common".to_string(),
+            "--add-dir".to_string(),
+            "C:/Users/test/.wardian/classes/Coder".to_string(),
+            "--search".to_string(),
+        ];
+
+        let stripped = strip_flag_value_pairs(args, "--add-dir");
+
+        assert_eq!(
+            stripped,
+            vec![
+                "--model".to_string(),
+                "gpt-5".to_string(),
+                "--search".to_string(),
+            ]
+        );
+    }
+
+        #[test]
+    fn strip_standalone_flag_removes_only_the_matching_flag() {
+        let args = vec![
+            "resume".to_string(),
+            "session-abc".to_string(),
+            "--no-alt-screen".to_string(),
+            "--model".to_string(),
+            "gpt-5.4".to_string(),
+        ];
+
+        let stripped = strip_standalone_flag(args, "--no-alt-screen");
+
+        assert_eq!(
+            stripped,
+            vec![
+                "resume".to_string(),
+                "session-abc".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+            ]
+        );
+    }
+
+        #[test]
+    fn opencode_interactive_launch_uses_habitat_root() {
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+        let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
+
+        let provider_cwd = interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
+
+        // OpenCode starts from the habitat root so its project-local skill walk-up
+        // sees habitat/.opencode and habitat/.agents before switching to the real
+        // workspace via --dir.
+        assert_eq!(
+            provider_cwd,
+            Path::new("C:/Users/test/.wardian/agents/ses_test/habitat")
+        );
+    }
+
+        #[test]
+    fn opencode_interactive_launch_matches_bootstrap_workspace() {
+        let workspace_cwd = Path::new("D:/Development/Wardian");
+        let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
+
+        let interactive_cwd =
+            interactive_provider_cwd("opencode", workspace_cwd, habitat_root, None);
+
+        assert_eq!(
+            interactive_cwd,
+            Path::new("C:/Users/test/.wardian/agents/ses_test/habitat")
+        );
+    }
+
+        #[test]
+    fn fresh_opencode_interactive_spawn_keeps_explicit_session_after_bootstrap() {
+        let args = finalize_interactive_spawn_args(
+            "opencode",
+            false,
+            &Some("ses_test".to_string()),
+            vec!["--session".to_string(), "ses_test".to_string()],
+        );
+
+        assert_eq!(args, vec!["--session".to_string(), "ses_test".to_string()]);
+    }
+
+    #[test]
+    fn restored_opencode_interactive_spawn_keeps_explicit_session() {
+        let args = finalize_interactive_spawn_args(
+            "opencode",
+            true,
+            &Some("ses_test".to_string()),
+            vec!["--session".to_string(), "ses_test".to_string()],
+        );
+
+        assert_eq!(args, vec!["--session".to_string(), "ses_test".to_string()]);
+    }
+
+    #[test]
+    fn codex_interactive_spawn_preserves_inline_scrollback_mode() {
+        let args = finalize_interactive_spawn_args(
+            "codex",
+            true,
+            &Some("019d331a-0500-7592-969f-8f437886f42b".to_string()),
+            vec![
+                "resume".to_string(),
+                "019d331a-0500-7592-969f-8f437886f42b".to_string(),
+                "--no-alt-screen".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "resume".to_string(),
+                "019d331a-0500-7592-969f-8f437886f42b".to_string(),
+                "--no-alt-screen".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+            ]
+        );
+    }
+
+        #[test]
+    fn claude_interactive_spawn_preserves_stream_json_flags() {
+        let args = finalize_interactive_spawn_args(
+            "claude",
+            true,
+            &Some("claude-session".to_string()),
+            vec![
+                "--verbose".to_string(),
+                "--input-format".to_string(),
+                "stream-json".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--resume".to_string(),
+                "claude-session".to_string(),
+            ],
+        );
+
+        // Phase 3: We now preserve these flags so PTY output can be parsed for status
+        assert_eq!(
+            args,
+            vec![
+                "--verbose".to_string(),
+                "--input-format".to_string(),
+                "stream-json".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--resume".to_string(),
+                "claude-session".to_string(),
+            ]
+        );
+    }
+}
