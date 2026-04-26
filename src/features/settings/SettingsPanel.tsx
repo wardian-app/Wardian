@@ -167,7 +167,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
           </div>
           <div className="mt-3 px-1">
             <p className="text-[10px] text-muted-neutral leading-relaxed">
-              <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> Gemini agents may require a manual theme change and restart.
+              <span className="text-[var(--color-wardian-accent)] font-bold">NOTE:</span> Gemini and OpenCode agents may require a manual theme change and restart.
             </p>
           </div>
         </div>

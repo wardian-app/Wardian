@@ -24,6 +24,6 @@ pub fn save_agent_session_persistence(
 }
 
 #[tauri::command]
-pub fn save_opencode_theme(theme: String) -> Result<(), String> {
-    crate::utils::save_opencode_theme(&theme)
+pub fn sync_provider_theme_settings(theme: String) -> Result<(), String> {
+    crate::utils::sync_provider_theme_settings(&theme)
 }

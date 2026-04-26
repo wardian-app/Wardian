@@ -301,8 +301,8 @@ function AppBody() {
       let effectiveTheme = theme;
       if (theme === "system") effectiveTheme = mediaQuery.matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", effectiveTheme);
-      invoke("save_opencode_theme", { theme }).catch((error) => {
-        console.error("Failed to sync OpenCode theme:", error);
+      invoke("sync_provider_theme_settings", { theme: effectiveTheme }).catch((error) => {
+        console.error("Failed to sync provider theme settings:", error);
       });
     };
     applyTheme();

@@ -11,6 +11,7 @@ const OSC_FOREGROUND_QUERY_ST = "\u001b]10;?\u001b\\";
 const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
+const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
 const HOME_CURSOR = "\u001b[H";
@@ -179,7 +180,10 @@ export function normalizeOpenCodeOutput(
     return data;
   }
 
-  return data.replace(DECRQM_QUERY, "").replace(SYNC_OUTPUT_TOGGLE, "");
+  return data
+    .replace(DECRQM_QUERY, "")
+    .replace(SYNC_OUTPUT_TOGGLE, "")
+    .replace(THEME_MODE_NOTIFICATION_TOGGLE, "");
 }
 
 export function planTerminalCapabilityResponses(

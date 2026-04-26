@@ -3,6 +3,7 @@ use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
+use chrono::TimeZone;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
@@ -1394,12 +1395,12 @@ fn opencode_env(
     if let Some(config_dir) = opencode_custom_config_dir(cwd, class_name, session_id, config)? {
         let config_path = config_dir.join("opencode.json");
 
-        // Build the runtime config (instructions + theme), and pair it with a
+        // Build the runtime config (instructions), and pair it with a
         // custom config directory so OpenCode can discover projected skills.
         let runtime_config: serde_json::Value =
             opencode_runtime_config_content(class_name, session_id, config)
                 .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| serde_json::json!({"theme": "system"}));
+                .unwrap_or_else(|| serde_json::json!({}));
 
         std::fs::write(&config_path, runtime_config.to_string()).map_err(|e| e.to_string())?;
         envs.push((
@@ -2559,12 +2560,21 @@ fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OpenCodeLogMetrics {
     query_count: usize,
     init_timestamp: Option<String>,
     status: Option<String>,
+}
+
+fn opencode_log_timestamp_to_rfc3339(timestamp: &str) -> Option<String> {
+    let parsed = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let local = chrono::Local.from_local_datetime(&parsed).earliest()?;
+    Some(
+        local
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    )
 }
 
 /// Find the newest OpenCode log file whose filesystem mtime is at or after
@@ -2676,7 +2686,6 @@ pub fn opencode_extract_created_session_id(log_path: &std::path::Path) -> Option
 ///
 /// This avoids timestamp comparisons entirely, which would be unreliable
 /// because opencode logs timestamps in local time while `now` is UTC.
-#[cfg(test)]
 fn opencode_metrics_from_log(content: &str, session_id: &str) -> OpenCodeLogMetrics {
     let mut metrics = OpenCodeLogMetrics::default();
     // true  = last session.prompt event was "exiting loop" (Idle)
@@ -2691,7 +2700,10 @@ fn opencode_metrics_from_log(content: &str, session_id: &str) -> OpenCodeLogMetr
         }
 
         if metrics.init_timestamp.is_none() {
-            metrics.init_timestamp = line.split_whitespace().nth(1).map(|ts| ts.to_string());
+            metrics.init_timestamp = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(opencode_log_timestamp_to_rfc3339);
         }
 
         if line.contains("service=session.prompt") {
@@ -2728,6 +2740,25 @@ fn opencode_metrics_from_log(content: &str, session_id: &str) -> OpenCodeLogMetr
     };
 
     metrics
+}
+
+fn apply_opencode_log_metrics(
+    content: &str,
+    session_id: &str,
+    query_count: &mut usize,
+    init_timestamp: &mut Option<String>,
+    current_status: &mut String,
+) {
+    let metrics = opencode_metrics_from_log(content, session_id);
+    if metrics.query_count > 0 {
+        *query_count = metrics.query_count;
+    }
+    if init_timestamp.is_none() && metrics.init_timestamp.is_some() {
+        *init_timestamp = metrics.init_timestamp;
+    }
+    if let Some(status) = metrics.status {
+        *current_status = status;
+    }
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
@@ -2843,24 +2874,24 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             let mut q_count = *snap.query_count.lock().unwrap();
             let mut i_ts = snap.init_timestamp.lock().unwrap().clone();
             let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
+            let opencode_session_id = snap
+                .resume_session
+                .as_deref()
+                .filter(|value| value.starts_with("ses_"))
+                .unwrap_or(&snap.session_id);
 
             // Provider-aware log discovery
             if snap.provider == "opencode" {
-                let opencode_session_id = snap
-                    .resume_session
-                    .as_deref()
-                    .filter(|value| value.starts_with("ses_"))
-                    .unwrap_or(&snap.session_id);
-                *log_path_lock = Some(opencode_session_diff_path(opencode_session_id));
-                if !log_path_lock.as_ref().is_some_and(|path| path.exists()) {
-                    let log_dirs = opencode_log_dirs();
-                    for dir in &log_dirs {
-                        if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
-                            *log_path_lock = Some(path);
-                            break;
-                        }
+                let mut discovered_log = None;
+                let log_dirs = opencode_log_dirs();
+                for dir in &log_dirs {
+                    if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
+                        discovered_log = Some(path);
+                        break;
                     }
                 }
+                *log_path_lock = discovered_log
+                    .or_else(|| Some(opencode_session_diff_path(opencode_session_id)));
             } else if snap.provider == "claude" && snap.resume_session.is_some() {
                 // For Claude, if we have a resume_session (Conversation ID), always re-verify
                 // the path so it updates immediately after a Clear rotation.
@@ -3048,8 +3079,15 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 }
                             }
                             "opencode" => {
-                                // OpenCode status and query count come from PTY events now.
-                                // Keep the discovered storage path for diagnostics only.
+                                let mut status = snap.current_status.lock().unwrap().clone();
+                                apply_opencode_log_metrics(
+                                    &content,
+                                    opencode_session_id,
+                                    &mut q_count,
+                                    &mut i_ts,
+                                    &mut status,
+                                );
+                                *snap.current_status.lock().unwrap() = status;
                             }
                             _ => {
                                 // Gemini logs are a single JSON object with a messages array
@@ -3250,7 +3288,7 @@ pub async fn kill_all_agents(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        claude_permission_hook_matches_session, claude_status_from_log,
+        apply_opencode_log_metrics, claude_permission_hook_matches_session, claude_status_from_log,
         codex_bootstrap_launch_context, codex_log_lookup_session_id, display_log_path,
         extract_terminal_titles, finalize_interactive_spawn_args, headless_provider_args,
         headless_provider_launch, interactive_provider_args, interactive_provider_cwd,
@@ -3690,6 +3728,66 @@ mod tests {
     }
 
     #[test]
+    fn opencode_log_metrics_update_status_and_query_count_from_current_logs() {
+        let current = concat!(
+            "INFO  2026-04-26T04:28:39 +1ms service=session.prompt session.id=ses_target step=0 loop\n",
+            "INFO  2026-04-26T04:28:42 +0ms service=session.status publishing\n",
+            "INFO  2026-04-26T04:28:42 +0ms service=session.prompt session.id=ses_target step=1 loop\n",
+            "INFO  2026-04-26T04:28:42 +1ms service=session.prompt session.id=ses_target exiting loop\n",
+            "INFO  2026-04-26T04:28:42 +1ms service=session.idle publishing\n",
+        );
+
+        let mut query_count = 0;
+        let mut init_timestamp = None;
+        let mut current_status = "Processing...".to_string();
+
+        apply_opencode_log_metrics(
+            current,
+            "ses_target",
+            &mut query_count,
+            &mut init_timestamp,
+            &mut current_status,
+        );
+
+        assert_eq!(query_count, 2);
+        let parsed_timestamp = init_timestamp
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .expect("OpenCode log timestamp should be normalized to RFC3339");
+        assert_eq!(
+            parsed_timestamp
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string(),
+            "2026-04-26T04:28:39"
+        );
+        assert_eq!(current_status, "Idle");
+    }
+
+    #[test]
+    fn opencode_log_metrics_preserve_existing_rfc3339_birth_timestamp() {
+        let current = concat!(
+            "INFO  2026-04-26T04:28:39 +1ms service=session.prompt session.id=ses_target step=0 loop\n",
+            "INFO  2026-04-26T04:28:42 +1ms service=session.prompt session.id=ses_target exiting loop\n",
+        );
+
+        let mut query_count = 0;
+        let mut init_timestamp = Some("2026-04-26T04:20:00.000Z".to_string());
+        let mut current_status = "Processing...".to_string();
+
+        apply_opencode_log_metrics(
+            current,
+            "ses_target",
+            &mut query_count,
+            &mut init_timestamp,
+            &mut current_status,
+        );
+
+        assert_eq!(init_timestamp, Some("2026-04-26T04:20:00.000Z".to_string()));
+        assert_eq!(current_status, "Idle");
+    }
+
+    #[test]
     fn opencode_interactive_args_include_dir_for_real_workspace_anchor() {
         let workspace_cwd = Path::new("D:/Development/Wardian");
 
@@ -3709,7 +3807,8 @@ mod tests {
         .expect("launch spec");
 
         assert!(
-            launch.executable.ends_with(r"\cmd.exe") || launch.executable.eq_ignore_ascii_case("cmd"),
+            launch.executable.ends_with(r"\cmd.exe")
+                || launch.executable.eq_ignore_ascii_case("cmd"),
             "expected cmd host, got {}",
             launch.executable
         );

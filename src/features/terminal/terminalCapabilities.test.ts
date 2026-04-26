@@ -48,6 +48,10 @@ describe("terminal capability broker", () => {
     expect(plan.focusReported).toBe(true);
   });
 
+  it("strips OpenTUI theme notification enablement from rendered output", () => {
+    expect(normalizeOpenCodeOutput("\u001b[?2031hready\u001b[?2031l", "opencode")).toBe("ready");
+  });
+
   it("replies to palette and OSC 10/11 foreground/background queries", () => {
     const data = "\u001b]4;0;?\u0007\u001b]10;?\u0007\u001b]11;?\u001b\\";
     const plan = planTerminalCapabilityResponses("opencode", data, baseContext);

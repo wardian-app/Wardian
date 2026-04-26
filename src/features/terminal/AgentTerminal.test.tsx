@@ -534,6 +534,44 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("answers OpenCode light-dark probes from the Wardian terminal theme", async () => {
+    const matchMedia = vi.fn().mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: matchMedia,
+    });
+
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          return readCount === 1 ? "\u001b[?996n" : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="opencode-light" provider="opencode" theme="light" />);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "opencode-light",
+        input: "\u001b[?997;2n",
+      });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-light",
+      input: "\u001b[?997;1n",
+    });
+  });
+
   it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {
