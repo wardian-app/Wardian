@@ -1024,6 +1024,35 @@ fn upsert_json_theme(path: &std::path::Path, schema: &str, theme: &str) -> Resul
     Ok(())
 }
 
+fn read_json_theme(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|value| {
+            value
+                .get("theme")
+                .and_then(|theme| theme.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn load_opencode_theme_from_paths(
+    config_path: Option<&std::path::Path>,
+    tui_path: Option<&std::path::Path>,
+) -> String {
+    config_path
+        .and_then(read_json_theme)
+        .or_else(|| tui_path.and_then(read_json_theme))
+        .unwrap_or_else(|| "system".to_string())
+}
+
+pub fn load_saved_opencode_theme() -> String {
+    load_opencode_theme_from_paths(
+        get_opencode_config_path().as_deref(),
+        get_opencode_tui_path().as_deref(),
+    )
+}
+
 pub fn save_opencode_theme(theme: &str) -> Result<(), String> {
     let normalized = wardian_theme_to_opencode_theme(theme);
     let tui_path = get_opencode_tui_path().ok_or("Could not find config directory")?;
@@ -1038,7 +1067,9 @@ pub fn save_opencode_theme(theme: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod opencode_theme_tests {
-    use super::{upsert_json_theme, wardian_theme_to_opencode_theme};
+    use super::{
+        load_opencode_theme_from_paths, upsert_json_theme, wardian_theme_to_opencode_theme,
+    };
 
     #[test]
     fn wardian_theme_maps_to_opencode_system_theme() {
@@ -1076,5 +1107,26 @@ mod opencode_theme_tests {
             parsed["provider"]["lmstudio"]["name"].as_str(),
             Some("LM Studio")
         );
+    }
+
+    #[test]
+    fn load_opencode_theme_prefers_config_then_tui_then_system_default() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_path = temp.path().join("opencode.json");
+        let tui_path = temp.path().join("tui.json");
+
+        std::fs::write(&tui_path, r#"{"theme":"opencode"}"#).expect("write tui config");
+        assert_eq!(
+            load_opencode_theme_from_paths(None, Some(&tui_path)),
+            "opencode"
+        );
+
+        std::fs::write(&config_path, r#"{"theme":"system"}"#).expect("write runtime config");
+        assert_eq!(
+            load_opencode_theme_from_paths(Some(&config_path), Some(&tui_path)),
+            "system"
+        );
+
+        assert_eq!(load_opencode_theme_from_paths(None, None), "system");
     }
 }

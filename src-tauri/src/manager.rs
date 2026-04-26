@@ -1396,10 +1396,16 @@ fn opencode_env(
 
         // Build the runtime config (instructions + theme), and pair it with a
         // custom config directory so OpenCode can discover projected skills.
-        let runtime_config: serde_json::Value =
+        let mut runtime_config: serde_json::Value =
             opencode_runtime_config_content(class_name, session_id, config)
                 .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| serde_json::json!({"theme": "system"}));
+                .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(runtime_map) = runtime_config.as_object_mut() {
+            runtime_map.insert(
+                "theme".to_string(),
+                serde_json::Value::String(crate::utils::load_saved_opencode_theme()),
+            );
+        }
 
         std::fs::write(&config_path, runtime_config.to_string()).map_err(|e| e.to_string())?;
         envs.push((
@@ -3810,6 +3816,7 @@ mod tests {
         let _guard = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
         let wardian_home = temp.path().join(".wardian");
+        let appdata_dir = temp.path().join("appdata");
         let common = wardian_home.join("common");
         let class_dir = wardian_home.join("classes").join("Builder");
         let agent_dir = wardian_home.join("agents").join("ses_123");
@@ -3827,8 +3834,14 @@ mod tests {
         std::fs::write(class_dir.join("AGENTS.md"), "class").expect("class AGENTS");
         std::fs::write(agent_dir.join("AGENTS.md"), "agent").expect("agent AGENTS");
         std::fs::write(user_dir.join("AGENTS.md"), "user").expect("user AGENTS");
-
         unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("APPDATA", appdata_dir.to_string_lossy().to_string()) };
+        let saved_theme_path =
+            crate::utils::get_opencode_config_path().expect("resolved saved config path");
+        std::fs::create_dir_all(saved_theme_path.parent().expect("saved theme parent"))
+            .expect("appdata opencode dir");
+        std::fs::write(&saved_theme_path, r#"{"theme":"opencode"}"#)
+            .expect("write saved theme");
 
         let config = AgentConfig {
             session_id: "ses_123".into(),
@@ -3841,6 +3854,7 @@ mod tests {
             .expect("interactive envs");
 
         unsafe { std::env::remove_var("WARDIAN_HOME") };
+        unsafe { std::env::remove_var("APPDATA") };
 
         assert!(envs.contains(&("COLORTERM".to_string(), "truecolor".to_string())));
         let config_path = envs
@@ -3857,6 +3871,7 @@ mod tests {
             .expect("instructions array");
 
         assert_eq!(instructions.len(), 4);
+        assert_eq!(parsed.get("theme").and_then(|value| value.as_str()), Some("opencode"));
 
         // Config JSON must NOT contain skills.paths — OpenCode 1.4.3 does not
         // expose a skills.paths config key, so Wardian omits it entirely.
