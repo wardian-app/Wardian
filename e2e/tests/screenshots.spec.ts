@@ -13,8 +13,10 @@
 import { test, expect } from "@playwright/test";
 import * as path from "path";
 import * as fs from "fs";
+import { fileURLToPath } from "url";
 
 const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outputDir = path.join(__dirname, "..", "screenshots", timestamp);
 
 test.beforeAll(() => {
