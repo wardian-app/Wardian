@@ -943,6 +943,16 @@ pub async fn spawn_agent(
     })
 }
 
+#[cfg(not(windows))]
+pub async fn spawn_agent(
+    _app: AppHandle,
+    _config: AgentConfig,
+    _is_restored: bool,
+    _initial_timestamp: Option<String>,
+) -> Result<ActiveAgent, String> {
+    Err("Interactive agent spawning is only supported on Windows".to_string())
+}
+
 pub async fn resize_pty(
     session_id: String,
     cols: u16,
