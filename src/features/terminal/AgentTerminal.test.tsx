@@ -184,7 +184,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("translates codex enter into the submit chord instead of a plain newline", async () => {
+  it("forwards codex enter as a plain carriage return", async () => {
     render(<AgentTerminal sessionId="codex-enter" provider="codex" theme="dark" />);
 
     await waitFor(() => {
@@ -198,7 +198,7 @@ describe("AgentTerminal scrollback", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "codex-enter",
-      input: "\u001b\r",
+      input: "\r",
     });
   });
 
