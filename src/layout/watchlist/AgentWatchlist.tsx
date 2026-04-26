@@ -79,6 +79,7 @@ interface AgentWatchlistProps {
   onAddAgentsToList?: (listId: string, agentIds: string[]) => void;
   onRemoveAgentsFromList?: (listId: string, agentIds: string[]) => void;
   onDelete: (agentId: string) => void;
+  onDeleteAgents?: (agentIds: string[]) => void;
   onCreateTeam?: (agentIds: string[]) => void;
   onUngroupTeam?: (teamId: string) => void;
   onRenameTeam?: (teamId: string, newName: string) => Promise<void>;
@@ -117,6 +118,7 @@ export default function AgentWatchlist({
   onAddAgentsToList,
   onRemoveAgentsFromList,
   onDelete,
+  onDeleteAgents,
   onCreateTeam,
   onUngroupTeam,
   onRenameTeam,
@@ -1021,6 +1023,7 @@ export default function AgentWatchlist({
             setContextMenu(p => ({ ...p, visible: false }));
           } : undefined}
           onDelete={onDelete}
+          onDeleteAgents={onDeleteAgents}
           onCreateTeam={onCreateTeam}
           onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
         />
@@ -1067,6 +1070,7 @@ export default function AgentWatchlist({
               setTeamContextMenu((p) => ({ ...p, visible: false }));
             } : undefined}
             onDelete={onDelete}
+            onDeleteAgents={onDeleteAgents}
             onUngroupTeam={(id) => {
               onUngroupTeam?.(id);
               setTeamContextMenu((p) => ({ ...p, visible: false }));

@@ -188,10 +188,6 @@ pub fn build_opencode_runtime_config(include_roots: &[std::path::PathBuf]) -> se
     }
 
     let mut config = serde_json::Map::new();
-    config.insert(
-        "theme".to_string(),
-        serde_json::Value::String("system".to_string()),
-    );
     if !instructions.is_empty() {
         config.insert(
             "instructions".to_string(),
@@ -931,7 +927,7 @@ mod tests {
             .get("instructions")
             .and_then(|v| v.as_array())
             .expect("instructions array");
-        assert_eq!(config.get("theme").and_then(|v| v.as_str()), Some("system"));
+        assert!(config.get("theme").is_none());
         assert_eq!(instructions.len(), 3);
         assert_eq!(
             instructions[0].as_str(),

@@ -170,11 +170,8 @@ function queueOpenCodeCapabilityResponses(sessionId: string, data: string, entry
   }
   const { row, col } = terminalCursorPositionReply(entry);
   const { width, height } = terminalPixelSizeReply(entry);
-  const prefersLight =
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-color-scheme: light)").matches;
   const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+  const prefersLight = termTheme === LIGHT_TERM_THEME;
   const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
   const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
   const backgroundRgb =
@@ -781,12 +778,12 @@ export const AgentTerminal = memo(function AgentTerminal({
       const background = toRgbTriplet(termTheme.background, "02/04/02");
       const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
       const prefersLight = termTheme === LIGHT_TERM_THEME;
-      // Push unsolicited OSC updates so OpenCode repaints against the new
-      // Wardian theme without needing to re-query.
+      // OpenTUI treats ?997 as a request to infer mode from subsequent OSC
+      // color replies, so send it before the current Wardian colors.
+      queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
-      queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
     }
   }, [sessionId, termTheme]);
 

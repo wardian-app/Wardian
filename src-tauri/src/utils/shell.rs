@@ -986,6 +986,22 @@ pub fn get_opencode_config_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|p| p.join("opencode").join("opencode.json"))
 }
 
+pub fn get_opencode_kv_path() -> Option<std::path::PathBuf> {
+    if let Some(state_home) = std::env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+    {
+        return Some(state_home.join("opencode").join("kv.json"));
+    }
+
+    dirs::home_dir().map(|p| {
+        p.join(".local")
+            .join("state")
+            .join("opencode")
+            .join("kv.json")
+    })
+}
+
 fn wardian_theme_to_opencode_theme(theme: &str) -> &str {
     match theme {
         "dark" | "light" | "system" => "system",
@@ -1024,21 +1040,94 @@ fn upsert_json_theme(path: &std::path::Path, schema: &str, theme: &str) -> Resul
     Ok(())
 }
 
-pub fn save_opencode_theme(theme: &str) -> Result<(), String> {
+fn remove_json_theme(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let mut config = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    if config.remove("theme").is_none() {
+        return Ok(());
+    }
+
+    let content = serde_json::to_string_pretty(&serde_json::Value::Object(config))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(path, content).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn upsert_opencode_theme_mode(path: &std::path::Path, mode: &str) -> Result<(), String> {
+    let mut kv = if path.exists() {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    match mode {
+        "dark" | "light" => {
+            kv.insert(
+                "theme_mode_lock".to_string(),
+                serde_json::Value::String(mode.to_string()),
+            );
+            kv.insert(
+                "theme_mode".to_string(),
+                serde_json::Value::String(mode.to_string()),
+            );
+        }
+        "system" => {
+            kv.remove("theme_mode_lock");
+            kv.remove("theme_mode");
+        }
+        _ => return Ok(()),
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let content =
+        serde_json::to_string_pretty(&serde_json::Value::Object(kv)).map_err(|e| e.to_string())?;
+    std::fs::write(path, content).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn sync_opencode_theme_settings(theme: &str) -> Result<(), String> {
     let normalized = wardian_theme_to_opencode_theme(theme);
     let tui_path = get_opencode_tui_path().ok_or("Could not find config directory")?;
     upsert_json_theme(&tui_path, "https://opencode.ai/tui.json", normalized)?;
 
     if let Some(config_path) = get_opencode_config_path() {
-        upsert_json_theme(&config_path, "https://opencode.ai/config.json", normalized)?;
+        remove_json_theme(&config_path)?;
+    }
+
+    if let Some(kv_path) = get_opencode_kv_path() {
+        upsert_opencode_theme_mode(&kv_path, theme)?;
     }
 
     Ok(())
 }
 
+pub fn sync_provider_theme_settings(theme: &str) -> Result<(), String> {
+    sync_opencode_theme_settings(theme)
+}
+
 #[cfg(test)]
 mod opencode_theme_tests {
-    use super::{upsert_json_theme, wardian_theme_to_opencode_theme};
+    use super::{
+        remove_json_theme, upsert_json_theme, upsert_opencode_theme_mode,
+        wardian_theme_to_opencode_theme,
+    };
 
     #[test]
     fn wardian_theme_maps_to_opencode_system_theme() {
@@ -1075,6 +1164,75 @@ mod opencode_theme_tests {
         assert_eq!(
             parsed["provider"]["lmstudio"]["name"].as_str(),
             Some("LM Studio")
+        );
+    }
+
+    #[test]
+    fn remove_json_theme_preserves_existing_config_keys() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"$schema":"https://opencode.ai/config.json","theme":"system","provider":{"lmstudio":{"name":"LM Studio"}}}"#,
+        )
+        .expect("write initial config");
+
+        remove_json_theme(&path).expect("remove theme");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read config"))
+                .expect("parse config");
+        assert!(parsed.get("theme").is_none());
+        assert_eq!(
+            parsed["provider"]["lmstudio"]["name"].as_str(),
+            Some("LM Studio")
+        );
+    }
+
+    #[test]
+    fn opencode_theme_mode_lock_matches_manual_light_dark_choice() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("kv.json");
+        std::fs::write(&path, r#"{"theme":"system","other":true}"#).expect("write initial kv");
+
+        upsert_opencode_theme_mode(&path, "light").expect("lock light mode");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read kv"))
+                .expect("parse kv");
+        assert_eq!(
+            parsed
+                .get("theme_mode_lock")
+                .and_then(|value| value.as_str()),
+            Some("light")
+        );
+        assert_eq!(
+            parsed.get("theme_mode").and_then(|value| value.as_str()),
+            Some("light")
+        );
+        assert_eq!(
+            parsed.get("theme").and_then(|value| value.as_str()),
+            Some("system")
+        );
+        assert_eq!(
+            parsed.get("other").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+
+        upsert_opencode_theme_mode(&path, "dark").expect("lock dark mode");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read kv"))
+                .expect("parse kv");
+        assert_eq!(
+            parsed
+                .get("theme_mode_lock")
+                .and_then(|value| value.as_str()),
+            Some("dark")
+        );
+        assert_eq!(
+            parsed.get("theme_mode").and_then(|value| value.as_str()),
+            Some("dark")
         );
     }
 }

@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect } from "react";
 import type { AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { getListsContainingAgent, getListsNotContainingAgent } from "../layout/watchlist/watchlistUtils";
 
+type MaybePromise = void | Promise<void>;
+
 export interface AgentContextMenuProps {
   x: number;
   y: number;
@@ -12,19 +14,20 @@ export interface AgentContextMenuProps {
   teamId?: string;
   offAgentIds: Set<string>;
   watchlists: Watchlist[];
-  onInitiateRename: (agentId: string) => void;
-  onInitiateTeamRename?: (teamId: string) => void;
-  onQuery: (agentId: string) => void;
-  onPause: (agentId: string) => void;
-  onRestart: (agentId: string) => void;
-  onClear: (agentId: string) => void;
-  onAddToList: (listId: string, agentId: string) => void;
-  onRemoveFromList: (listId: string, agentId: string) => void;
-  onAddAgentsToList?: (listId: string, agentIds: string[]) => void;
-  onRemoveAgentsFromList?: (listId: string, agentIds: string[]) => void;
-  onDelete: (agentId: string) => void;
-  onCreateTeam?: (agentIds: string[]) => void;
-  onUngroupTeam?: (teamId: string) => void;
+  onInitiateRename: (agentId: string) => MaybePromise;
+  onInitiateTeamRename?: (teamId: string) => MaybePromise;
+  onQuery: (agentId: string) => MaybePromise;
+  onPause: (agentId: string) => MaybePromise;
+  onRestart: (agentId: string) => MaybePromise;
+  onClear: (agentId: string) => MaybePromise;
+  onAddToList: (listId: string, agentId: string) => MaybePromise;
+  onRemoveFromList: (listId: string, agentId: string) => MaybePromise;
+  onAddAgentsToList?: (listId: string, agentIds: string[]) => MaybePromise;
+  onRemoveAgentsFromList?: (listId: string, agentIds: string[]) => MaybePromise;
+  onDelete: (agentId: string) => MaybePromise;
+  onDeleteAgents?: (agentIds: string[]) => MaybePromise;
+  onCreateTeam?: (agentIds: string[]) => MaybePromise;
+  onUngroupTeam?: (teamId: string) => MaybePromise;
   onClose: () => void;
 }
 
@@ -49,6 +52,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   onAddAgentsToList,
   onRemoveAgentsFromList,
   onDelete,
+  onDeleteAgents,
   onCreateTeam,
   onUngroupTeam,
   onClose,
@@ -62,8 +66,10 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   const anyTargetOff = targetAgentIds.some((id) => offAgentIds.has(id));
   const anyTargetRunning = targetAgentIds.some((id) => !offAgentIds.has(id));
 
-  const forEachTarget = (handler: (id: string) => void) => {
-    for (const id of targetAgentIds) handler(id);
+  const forEachTarget = async (handler: (id: string) => MaybePromise) => {
+    for (const id of targetAgentIds) {
+      await handler(id);
+    }
   };
 
   useEffect(() => {
@@ -88,14 +94,14 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       <button
         className={`context-menu-item ${isBulk && !isTeam ? 'opacity-50 cursor-not-allowed' : ''}`}
         disabled={isBulk && !isTeam}
-        onClick={() => {
+        onClick={async () => {
           if (isTeam && teamId) {
-            onInitiateTeamRename?.(teamId);
+            await onInitiateTeamRename?.(teamId);
             onClose();
             return;
           }
           if (isBulk) return;
-          onInitiateRename(agentId);
+          await onInitiateRename(agentId);
           onClose();
         }}
       >
@@ -104,8 +110,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       </button>
       <button
         className="context-menu-item"
-        onClick={() => {
-          forEachTarget(onQuery);
+        onClick={async () => {
+          await forEachTarget(onQuery);
           onClose();
         }}
       >
@@ -118,8 +124,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       {!isTeam && onCreateTeam && (
         <button
           className="context-menu-item"
-          onClick={() => {
-            onCreateTeam(targetAgentIds);
+          onClick={async () => {
+            await onCreateTeam(targetAgentIds);
             onClose();
           }}
         >
@@ -134,9 +140,11 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
         data-testid="context-pause"
         className={`context-menu-item ${!anyTargetRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
         disabled={!anyTargetRunning}
-        onClick={() => {
+        onClick={async () => {
           if (!anyTargetRunning) return;
-          forEachTarget((id) => { if (!offAgentIds.has(id)) onPause(id); });
+          await forEachTarget((id) => {
+            if (!offAgentIds.has(id)) return onPause(id);
+          });
           onClose();
         }}
       >
@@ -146,8 +154,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       <button
         data-testid="context-start"
         className="context-menu-item"
-        onClick={() => {
-          forEachTarget(onRestart);
+        onClick={async () => {
+          await forEachTarget(onRestart);
           onClose();
         }}
       >
@@ -169,8 +177,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       <button
         data-testid="context-clear"
         className="context-menu-item"
-        onClick={() => {
-          forEachTarget(onClear);
+        onClick={async () => {
+          await forEachTarget(onClear);
           onClose();
         }}
       >
@@ -198,9 +206,9 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
                 <button
                   key={l.id}
                   className="context-menu-item"
-                  onClick={() => {
-                    if (onAddAgentsToList) onAddAgentsToList(l.id, targetAgentIds);
-                    else forEachTarget((id) => onAddToList(l.id, id));
+                  onClick={async () => {
+                    if (onAddAgentsToList) await onAddAgentsToList(l.id, targetAgentIds);
+                    else await forEachTarget((id) => onAddToList(l.id, id));
                     onClose();
                   }}
                 >
@@ -230,9 +238,9 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
                 <button
                   key={l.id}
                   className="context-menu-item"
-                  onClick={() => {
-                    if (onRemoveAgentsFromList) onRemoveAgentsFromList(l.id, targetAgentIds);
-                    else forEachTarget((id) => onRemoveFromList(l.id, id));
+                  onClick={async () => {
+                    if (onRemoveAgentsFromList) await onRemoveAgentsFromList(l.id, targetAgentIds);
+                    else await forEachTarget((id) => onRemoveFromList(l.id, id));
                     onClose();
                   }}
                 >
@@ -249,8 +257,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       {isTeam && teamId && onUngroupTeam && (
         <button
           className="context-menu-item"
-          onClick={() => {
-            onUngroupTeam(teamId);
+          onClick={async () => {
+            await onUngroupTeam(teamId);
             onClose();
           }}
         >
@@ -262,8 +270,9 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
 
       <button
         className="context-menu-item text-wardian-error hover:!bg-wardian-error/20"
-        onClick={() => {
-          forEachTarget(onDelete);
+        onClick={async () => {
+          if (isBulk && onDeleteAgents) await onDeleteAgents(targetAgentIds);
+          else await forEachTarget(onDelete);
           onClose();
         }}
       >

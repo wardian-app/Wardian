@@ -162,6 +162,16 @@ describe("Agent List Management", () => {
       expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "skills" });
     });
   });
+
+  it("syncs provider theme settings with the effective Wardian theme", async () => {
+    setupDefaultMocks([], defaultClasses);
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("sync_provider_theme_settings", { theme: "dark" });
+    });
+  });
 });
 
 // ── Agent Class Dropdown Tests ─────────────────────────────────────────

@@ -301,8 +301,8 @@ function AppBody() {
       let effectiveTheme = theme;
       if (theme === "system") effectiveTheme = mediaQuery.matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", effectiveTheme);
-      invoke("save_opencode_theme", { theme }).catch((error) => {
-        console.error("Failed to sync OpenCode theme:", error);
+      invoke("sync_provider_theme_settings", { theme: effectiveTheme }).catch((error) => {
+        console.error("Failed to sync provider theme settings:", error);
       });
     };
     applyTheme();
@@ -621,6 +621,41 @@ function AppBody() {
     }
   };
 
+  const onDeleteAgents = async (ids: string[]) => {
+    if (ids.length === 0) return;
+
+    const message = ids.length === 1
+      ? 'Delete this agent?'
+      : `Delete ${ids.length} selected agents?`;
+
+    if (!(await confirm(message))) return;
+
+    const deletedIds = new Set<string>();
+
+    for (const id of ids) {
+      try {
+        await invoke('kill_agent', { sessionId: id });
+        deletedIds.add(id);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    if (deletedIds.size === 0) return;
+
+    setOffAgentIds(prev => {
+      const next = new Set(prev);
+      for (const id of deletedIds) next.delete(id);
+      return next;
+    });
+    setSelectedAgentIds(prev => {
+      const next = new Set(prev);
+      for (const id of deletedIds) next.delete(id);
+      return next;
+    });
+    fetchAgents();
+  };
+
   return (
     <div data-testid="app-shell" className="flex flex-col h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
       <CustomTitleBar
@@ -758,6 +793,7 @@ function AppBody() {
           onRestart={onRestart}
           onClear={onClear}
           onDelete={onDelete}
+          onDeleteAgents={onDeleteAgents}
           onAddToList={handleAddToList}
           onRemoveFromList={handleRemoveFromList}
           onAddAgentsToList={handleAddAgentsToList}

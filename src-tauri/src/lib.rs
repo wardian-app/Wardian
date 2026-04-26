@@ -290,7 +290,7 @@ pub fn run() {
             commands::settings::list_available_shells,
             commands::settings::save_shell_settings,
             commands::settings::save_agent_session_persistence,
-            commands::settings::save_opencode_theme,
+            commands::settings::sync_provider_theme_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

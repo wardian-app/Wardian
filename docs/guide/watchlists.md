@@ -45,6 +45,7 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 - **Reordering**: Drag and drop agent cards within a watchlist to prioritize your view.
 - **Filtering**: Click a watchlist tab to focus only on that group of agents.
 - **Bulk Selection**: Use `Ctrl+Click` to select multiple agents within a watchlist for broadcast commands.
+- **Bulk Context Menu**: If you right-click inside the current multi-selection, the menu applies to the whole selection. Bulk delete shows one confirmation dialog for the full selected set instead of prompting once per agent.
 
 ## 🖱️ Remote Management
 Hover over any agent in the Roster to access instant control icons:
