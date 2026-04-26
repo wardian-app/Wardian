@@ -30,7 +30,17 @@ export default defineConfig({
   projects: [
     {
       name: "smoke",
-      testMatch: "*.spec.ts",
+      testMatch: /^(?!screenshots).*\.spec\.ts$/,
+    },
+    {
+      name: "screenshots",
+      testMatch: "screenshots.spec.ts",
+      use: {
+        screenshot: "on",
+        video: "off",
+        // Pass screenshot output dir via env so the spec can use it
+        // without hardcoding a path.
+      },
     },
   ],
 });

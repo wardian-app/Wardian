@@ -19,6 +19,7 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
    - [ ] Document strategic decisions in a new **Spec** in `docs/specs/`.
    - [ ] Update related guides in `docs/guide/` or `docs/developer/`.
    - [ ] Ensure public APIs/complex logic have appropriate JSDoc or Rust docstrings.
+   - [ ] **UI changes**: Run `npm run screenshots` and attach the output artifact link (or embed a representative screenshot) in the PR description.
 3. **Safety & Integrity**:
    - [ ] **Secrets Check**: Verify no API keys, credentials, or `.env` files are being committed.
    - [ ] **Git Status**: Run `git status` to ensure only intended files are staged.
@@ -67,12 +68,15 @@ Wardian has multiple test layers. Before marking a task as complete, run the app
 
 1. **Frontend Unit Tests**: `npm run test`
    - Run after any TypeScript/React changes.
+   - Coverage report: `npm run test:coverage` → `coverage/lcov.info`
 2. **Backend Unit Tests**: `cd src-tauri && cargo test`
    - Run after any Rust changes. Use `--test-threads=1` if tests involve env vars.
+   - Coverage report: `npm run test:coverage:rust` → `coverage/rust-lcov.info` (requires `cargo install cargo-llvm-cov`)
 3. **Browser E2E Smoke Tests**: `npm run test:e2e`
    - Run after UI or orchestration changes.
    - Uses an isolated `WARDIAN_HOME` (temp directory) with seeded fixtures.
-   - Covers browser-level UI behavior only. It does **not** prove native Tauri IPC, PTY behavior, or real provider launch behavior.
+   - **Scope**: browser-level UI behavior and mock-provider agent lifecycle flows only.
+   - **Cannot prove**: real PTY behavior, native Tauri IPC, filesystem operations (junctions, workspace init), or provider-specific behavior. Use a higher layer for those.
 4. **Native Runtime E2E**: use the Tauri/WebDriver-native harness when validating PTY behavior, `invoke` commands, or provider spawning.
    - This is the required layer for real terminal and provider-runtime claims.
    - Setup: `npm run setup:e2e:native`
@@ -82,11 +86,31 @@ Wardian has multiple test layers. Before marking a task as complete, run the app
    - Keep these runs isolated and opt-in.
    - Example: ``$env:WARDIAN_E2E_REAL_OPENCODE='1'; $env:WARDIAN_E2E_REAL_WORKSPACE='D:\Development\Wardian'; npm run test:e2e:native``
 
+### E2E Layer Boundary Rules
+
+When writing a test, pick the **lowest** layer that can prove the behavior:
+
+| What you're testing | Layer to use |
+|---|---|
+| UI rendering, navigation, form inputs | Browser E2E |
+| Agent lifecycle with mock provider (spawn/status/kill) | Browser E2E |
+| PTY resize, `invoke` IPC commands | Native E2E |
+| Real filesystem ops (junctions, workspace init) | Native E2E |
+| Provider-specific spawn or token behavior | Real Provider E2E |
+
+If a browser E2E test **requires** a higher layer to be meaningful, wrap it in `test.skip(...)` with a `// @native-only` or `// @real-provider-only` comment. This makes the gap explicit and machine-readable rather than silently absent.
+
+### Screenshot Documentation
+
+Run `npm run screenshots` before opening a PR that touches UI components or layout. This generates named PNGs in `e2e/screenshots/<timestamp>/` and is uploaded by CI as the `pr-screenshots` artifact. Attach the artifact link (or embed a representative screenshot) in the PR description.
+
 ### Mock Provider
 
 The `mock` provider (`scripts/mock-agent.cjs`) simulates deterministic agent behavior for offline testing. Configure via environment variables:
 - `WARDIAN_MOCK_SCENARIO`: `basic`, `resume`, `action_needed`, `failure`, `long_output`, `headless`, `multi_turn`
 - `WARDIAN_MOCK_DELAY_MS`: Delay between events (default `100`)
+
+Use `e2e/fixtures/mockAgent.ts` to set up an isolated `WARDIAN_HOME` and seed a mock agent before assertions in browser E2E specs.
 
 ### Isolated Test Home
 

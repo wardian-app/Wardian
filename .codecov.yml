@@ -1,0 +1,14 @@
+coverage:
+  status:
+    project:
+      frontend:
+        flags: [frontend]
+        informational: true
+      backend:
+        flags: [backend]
+        informational: true
+
+comment:
+  layout: "reach,diff,flags"
+  behavior: default
+  require_changes: true

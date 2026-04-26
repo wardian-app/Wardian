@@ -62,7 +62,11 @@ src-tauri/gen/
 # Playwright
 e2e/test-results/
 e2e/playwright-report/
+e2e/screenshots/
 playwright-report/
+
+# Coverage reports
+coverage/
 
 # Native E2E tooling
 tools/e2e-native/

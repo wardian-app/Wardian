@@ -26,4 +26,5 @@ Use this index when implementing or debugging Wardian internals.
 
 ## Testing and Verification
 
+- [Developer Setup](./setup.md)
 - [Native E2E Harness](./native-e2e.md)

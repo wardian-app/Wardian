@@ -13,6 +13,8 @@
     "tauri": "tauri",
     "lint": "tsc --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",
     "test:watch": "vitest",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:web": "playwright test --config e2e/playwright.config.ts",
@@ -20,7 +22,8 @@
     "test:e2e:native": "node --test --test-concurrency=1 e2e-native/tests",
     "test:e2e:native:fast": "node scripts/run-native-e2e-fast.mjs",
     "setup:e2e:native": "node scripts/setup-native-e2e.mjs",
-    "setup:e2e:native:windows": "npm run setup:e2e:native"
+    "setup:e2e:native:windows": "npm run setup:e2e:native",
+    "screenshots": "playwright test --config e2e/playwright.config.ts --project=screenshots"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -47,6 +50,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "@vitest/coverage-v8": "^4.1.5",
     "autoprefixer": "^10.4.24",
     "jsdom": "^28.1.0",
     "lucide-react": "^0.577.0",
