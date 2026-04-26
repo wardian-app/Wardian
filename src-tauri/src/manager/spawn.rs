@@ -447,28 +447,35 @@ pub async fn spawn_agent(
                                                 }
                                             }
                                             if !session_id.trim().is_empty() {
-                                                let mut config = config_lock_clone.lock().unwrap();
-                                                let is_excluded = provider_name_for_pty == "codex"
-                                                    && codex_provider_session_is_excluded(
-                                                        session_id,
-                                                        &config.codex_cleared_provider_sessions,
-                                                    );
-                                                if !is_excluded
-                                                    && config.resume_session.as_deref()
-                                                        != Some(session_id.as_str())
-                                                {
-                                                    log_debug(&format!(
-                                                        "[Wardian] Session ID mapped for {}: {}",
-                                                        sid_for_pty, session_id
-                                                    ));
-                                                    config.resume_session =
-                                                        Some(session_id.clone());
-                                                    if provider_name_for_pty == "codex" {
-                                                        config
-                                                            .codex_cleared_provider_sessions
-                                                            .clear();
+                                                let needs_save = {
+                                                    let mut config = config_lock_clone.lock().unwrap();
+                                                    let is_excluded = provider_name_for_pty == "codex"
+                                                        && codex_provider_session_is_excluded(
+                                                            session_id,
+                                                            &config.codex_cleared_provider_sessions,
+                                                        );
+                                                    if !is_excluded
+                                                        && config.resume_session.as_deref()
+                                                            != Some(session_id.as_str())
+                                                    {
+                                                        log_debug(&format!(
+                                                            "[Wardian] Session ID mapped for {}: {}",
+                                                            sid_for_pty, session_id
+                                                        ));
+                                                        config.resume_session =
+                                                            Some(session_id.clone());
+                                                        if provider_name_for_pty == "codex" {
+                                                            config
+                                                                .codex_cleared_provider_sessions
+                                                                .clear();
+                                                        }
+                                                        true
+                                                    } else {
+                                                        false
                                                     }
+                                                };
 
+                                                if needs_save {
                                                     // Notify UI that metadata (resume_session ID) has changed
                                                     let _ = pty_emit_app.emit("agents-updated", ());
                                                     let _ = pty_emit_app.emit(
