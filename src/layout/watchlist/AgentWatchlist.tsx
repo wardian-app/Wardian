@@ -228,8 +228,11 @@ export default function AgentWatchlist({
   const unsortedDisplayedAgents = flattenDisplayItems(filteredDisplayItems);
   const sortedDisplayedAgents = sortAgents(unsortedDisplayedAgents, prefs.sort, telemetry, interactions);
   const sortedAgentRanks = new Map(sortedDisplayedAgents.map((agent, index) => [agent.session_id, index]));
+  const flattenSortedTeams = Boolean(prefs.sort) && !prefs.preserve_team_grouping_when_sorted;
   const sortedDisplayItems = prefs.sort
-    ? [...filteredDisplayItems]
+    ? flattenSortedTeams
+      ? sortedDisplayedAgents.map((agent): WatchlistDisplayItem => ({ type: "agent", agent }))
+      : [...filteredDisplayItems]
         .map((item) => {
           if (item.type === "agent") return item;
           return {
@@ -863,7 +866,7 @@ export default function AgentWatchlist({
           className="flex-1 overflow-y-auto no-scrollbar"
           onClick={() => onSelectionChange(new Set())}
         >
-          {teams.length === 0
+          {teams.length === 0 || flattenSortedTeams
             ? displayedAgents.map((agent) => renderAgentRow(agent))
             : sortedDisplayItems.map((item) => {
                 if (item.type === "agent") return renderAgentRow(item.agent);

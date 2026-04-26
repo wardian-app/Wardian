@@ -1,14 +1,14 @@
-use rusqlite::{params, Connection, OptionalExtension};
-use std::sync::{Arc, Mutex};
-use once_cell::sync::Lazy;
 use crate::utils::fs::get_wardian_home;
 use crate::utils::logging::log_debug;
+use once_cell::sync::Lazy;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::sync::{Arc, Mutex};
 
 static DB_CONN: Lazy<Arc<Mutex<Option<Connection>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
 
 pub fn init_db() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let home = get_wardian_home().ok_or("Could not resolve Wardian home")?;
-    
+
     let db_path = home.join("state.db");
     let conn = Connection::open(db_path)?;
 
@@ -81,14 +81,20 @@ pub fn upsert_agent(
     })
 }
 
-pub fn update_agent_status(session_id: &str, status: &str, pid: Option<u32>) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn update_agent_status(
+    session_id: &str,
+    status: &str,
+    pid: Option<u32>,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
         // Only write to events table if status actually changed (Deduplication)
-        let last_status: Option<String> = conn.query_row(
-            "SELECT last_status FROM agents WHERE session_id = ?",
-            params![session_id],
-            |row| row.get(0),
-        ).optional()?;
+        let last_status: Option<String> = conn
+            .query_row(
+                "SELECT last_status FROM agents WHERE session_id = ?",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         if last_status.as_deref() != Some(status) {
             conn.execute(
@@ -105,7 +111,11 @@ pub fn update_agent_status(session_id: &str, status: &str, pid: Option<u32>) -> 
     })
 }
 
-pub fn record_event(session_id: &str, event_type: &str, payload: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn record_event(
+    session_id: &str,
+    event_type: &str,
+    payload: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
         conn.execute(
             "INSERT INTO events (session_id, event_type, payload) VALUES (?1, ?2, ?3)",
@@ -117,8 +127,14 @@ pub fn record_event(session_id: &str, event_type: &str, payload: &str) -> std::r
 
 pub fn delete_agent(session_id: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
-        conn.execute("DELETE FROM events WHERE session_id = ?", params![session_id])?;
-        conn.execute("DELETE FROM agents WHERE session_id = ?", params![session_id])?;
+        conn.execute(
+            "DELETE FROM events WHERE session_id = ?",
+            params![session_id],
+        )?;
+        conn.execute(
+            "DELETE FROM agents WHERE session_id = ?",
+            params![session_id],
+        )?;
         Ok(())
     })
 }
@@ -153,7 +169,9 @@ pub fn get_all_agents() -> std::result::Result<Vec<AgentRow>, Box<dyn std::error
     })
 }
 
-pub fn prune_events(max_events_per_agent: usize) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn prune_events(
+    max_events_per_agent: usize,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
         conn.execute(
             "DELETE FROM events WHERE id IN (

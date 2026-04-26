@@ -82,8 +82,12 @@ pub struct ScheduleDefinition {
     pub active: bool,
 }
 
-fn default_repeat_every() -> u32 { 1 }
-fn default_end_condition() -> String { "never".to_string() }
+fn default_repeat_every() -> u32 {
+    1
+}
+fn default_end_condition() -> String {
+    "never".to_string()
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduledRun {

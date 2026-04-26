@@ -35,6 +35,13 @@ export function ColumnPicker({ prefs, onPrefsChange, onClose }: ColumnPickerProp
     onPrefsChange({ ...prefs, columns: updated });
   }
 
+  function togglePreserveTeamGroupingWhenSorted() {
+    onPrefsChange({
+      ...prefs,
+      preserve_team_grouping_when_sorted: !prefs.preserve_team_grouping_when_sorted,
+    });
+  }
+
   return (
     <div
       ref={ref}
@@ -56,6 +63,16 @@ export function ColumnPicker({ prefs, onPrefsChange, onClose }: ColumnPickerProp
           <span className="label-small">{COLUMN_LABELS[col.id]}</span>
         </label>
       ))}
+      <div className="my-1 border-t border-wardian-border" />
+      <label className="flex items-center gap-2 py-1 px-1 cursor-pointer hover:bg-wardian-hover rounded">
+        <input
+          type="checkbox"
+          checked={prefs.preserve_team_grouping_when_sorted}
+          onChange={togglePreserveTeamGroupingWhenSorted}
+          className="accent-wardian-accent"
+        />
+        <span className="label-small">Preserve Teams While Sorted</span>
+      </label>
     </div>
   );
 }

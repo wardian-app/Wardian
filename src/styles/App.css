@@ -353,6 +353,12 @@
     transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.sidebar-resizing .sidebar-transition,
+.sidebar-resizing .titlebar-left,
+.sidebar-resizing .titlebar-right {
+  transition: none;
+}
+
 /* Snap Guide Lines */
 .grid-guide-line-v {
   position: fixed;

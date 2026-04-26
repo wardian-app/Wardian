@@ -6,13 +6,13 @@ use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 use crate::utils::{
     build_shell_command, get_wardian_home, new_headless_command, validate_workspace_path,
 };
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{Datelike, Local, TimeZone, Utc};
 use notify::{Event, RecursiveMode, Watcher};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::fs::{self, OpenOptions};
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -86,11 +86,12 @@ where
     F: Future<Output = Result<T, String>>,
 {
     match timeout_ms {
-        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), future).await
-        {
-            Ok(result) => result,
-            Err(_) => Err(format!("{} timeout ({}ms)", label, ms)),
-        },
+        Some(ms) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(ms), future).await {
+                Ok(result) => result,
+                Err(_) => Err(format!("{} timeout ({}ms)", label, ms)),
+            }
+        }
         None => future.await,
     }
 }
@@ -149,22 +150,19 @@ async fn run_command_headless(
     });
 
     let status = match timeout_ms {
-        Some(ms) => match tokio::time::timeout(
-            std::time::Duration::from_millis(ms),
-            child.wait(),
-        )
-        .await
-        {
-            Ok(Ok(status)) => status,
-            Ok(Err(e)) => return Err(format!("Command execution failed: {}", e)),
-            Err(_) => {
-                // Kill the child on timeout to prevent zombie processes.
-                let _ = child.kill().await;
-                stdout_task.abort();
-                stderr_task.abort();
-                return Err(format!("Command timed out after {}ms", ms));
+        Some(ms) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(ms), child.wait()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(e)) => return Err(format!("Command execution failed: {}", e)),
+                Err(_) => {
+                    // Kill the child on timeout to prevent zombie processes.
+                    let _ = child.kill().await;
+                    stdout_task.abort();
+                    stderr_task.abort();
+                    return Err(format!("Command timed out after {}ms", ms));
+                }
             }
-        },
+        }
         None => child
             .wait()
             .await
@@ -181,7 +179,6 @@ async fn run_command_headless(
         "stderr": stderr
     }))
 }
-
 
 pub fn get_workflows_dir() -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("workflows"))
@@ -287,100 +284,110 @@ fn sync_scheduled_runs_for_workflow(
         }
 
         // Read the nested schedule object from config
-        let schedule: crate::models::ScheduleDefinition = if let Some(sched_val) = config.get("schedule") {
-            match serde_json::from_value(sched_val.clone()) {
-                Ok(s) => s,
-                Err(_) => continue,
-            }
-        } else {
-            // Legacy fallback: read flat config keys
-            let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let interval = config.get("interval").and_then(|v| v.as_str()).unwrap_or("");
-            let time = config.get("time").and_then(|v| v.as_str()).unwrap_or("00:00");
-            let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
-            let datetime = config.get("datetime").and_then(|v| v.as_str()).unwrap_or("");
+        let schedule: crate::models::ScheduleDefinition =
+            if let Some(sched_val) = config.get("schedule") {
+                match serde_json::from_value(sched_val.clone()) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                }
+            } else {
+                // Legacy fallback: read flat config keys
+                let Some(sched_type) = config.get("schedule_type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let interval = config
+                    .get("interval")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let time = config
+                    .get("time")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("00:00");
+                let days = config.get("days").and_then(|v| v.as_str()).unwrap_or("");
+                let datetime = config
+                    .get("datetime")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
-            match sched_type {
-                "Minutes" => crate::models::ScheduleDefinition {
-                    schedule_type: "interval".to_string(),
-                    interval_minutes: Some(interval.parse().unwrap_or(5)),
-                    time_of_day: None,
-                    days_of_week: None,
-                    repeat_every: 1,
-                    days_of_month: None,
-                    specific_dates: None,
-                    run_at: None,
-                    end_condition: "never".to_string(),
-                    end_date: None,
-                    max_occurrences: None,
-                    occurrence_count: 0,
-                    active: true,
-                },
-                "Hours" => crate::models::ScheduleDefinition {
-                    schedule_type: "interval".to_string(),
-                    interval_minutes: Some(interval.parse::<u32>().unwrap_or(1) * 60),
-                    time_of_day: None,
-                    days_of_week: None,
-                    repeat_every: 1,
-                    days_of_month: None,
-                    specific_dates: None,
-                    run_at: None,
-                    end_condition: "never".to_string(),
-                    end_date: None,
-                    max_occurrences: None,
-                    occurrence_count: 0,
-                    active: true,
-                },
-                "Daily" => crate::models::ScheduleDefinition {
-                    schedule_type: "daily".to_string(),
-                    interval_minutes: None,
-                    time_of_day: Some(time.to_string()),
-                    days_of_week: None,
-                    repeat_every: 1,
-                    days_of_month: None,
-                    specific_dates: None,
-                    run_at: None,
-                    end_condition: "never".to_string(),
-                    end_date: None,
-                    max_occurrences: None,
-                    occurrence_count: 0,
-                    active: true,
-                },
-                "Weekly" => crate::models::ScheduleDefinition {
-                    schedule_type: "weekly".to_string(),
-                    interval_minutes: None,
-                    time_of_day: Some(time.to_string()),
-                    days_of_week: Some(days.split(',').map(|s| s.trim().to_string()).collect()),
-                    repeat_every: 1,
-                    days_of_month: None,
-                    specific_dates: None,
-                    run_at: None,
-                    end_condition: "never".to_string(),
-                    end_date: None,
-                    max_occurrences: None,
-                    occurrence_count: 0,
-                    active: true,
-                },
-                "One-Time" => crate::models::ScheduleDefinition {
-                    schedule_type: "one_time".to_string(),
-                    interval_minutes: None,
-                    time_of_day: None,
-                    days_of_week: None,
-                    repeat_every: 1,
-                    days_of_month: None,
-                    specific_dates: None,
-                    run_at: Some(datetime.to_string()),
-                    end_condition: "never".to_string(),
-                    end_date: None,
-                    max_occurrences: None,
-                    occurrence_count: 0,
-                    active: true,
-                },
-                _ => continue,
-            }
-        };
+                match sched_type {
+                    "Minutes" => crate::models::ScheduleDefinition {
+                        schedule_type: "interval".to_string(),
+                        interval_minutes: Some(interval.parse().unwrap_or(5)),
+                        time_of_day: None,
+                        days_of_week: None,
+                        repeat_every: 1,
+                        days_of_month: None,
+                        specific_dates: None,
+                        run_at: None,
+                        end_condition: "never".to_string(),
+                        end_date: None,
+                        max_occurrences: None,
+                        occurrence_count: 0,
+                        active: true,
+                    },
+                    "Hours" => crate::models::ScheduleDefinition {
+                        schedule_type: "interval".to_string(),
+                        interval_minutes: Some(interval.parse::<u32>().unwrap_or(1) * 60),
+                        time_of_day: None,
+                        days_of_week: None,
+                        repeat_every: 1,
+                        days_of_month: None,
+                        specific_dates: None,
+                        run_at: None,
+                        end_condition: "never".to_string(),
+                        end_date: None,
+                        max_occurrences: None,
+                        occurrence_count: 0,
+                        active: true,
+                    },
+                    "Daily" => crate::models::ScheduleDefinition {
+                        schedule_type: "daily".to_string(),
+                        interval_minutes: None,
+                        time_of_day: Some(time.to_string()),
+                        days_of_week: None,
+                        repeat_every: 1,
+                        days_of_month: None,
+                        specific_dates: None,
+                        run_at: None,
+                        end_condition: "never".to_string(),
+                        end_date: None,
+                        max_occurrences: None,
+                        occurrence_count: 0,
+                        active: true,
+                    },
+                    "Weekly" => crate::models::ScheduleDefinition {
+                        schedule_type: "weekly".to_string(),
+                        interval_minutes: None,
+                        time_of_day: Some(time.to_string()),
+                        days_of_week: Some(days.split(',').map(|s| s.trim().to_string()).collect()),
+                        repeat_every: 1,
+                        days_of_month: None,
+                        specific_dates: None,
+                        run_at: None,
+                        end_condition: "never".to_string(),
+                        end_date: None,
+                        max_occurrences: None,
+                        occurrence_count: 0,
+                        active: true,
+                    },
+                    "One-Time" => crate::models::ScheduleDefinition {
+                        schedule_type: "one_time".to_string(),
+                        interval_minutes: None,
+                        time_of_day: None,
+                        days_of_week: None,
+                        repeat_every: 1,
+                        days_of_month: None,
+                        specific_dates: None,
+                        run_at: Some(datetime.to_string()),
+                        end_condition: "never".to_string(),
+                        end_date: None,
+                        max_occurrences: None,
+                        occurrence_count: 0,
+                        active: true,
+                    },
+                    _ => continue,
+                }
+            };
 
         let description = describe_schedule(&schedule);
 
@@ -394,12 +401,12 @@ fn sync_scheduled_runs_for_workflow(
                 && run.schedule.time_of_day == schedule.time_of_day
                 && run.schedule.days_of_week == schedule.days_of_week
                 && run.schedule.repeat_every == schedule.repeat_every
-                        && run.schedule.days_of_month == schedule.days_of_month
-                        && run.schedule.specific_dates == schedule.specific_dates
-                        && run.schedule.run_at == schedule.run_at
-                        && run.schedule.end_condition == schedule.end_condition
-                        && run.schedule.end_date == schedule.end_date
-                        && run.schedule.max_occurrences == schedule.max_occurrences
+                && run.schedule.days_of_month == schedule.days_of_month
+                && run.schedule.specific_dates == schedule.specific_dates
+                && run.schedule.run_at == schedule.run_at
+                && run.schedule.end_condition == schedule.end_condition
+                && run.schedule.end_date == schedule.end_date
+                && run.schedule.max_occurrences == schedule.max_occurrences
         });
 
         let mut final_schedule = schedule;
@@ -476,23 +483,41 @@ fn describe_schedule(schedule: &crate::models::ScheduleDefinition) -> String {
             format!("Daily at {}", time)
         }
         "weekly" => {
-            let days = schedule.days_of_week.as_ref().map(|d| d.join(", ")).unwrap_or_default();
+            let days = schedule
+                .days_of_week
+                .as_ref()
+                .map(|d| d.join(", "))
+                .unwrap_or_default();
             let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
             if schedule.repeat_every > 1 {
-                format!("Every {} weeks on {} at {}", schedule.repeat_every, days, time)
+                format!(
+                    "Every {} weeks on {} at {}",
+                    schedule.repeat_every, days, time
+                )
             } else {
                 format!("{} at {}", days, time)
             }
         }
         "monthly" => {
-            let days = schedule.days_of_month.as_ref()
-                .map(|d| d.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))
+            let days = schedule
+                .days_of_month
+                .as_ref()
+                .map(|d| {
+                    d.iter()
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
                 .unwrap_or_default();
             let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
             format!("Monthly on day(s) {} at {}", days, time)
         }
         "specific_dates" => {
-            let count = schedule.specific_dates.as_ref().map(|d| d.len()).unwrap_or(0);
+            let count = schedule
+                .specific_dates
+                .as_ref()
+                .map(|d| d.len())
+                .unwrap_or(0);
             let time = schedule.time_of_day.as_deref().unwrap_or("00:00");
             format!("{} specific date(s) at {}", count, time)
         }
@@ -760,7 +785,9 @@ pub async fn start_scheduler(app: AppHandle) {
                 if end_cond == "on_date" {
                     if let Some(ref end_date_str) = run.schedule.end_date {
                         let today = chrono::Local::now().date_naive();
-                        if let Ok(end_date) = chrono::NaiveDate::parse_from_str(end_date_str, "%Y-%m-%d") {
+                        if let Ok(end_date) =
+                            chrono::NaiveDate::parse_from_str(end_date_str, "%Y-%m-%d")
+                        {
                             if today > end_date {
                                 log_debug(&format!(
                                     "[Wardian] Schedule {} expired (end_date {})",
@@ -812,17 +839,13 @@ pub async fn start_scheduler(app: AppHandle) {
 
                         run.next_run_epoch_ms = compute_next_run(&run.schedule, now_ms);
                         run.paused_remaining_ms = None;
-                        
+
                         if is_one_time || (is_specific_dates && run.next_run_epoch_ms.is_none()) {
                             runs_to_delete.push(completed_run_id);
                         }
                         modified = true;
 
-                        let payload = serde_json::json!({
-                            "timestamp": Utc::now().to_rfc3339(),
-                            "scheduled_run_id": run.id,
-                            "role_mappings": run.role_mappings,
-                        });
+                        let payload = scheduled_trigger_payload(&run.id, &run.role_mappings);
 
                         let _ =
                             run_workflow(app_clone.clone(), run.workflow_id.clone(), Some(payload))
@@ -984,11 +1007,9 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                 let candidate_month_norm = ((candidate_month - 1) % 12 + 1) as u32;
 
                 for &day in &target_days {
-                    if let Some(candidate_date) = chrono::NaiveDate::from_ymd_opt(
-                        candidate_year,
-                        candidate_month_norm,
-                        day,
-                    ) {
+                    if let Some(candidate_date) =
+                        chrono::NaiveDate::from_ymd_opt(candidate_year, candidate_month_norm, day)
+                    {
                         let candidate_naive = candidate_date.and_time(target_time);
                         if let Some(candidate_local) = chrono::Local
                             .from_local_datetime(&candidate_naive)
@@ -996,9 +1017,8 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                         {
                             let candidate_ms = candidate_local.timestamp_millis() as u64;
                             if candidate_ms > now_ms {
-                                best = Some(
-                                    best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)),
-                                );
+                                best =
+                                    Some(best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)));
                             }
                         }
                     }
@@ -1034,9 +1054,7 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                     {
                         let candidate_ms = candidate_local.timestamp_millis() as u64;
                         if candidate_ms > now_ms {
-                            best = Some(
-                                best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)),
-                            );
+                            best = Some(best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)));
                         }
                     }
                 }
@@ -1053,9 +1071,7 @@ fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -
                 } else {
                     None
                 }
-            } else if let Ok(dt) =
-                chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M")
-            {
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M") {
                 let local = chrono::Local.from_local_datetime(&dt).earliest()?;
                 let ms = local.timestamp_millis() as u64;
                 if ms > now_ms {
@@ -1235,16 +1251,24 @@ pub async fn run_scheduled_workflow_now(app: AppHandle, run_id: String) -> Resul
         run.paused_remaining_ms = None;
     }
 
-    let payload = serde_json::json!({
-        "timestamp": Utc::now().to_rfc3339(),
-        "scheduled_run_id": run.id,
-        "role_mappings": run.role_mappings,
-    });
+    let payload = scheduled_trigger_payload(&run.id, &run.role_mappings);
     let workflow_id = run.workflow_id.clone();
 
     save_scheduled_runs(&runs)?;
     run_workflow(app, workflow_id, Some(payload)).await
 }
+
+fn scheduled_trigger_payload(
+    scheduled_run_id: &str,
+    role_mappings: &HashMap<String, String>,
+) -> Value {
+    serde_json::json!({
+        "timestamp": Local::now().to_rfc3339(),
+        "scheduled_run_id": scheduled_run_id,
+        "role_mappings": role_mappings,
+    })
+}
+
 pub async fn save_workflow(app: AppHandle, wf: WorkflowDefinition) -> Result<(), String> {
     let dir = get_workflows_dir().ok_or("Could not find Wardian home")?;
     if !dir.exists() {
@@ -1321,12 +1345,13 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 mod tests {
     use super::{
         parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,
-        sync_scheduled_runs_for_workflow,
+        scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
     };
     use crate::models::{
         ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
     };
     use crate::utils::ShellLaunchSpec;
+    use chrono::Local;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -1367,9 +1392,15 @@ mod tests {
             ..Default::default()
         };
         // Use a test date: 2024-01-01 was a Monday
-        let now = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_time(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap());
-        let now_ms = chrono::Local.from_local_datetime(&now).earliest().unwrap().timestamp_millis() as u64;
-        
+        let now = chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+            .unwrap()
+            .and_time(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        let now_ms = chrono::Local
+            .from_local_datetime(&now)
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+
         // This will verify `rem_euclid` doesn't panic and returns a valid timestamp in the future.
         let next = compute_next_run(&schedule, now_ms);
         assert!(next.is_some());
@@ -1414,17 +1445,58 @@ mod tests {
     #[test]
     fn parse_optional_timeout_treats_absent_blank_null_and_zero_as_unlimited() {
         assert_eq!(parse_optional_timeout_ms(&json!({})), None);
-        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": null })), None);
-        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "" })), None);
-        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "   " })), None);
+        assert_eq!(
+            parse_optional_timeout_ms(&json!({ "timeout_ms": null })),
+            None
+        );
+        assert_eq!(
+            parse_optional_timeout_ms(&json!({ "timeout_ms": "" })),
+            None
+        );
+        assert_eq!(
+            parse_optional_timeout_ms(&json!({ "timeout_ms": "   " })),
+            None
+        );
         assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": 0 })), None);
-        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "0" })), None);
+        assert_eq!(
+            parse_optional_timeout_ms(&json!({ "timeout_ms": "0" })),
+            None
+        );
     }
 
     #[test]
     fn parse_optional_timeout_accepts_positive_numeric_values() {
-        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": 5000 })), Some(5000));
-        assert_eq!(parse_optional_timeout_ms(&json!({ "timeout_ms": "60000" })), Some(60000));
+        assert_eq!(
+            parse_optional_timeout_ms(&json!({ "timeout_ms": 5000 })),
+            Some(5000)
+        );
+        assert_eq!(
+            parse_optional_timeout_ms(&json!({ "timeout_ms": "60000" })),
+            Some(60000)
+        );
+    }
+
+    #[test]
+    fn scheduled_trigger_payload_uses_local_timestamp_offset() {
+        let payload = scheduled_trigger_payload(
+            "sched-1",
+            &HashMap::from([("analyst".to_string(), "agent-1".to_string())]),
+        );
+
+        let timestamp = payload
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .expect("timestamp string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).expect("valid rfc3339");
+
+        assert_eq!(
+            parsed.offset().local_minus_utc(),
+            Local::now().offset().local_minus_utc()
+        );
+        assert_eq!(
+            payload.get("scheduled_run_id").and_then(|value| value.as_str()),
+            Some("sched-1")
+        );
     }
 
     #[test]
@@ -1704,8 +1776,11 @@ pub async fn run_workflow(
             if let Some(Value::Object(schema_props)) = &node.parameter_schema {
                 for (param_name, param_def) in schema_props {
                     if let Some(def_obj) = param_def.as_object() {
-                        let is_required = def_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
-                        
+                        let is_required = def_obj
+                            .get("required")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
                         let is_missing = match merged_config.get(param_name) {
                             None | Some(Value::Null) => true,
                             Some(Value::String(s)) if s.is_empty() => true,
@@ -1721,7 +1796,8 @@ pub async fn run_workflow(
                                 };
                                 merged_config.insert(param_name.clone(), final_val);
                             } else if is_required {
-                                node_validation_error = Some(format!("Missing required parameter: {}", param_name));
+                                node_validation_error =
+                                    Some(format!("Missing required parameter: {}", param_name));
                                 break;
                             }
                         }
@@ -1808,204 +1884,204 @@ pub async fn run_workflow(
             let mut node_error = node_validation_error;
 
             if node_error.is_none() {
+                match node.r#type.as_str() {
+                    "trigger" => {
+                        log_debug(&format!("[Wardian] Trigger node {} pulsing", node.id));
 
-            match node.r#type.as_str() {
-                "trigger" => {
-                    log_debug(&format!("[Wardian] Trigger node {} pulsing", node.id));
+                        let mut payload_map = match node.config.as_object() {
+                            Some(m) => m.clone(),
+                            None => serde_json::Map::new(),
+                        };
 
-                    let mut payload_map = match node.config.as_object() {
-                        Some(m) => m.clone(),
-                        None => serde_json::Map::new(),
-                    };
-
-                    if let Some(Value::Object(initial)) = initial_payload_captured.as_ref() {
-                        for (k, v) in initial {
-                            payload_map.insert(k.clone(), v.clone());
+                        if let Some(Value::Object(initial)) = initial_payload_captured.as_ref() {
+                            for (k, v) in initial {
+                                payload_map.insert(k.clone(), v.clone());
+                            }
                         }
+
+                        // Clean up metadata that shouldn't be in the runtime payload
+                        payload_map.remove("input_schema");
+                        payload_map.remove("json_schema");
+
+                        output_payload = Value::Object(payload_map);
+
+                        // Alias this to the global 'trigger' key
+                        registry.insert("trigger".to_string(), output_payload.clone());
                     }
+                    "memory" => {
+                        let op = node
+                            .config
+                            .get("operation")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("get");
+                        let key_path = node
+                            .config
+                            .get("key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let value_to_set = node
+                            .config
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
 
-                    // Clean up metadata that shouldn't be in the runtime payload
-                    payload_map.remove("input_schema");
-                    payload_map.remove("json_schema");
+                        // Interpolate key and value
+                        let interpolated_key = interpolate_string(key_path, &registry);
+                        let interpolated_val = interpolate_string(value_to_set, &registry);
 
-                    output_payload = Value::Object(payload_map);
-
-                    // Alias this to the global 'trigger' key
-                    registry.insert("trigger".to_string(), output_payload.clone());
-                }
-                "memory" => {
-                    let op = node
-                        .config
-                        .get("operation")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("get");
-                    let key_path = node
-                        .config
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let value_to_set = node
-                        .config
-                        .get("value")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    // Interpolate key and value
-                    let interpolated_key = interpolate_string(key_path, &registry);
-                    let interpolated_val = interpolate_string(value_to_set, &registry);
-
-                    match op {
-                        "set" => {
-                            // Deep set logic or flat key? For now, let's stick to flat or dot-notated objects
-                            if let Some(obj) = storage.as_object_mut() {
-                                // Simple dot notation support for set (key.subKey)
-                                let parts: Vec<&str> = interpolated_key.split('.').collect();
-                                if parts.len() == 1 {
-                                    obj.insert(
-                                        interpolated_key.clone(),
-                                        serde_json::Value::String(interpolated_val.clone()),
-                                    );
-                                } else {
-                                    // Complex nested set - keeping it simple for now
-                                    obj.insert(
-                                        interpolated_key.clone(),
-                                        serde_json::Value::String(interpolated_val.clone()),
-                                    );
+                        match op {
+                            "set" => {
+                                // Deep set logic or flat key? For now, let's stick to flat or dot-notated objects
+                                if let Some(obj) = storage.as_object_mut() {
+                                    // Simple dot notation support for set (key.subKey)
+                                    let parts: Vec<&str> = interpolated_key.split('.').collect();
+                                    if parts.len() == 1 {
+                                        obj.insert(
+                                            interpolated_key.clone(),
+                                            serde_json::Value::String(interpolated_val.clone()),
+                                        );
+                                    } else {
+                                        // Complex nested set - keeping it simple for now
+                                        obj.insert(
+                                            interpolated_key.clone(),
+                                            serde_json::Value::String(interpolated_val.clone()),
+                                        );
+                                    }
                                 }
+                                save_shared_storage(&storage);
+                                registry.insert("storage".to_string(), storage.clone());
+                                output_payload = serde_json::json!({ "status": "success", "op": "set", "key": interpolated_key, "value": interpolated_val });
                             }
-                            save_shared_storage(&storage);
-                            registry.insert("storage".to_string(), storage.clone());
-                            output_payload = serde_json::json!({ "status": "success", "op": "set", "key": interpolated_key, "value": interpolated_val });
-                        }
-                        "delete" => {
-                            if let Some(obj) = storage.as_object_mut() {
-                                obj.remove(&interpolated_key);
+                            "delete" => {
+                                if let Some(obj) = storage.as_object_mut() {
+                                    obj.remove(&interpolated_key);
+                                }
+                                save_shared_storage(&storage);
+                                registry.insert("storage".to_string(), storage.clone());
+                                output_payload = serde_json::json!({ "status": "success", "op": "delete", "key": interpolated_key });
                             }
-                            save_shared_storage(&storage);
-                            registry.insert("storage".to_string(), storage.clone());
-                            output_payload = serde_json::json!({ "status": "success", "op": "delete", "key": interpolated_key });
-                        }
-                        _ => {
-                            // Already in registry as 'storage', but we return the specific value as node output too
-                            let val = if let Some(obj) = storage.as_object() {
-                                obj.get(&interpolated_key).cloned().unwrap_or(Value::Null)
-                            } else {
-                                Value::Null
-                            };
-                            output_payload = serde_json::json!({ "status": "success", "op": "get", "key": interpolated_key, "value": val });
+                            _ => {
+                                // Already in registry as 'storage', but we return the specific value as node output too
+                                let val = if let Some(obj) = storage.as_object() {
+                                    obj.get(&interpolated_key).cloned().unwrap_or(Value::Null)
+                                } else {
+                                    Value::Null
+                                };
+                                output_payload = serde_json::json!({ "status": "success", "op": "get", "key": interpolated_key, "value": val });
+                            }
                         }
                     }
-                }
-                "agent" => {
-                    // Role-based resolution with agent_id fallback
-                    let role = node
-                        .config
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let direct_id = node
-                        .config
-                        .get("agent_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    "agent" => {
+                        // Role-based resolution with agent_id fallback
+                        let role = node
+                            .config
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let direct_id = node
+                            .config
+                            .get("agent_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
 
-                    let agent_id = if !role.is_empty() {
-                        wf.role_mappings.get(role).map(|s| s.as_str()).unwrap_or("")
-                    } else {
-                        direct_id
-                    };
-                    let mode = crate::models::AgentExecutionPolicy::from_legacy_session_type(
-                        node.config.get("session_type").and_then(|v| v.as_str()),
-                        node.config.get("mode").and_then(|v| v.as_str()),
-                    )
-                    .mode;
-
-                    let mut prompt = node
-                        .config
-                        .get("prompt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    prompt = interpolate_string(&prompt, &registry);
-
-                    if agent_id.is_empty() && mode != crate::models::WorkflowAgentMode::Ephemeral {
-                        node_error = Some(if !role.is_empty() {
-                            format!("Role '{}' not mapped to an agent. Set role_mappings before running.", role)
+                        let agent_id = if !role.is_empty() {
+                            wf.role_mappings.get(role).map(|s| s.as_str()).unwrap_or("")
                         } else {
-                            "Missing agent_id or role".to_string()
-                        });
-                    } else {
-                        let target_agent_config = if agent_id.is_empty() {
-                            None
+                            direct_id
+                        };
+                        let mode = crate::models::AgentExecutionPolicy::from_legacy_session_type(
+                            node.config.get("session_type").and_then(|v| v.as_str()),
+                            node.config.get("mode").and_then(|v| v.as_str()),
+                        )
+                        .mode;
+
+                        let mut prompt = node
+                            .config
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        prompt = interpolate_string(&prompt, &registry);
+
+                        if agent_id.is_empty()
+                            && mode != crate::models::WorkflowAgentMode::Ephemeral
+                        {
+                            node_error = Some(if !role.is_empty() {
+                                format!("Role '{}' not mapped to an agent. Set role_mappings before running.", role)
+                            } else {
+                                "Missing agent_id or role".to_string()
+                            });
                         } else {
-                            let state = app.state::<crate::state::AppState>();
-                            let agents_map = state.agents.lock().await;
-                            let existing_config = if let Some(agent) = agents_map.get(agent_id) {
-                                let config = agent.config.lock().unwrap().clone();
-                                Some(config)
-                            } else if let Some(home) = get_wardian_home() {
-                                if let Ok(data) =
-                                    std::fs::read_to_string(home.join("settings/state.json"))
+                            let target_agent_config = if agent_id.is_empty() {
+                                None
+                            } else {
+                                let state = app.state::<crate::state::AppState>();
+                                let agents_map = state.agents.lock().await;
+                                let existing_config = if let Some(agent) = agents_map.get(agent_id)
                                 {
-                                    if let Ok(configs) =
-                                        serde_json::from_str::<Vec<crate::models::AgentConfig>>(
-                                            &data,
-                                        )
+                                    let config = agent.config.lock().unwrap().clone();
+                                    Some(config)
+                                } else if let Some(home) = get_wardian_home() {
+                                    if let Ok(data) =
+                                        std::fs::read_to_string(home.join("settings/state.json"))
                                     {
-                                        configs.into_iter().find(|c| c.session_id == agent_id)
+                                        if let Ok(configs) =
+                                            serde_json::from_str::<Vec<crate::models::AgentConfig>>(
+                                                &data,
+                                            )
+                                        {
+                                            configs.into_iter().find(|c| c.session_id == agent_id)
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }
                                 } else {
                                     None
-                                }
-                            } else {
-                                None
+                                };
+                                existing_config
                             };
-                            existing_config
-                        };
-                        let node_config = node
-                            .config
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default();
-                        let exec_ctx = match agent_execution::resolve_agent_execution_context(
-                            &node.id,
-                            &node_config,
-                            target_agent_config.as_ref(),
-                            &run_instance_id,
-                        ) {
-                            Ok(ctx) => Some(ctx),
-                            Err(err) => {
-                                node_error = Some(err);
-                                None
-                            }
-                        };
-                        if let Some(exec_ctx) = exec_ctx {
-                        let provider_name = exec_ctx.config.provider.clone();
-                        let output_format = node
-                            .config
-                            .get("output_format")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("text");
-
-                        // Apply JSON Schema constraint if provided
-                        if output_format == "json" {
-                            if let Some(schema) =
-                                node.config.get("json_schema").and_then(|v| v.as_str())
-                            {
-                                if !schema.trim().is_empty() && schema.trim() != "{}" {
-                                    let interpolated_schema = interpolate_string(schema, &registry);
-                                    prompt
-                                        .push_str("\n\nGive your answer as JSON in the format:\n");
-                                    prompt.push_str(&interpolated_schema);
+                            let node_config = node.config.as_object().cloned().unwrap_or_default();
+                            let exec_ctx = match agent_execution::resolve_agent_execution_context(
+                                &node.id,
+                                &node_config,
+                                target_agent_config.as_ref(),
+                                &run_instance_id,
+                            ) {
+                                Ok(ctx) => Some(ctx),
+                                Err(err) => {
+                                    node_error = Some(err);
+                                    None
                                 }
-                            }
-                        }
+                            };
+                            if let Some(exec_ctx) = exec_ctx {
+                                let provider_name = exec_ctx.config.provider.clone();
+                                let output_format = node
+                                    .config
+                                    .get("output_format")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("text");
 
-                        let timeout_ms = parse_optional_timeout_ms(&node.config);
+                                // Apply JSON Schema constraint if provided
+                                if output_format == "json" {
+                                    if let Some(schema) =
+                                        node.config.get("json_schema").and_then(|v| v.as_str())
+                                    {
+                                        if !schema.trim().is_empty() && schema.trim() != "{}" {
+                                            let interpolated_schema =
+                                                interpolate_string(schema, &registry);
+                                            prompt.push_str(
+                                                "\n\nGive your answer as JSON in the format:\n",
+                                            );
+                                            prompt.push_str(&interpolated_schema);
+                                        }
+                                    }
+                                }
 
-                        log_debug(&format!(
+                                let timeout_ms = parse_optional_timeout_ms(&node.config);
+
+                                log_debug(&format!(
                             "[Wardian] Agent node: agent_id={}, provider={}, output_format={}, prompt_len={}, prompt_preview='{}'",
                             agent_id,
                             provider_name,
@@ -2014,165 +2090,72 @@ pub async fn run_workflow(
                             &prompt[..prompt.len().min(200)]
                         ));
 
-                        // 1. Resolve CWD logic (Shared between modes)
-                        let cwd = crate::utils::fs::resolve_cwd(
-                            &exec_ctx.config.folder,
-                            &exec_ctx.execution_session_id,
-                        );
+                                // 1. Resolve CWD logic (Shared between modes)
+                                let cwd = crate::utils::fs::resolve_cwd(
+                                    &exec_ctx.config.folder,
+                                    &exec_ctx.execution_session_id,
+                                );
 
-                        if exec_ctx.mode != crate::models::WorkflowAgentMode::InheritResume {
-                            let run_result = run_with_optional_timeout(
-                                timeout_ms,
-                                "Agent",
-                                crate::manager::run_headless_with_options(
-                                    crate::manager::HeadlessRunOptions {
-                                        cwd: &cwd,
-                                        prompt: &prompt,
-                                        wardian_session_id: &exec_ctx.execution_session_id,
-                                        resume_session: None,
-                                        output_format,
-                                        provider_name: &provider_name,
-                                        config_override: Some(&exec_ctx.config),
-                                    },
-                                ),
-                            )
-                            .await;
+                                if exec_ctx.mode != crate::models::WorkflowAgentMode::InheritResume
+                                {
+                                    let run_result = run_with_optional_timeout(
+                                        timeout_ms,
+                                        "Agent",
+                                        crate::manager::run_headless_with_options(
+                                            crate::manager::HeadlessRunOptions {
+                                                cwd: &cwd,
+                                                prompt: &prompt,
+                                                wardian_session_id: &exec_ctx.execution_session_id,
+                                                resume_session: None,
+                                                output_format,
+                                                provider_name: &provider_name,
+                                                config_override: Some(&exec_ctx.config),
+                                            },
+                                        ),
+                                    )
+                                    .await;
 
-                            match run_result {
-                                Ok(data) => {
-                                    output_payload = flatten_headless_response(data);
-                                }
-                                Err(e) => {
-                                    log_debug(&format!(
-                                        "[Wardian] Fresh workflow agent run failed: {}",
-                                        e
-                                    ));
-                                    node_error = Some(e);
-                                }
-                            }
-                        } else if output_format == "json" {
-                            // --- HEADLESS JSON MODE (Always kills PTY for clean structured output) ---
-                            let state = app.state::<crate::state::AppState>();
-                            let mut was_online = false;
-                            let mut agent_cfg = None;
-
-                            {
-                                let mut agents_map = state.agents.lock().await;
-                                if let Some(agent) = agents_map.get_mut(agent_id) {
-                                    agent_cfg = Some(agent.config.clone());
-                                    if let Some(mut child) = agent.child_process.take() {
-                                        was_online = true;
-                                        let _ = child.kill();
-                                        let _ = child.wait();
+                                    match run_result {
+                                        Ok(data) => {
+                                            output_payload = flatten_headless_response(data);
+                                        }
+                                        Err(e) => {
+                                            log_debug(&format!(
+                                                "[Wardian] Fresh workflow agent run failed: {}",
+                                                e
+                                            ));
+                                            node_error = Some(e);
+                                        }
                                     }
-                                    // Mark status as Headless so the UI shows the purple indicator
-                                    if let Ok(mut status) = agent.current_status.lock() {
-                                        *status = "Headless".to_string();
-                                    }
-                                    if let Ok(mut senders) = state.input_senders.write() {
-                                        senders.remove(agent_id);
-                                    }
-                                    let order = state.agent_order.lock().await;
-                                    crate::manager::save_state(&app, &agents_map, &order);
-                                    let _ = app.emit("agents-updated", ());
-                                    log_debug(&format!("[Wardian] Killed active PTY and set Headless status for {} (was_online={})", agent_id, was_online));
-                                }
-                            }
+                                } else if output_format == "json" {
+                                    // --- HEADLESS JSON MODE (Always kills PTY for clean structured output) ---
+                                    let state = app.state::<crate::state::AppState>();
+                                    let mut was_online = false;
+                                    let mut agent_cfg = None;
 
-                            let run_result = run_with_optional_timeout(
-                                timeout_ms,
-                                "Agent",
-                                crate::manager::run_headless_with_options(
-                                    crate::manager::HeadlessRunOptions {
-                                        cwd: &cwd,
-                                        prompt: &prompt,
-                                        wardian_session_id: &exec_ctx.execution_session_id,
-                                        resume_session: exec_ctx.resume_session.as_deref(),
-                                        output_format,
-                                        provider_name: &provider_name,
-                                        config_override: Some(&exec_ctx.config),
-                                    },
-                                ),
-                            )
-                            .await;
-
-                            match run_result {
-                                Ok(data) => {
-                                    output_payload = flatten_headless_response(data);
-                                }
-                                Err(e) => {
-                                    log_debug(&format!(
-                                        "[Wardian] Headless JSON agent failed: {}",
-                                        e
-                                    ));
-                                    node_error = Some(e);
-                                }
-                            }
-
-                            // Restore state after headless run
-                            if was_online {
-                                if let Some(cfg_lock) = agent_cfg {
-                                    let (cfg, born) = {
-                                        let config_guard = cfg_lock.lock().unwrap();
-                                        // Since we don't have direct access to the ActiveAgent struct here (it's being restored),
-                                        // we'll pass None for the timestamp if it's not in the config, letting spawn_agent 
-                                        // use the existing one if it finds it, or Now() if not.
-                                        // Actually, let's just pass None here as this path is for RE-SPAWNING after a headless run failure.
-                                        (config_guard.clone(), None) 
-                                    };
-                                    let mut cfg = cfg;
-                                    cfg.is_off = false;
-                                    log_debug(&format!("[Wardian] Restoring agent {} to Online state after headless run", agent_id));
-                                    if let Ok(new_agent) =
-                                        crate::manager::spawn_agent(app.clone(), cfg, false, born).await
                                     {
                                         let mut agents_map = state.agents.lock().await;
-                                        if let Some(ref tx) = new_agent.stdin_tx {
-                                            if let Ok(mut senders) = state.input_senders.write() {
-                                                senders.insert(agent_id.to_string(), tx.clone());
+                                        if let Some(agent) = agents_map.get_mut(agent_id) {
+                                            agent_cfg = Some(agent.config.clone());
+                                            if let Some(mut child) = agent.child_process.take() {
+                                                was_online = true;
+                                                let _ = child.kill();
+                                                let _ = child.wait();
                                             }
-                                        }
-                                        agents_map.insert(agent_id.to_string(), new_agent);
-                                        let order = state.agent_order.lock().await;
-                                        crate::manager::save_state(&app, &agents_map, &order);
-                                        let _ = app.emit("agents-updated", ());
-                                    }
-                                }
-                            } else {
-                                // Agent was already off — reset from Headless back to Off
-                                let agents_map = state.agents.lock().await;
-                                if let Some(agent) = agents_map.get(agent_id) {
-                                    if let Ok(mut status) = agent.current_status.lock() {
-                                        *status = "Off".to_string();
-                                    }
-                                }
-                                let _ = app.emit("agents-updated", ());
-                            }
-                        } else {
-                            // --- PTY TEXT MODE (With Headless Fallback) ---
-                            let state = app.state::<crate::state::AppState>();
-                            let sender = {
-                                let senders = state
-                                    .input_senders
-                                    .read()
-                                    .map_err(|e| e.to_string())
-                                    .unwrap();
-                                senders.get(agent_id).cloned()
-                            };
-
-                            if let Some(tx) = sender {
-                                // Agent is ONLINE: Use provider-native automation when PTY submit
-                                // is unreliable, otherwise inject through the live terminal.
-                                {
-                                    let agents = state.agents.lock().await;
-                                    if let Some(agent) = agents.get(agent_id) {
-                                        if let Ok(mut buf) = agent.output_buffer.lock() {
-                                            buf.clear();
+                                            // Mark status as Headless so the UI shows the purple indicator
+                                            if let Ok(mut status) = agent.current_status.lock() {
+                                                *status = "Headless".to_string();
+                                            }
+                                            if let Ok(mut senders) = state.input_senders.write() {
+                                                senders.remove(agent_id);
+                                            }
+                                            let order = state.agent_order.lock().await;
+                                            crate::manager::save_state(&app, &agents_map, &order);
+                                            let _ = app.emit("agents-updated", ());
+                                            log_debug(&format!("[Wardian] Killed active PTY and set Headless status for {} (was_online={})", agent_id, was_online));
                                         }
                                     }
-                                }
 
-                                if provider_name == "opencode" {
                                     let run_result = run_with_optional_timeout(
                                         timeout_ms,
                                         "Agent",
@@ -2196,14 +2179,126 @@ pub async fn run_workflow(
                                         }
                                         Err(e) => {
                                             log_debug(&format!(
-                                                "[Wardian] OpenCode online automation failed: {}",
+                                                "[Wardian] Headless JSON agent failed: {}",
                                                 e
                                             ));
                                             node_error = Some(e);
                                         }
                                     }
+
+                                    // Restore state after headless run
+                                    if was_online {
+                                        if let Some(cfg_lock) = agent_cfg {
+                                            let (cfg, born) = {
+                                                let config_guard = cfg_lock.lock().unwrap();
+                                                // Since we don't have direct access to the ActiveAgent struct here (it's being restored),
+                                                // we'll pass None for the timestamp if it's not in the config, letting spawn_agent
+                                                // use the existing one if it finds it, or Now() if not.
+                                                // Actually, let's just pass None here as this path is for RE-SPAWNING after a headless run failure.
+                                                (config_guard.clone(), None)
+                                            };
+                                            let mut cfg = cfg;
+                                            cfg.is_off = false;
+                                            log_debug(&format!("[Wardian] Restoring agent {} to Online state after headless run", agent_id));
+                                            if let Ok(new_agent) = crate::manager::spawn_agent(
+                                                app.clone(),
+                                                cfg,
+                                                false,
+                                                born,
+                                            )
+                                            .await
+                                            {
+                                                let mut agents_map = state.agents.lock().await;
+                                                if let Some(ref tx) = new_agent.stdin_tx {
+                                                    if let Ok(mut senders) =
+                                                        state.input_senders.write()
+                                                    {
+                                                        senders.insert(
+                                                            agent_id.to_string(),
+                                                            tx.clone(),
+                                                        );
+                                                    }
+                                                }
+                                                agents_map.insert(agent_id.to_string(), new_agent);
+                                                let order = state.agent_order.lock().await;
+                                                crate::manager::save_state(
+                                                    &app,
+                                                    &agents_map,
+                                                    &order,
+                                                );
+                                                let _ = app.emit("agents-updated", ());
+                                            }
+                                        }
+                                    } else {
+                                        // Agent was already off — reset from Headless back to Off
+                                        let agents_map = state.agents.lock().await;
+                                        if let Some(agent) = agents_map.get(agent_id) {
+                                            if let Ok(mut status) = agent.current_status.lock() {
+                                                *status = "Off".to_string();
+                                            }
+                                        }
+                                        let _ = app.emit("agents-updated", ());
+                                    }
                                 } else {
-                                    if let Err(err) =
+                                    // --- PTY TEXT MODE (With Headless Fallback) ---
+                                    let state = app.state::<crate::state::AppState>();
+                                    let sender = {
+                                        let senders = state
+                                            .input_senders
+                                            .read()
+                                            .map_err(|e| e.to_string())
+                                            .unwrap();
+                                        senders.get(agent_id).cloned()
+                                    };
+
+                                    if let Some(tx) = sender {
+                                        // Agent is ONLINE: Use provider-native automation when PTY submit
+                                        // is unreliable, otherwise inject through the live terminal.
+                                        {
+                                            let agents = state.agents.lock().await;
+                                            if let Some(agent) = agents.get(agent_id) {
+                                                if let Ok(mut buf) = agent.output_buffer.lock() {
+                                                    buf.clear();
+                                                }
+                                            }
+                                        }
+
+                                        if provider_name == "opencode" {
+                                            let run_result = run_with_optional_timeout(
+                                                timeout_ms,
+                                                "Agent",
+                                                crate::manager::run_headless_with_options(
+                                                    crate::manager::HeadlessRunOptions {
+                                                        cwd: &cwd,
+                                                        prompt: &prompt,
+                                                        wardian_session_id: &exec_ctx
+                                                            .execution_session_id,
+                                                        resume_session: exec_ctx
+                                                            .resume_session
+                                                            .as_deref(),
+                                                        output_format,
+                                                        provider_name: &provider_name,
+                                                        config_override: Some(&exec_ctx.config),
+                                                    },
+                                                ),
+                                            )
+                                            .await;
+
+                                            match run_result {
+                                                Ok(data) => {
+                                                    output_payload =
+                                                        flatten_headless_response(data);
+                                                }
+                                                Err(e) => {
+                                                    log_debug(&format!(
+                                                "[Wardian] OpenCode online automation failed: {}",
+                                                e
+                                            ));
+                                                    node_error = Some(e);
+                                                }
+                                            }
+                                        } else {
+                                            if let Err(err) =
                                         crate::utils::terminal_input::submit_prompt_via_sender(
                                             &tx, &prompt, &provider_name
                                         )
@@ -2212,335 +2307,354 @@ pub async fn run_workflow(
                                         node_error = Some(err);
                                     }
 
-                                    if node_error.is_none() {
-                                    let (completion_tx, mut completion_rx) =
-                                        tokio::sync::mpsc::channel::<Value>(1);
-                                    let agent_id_clone = agent_id.to_string();
+                                            if node_error.is_none() {
+                                                let (completion_tx, mut completion_rx) =
+                                                    tokio::sync::mpsc::channel::<Value>(1);
+                                                let agent_id_clone = agent_id.to_string();
 
-                                    let handler_id =
-                                        app.listen_any("agent-turn-completed", move |event| {
-                                            if let Ok(parsed) =
-                                                serde_json::from_str::<Value>(event.payload())
-                                            {
-                                                if parsed.get("session_id").and_then(|v| v.as_str())
-                                                    == Some(&agent_id_clone)
-                                                {
-                                                    let _ = completion_tx.try_send(parsed);
+                                                let handler_id = app.listen_any(
+                                                    "agent-turn-completed",
+                                                    move |event| {
+                                                        if let Ok(parsed) =
+                                                            serde_json::from_str::<Value>(
+                                                                event.payload(),
+                                                            )
+                                                        {
+                                                            if parsed
+                                                                .get("session_id")
+                                                                .and_then(|v| v.as_str())
+                                                                == Some(&agent_id_clone)
+                                                            {
+                                                                let _ =
+                                                                    completion_tx.try_send(parsed);
+                                                            }
+                                                        }
+                                                    },
+                                                );
+
+                                                let completion = match timeout_ms {
+                                                    Some(ms) => match tokio::time::timeout(
+                                                        std::time::Duration::from_millis(ms),
+                                                        completion_rx.recv(),
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(value) => Ok(value),
+                                                        Err(_) => {
+                                                            Err(format!("Agent timeout ({}ms)", ms))
+                                                        }
+                                                    },
+                                                    None => Ok(completion_rx.recv().await),
+                                                };
+
+                                                match completion {
+                                                    Ok(_) => {
+                                                        let agents = state.agents.lock().await;
+                                                        if let Some(agent) = agents.get(agent_id) {
+                                                            if let Ok(buf) =
+                                                                agent.output_buffer.lock()
+                                                            {
+                                                                output_payload = serde_json::json!({ "text": buf.clone() });
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => node_error = Some(err),
                                                 }
-                                            }
-                                        });
-
-                                    let completion = match timeout_ms {
-                                        Some(ms) => match tokio::time::timeout(
-                                            std::time::Duration::from_millis(ms),
-                                            completion_rx.recv(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(value) => Ok(value),
-                                            Err(_) => Err(format!("Agent timeout ({}ms)", ms)),
-                                        },
-                                        None => Ok(completion_rx.recv().await),
-                                    };
-
-                                    match completion {
-                                        Ok(_) => {
-                                            let agents = state.agents.lock().await;
-                                            if let Some(agent) = agents.get(agent_id) {
-                                                if let Ok(buf) = agent.output_buffer.lock() {
-                                                    output_payload =
-                                                        serde_json::json!({ "text": buf.clone() });
-                                                }
+                                                app.unlisten(handler_id);
                                             }
                                         }
-                                        Err(err) => node_error = Some(err),
-                                    }
-                                    app.unlisten(handler_id);
-                                }
-                                }
-                            } else {
-                                // Agent is OFFLINE: Fallback to Headless Execution
-                                log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
-                                // Set Headless status for UI indicator
-                                {
-                                    let agents_map = state.agents.lock().await;
-                                    if let Some(agent) = agents_map.get(agent_id) {
-                                        if let Ok(mut status) = agent.current_status.lock() {
-                                            *status = "Headless".to_string();
-                                        }
-                                    }
-                                }
-                                let _ = app.emit("agents-updated", ());
-                                let run_result = run_with_optional_timeout(
-                                    timeout_ms,
-                                    "Agent",
-                                    crate::manager::run_headless_with_options(
-                                        crate::manager::HeadlessRunOptions {
-                                            cwd: &cwd,
-                                            prompt: &prompt,
-                                            wardian_session_id: &exec_ctx.execution_session_id,
-                                            resume_session: exec_ctx.resume_session.as_deref(),
-                                            output_format,
-                                            provider_name: &provider_name,
-                                            config_override: Some(&exec_ctx.config),
-                                        },
-                                    ),
-                                )
-                                .await;
-
-                                match run_result {
-                                    Ok(data) => {
-                                        output_payload = flatten_headless_response(data);
-                                    }
-                                    Err(e) => {
-                                        log_debug(&format!(
-                                            "[Wardian] Headless fallback failed: {}",
-                                            e
-                                        ));
-                                        node_error = Some(e);
-                                    }
-                                }
-                                // Reset from Headless back to Off
-                                {
-                                    let agents_map = state.agents.lock().await;
-                                    if let Some(agent) = agents_map.get(agent_id) {
-                                        if let Ok(mut status) = agent.current_status.lock() {
-                                            *status = "Off".to_string();
-                                        }
-                                    }
-                                }
-                                let _ = app.emit("agents-updated", ());
-                            }
-                        }
-                    }
-                    }
-                }
-                "communication" | "notify" => {
-                    log_debug(&format!(
-                        "[Wardian] Communication node {} starting",
-                        node.id
-                    ));
-                    if let Some(message) = node.config.get("message").and_then(|v| v.as_str()) {
-                        let interpolated = interpolate_string(message, &registry);
-                        log_debug(&format!("[Wardian] Sending notification: {}", interpolated));
-
-                        use tauri_plugin_notification::NotificationExt;
-                        app.notification()
-                            .builder()
-                            .title("Wardian")
-                            .body(interpolated)
-                            .show()
-                            .unwrap();
-
-                        output_payload =
-                            serde_json::json!({ "delivered": true, "type": "notification" });
-                    } else if let Some(prompt) = node.config.get("prompt").and_then(|v| v.as_str())
-                    {
-                        log_debug(&format!("[Wardian] Broadcast prompt: {}", prompt));
-                        // TODO: Implement actual broadcast to all agents
-                        output_payload =
-                            serde_json::json!({ "delivered": true, "type": "broadcast" });
-                    } else {
-                        log_debug("[Wardian] Communication node missing message or prompt");
-                        output_payload = serde_json::json!({ "delivered": false, "error": "Missing message or prompt" });
-                    }
-                }
-                "logic" => {
-                    let condition = node
-                        .config
-                        .get("condition")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let is_true = evaluate_logic(condition, &registry);
-
-                    result_ports = if is_true {
-                        vec!["on_true".to_string()]
-                    } else {
-                        vec!["on_false".to_string()]
-                    };
-                    output_payload =
-                        serde_json::json!({ "condition_met": is_true, "condition": condition });
-                    log_debug(&format!(
-                        "[Wardian] Logic node {} evaluated {} to {}",
-                        node.id, condition, is_true
-                    ));
-                }
-                "command" => {
-                    log_debug(&format!(
-                        "[Wardian] Shell Command node {} starting",
-                        node.id
-                    ));
-                    let cmd_str = node
-                        .config
-                        .get("cmd")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let interpolated_cmd = interpolate_string(cmd_str, &registry);
-                    let cwd = resolve_cwd(&node.config, "");
-                    let env = node.config.get("env");
-                    let timeout_ms = parse_optional_timeout_ms(&node.config);
-
-                    match resolve_command_node_launch(&interpolated_cmd, build_shell_command) {
-                        Ok(spec) => match run_command_headless(
-                            &spec.executable,
-                            spec.args,
-                            &cwd,
-                            env,
-                            timeout_ms,
-                        )
-                        .await
-                        {
-                            Ok(res) => {
-                                let exit_code =
-                                    res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
-                                if exit_code != 0 {
-                                    node_error = Some(format!(
-                                        "Exit code {}: {}",
-                                        exit_code,
-                                        res.get("stderr")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("Unknown error")
-                                    ));
-                                }
-                                output_payload = res;
-                            }
-                            Err(e) => node_error = Some(e),
-                        },
-                        Err(e) => node_error = Some(e),
-                    }
-                }
-                "script" => {
-                    log_debug(&format!("[Wardian] Script node {} starting", node.id));
-                    let runtime = node
-                        .config
-                        .get("runtime")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("python");
-                    let file_path_str = node
-                        .config
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let args_str = node
-                        .config
-                        .get("args")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let interpolated_args = interpolate_string(args_str, &registry);
-                    let env = node.config.get("env");
-                    let timeout_ms = parse_optional_timeout_ms(&node.config);
-                    let cwd = resolve_cwd(&node.config, "");
-
-                    if file_path_str.is_empty() {
-                        node_error = Some("Missing file_path".to_string());
-                    } else {
-                        let script_path = cwd.join(file_path_str);
-                        match validate_workspace_path(&script_path) {
-                            Ok(validated_path) => {
-                                let executable = match runtime {
-                                    "python" => "python",
-                                    "node" => "node",
-                                    "sh" => "sh",
-                                    _ => "python",
-                                };
-
-                                let mut args = vec![validated_path.to_string_lossy().to_string()];
-                                if !interpolated_args.is_empty() {
-                                    if let Some(parsed_args) = shlex::split(&interpolated_args) {
-                                        args.extend(parsed_args);
                                     } else {
-                                        // Fallback to naive split if shlex fails (unlikely)
-                                        args.extend(
-                                            interpolated_args
-                                                .split_whitespace()
-                                                .map(|s| s.to_string()),
-                                        );
-                                    }
-                                }
-
-                                match run_command_headless(executable, args, &cwd, env, timeout_ms)
-                                    .await
-                                {
-                                    Ok(res) => {
-                                        let exit_code = res
-                                            .get("exit_code")
-                                            .and_then(|v| v.as_i64())
-                                            .unwrap_or(0);
-                                        if exit_code != 0 {
-                                            node_error = Some(format!(
-                                                "Exit code {}: {}",
-                                                exit_code,
-                                                res.get("stderr")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("Unknown error")
-                                            ));
+                                        // Agent is OFFLINE: Fallback to Headless Execution
+                                        log_debug(&format!("[Wardian] Agent {} offline, falling back to headless execution with format: {}", agent_id, output_format));
+                                        // Set Headless status for UI indicator
+                                        {
+                                            let agents_map = state.agents.lock().await;
+                                            if let Some(agent) = agents_map.get(agent_id) {
+                                                if let Ok(mut status) = agent.current_status.lock()
+                                                {
+                                                    *status = "Headless".to_string();
+                                                }
+                                            }
                                         }
-                                        output_payload = res;
+                                        let _ = app.emit("agents-updated", ());
+                                        let run_result = run_with_optional_timeout(
+                                            timeout_ms,
+                                            "Agent",
+                                            crate::manager::run_headless_with_options(
+                                                crate::manager::HeadlessRunOptions {
+                                                    cwd: &cwd,
+                                                    prompt: &prompt,
+                                                    wardian_session_id: &exec_ctx
+                                                        .execution_session_id,
+                                                    resume_session: exec_ctx
+                                                        .resume_session
+                                                        .as_deref(),
+                                                    output_format,
+                                                    provider_name: &provider_name,
+                                                    config_override: Some(&exec_ctx.config),
+                                                },
+                                            ),
+                                        )
+                                        .await;
+
+                                        match run_result {
+                                            Ok(data) => {
+                                                output_payload = flatten_headless_response(data);
+                                            }
+                                            Err(e) => {
+                                                log_debug(&format!(
+                                                    "[Wardian] Headless fallback failed: {}",
+                                                    e
+                                                ));
+                                                node_error = Some(e);
+                                            }
+                                        }
+                                        // Reset from Headless back to Off
+                                        {
+                                            let agents_map = state.agents.lock().await;
+                                            if let Some(agent) = agents_map.get(agent_id) {
+                                                if let Ok(mut status) = agent.current_status.lock()
+                                                {
+                                                    *status = "Off".to_string();
+                                                }
+                                            }
+                                        }
+                                        let _ = app.emit("agents-updated", ());
                                     }
-                                    Err(e) => node_error = Some(e),
                                 }
                             }
-                            Err(e) => node_error = Some(format!("Security Violation: {}", e)),
                         }
                     }
-                }
-                "loop" => {
-                    let mode = node
-                        .config
-                        .get("mode")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("count");
-                    let max_local = node
-                        .config
-                        .get("max_iterations")
-                        .and_then(|v| v.as_str())
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(10);
+                    "communication" | "notify" => {
+                        log_debug(&format!(
+                            "[Wardian] Communication node {} starting",
+                            node.id
+                        ));
+                        if let Some(message) = node.config.get("message").and_then(|v| v.as_str()) {
+                            let interpolated = interpolate_string(message, &registry);
+                            log_debug(&format!("[Wardian] Sending notification: {}", interpolated));
 
-                    let iterator_key = node
-                        .config
-                        .get("iterator_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("i");
+                            use tauri_plugin_notification::NotificationExt;
+                            app.notification()
+                                .builder()
+                                .title("Wardian")
+                                .body(interpolated)
+                                .show()
+                                .unwrap();
 
-                    // State Namespace: nodes.[id].output.[iterator_key]
-                    let current_i = registry
-                        .get(&node.id)
-                        .and_then(|v| v.get(iterator_key))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32;
-
-                    let should_continue = if mode == "count" {
-                        current_i < max_local
-                    } else {
+                            output_payload =
+                                serde_json::json!({ "delivered": true, "type": "notification" });
+                        } else if let Some(prompt) =
+                            node.config.get("prompt").and_then(|v| v.as_str())
+                        {
+                            log_debug(&format!("[Wardian] Broadcast prompt: {}", prompt));
+                            // TODO: Implement actual broadcast to all agents
+                            output_payload =
+                                serde_json::json!({ "delivered": true, "type": "broadcast" });
+                        } else {
+                            log_debug("[Wardian] Communication node missing message or prompt");
+                            output_payload = serde_json::json!({ "delivered": false, "error": "Missing message or prompt" });
+                        }
+                    }
+                    "logic" => {
                         let condition = node
                             .config
                             .get("condition")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("false");
-                        evaluate_logic(condition, &registry)
-                    };
+                            .unwrap_or("");
+                        let is_true = evaluate_logic(condition, &registry);
 
-                    if should_continue {
-                        result_ports = vec!["body".to_string()];
-                        output_payload = serde_json::json!({ iterator_key: current_i + 1, "status": "pulsing_body" });
-                    } else {
-                        result_ports = vec!["done".to_string()];
+                        result_ports = if is_true {
+                            vec!["on_true".to_string()]
+                        } else {
+                            vec!["on_false".to_string()]
+                        };
                         output_payload =
-                            serde_json::json!({ iterator_key: 0, "status": "pulsing_done" });
+                            serde_json::json!({ "condition_met": is_true, "condition": condition });
+                        log_debug(&format!(
+                            "[Wardian] Logic node {} evaluated {} to {}",
+                            node.id, condition, is_true
+                        ));
                     }
-                    log_debug(&format!(
-                        "[Wardian] Loop node {}: i={} -> continue={}",
-                        node.id, current_i, should_continue
-                    ));
+                    "command" => {
+                        log_debug(&format!(
+                            "[Wardian] Shell Command node {} starting",
+                            node.id
+                        ));
+                        let cmd_str = node
+                            .config
+                            .get("cmd")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let interpolated_cmd = interpolate_string(cmd_str, &registry);
+                        let cwd = resolve_cwd(&node.config, "");
+                        let env = node.config.get("env");
+                        let timeout_ms = parse_optional_timeout_ms(&node.config);
+
+                        match resolve_command_node_launch(&interpolated_cmd, build_shell_command) {
+                            Ok(spec) => match run_command_headless(
+                                &spec.executable,
+                                spec.args,
+                                &cwd,
+                                env,
+                                timeout_ms,
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    let exit_code =
+                                        res.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    if exit_code != 0 {
+                                        node_error = Some(format!(
+                                            "Exit code {}: {}",
+                                            exit_code,
+                                            res.get("stderr")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("Unknown error")
+                                        ));
+                                    }
+                                    output_payload = res;
+                                }
+                                Err(e) => node_error = Some(e),
+                            },
+                            Err(e) => node_error = Some(e),
+                        }
+                    }
+                    "script" => {
+                        log_debug(&format!("[Wardian] Script node {} starting", node.id));
+                        let runtime = node
+                            .config
+                            .get("runtime")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("python");
+                        let file_path_str = node
+                            .config
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let args_str = node
+                            .config
+                            .get("args")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let interpolated_args = interpolate_string(args_str, &registry);
+                        let env = node.config.get("env");
+                        let timeout_ms = parse_optional_timeout_ms(&node.config);
+                        let cwd = resolve_cwd(&node.config, "");
+
+                        if file_path_str.is_empty() {
+                            node_error = Some("Missing file_path".to_string());
+                        } else {
+                            let script_path = cwd.join(file_path_str);
+                            match validate_workspace_path(&script_path) {
+                                Ok(validated_path) => {
+                                    let executable = match runtime {
+                                        "python" => "python",
+                                        "node" => "node",
+                                        "sh" => "sh",
+                                        _ => "python",
+                                    };
+
+                                    let mut args =
+                                        vec![validated_path.to_string_lossy().to_string()];
+                                    if !interpolated_args.is_empty() {
+                                        if let Some(parsed_args) = shlex::split(&interpolated_args)
+                                        {
+                                            args.extend(parsed_args);
+                                        } else {
+                                            // Fallback to naive split if shlex fails (unlikely)
+                                            args.extend(
+                                                interpolated_args
+                                                    .split_whitespace()
+                                                    .map(|s| s.to_string()),
+                                            );
+                                        }
+                                    }
+
+                                    match run_command_headless(
+                                        executable, args, &cwd, env, timeout_ms,
+                                    )
+                                    .await
+                                    {
+                                        Ok(res) => {
+                                            let exit_code = res
+                                                .get("exit_code")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0);
+                                            if exit_code != 0 {
+                                                node_error = Some(format!(
+                                                    "Exit code {}: {}",
+                                                    exit_code,
+                                                    res.get("stderr")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("Unknown error")
+                                                ));
+                                            }
+                                            output_payload = res;
+                                        }
+                                        Err(e) => node_error = Some(e),
+                                    }
+                                }
+                                Err(e) => node_error = Some(format!("Security Violation: {}", e)),
+                            }
+                        }
+                    }
+                    "loop" => {
+                        let mode = node
+                            .config
+                            .get("mode")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("count");
+                        let max_local = node
+                            .config
+                            .get("max_iterations")
+                            .and_then(|v| v.as_str())
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(10);
+
+                        let iterator_key = node
+                            .config
+                            .get("iterator_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("i");
+
+                        // State Namespace: nodes.[id].output.[iterator_key]
+                        let current_i = registry
+                            .get(&node.id)
+                            .and_then(|v| v.get(iterator_key))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+
+                        let should_continue = if mode == "count" {
+                            current_i < max_local
+                        } else {
+                            let condition = node
+                                .config
+                                .get("condition")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("false");
+                            evaluate_logic(condition, &registry)
+                        };
+
+                        if should_continue {
+                            result_ports = vec!["body".to_string()];
+                            output_payload = serde_json::json!({ iterator_key: current_i + 1, "status": "pulsing_body" });
+                        } else {
+                            result_ports = vec!["done".to_string()];
+                            output_payload =
+                                serde_json::json!({ iterator_key: 0, "status": "pulsing_done" });
+                        }
+                        log_debug(&format!(
+                            "[Wardian] Loop node {}: i={} -> continue={}",
+                            node.id, current_i, should_continue
+                        ));
+                    }
+                    _ => {
+                        log_debug(&format!("[Wardian] Unknown node type: {}", node.r#type));
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        output_payload = serde_json::json!({ "status": "unknown_type" });
+                    }
                 }
-                _ => {
-                    log_debug(&format!("[Wardian] Unknown node type: {}", node.r#type));
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    output_payload = serde_json::json!({ "status": "unknown_type" });
-                }
-            }
-            
             } // end if node_error.is_none()
 
             // Inject fired_ports into output for telemetry

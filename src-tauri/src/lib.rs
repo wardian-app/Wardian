@@ -12,14 +12,16 @@ use tauri::{Emitter, Manager};
 
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;
-    
+
     // Use new_all() to ensure we have process and environment data
     let mut sys = System::new_all();
     sys.refresh_all();
 
     let agents = crate::utils::db::get_all_agents()?;
     for agent in agents {
-        if agent.is_off { continue; }
+        if agent.is_off {
+            continue;
+        }
 
         let mut found_alive = false;
         for process in sys.processes().values() {
@@ -27,11 +29,17 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
                 let env_str = env_var.to_string_lossy();
                 if env_str.contains("WARDIAN_SESSION_ID=") && env_str.contains(&agent.session_id) {
                     found_alive = true;
-                    let _ = crate::utils::db::update_agent_status(&agent.session_id, "Headless", Some(process.pid().as_u32()));
+                    let _ = crate::utils::db::update_agent_status(
+                        &agent.session_id,
+                        "Headless",
+                        Some(process.pid().as_u32()),
+                    );
                     break;
                 }
             }
-            if found_alive { break; }
+            if found_alive {
+                break;
+            }
         }
 
         if !found_alive && agent.last_status.as_deref() != Some("Off") {
@@ -45,9 +53,12 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
 pub fn run() {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
         use windows::core::PCWSTR;
-        let aumid: Vec<u16> = "org.wardian.desktop".encode_utf16().chain(std::iter::once(0)).collect();
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        let aumid: Vec<u16> = "org.wardian.desktop"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         unsafe {
             let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR::from_raw(aumid.as_ptr()));
         }
@@ -92,18 +103,33 @@ pub fn run() {
                             let mut agents_map = state.agents.lock().await;
                             let mut order_map = state.agent_order.lock().await;
                             let mut seen_names = std::collections::HashSet::new();
-// Fetch latest status from DB for all agents
-let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
-type DbStatus = (Option<String>, Option<u32>, Option<String>);
-let db_status_map: std::collections::HashMap<String, DbStatus> = 
-    db_agents.into_iter().map(|a| (a.session_id, (a.last_status, a.last_pid, a.created_at))).collect();
+                            // Fetch latest status from DB for all agents
+                            let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
+                            type DbStatus = (Option<String>, Option<u32>, Option<String>);
+                            let db_status_map: std::collections::HashMap<String, DbStatus> =
+                                db_agents
+                                    .into_iter()
+                                    .map(|a| {
+                                        (a.session_id, (a.last_status, a.last_pid, a.created_at))
+                                    })
+                                    .collect();
 
                             for mut config in configs {
                                 // Sanitize name
-                                let mut sanitized_name = config.session_name.chars()
-                                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+                                let mut sanitized_name = config
+                                    .session_name
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
                                     .collect::<String>();
-                                if sanitized_name.is_empty() { sanitized_name = "agent".to_string(); }
+                                if sanitized_name.is_empty() {
+                                    sanitized_name = "agent".to_string();
+                                }
                                 let base_name = sanitized_name.clone();
                                 let mut counter = 1;
                                 while seen_names.contains(&sanitized_name) {
@@ -113,32 +139,60 @@ let db_status_map: std::collections::HashMap<String, DbStatus> =
                                 seen_names.insert(sanitized_name.clone());
                                 config.session_name = sanitized_name;
 
-                                config.system_include_directories = Some(utils::fs::resolve_system_include_directories(&config.agent_class, &config.session_id));
+                                config.system_include_directories =
+                                    Some(utils::fs::resolve_system_include_directories(
+                                        &config.agent_class,
+                                        &config.session_id,
+                                    ));
 
-                                let (last_status, last_pid, last_born) = db_status_map.get(&config.session_id).cloned().unwrap_or((None, None, None));
+                                let (last_status, last_pid, last_born) = db_status_map
+                                    .get(&config.session_id)
+                                    .cloned()
+                                    .unwrap_or((None, None, None));
 
                                 if last_status.as_deref() == Some("Headless") {
                                     let agent = crate::state::ActiveAgent {
-                                        config: std::sync::Arc::new(std::sync::Mutex::new(config.clone())),
+                                        config: std::sync::Arc::new(std::sync::Mutex::new(
+                                            config.clone(),
+                                        )),
                                         child_process: None,
                                         background_processes: Vec::new(),
                                         pty_master: None,
                                         stdin_tx: None,
-                                        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+                                        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(
+                                            String::new(),
+                                        )),
                                         process_id: last_pid,
                                         query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(last_born)),
-                                        current_status: std::sync::Arc::new(std::sync::Mutex::new("Headless".to_string())),
-                                        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
-                                        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(
+                                            last_born,
+                                        )),
+                                        current_status: std::sync::Arc::new(std::sync::Mutex::new(
+                                            "Headless".to_string(),
+                                        )),
+                                        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(
+                                            String::new(),
+                                        )),
+                                        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(
+                                            None,
+                                        )),
                                         log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                                        log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                                        log_last_modified: std::sync::Arc::new(
+                                            std::sync::Mutex::new(None),
+                                        ),
                                         #[cfg(windows)]
                                         job_object: None,
                                     };
                                     order_map.push(config.session_id.clone());
                                     agents_map.insert(config.session_id.clone(), agent);
-                                } else if let Ok(agent) = manager::spawn_agent(app_handle.clone(), config.clone(), true, last_born).await {
+                                } else if let Ok(agent) = manager::spawn_agent(
+                                    app_handle.clone(),
+                                    config.clone(),
+                                    true,
+                                    last_born,
+                                )
+                                .await
+                                {
                                     if let Some(ref tx) = agent.stdin_tx {
                                         if let Ok(mut senders) = state.input_senders.write() {
                                             senders.insert(config.session_id.clone(), tx.clone());

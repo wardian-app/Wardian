@@ -19,6 +19,16 @@ export default defineConfig(async () => ({
     },
   },
 
+  // esbuild miscompiles xterm.js 6.0.0's `requestMode` (nested `const i`
+  // shadowing the outer webpack require in the pre-minified UMD bundle),
+  // producing a runtime `ReferenceError: i is not defined` when a provider
+  // sends a DECRQM sequence (e.g. OpenCode's `CSI ? 2027 $ p` on startup,
+  // or anything that hits the parser after). Terser handles the shadowing
+  // correctly.
+  build: {
+    minify: "terser",
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

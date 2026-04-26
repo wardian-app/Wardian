@@ -33,6 +33,14 @@ const LIGHT_TERM_THEME = {
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
+function mapTerminalInputForProvider(provider: string | undefined, data: string): string {
+  if (provider === "codex" && data === "\r") {
+    return "\u001b\r";
+  }
+
+  return data;
+}
+
 type TitleHandlerRef = {
   current?: (title: string) => void;
 };
@@ -519,7 +527,10 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
-    invoke("send_input_to_agent", { sessionId, input: data }).catch(() => {});
+    invoke("send_input_to_agent", {
+      sessionId,
+      input: mapTerminalInputForProvider(entry.provider, data),
+    }).catch(() => {});
   });
 
   term.onBinary((data) => {
@@ -754,6 +765,28 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (term) {
       term.options.theme = termTheme;
       term.refresh(0, Math.max(term.rows - 1, 0));
+    }
+    const entry = terminalSessionMap.get(sessionId);
+    if (!entry) {
+      return;
+    }
+    entry.currentTheme = termTheme;
+    if (entry.provider === "opencode") {
+      const toRgbTriplet = (hex: string, fallback: string) => {
+        const cleaned = String(hex ?? "").replace("#", "");
+        return cleaned.length === 6
+          ? `${cleaned.slice(0, 2)}/${cleaned.slice(2, 4)}/${cleaned.slice(4, 6)}`
+          : fallback;
+      };
+      const background = toRgbTriplet(termTheme.background, "02/04/02");
+      const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
+      const prefersLight = termTheme === LIGHT_TERM_THEME;
+      // Push unsolicited OSC updates so OpenCode repaints against the new
+      // Wardian theme without needing to re-query.
+      queueAgentInput(sessionId, `]11;rgb:${background}\\`);
+      queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
+      queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
+      queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
     }
   }, [sessionId, termTheme]);
 

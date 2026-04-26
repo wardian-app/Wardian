@@ -198,5 +198,4 @@ mod tests {
         assert_eq!(ctx.config.session_id, "workflow-run-1-node-1");
         assert_eq!(ctx.resume_session, None);
     }
-
 }

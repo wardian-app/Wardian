@@ -7,21 +7,31 @@ interface Props {
   onReset: () => void;
 }
 
+const RESIZING_CLASS = 'sidebar-resizing';
+
 export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, edge, onResize, onReset }) => {
   const startXRef = useRef<number | null>(null);
   const baseRef = useRef<number>(baseWidth);
+  const edgeRef = useRef(edge);
+  const onResizeRef = useRef(onResize);
+
+  useEffect(() => {
+    edgeRef.current = edge;
+    onResizeRef.current = onResize;
+  }, [edge, onResize]);
 
   const onPointerMove = useCallback((e: PointerEvent) => {
     if (startXRef.current === null) return;
     const delta = e.clientX - startXRef.current;
-    const next = edge === 'right' ? baseRef.current + delta : baseRef.current - delta;
-    onResize(next);
-  }, [edge, onResize]);
+    const next = edgeRef.current === 'right' ? baseRef.current + delta : baseRef.current - delta;
+    onResizeRef.current(next);
+  }, []);
 
   const endDrag = useCallback(() => {
     startXRef.current = null;
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', endDrag);
+    document.documentElement.classList.remove(RESIZING_CLASS);
     document.body.style.userSelect = '';
     document.body.style.cursor = '';
   }, [onPointerMove]);
@@ -31,8 +41,11 @@ export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, edge, onResize
   useEffect(() => endDrag, [endDrag]);
 
   const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     startXRef.current = e.clientX;
     baseRef.current = baseWidth;
+    document.documentElement.classList.add(RESIZING_CLASS);
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
     window.addEventListener('pointermove', onPointerMove);

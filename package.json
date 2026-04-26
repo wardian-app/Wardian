@@ -53,6 +53,7 @@
     "postcss": "^8.5.6",
     "selenium-webdriver": "^4.34.0",
     "tailwindcss": "^4.2.0",
+    "terser": "^5.46.1",
     "typescript": "~5.8.3",
     "vite": "^6.0.0",
     "vitest": "^3.2.4"
