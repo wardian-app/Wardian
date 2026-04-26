@@ -113,38 +113,6 @@ jobs:
           name: e2e-results
           path: e2e/test-results/
 
-  pr-screenshots:
-    name: PR Screenshots (Windows)
-    runs-on: windows-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: "npm"
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-      - name: Install dependencies
-        run: npm install
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-      - name: Capture screenshots
-        run: npm run screenshots
-        env:
-          WARDIAN_HOME: ${{ runner.temp }}\wardian-screenshots-test
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-screenshots
-          path: e2e/screenshots/
-
   backend-linux-check:
     name: Backend (Linux - Compile Check)
     runs-on: ubuntu-latest

@@ -14,7 +14,7 @@ Fixes # (issue)
 Please describe the tests that you ran to verify your changes.
 
 ## Screenshots
-<!-- For UI/layout changes: run `npm run screenshots` and attach the CI artifact link, or embed a representative screenshot here. -->
+<!-- For UI/layout changes: embed feature-specific screenshots that demonstrate the changed interaction/state. Do not include generic empty-state screenshots. -->
 <!-- For non-UI changes: delete this section. -->
 
 ## Checklist:
@@ -25,4 +25,4 @@ Please describe the tests that you ran to verify your changes.
 - [ ] My changes generate no new warnings
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] New and existing unit tests pass locally with my changes
-- [ ] (UI changes) `npm run screenshots` artifact attached or screenshot embedded above
+- [ ] (UI changes) Feature-specific screenshot evidence embedded above, or not applicable

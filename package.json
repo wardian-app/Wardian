@@ -22,8 +22,7 @@
     "test:e2e:native": "node --test --test-concurrency=1 e2e-native/tests",
     "test:e2e:native:fast": "node scripts/run-native-e2e-fast.mjs",
     "setup:e2e:native": "node scripts/setup-native-e2e.mjs",
-    "setup:e2e:native:windows": "npm run setup:e2e:native",
-    "screenshots": "playwright test --config e2e/playwright.config.ts --project=screenshots"
+    "setup:e2e:native:windows": "npm run setup:e2e:native"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

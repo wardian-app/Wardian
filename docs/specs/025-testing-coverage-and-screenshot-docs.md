@@ -8,7 +8,7 @@
 
 Wardian's test suite has three gaps that reduce confidence in PRs and make agent contributions harder to verify:
 
-1. **No screenshot documentation**: the Playwright config only captures screenshots on failure. Agents opening PRs have no standard artifact to demonstrate what the UI looks like after their changes.
+1. **No screenshot documentation**: the Playwright config only captures screenshots on failure. Agents opening PRs need a standard way to provide useful visual evidence for the UI behavior they changed.
 2. **No coverage reporting**: there is no measure of how much of the frontend or backend is exercised by tests. The README contains no coverage badges.
 3. **Thin E2E coverage**: the five existing browser E2E specs test only the empty-state/smoke layer. No spec exercises agent lifecycle (spawn → running → idle → kill) or workflow execution, which are the most critical user-facing paths. Additionally, the boundary between what browser E2E can prove vs. what requires the native harness is not documented in a machine-readable way.
 
@@ -16,37 +16,11 @@ Wardian's test suite has three gaps that reduce confidence in PRs and make agent
 
 ### Component A — Screenshot Documentation
 
-Add a dedicated Playwright project `screenshots` that captures named PNGs of every major view and key agent states. This project is **not** part of the default test run — it is invoked explicitly before opening a PR.
+Use local, feature-specific screenshot evidence rather than a generic CI-generated app tour. Agents should drive the changed behavior with Playwright or a running local app, save only meaningful screenshots under `e2e/screenshots/<feature>/<timestamp>/`, and embed representative images directly in the PR description.
 
-**Script**: `npm run screenshots`
+Do not maintain a default screenshot command that captures empty windows or unchanged top-level views. Generic screenshots create low-signal artifacts and do not prove the PR behavior.
 
-**Output**: `e2e/screenshots/<timestamp>/` (gitignored). CI uploads the folder as a workflow artifact named `pr-screenshots` on every PR branch push.
-
-**Playwright project config** (`e2e/playwright.config.ts`):
-
-```ts
-{
-  name: "screenshots",
-  testMatch: "screenshots.spec.ts",
-  use: { screenshot: "on", video: "off" },
-}
-```
-
-**Coverage** (`e2e/tests/screenshots.spec.ts`):
-| Screenshot name | How to reach it |
-|---|---|
-| `dashboard.png` | default view on load |
-| `agent-spawn.png` | sidebar Agent Config tab |
-| `workflow-builder.png` | sidebar Workflows tab |
-| `settings.png` | sidebar Settings tab |
-| `class-manager.png` | sidebar Classes tab |
-| `explorer.png` | sidebar Explorer tab |
-| `grid-empty.png` | Grid view, no agents |
-| `agent-running.png` | Grid view after spawning mock agent (`basic` scenario) |
-| `agent-action-needed.png` | Grid view after spawning mock agent (`action_needed` scenario) |
-| `watchlist-populated.png` | right sidebar after mock agent spawned |
-
-**PR requirement** (added to AGENTS.md Pre-Commit Checklist): before opening a PR that touches UI components or layout, run `npm run screenshots` and attach the CI artifact link (or embed one representative screenshot) in the PR description.
+**PR requirement** (added to AGENTS.md Pre-Commit Checklist): for UI changes, include screenshots only when they explain the changed interaction/state. Omit screenshots for non-visual changes and avoid generic empty-state captures.
 
 ### Component B — Coverage Reporting
 
@@ -163,10 +137,10 @@ This fixture will live in `e2e/fixtures/mockAgent.ts`.
 
 ## Consequences
 
-- **Positive**: agents have a deterministic, artifact-backed way to document UI changes in PRs.
+- **Positive**: agents have a targeted, artifact-backed way to document UI changes in PRs without producing empty-state noise.
 - **Positive**: Codecov gives per-PR coverage delta without blocking merges; coverage can only improve over time.
 - **Positive**: agent-lifecycle and workflow E2E specs cover the most important user-facing paths that were entirely untested.
 - **Positive**: the `@native-only` convention makes coverage gaps explicit and machine-readable.
-- **Negative**: `npm run screenshots` requires the app to be running (either `tauri dev` or via the `webServer` in playwright config); CI must start the app first, adding ~3 min to PR pipelines.
+- **Negative**: screenshot evidence is not a uniform CI artifact; agents must intentionally capture the UI state that matters for each feature.
 - **Negative**: `cargo-llvm-cov` is a one-time developer install not managed by Cargo.toml; needs documentation and CI bootstrapping.
 - **Negative**: the mock provider fixture for agent-lifecycle specs calls `spawn_agent` IPC, which means these tests run on the browser E2E layer but depend on the Tauri backend being alive. They will not work in pure browser mode without the Tauri webview — document this limitation.

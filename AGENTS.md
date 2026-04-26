@@ -19,7 +19,7 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
    - [ ] Document strategic decisions in a new **Spec** in `docs/specs/`.
    - [ ] Update related guides in `docs/guide/` or `docs/developer/`.
    - [ ] Ensure public APIs/complex logic have appropriate JSDoc or Rust docstrings.
-   - [ ] **UI changes**: Run `npm run screenshots` and attach the output artifact link (or embed a representative screenshot) in the PR description.
+   - [ ] **UI changes**: If visual behavior changed, capture feature-specific local screenshots that demonstrate the changed interaction/state and embed the useful ones in the PR description.
 3. **Safety & Integrity**:
    - [ ] **Secrets Check**: Verify no API keys, credentials, or `.env` files are being committed.
    - [ ] **Git Status**: Run `git status` to ensure only intended files are staged.
@@ -102,7 +102,7 @@ If a browser E2E test **requires** a higher layer to be meaningful, wrap it in `
 
 ### Screenshot Documentation
 
-Run `npm run screenshots` before opening a PR that touches UI components or layout. This generates named PNGs in `e2e/screenshots/<timestamp>/` and is uploaded by CI as the `pr-screenshots` artifact. Attach the artifact link (or embed a representative screenshot) in the PR description.
+Screenshots are local, feature-specific evidence rather than a generic CI artifact. For UI changes, use Playwright or the running app to capture only the interaction/state changed by the PR, write images under `e2e/screenshots/<feature>/<timestamp>/`, and embed the representative images in the PR description. Do not add empty-window or app-tour screenshots that do not explain the change.
 
 ### Mock Provider
 

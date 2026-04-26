@@ -29,18 +29,20 @@ test.describe("Watchlist Panel", () => {
     await expect(collapseBtn).toBeVisible();
     await collapseBtn.click();
 
-    // After collapse the watchlist width becomes 0 (overflow-hidden w-0).
-    await expect(watchlist).not.toBeVisible();
+    // After collapse the roster remains mounted but is compressed to zero width.
+    await expect(watchlist).toHaveClass(/w-0/);
   });
 
   test("expand toggle restores the watchlist", async ({ page }) => {
     // Collapse first.
+    const watchlist = page.locator('[data-testid="agent-watchlist"]');
     await page.getByTitle("Hide Agent Roster").click();
-    await expect(page.locator('[data-testid="agent-watchlist"]')).not.toBeVisible();
+    await expect(watchlist).toHaveClass(/w-0/);
 
     // Expand.
     await page.getByTitle("Show Agent Roster").click();
-    await expect(page.locator('[data-testid="agent-watchlist"]')).toBeVisible();
+    await expect(watchlist).not.toHaveClass(/w-0/);
+    await expect(watchlist).toBeVisible();
   });
 
   test("search input is visible inside watchlist", async ({ page }) => {

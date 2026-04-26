@@ -26,7 +26,7 @@ This generates `coverage/rust-lcov.info` which is uploaded to Codecov in CI. The
 
 ### Playwright browsers
 
-Required for browser E2E tests (`npm run test:e2e`, `npm run screenshots`):
+Required for browser E2E tests (`npm run test:e2e`) and local feature-specific screenshot capture:
 
 ```bash
 npx playwright install --with-deps chromium
