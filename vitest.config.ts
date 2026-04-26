@@ -24,5 +24,11 @@ export default defineConfig({
     setupFiles: [path.join(workspaceRoot, "src/test/setup.ts")],
     include: ["src/**/*.test.{ts,tsx}"],
     css: false,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/test/**", "src/**/*.test.*", "src/types/**"],
+    },
   },
 });

@@ -13,6 +13,10 @@ Fixes # (issue)
 ## How Has This Been Tested?
 Please describe the tests that you ran to verify your changes.
 
+## Screenshots
+<!-- For UI/layout changes: embed feature-specific screenshots that demonstrate the changed interaction/state. Do not include generic empty-state screenshots. -->
+<!-- For non-UI changes: delete this section. -->
+
 ## Checklist:
 - [ ] My code follows the stylistic guidelines of this project
 - [ ] I have performed a self-review of my own code
@@ -21,3 +25,4 @@ Please describe the tests that you ran to verify your changes.
 - [ ] My changes generate no new warnings
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] New and existing unit tests pass locally with my changes
+- [ ] (UI changes) Feature-specific screenshot evidence embedded above, or not applicable

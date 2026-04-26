@@ -6,6 +6,9 @@
 
 **Integrated Agent Environment** — A high-performance habitat for spawning, orchestrating, and monitoring multiple autonomous AI agents.
 
+[![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend)](https://codecov.io/gh/tangemicioglu/Wardian)
+[![Backend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=backend)](https://codecov.io/gh/tangemicioglu/Wardian)
+
 [![Wardian Screenshot](public/screenshot.png)](public/screenshot.png)
 
 </div>

@@ -39,6 +39,16 @@ jobs:
       - name: Unit Tests
         if: github.event_name == 'pull_request'
         run: npm run test
+      - name: Coverage Report
+        if: github.event_name == 'pull_request'
+        run: npm run test:coverage
+      - name: Upload Frontend Coverage
+        if: github.event_name == 'pull_request'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/lcov.info
+          flags: frontend
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   backend-windows:
     name: Backend (Windows - Full Test)
@@ -60,6 +70,16 @@ jobs:
       - name: Test
         working-directory: src-tauri
         run: cargo test
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Coverage Report
+        run: npm run test:coverage:rust
+      - name: Upload Backend Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/rust-lcov.info
+          flags: backend
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   e2e-smoke:
     name: E2E Smoke Tests (Windows)

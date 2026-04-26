@@ -28,10 +28,15 @@ pub fn headless_command_spec(program: &str) -> HeadlessCommandSpec {
 
 pub fn new_headless_command(program: &str) -> tokio::process::Command {
     use tokio::process::Command;
+    use std::process::Stdio;
 
     let spec = headless_command_spec(program);
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
+
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
 
     #[cfg(target_os = "windows")]
     {
@@ -44,9 +49,15 @@ pub fn new_headless_command(program: &str) -> tokio::process::Command {
 }
 
 pub fn new_headless_std_command(program: &str) -> std::process::Command {
+    use std::process::Stdio;
+
     let spec = headless_command_spec(program);
     let mut cmd = std::process::Command::new(&spec.program);
     cmd.args(&spec.args);
+
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
 
     #[cfg(target_os = "windows")]
     {
