@@ -54,6 +54,21 @@ fn collect_related_pids(
     related_pids
 }
 
+fn collect_app_process_pids(
+    app_pid: u32,
+    excluded_roots: &[u32],
+    children_map: &HashMap<u32, Vec<u32>>,
+) -> BTreeSet<u32> {
+    let mut app_pids = collect_related_pids(Some(app_pid), &[], children_map);
+    let excluded_pids = collect_related_pids(None, excluded_roots, children_map);
+
+    for pid in excluded_pids {
+        app_pids.remove(&pid);
+    }
+
+    app_pids
+}
+
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     struct AgentSnapshot {
         session_id: String,
@@ -465,6 +480,17 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 }
 
 pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
+    let agent_roots: Vec<(String, u32)> = {
+        let agents = state.agents.lock().await;
+        agents
+            .iter()
+            .filter_map(|(session_id, agent)| {
+                agent
+                    .process_id
+                    .map(|process_id| (session_id.clone(), process_id))
+            })
+            .collect()
+    };
     let sys_metrics = state.system_metrics.clone();
     tokio::task::spawn_blocking(move || {
         // Reuse the snapshot refreshed by get_all_metrics in the telemetry loop.
@@ -482,8 +508,20 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
             }
         }
 
+        let mut excluded_roots: BTreeSet<u32> = BTreeSet::new();
+        for (session_id, process_id) in &agent_roots {
+            excluded_roots.insert(*process_id);
+            #[cfg(windows)]
+            for discovered_pid in crate::utils::process::find_wardian_session_process_roots(
+                session_id,
+                Some(*process_id),
+            ) {
+                excluded_roots.insert(discovered_pid);
+            }
+        }
+        let excluded_roots: Vec<u32> = excluded_roots.into_iter().collect();
         let related_process_ids =
-            collect_related_pids(Some(std::process::id()), &[], &children_map);
+            collect_app_process_pids(std::process::id(), &excluded_roots, &children_map);
         let mut raw_cpu = 0.0;
         let mut memory_bytes = 0_u64;
         for pid in &related_process_ids {
@@ -535,5 +573,19 @@ mod tests {
         let related = super::collect_related_pids(Some(1), &[2, 9], &children_map);
 
         assert_eq!(related, BTreeSet::from([1_u32, 2, 3, 4, 5, 9, 10]));
+    }
+
+    #[test]
+    fn app_process_pids_exclude_agent_trees_to_prevent_double_counting() {
+        let children_map = HashMap::from([
+            (1, vec![2, 3, 6]),
+            (3, vec![4, 5]),
+            (6, vec![7]),
+            (8, vec![9]),
+        ]);
+
+        let app_pids = super::collect_app_process_pids(1, &[3, 7, 8], &children_map);
+
+        assert_eq!(app_pids, BTreeSet::from([1_u32, 2, 6]));
     }
 }
