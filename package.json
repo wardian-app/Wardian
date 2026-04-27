@@ -4,6 +4,15 @@
   "version": "0.3.0",
   "type": "module",
   "description": "Integrated Agent Environment",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tangemicioglu/Wardian.git"
+  },
+  "homepage": "https://github.com/tangemicioglu/Wardian#readme",
+  "bugs": {
+    "url": "https://github.com/tangemicioglu/Wardian/issues"
+  },
   "scripts": {
     "start": "tauri dev",
     "dev": "tauri dev",
