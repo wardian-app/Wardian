@@ -25,7 +25,10 @@ pub use crate::utils::fs::*;
 pub use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 pub use crate::utils::process::new_headless_command;
 #[cfg(windows)]
-pub use crate::utils::process::{find_wardian_session_process_roots, force_kill_process_tree};
+pub use crate::utils::process::{
+    app_process_supervisor_active, assign_pid_to_job, create_kill_on_close_job,
+    find_wardian_session_process_roots, force_kill_process_tree,
+};
 pub use crate::utils::shell::build_program_launch;
 
 use crate::models::{AgentConfig, AgentEvent};
@@ -50,6 +53,39 @@ pub(crate) fn cleanup_stale_session_processes(session_id: &str, provider: &str) 
                 session_id, pid, err
             ));
         }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn cleanup_stale_persisted_session_processes() {
+    let Some(app_dir) = get_wardian_home() else {
+        return;
+    };
+    let state_path = app_dir.join("settings/state.json");
+    let Ok(data) = std::fs::read_to_string(state_path) else {
+        return;
+    };
+    let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) else {
+        return;
+    };
+
+    let db_status_map = crate::utils::db::get_all_agents()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|agent| (agent.session_id, agent.last_status))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for config in configs {
+        if config.is_off
+            || db_status_map
+                .get(&config.session_id)
+                .and_then(|status| status.as_deref())
+                == Some("Headless")
+        {
+            continue;
+        }
+
+        cleanup_stale_session_processes(&config.session_id, &config.provider);
     }
 }
 

@@ -13,12 +13,17 @@ Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface 
 - **Slave**: The application end, where the selected runtime shell hosts the provider command.
 
 ## 🛡️ Process Integrity (Windows Job Objects)
-To prevent "zombie" processes when Wardian crashes or is force-closed, the Windows implementation uses **Job Objects** via the `win32job` crate.
+To prevent orphaned provider and console-host processes when Wardian crashes or is force-closed, the Windows implementation uses **Job Objects** via the `win32job` crate.
 
-1. On startup, Wardian creates a `win32job::Job`.
+1. On startup, Wardian creates an app-lifetime `win32job::Job`.
 2. The `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` flag is enabled.
-3. Every agent spawned is "assigned" to this job object.
-4. When the Wardian process terminates, the job object is closed by the OS, which automatically kills all processes assigned to it.
+3. Wardian assigns the backend process to that job before restoring or spawning interactive agents.
+4. Provider shells, CLIs, ConPTY console hosts, and descendants inherit the job from process creation time.
+5. When the Wardian process terminates, the job object is closed by the OS, which automatically kills all processes assigned to it.
+
+Per-agent process-tree termination is still used for normal UI actions such as kill, pause, resume, and clear. Per-agent Job Objects are only a fallback if app-level supervision cannot be installed, because post-spawn assignment is inherently less reliable than inheriting the app-level job at creation time.
+
+At startup, Wardian also sweeps stale persisted interactive sessions before restoring agents. This catches process trees from older builds or from environments where Windows refused app-level job assignment. The sweep uses Wardian session command-line markers and `WARDIAN_SESSION_ID` environment markers, and skips agents that are off or database-marked as headless.
 
 ## 🔁 Spawning Lifecycle
 Spawning an agent follows a deterministic sequence in `manager::spawn_agent`:

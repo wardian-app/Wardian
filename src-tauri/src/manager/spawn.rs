@@ -8,18 +8,23 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter};
 
-use super::codex::{codex_provider_session_is_excluded, codex_log_lookup_session_id, codex_session_file_path, latest_codex_session_index_entry};
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
+use super::codex::{
+    codex_log_lookup_session_id, codex_provider_session_is_excluded, codex_session_file_path,
+    latest_codex_session_index_entry,
+};
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
 use super::{
-    apply_agent_event, apply_agent_status_event, apply_terminal_identity_env,
-    debug_preview_bytes, extract_terminal_titles,
-    finalize_interactive_spawn_args, interactive_provider_args, interactive_provider_cwd,
-    interactive_provider_launch, set_agent_status,
+    apply_agent_event, apply_agent_status_event, apply_terminal_identity_env, debug_preview_bytes,
+    extract_terminal_titles, finalize_interactive_spawn_args, interactive_provider_args,
+    interactive_provider_cwd, interactive_provider_launch, set_agent_status,
 };
 
 #[cfg(windows)]
-use super::cleanup_stale_session_processes;
+use super::{
+    app_process_supervisor_active, assign_pid_to_job, cleanup_stale_session_processes,
+    create_kill_on_close_job,
+};
 #[cfg(windows)]
 pub async fn spawn_agent(
     app: AppHandle,
@@ -179,19 +184,15 @@ pub async fn spawn_agent(
 
     #[cfg(windows)]
     let job_object = {
-        if let Ok(job) = win32job::Job::create() {
-            let mut info = job.query_extended_limit_info().unwrap_or_default();
-            info.limit_kill_on_job_close();
-            let _ = job.set_extended_limit_info(&info);
+        if app_process_supervisor_active() {
+            None
+        } else if let Ok(job) = create_kill_on_close_job("agent fallback") {
             if let Some(pid) = process_id {
-                unsafe {
-                    use winapi::um::processthreadsapi::OpenProcess;
-                    use winapi::um::winnt::{PROCESS_SET_QUOTA, PROCESS_TERMINATE};
-                    let handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-                    if !handle.is_null() {
-                        let _ = job.assign_process(handle as isize);
-                        winapi::um::handleapi::CloseHandle(handle);
-                    }
+                if let Err(err) = assign_pid_to_job(&job, pid, "agent fallback") {
+                    log_debug(&format!(
+                        "[Wardian] Failed to assign session {} PID {} to fallback job: {}",
+                        config.session_id, pid, err
+                    ));
                 }
             }
             Some(job)

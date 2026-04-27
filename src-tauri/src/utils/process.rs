@@ -1,3 +1,17 @@
+#[cfg(windows)]
+use std::sync::OnceLock;
+
+#[cfg(windows)]
+static APP_PROCESS_SUPERVISOR: OnceLock<AppProcessSupervisor> = OnceLock::new();
+#[cfg(windows)]
+static APP_PROCESS_SUPERVISOR_ERROR: OnceLock<String> = OnceLock::new();
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct AppProcessSupervisor {
+    _job: win32job::Job,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadlessCommandSpec {
     pub program: String,
@@ -27,8 +41,8 @@ pub fn headless_command_spec(program: &str) -> HeadlessCommandSpec {
 }
 
 pub fn new_headless_command(program: &str) -> tokio::process::Command {
-    use tokio::process::Command;
     use std::process::Stdio;
+    use tokio::process::Command;
 
     let spec = headless_command_spec(program);
     let mut cmd = Command::new(&spec.program);
@@ -69,6 +83,84 @@ pub fn new_headless_std_command(program: &str) -> std::process::Command {
     }
 
     cmd
+}
+
+#[cfg(windows)]
+pub fn init_app_process_supervisor() -> Result<(), String> {
+    if APP_PROCESS_SUPERVISOR.get().is_some() {
+        return Ok(());
+    }
+
+    if let Some(err) = APP_PROCESS_SUPERVISOR_ERROR.get() {
+        return Err(err.clone());
+    }
+
+    let supervisor = match create_app_process_supervisor() {
+        Ok(supervisor) => supervisor,
+        Err(err) => {
+            let _ = APP_PROCESS_SUPERVISOR_ERROR.set(err.clone());
+            return Err(err);
+        }
+    };
+
+    APP_PROCESS_SUPERVISOR
+        .set(supervisor)
+        .map_err(|_| "app process supervisor was initialized concurrently".to_string())
+}
+
+#[cfg(windows)]
+pub fn app_process_supervisor_active() -> bool {
+    APP_PROCESS_SUPERVISOR.get().is_some()
+}
+
+#[cfg(windows)]
+fn create_app_process_supervisor() -> Result<AppProcessSupervisor, String> {
+    let job = create_kill_on_close_job("app process supervisor")?;
+    job.assign_current_process().map_err(|err| {
+        format!(
+            "failed to assign Wardian process to supervisor job: {}",
+            err
+        )
+    })?;
+    Ok(AppProcessSupervisor { _job: job })
+}
+
+#[cfg(windows)]
+pub fn create_kill_on_close_job(context: &str) -> Result<win32job::Job, String> {
+    let job = win32job::Job::create()
+        .map_err(|err| format!("failed to create {} job object: {}", context, err))?;
+    let mut info = job
+        .query_extended_limit_info()
+        .map_err(|err| format!("failed to query {} job limits: {}", context, err))?;
+    info.limit_kill_on_job_close();
+    job.set_extended_limit_info(&info)
+        .map_err(|err| format!("failed to set {} kill-on-close limit: {}", context, err))?;
+    Ok(job)
+}
+
+#[cfg(windows)]
+pub fn assign_pid_to_job(job: &win32job::Job, pid: u32, context: &str) -> Result<(), String> {
+    unsafe {
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+        let handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            return Err(format!(
+                "failed to open process {} for {} job assignment",
+                pid, context
+            ));
+        }
+
+        let assign_result = job.assign_process(handle as isize).map_err(|err| {
+            format!(
+                "failed to assign process {} to {} job: {}",
+                pid, context, err
+            )
+        });
+        winapi::um::handleapi::CloseHandle(handle);
+        assign_result
+    }
 }
 
 #[cfg(windows)]
@@ -118,6 +210,21 @@ pub fn is_wardian_session_process_candidate(
 }
 
 #[cfg(windows)]
+pub fn is_wardian_session_environment_candidate(environ: &[String], session_id: &str) -> bool {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return false;
+    }
+
+    environ.iter().any(|entry| {
+        entry.split_once('=').is_some_and(|(key, value)| {
+            key.eq_ignore_ascii_case("WARDIAN_SESSION_ID")
+                && value.trim().eq_ignore_ascii_case(session_id)
+        })
+    })
+}
+
+#[cfg(windows)]
 pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<u32>) -> Vec<u32> {
     let mut sys = sysinfo::System::new_all();
     sys.refresh_all();
@@ -136,8 +243,15 @@ pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<
             .map(|part| part.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
+        let environ = process
+            .environ()
+            .iter()
+            .map(|entry| entry.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
 
-        if is_wardian_session_process_candidate(&process_name, &command_line, session_id) {
+        if is_wardian_session_environment_candidate(&environ, session_id)
+            || is_wardian_session_process_candidate(&process_name, &command_line, session_id)
+        {
             matches.push(pid_u32);
         }
     }
@@ -237,6 +351,23 @@ mod tests {
         assert!(!super::is_wardian_session_process_candidate(
             "pwsh.exe",
             "pwsh.exe -NoLogo -Command \"Write-Host 019d331a-0500-7592-969f-8f437886f42b\"",
+            "019d331a-0500-7592-969f-8f437886f42b",
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn identifies_wardian_session_environment_markers() {
+        assert!(super::is_wardian_session_environment_candidate(
+            &[
+                "PATH=C:\\Windows\\System32".to_string(),
+                "WARDIAN_SESSION_ID=019d331a-0500-7592-969f-8f437886f42b".to_string(),
+            ],
+            "019d331a-0500-7592-969f-8f437886f42b",
+        ));
+
+        assert!(!super::is_wardian_session_environment_candidate(
+            &["WARDIAN_SESSION_ID=other-session".to_string()],
             "019d331a-0500-7592-969f-8f437886f42b",
         ));
     }
