@@ -90,7 +90,9 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     let state = metrics_handle.state::<AppState>();
                     let metrics = manager::get_all_metrics(&state).await;
+                    let app_metrics = manager::get_app_metrics(&state).await;
                     let _ = metrics_handle.emit("agent-metrics", &metrics);
+                    let _ = metrics_handle.emit("app-metrics", &app_metrics);
                 }
             });
 

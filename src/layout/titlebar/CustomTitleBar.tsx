@@ -4,7 +4,7 @@ import { LeftSidebarControls } from "./LeftSidebarControls";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import type { ViewMode } from "./WorkspaceTabs";
 import { RightWindowControls } from "./RightWindowControls";
-import type { AgentTelemetry, AgentConfig } from "../../types";
+import type { AgentTelemetry, AgentConfig, AppTelemetry } from "../../types";
 
 export type { ViewMode };
 
@@ -19,6 +19,7 @@ interface CustomTitleBarProps {
   rightCollapsed: boolean;
   setRightCollapsed: (collapsed: boolean) => void;
   telemetry: Record<string, AgentTelemetry>;
+  appTelemetry: AppTelemetry;
   agents: AgentConfig[];
   offAgentIds: Set<string>;
 }
@@ -47,6 +48,7 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
         leftCollapsed={props.leftCollapsed}
         setLeftCollapsed={props.setLeftCollapsed}
         telemetry={props.telemetry}
+        appTelemetry={props.appTelemetry}
         agents={props.agents}
         offAgentIds={props.offAgentIds}
       />

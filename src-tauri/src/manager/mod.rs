@@ -19,7 +19,7 @@ pub use headless::{
 pub use opencode::opencode_extract_created_session_id;
 pub use codex::latest_codex_session_index_entry;
 pub use spawn::{resize_pty, spawn_agent};
-pub use telemetry::get_all_metrics;
+pub use telemetry::{get_all_metrics, get_app_metrics};
 
 pub use crate::utils::fs::*;
 pub use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};

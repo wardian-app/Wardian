@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate } from "../types";
+import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -114,6 +114,7 @@ function AppBody() {
   }, []);
 
   const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
+  const [appTelemetry, setAppTelemetry] = useState<AppTelemetry>({ cpu_usage: 0, memory_mb: 0 });
   const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
   const handleTitleChange = useCallback((agentId: string, title: string) => {
     setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
@@ -489,6 +490,9 @@ function AppBody() {
         return next;
       });
     });
+    const unlistenAppMetrics = listen<AppTelemetry>('app-metrics', (event) => {
+      setAppTelemetry(event.payload);
+    });
     const unlistenStatus = listen<AgentStatusUpdate>("agent-status-updated", (event) => {
       const { session_id, current_status } = event.payload;
       if (current_status === "Idle" || current_status === "Off" || current_status === "Action Needed") {
@@ -510,6 +514,7 @@ function AppBody() {
     });
     return () => {
       unlistenMetrics.then(fn => fn());
+      unlistenAppMetrics.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
   }, []);
@@ -670,6 +675,7 @@ function AppBody() {
         rightCollapsed={rightCollapsed}
         setRightCollapsed={setRightCollapsed}
         telemetry={telemetry}
+        appTelemetry={appTelemetry}
         agents={agents}
         offAgentIds={offAgentIds}
       />
