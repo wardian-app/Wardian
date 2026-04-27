@@ -14,11 +14,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - name: Rust Audit
         working-directory: src-tauri
-        run: |
-          cargo install cargo-audit
-          cargo audit
+        run: cargo audit
       - name: NPM Audit
         run: npm audit --audit-level=high
 
@@ -33,7 +35,7 @@ jobs:
           node-version: 20
           cache: "npm"
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Lint (TypeScript)
         run: npm run lint
       - name: Unit Tests
@@ -103,7 +105,7 @@ jobs:
         with:
           workspaces: src-tauri
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
       - name: Run E2E tests
@@ -120,24 +122,18 @@ jobs:
   backend-linux-check:
     name: Backend (Linux - Compile Check)
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: |
           sudo apt-get update
-              sudo apt-get install -y build-essential curl wget file
-              # GTK and glib
-              sudo apt-get install -y libglib2.0-dev pkg-config
-              sudo apt-get install -y libgtk-3-dev libgdk-pixbuf2.0-dev
-              # Webkit2GTK (for webview - required by Tauri)
-              sudo apt-get install -y libwebkit2gtk-4.1-dev
-              # Additional GTK dependencies
-              sudo apt-get install -y libsoup-3.0-dev
-              sudo apt-get install -y libjavascriptcoregtk-4.1-dev
-              # X11 and window manager libraries
-              sudo apt-get install -y libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-              # Additional required libraries
-              sudo apt-get install -y libssl-dev libxkbcommon-dev
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl wget file pkg-config \
+            libglib2.0-dev libgtk-3-dev libgdk-pixbuf2.0-dev \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libssl-dev libxkbcommon-dev
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

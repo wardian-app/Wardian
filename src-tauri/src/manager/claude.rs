@@ -172,7 +172,7 @@ mod tests {
     fn claude_permission_hook_ignores_other_transcript_sessions() {
         let event = serde_json::json!({
             "session_id": "other-session",
-            "transcript_path": "C:\\Users\\tgemi\\.claude\\projects\\D--Development-Wardian\\other-session.jsonl",
+            "transcript_path": "/tmp/claude-projects/wardian/other-session.jsonl",
             "tool_name": "Bash"
         });
 
@@ -186,7 +186,7 @@ mod tests {
     fn claude_permission_hook_accepts_matching_transcript_session() {
         let event = serde_json::json!({
             "session_id": "expected-session",
-            "transcript_path": "C:\\Users\\tgemi\\.claude\\projects\\D--Development-Wardian\\expected-session.jsonl",
+            "transcript_path": "/tmp/claude-projects/wardian/expected-session.jsonl",
             "tool_name": "Bash"
         });
 

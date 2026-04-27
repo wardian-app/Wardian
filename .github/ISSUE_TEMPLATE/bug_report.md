@@ -25,7 +25,7 @@ If applicable, add screenshots or terminal logs to help explain your problem.
 
 **Environment (please complete the following information):**
  - OS: [e.g. Windows 11, macOS]
- - Provider(s): [e.g. Gemini CLI, Claude Code, OpenClaw]
+ - Provider(s): [e.g. Gemini CLI, Claude Code, Codex, OpenCode]
  - Provider Version: [e.g. 1.5.0]
  - Wardian Version: [e.g. 0.2.1]
 

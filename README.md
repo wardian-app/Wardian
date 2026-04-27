@@ -4,18 +4,20 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**Integrated Agent Environment** — A high-performance habitat for spawning, orchestrating, and monitoring multiple autonomous AI agents.
+**Local command center for multi-agent CLI workflows** — see every session, swap skills on the fly, and chain agents into deterministic pipelines.
 
 [![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend)](https://codecov.io/gh/tangemicioglu/Wardian)
 [![Backend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=backend)](https://codecov.io/gh/tangemicioglu/Wardian)
 
-[![Wardian Screenshot](public/screenshot.png)](public/screenshot.png)
+[![Wardian Demo](public/demo.gif)](public/demo.gif)
 
 </div>
 
 ---
 
-Wardian is a governance layer for AI orchestration. It centralizes PTY management, telemetry, and shared context into a unified Command Center, designed for developers who need to manage multiple long-running agent sessions across multiple projects.
+> 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/tangemicioglu/Wardian/issues) when something breaks.
+
+Wardian is an **Integrated Agent Environment** — a desktop governance layer for AI orchestration. It centralizes PTY management, telemetry, and shared context into a unified Command Center, designed for developers who need to manage multiple long-running agent sessions across multiple projects.
 
 ---
 
@@ -80,7 +82,6 @@ Wardian abstracts the differences between varied agent runtimes into a unified i
 | **Claude Code** | ✅ Stable  | Custom permission hooks; explicit session ID management. |
 | **Codex**       | 🧪 Beta    | Habitat-based state migration; bootstrap isolation.      |
 | **OpenCode**    | 🧪 Beta    | Real-workspace runtime config injection.                |
-| **OpenClaw**    | 📅 Planned | TBD.                                                     |
 
 > See [Provider Runtime Notes](docs/providers.md) for a deep dive into provider-specific discovery and lifecycle management.
 

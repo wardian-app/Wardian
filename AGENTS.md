@@ -84,7 +84,7 @@ Wardian has multiple test layers. Before marking a task as complete, run the app
    - Generated native driver artifacts live under `tools/e2e-native/` and are intentionally ignored by git.
 5. **Real Provider E2E**: run only when a change specifically depends on provider-specific native behavior and the native runtime harness is available.
    - Keep these runs isolated and opt-in.
-   - Example: ``$env:WARDIAN_E2E_REAL_OPENCODE='1'; $env:WARDIAN_E2E_REAL_WORKSPACE='D:\Development\Wardian'; npm run test:e2e:native``
+   - Example (PowerShell): ``$env:WARDIAN_E2E_REAL_OPENCODE='1'; $env:WARDIAN_E2E_REAL_WORKSPACE='<absolute path to your Wardian checkout>'; npm run test:e2e:native``
 
 ### E2E Layer Boundary Rules
 
