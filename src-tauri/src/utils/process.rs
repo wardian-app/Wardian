@@ -226,7 +226,7 @@ mod tests {
 
         assert!(super::is_wardian_session_process_candidate(
             "cmd.exe",
-            "\"C:\\Windows\\system32\\cmd.exe\" /d /c \"call gemini.cmd --include-directories C:\\Users\\tgemi\\.wardian\\common --session 019d331a-0500-7592-969f-8f437886f42b\"",
+            "\"C:\\Windows\\system32\\cmd.exe\" /d /c \"call gemini.cmd --include-directories C:\\Users\\testuser\\.wardian\\common --session 019d331a-0500-7592-969f-8f437886f42b\"",
             "019d331a-0500-7592-969f-8f437886f42b",
         ));
     }

@@ -87,7 +87,7 @@ describe("terminal capability broker", () => {
     const claudeResizeFrame =
       "\u001b[?2026h\u001b[38;2;215;119;87m\u001b[H ▐\u001b[48;2;0;0;0m▛███▜\u001b[49m▌   \u001b[m\u001b[1mClaude\u001b[22m \u001b[1mCode\u001b[22m \u001b[38;2;102;102;102mv2.1.101\u001b[K\r\n" +
       "▝▜\u001b[48;2;0;0;0m█████\u001b[49m▛▘  Sonnet 4.6 · Claude Pro\u001b[K\r\n" +
-      "  ▘▘ ▝▝    C:\\Users\\tgemi\u001b[K\u001b[?2026l";
+      "  ▘▘ ▝▝    C:\\Users\\testuser\u001b[K\u001b[?2026l";
 
     normalizeOpenCodeOutput(claudeResizeFrame, "claude", state);
 
@@ -100,20 +100,20 @@ describe("terminal capability broker", () => {
     const existingLines = [
       " ▐▛███▜▌   Claude Code v2.1.101",
       "▝▜█████▛▘  Sonnet 4.6 · Claude Pro",
-      "  ▘▘ ▝▝    C:\\Users\\tgemi",
+      "  ▘▘ ▝▝    C:\\Users\\testuser",
       "● 1. LINE-1",
       ...Array.from({ length: 70 }, (_, index) => `  ${index + 1}. LINE-${index + 1}`),
       "❯",
-      "tgemi | Sonnet 4.6 | 460 tok | ctx:9%",
+      "testuser | Sonnet 4.6 | 460 tok | ctx:9%",
     ];
     const duplicateRedraw =
       "\u001b[?2026h\u001b[H ▐▛███▜▌   Claude Code v2.1.101\u001b[K\r\n" +
       "▝▜█████▛▘  Sonnet 4.6 · Claude Pro\u001b[K\r\n" +
-      "  ▘▘ ▝▝    C:\\Users\\tgemi\u001b[K\r\n" +
+      "  ▘▘ ▝▝    C:\\Users\\testuser\u001b[K\r\n" +
       "● 1. LINE-1\u001b[K\r\n" +
       Array.from({ length: 70 }, (_, index) => `  ${index + 1}. LINE-${index + 1}\u001b[K`).join("\r\n") +
       "\r\n❯\u001b[K\r\n" +
-      "tgemi | Sonnet 4.6 | 460 tok | ctx:9%\u001b[K\u001b[?2026l";
+      "testuser | Sonnet 4.6 | 460 tok | ctx:9%\u001b[K\u001b[?2026l";
 
     expect(shouldSuppressDuplicateResizeRedraw(duplicateRedraw, existingLines)).toBe(true);
   });
