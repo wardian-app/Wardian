@@ -17,6 +17,9 @@ use crate::utils::logging::log_debug;
 
 #[cfg(windows)]
 use super::quote_cmd_arg;
+#[cfg(target_os = "macos")]
+use super::macos_extended_path;
+
 pub(crate) fn headless_provider_launch(
     provider_name: &str,
     bin: &str,
