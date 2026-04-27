@@ -70,6 +70,11 @@ pub fn run() {
         eprintln!("Failed to initialize database: {}", e);
     }
 
+    #[cfg(windows)]
+    if let Err(e) = crate::utils::process::init_app_process_supervisor() {
+        eprintln!("Failed to initialize process supervisor: {}", e);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -91,6 +96,9 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+                #[cfg(windows)]
+                manager::cleanup_stale_persisted_session_processes();
+
                 if let Err(e) = reconcile_headless_agents().await {
                     eprintln!("Failed to reconcile headless agents: {}", e);
                 }
