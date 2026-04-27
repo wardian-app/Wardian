@@ -393,6 +393,17 @@ export default function AgentWatchlist({
     onReorderAgents(newOrder);
   };
 
+  const insertAgentInsideTeam = (draggedAgentId: string, teamId: string) => {
+    const team = teams.find((candidate) => candidate.id === teamId);
+    if (!team) return;
+    const newOrder = agents.map((agent) => agent.session_id).filter((id) => id !== draggedAgentId);
+    const indexes = team.agentIds.map((id) => newOrder.indexOf(id)).filter((index) => index !== -1);
+    if (indexes.length === 0) return;
+    newOrder.splice(Math.max(...indexes) + 1, 0, draggedAgentId);
+    if (newOrder.every((id, index) => id === agents[index]?.session_id)) return;
+    onReorderAgents(newOrder);
+  };
+
   const updateActiveEntries = async (nextEntries: ReturnType<typeof getWatchlistEntries>) => {
     if (!activeList) return;
     await persistWatchlists(watchlists.map((list) =>
@@ -473,6 +484,7 @@ export default function AgentWatchlist({
       const sourceTeam = targetTeamForAgent(draggedAgentId);
       if (target.type === "team" && target.position === "inside") {
         if (!sourceTeam || sourceTeam.id !== target.teamId) {
+          if (activeListId === "all") insertAgentInsideTeam(draggedAgentId, target.teamId);
           onAddAgentToTeam?.(target.teamId, draggedAgentId);
           wasDragging.current = true;
         }
