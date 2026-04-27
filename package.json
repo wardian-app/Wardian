@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.3.0",
   "type": "module",
-  "description": "Integrated Agent Environment",
+  "description": "Local command center for multi-agent CLI workflows — see every session, swap skills on the fly, and chain agents into deterministic pipelines.",
   "license": "MIT",
   "repository": {
     "type": "git",
