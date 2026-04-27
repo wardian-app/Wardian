@@ -4,6 +4,79 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.4.0](https://github.com/tangemicioglu/Wardian/compare/v0.3.0...v0.4.0) (2026-04-27)
+
+
+### Features
+
+* **agents:** implement unique identity and SQLite status tracking ([0ffc996](https://github.com/tangemicioglu/Wardian/commit/0ffc996d7ba1474bd58cd2231ebd941a6c42f2fd))
+* **agents:** robust identity rotation and non-destructive clear ([f962f69](https://github.com/tangemicioglu/Wardian/commit/f962f6937f369511934b84f218ff85c29637c078))
+* **grid:** honor gridStacked mode with exit button ([9e7d37f](https://github.com/tangemicioglu/Wardian/commit/9e7d37f114d810541717852e10777725b96e6f3c))
+* **grid:** live multi-column preview during stack-exit drag ([09c4a9c](https://github.com/tangemicioglu/Wardian/commit/09c4a9c2b0a58aae6bf8edf0e31a89e8bd67a07e))
+* **grid:** trigger stacked mode when drag snaps to full width ([eba167f](https://github.com/tangemicioglu/Wardian/commit/eba167f5e2c4c17b170870d06a4fdef549ce7a03))
+* **layout:** add SidebarResizeHandle component ([6ad2433](https://github.com/tangemicioglu/Wardian/commit/6ad24336da98968ed7d76130ee23d7d16258ebbd))
+* **layout:** extend useLayoutStore with sidebar widths and gridStacked ([bf008a3](https://github.com/tangemicioglu/Wardian/commit/bf008a35ffb51693c8d7e113e33a04d76c300574))
+* **layout:** make left sidebar resizable ([976bd24](https://github.com/tangemicioglu/Wardian/commit/976bd2463282a4866c91830d59d10389e47e233e))
+* **layout:** make right sidebar (AgentWatchlist) resizable ([d49bdd0](https://github.com/tangemicioglu/Wardian/commit/d49bdd04eddf46f7e9264334250e83f846bad589))
+* **layout:** wire useLayoutStore sidebar widths to CSS variables ([2764e7c](https://github.com/tangemicioglu/Wardian/commit/2764e7cde147650614be90d7eb335e50a3ad7b46))
+* **testing:** implement Spec 025 — coverage reporting and screenshot docs ([3cd331b](https://github.com/tangemicioglu/Wardian/commit/3cd331ba350911d3e0ec6048d8397a08f4308124))
+* **watchlist:** flatten sorted team members ([10cd057](https://github.com/tangemicioglu/Wardian/commit/10cd057fae361770073941e5c47e38edb6a1b41a))
+
+
+### Bug Fixes
+
+* address PR review feedback ([4e61ea6](https://github.com/tangemicioglu/Wardian/commit/4e61ea6dd44be9fe59c3c7d5e9f3e7d1ed9e8d5d))
+* **agents:** Build freeze ([841cb69](https://github.com/tangemicioglu/Wardian/commit/841cb6938d1e37e0ee6136fc3a6fd2f86c9d189c))
+* **build:** switch Vite minifier to terser to unbreak xterm.js in release ([4b10d0b](https://github.com/tangemicioglu/Wardian/commit/4b10d0b6df42a9b066e175f4f6c2bd1fd7693a61))
+* **ci/security/docs:** CI coverage install, security patches, Linux stable ([70cc008](https://github.com/tangemicioglu/Wardian/commit/70cc00814b4715d00a92b60c0cec99322e96fc9f))
+* **ci:** unblock coverage install and linux check ([2b1fb24](https://github.com/tangemicioglu/Wardian/commit/2b1fb2406b3a45a5ee045c77014095fc948262bb))
+* **ci:** unblock coverage install and linux check ([2d99094](https://github.com/tangemicioglu/Wardian/commit/2d990941efe1aa537344cd56a9b6aa05da248b33))
+* **claude:** prevent stuck 'Processing' status by recognizing result events ([4b8be7c](https://github.com/tangemicioglu/Wardian/commit/4b8be7cdf79b59b35869019bbd6215dd2213a78e))
+* **codex:** resolve provider session identity mismatch and state recovery ([d45b36d](https://github.com/tangemicioglu/Wardian/commit/d45b36dab96613d8650a2c8cfbf932a94cca859c))
+* **deps:** explicitly add @testing-library/dom peer dep to unblock unit tests ([9b16a22](https://github.com/tangemicioglu/Wardian/commit/9b16a221f56fa1159771b05e594ac8047dbd37b4))
+* **dev:** prevent stale Vite module caching ([fc93e47](https://github.com/tangemicioglu/Wardian/commit/fc93e4711e1230a8214dff861d3a985c1bfb221f))
+* **e2e:** remove generic screenshot workflow ([0fa7004](https://github.com/tangemicioglu/Wardian/commit/0fa70044ccbc034c673f61c7e883b252172d4f39))
+* **e2e:** resolve screenshots path in ESM ([e224ab6](https://github.com/tangemicioglu/Wardian/commit/e224ab6946df75890180e9dc7e8e84e41b1d7e0e))
+* **fs:** minor explorer open hotfix ([90c1487](https://github.com/tangemicioglu/Wardian/commit/90c1487a95a4b869d17bf60952be99f2a9b49cc6))
+* **gemini/codex:** session identity, state recovery, and status tracking ([bd6bbbd](https://github.com/tangemicioglu/Wardian/commit/bd6bbbd7691d8c1da68b6d1fc7a92ae9ae9e0af4))
+* **gemini:** bootstrap fresh session on clear and fix Processing status ([ff93df8](https://github.com/tangemicioglu/Wardian/commit/ff93df8d79f26ec3934ff0fc32f7d29da999b090))
+* **gemini:** resolve session clear and action needed state synchronization ([24a4bae](https://github.com/tangemicioglu/Wardian/commit/24a4bae52dd40f52f50e1a8544cc22cf8d2fe58c))
+* **gemini:** resolve session ID mismatch and state recovery ([89b79d5](https://github.com/tangemicioglu/Wardian/commit/89b79d568fbd7428b5c863459670d12d67074c1e))
+* **gemini:** resolve session identity tracking and action needed detection ([00f75a6](https://github.com/tangemicioglu/Wardian/commit/00f75a68a0930313d45586b65620255cdaaba9f5))
+* **grid:** correct maximized layout, add background menu, and fix scroll whitespace ([d053424](https://github.com/tangemicioglu/Wardian/commit/d053424aae59404e3f96c9bdfbce2a6d83b596b8))
+* **grid:** switch maximized agent from watchlist ([5c75bf2](https://github.com/tangemicioglu/Wardian/commit/5c75bf2c05fe5e8ec48b145ffd143eb0c003ec56))
+* **layout:** address PR [#130](https://github.com/tangemicioglu/Wardian/issues/130) review comments ([39c9f08](https://github.com/tangemicioglu/Wardian/commit/39c9f08cc03a10927b84aa0c0b4b59f0a3e5494f))
+* **layout:** resizable sidebars and forced stacked grid mode ([d5c1354](https://github.com/tangemicioglu/Wardian/commit/d5c1354518012abdf94cb6a138e3b1b7724dfcb0))
+* **opencode:** prefer native windows binaries over shims ([ae239a1](https://github.com/tangemicioglu/Wardian/commit/ae239a1fdec043fb27452757f54c189879eb84fe))
+* **opencode:** preserve saved theme in runtime config ([f0f6f09](https://github.com/tangemicioglu/Wardian/commit/f0f6f09ceea21ae12535420154ac363de6c2eb41))
+* **opencode:** sync theme and status telemetry ([8958876](https://github.com/tangemicioglu/Wardian/commit/8958876dd276ac578ec61df67343337fb5ce3a08))
+* **opencode:** wrap Windows shim launches ([87792b7](https://github.com/tangemicioglu/Wardian/commit/87792b79db647aa75828354bf9d5a2c0d00b67ff))
+* resolve clippy warnings and terminal reset UX ([8c4ab67](https://github.com/tangemicioglu/Wardian/commit/8c4ab679ff39ad258c852156ab95968828931b00))
+* robust agent identity, SQLite status tracking, and state recovery ([a5c3500](https://github.com/tangemicioglu/Wardian/commit/a5c35004a32993ffc3c68012f6fce0071d4c41f3))
+* **runtime:** supervise Windows agent process trees ([12d8af3](https://github.com/tangemicioglu/Wardian/commit/12d8af3fbd9facc100bd4583df8bca11a2269744))
+* **runtime:** supervise Windows agent process trees ([b1a27c5](https://github.com/tangemicioglu/Wardian/commit/b1a27c58f4a09c4cce65031d39632ae5d01c3244))
+* **security:** patch postcss XSS and rand unsoundness (Dependabot [#3](https://github.com/tangemicioglu/Wardian/issues/3), [#4](https://github.com/tangemicioglu/Wardian/issues/4), [#5](https://github.com/tangemicioglu/Wardian/issues/5)) ([3aa85ae](https://github.com/tangemicioglu/Wardian/commit/3aa85aeb6c2d41257d4a4cb5f3b4b00fb01f87e3))
+* **terminal:** propagate Wardian theme changes to OpenCode ([df47f5d](https://github.com/tangemicioglu/Wardian/commit/df47f5db75dc9f9734c66b29ce25df141b13d3c4))
+* **terminal:** restore Codex enter submission ([c8f322c](https://github.com/tangemicioglu/Wardian/commit/c8f322cc1495f37c1d5e95d61495e539ef4d5a03))
+* **terminal:** translate codex enter into ESC+CR submit chord ([9264d80](https://github.com/tangemicioglu/Wardian/commit/9264d80a3d3990c21e4b7cf79cc1f1291cc2a7ac))
+* **watchlist:** keep team drops aligned in grid ([c4e1cac](https://github.com/tangemicioglu/Wardian/commit/c4e1cace94a8cbe8e133cb456ffd7069c90a2c5f))
+* **watchlist:** use one confirm for bulk delete ([2faaa6e](https://github.com/tangemicioglu/Wardian/commit/2faaa6e16a1b278b9b0470c4d20f28f3a93fd503))
+* **workflows:** surface failures and optionalize timeouts ([f73065b](https://github.com/tangemicioglu/Wardian/commit/f73065baae0ed3b4232c017e13eed40a74c57288))
+* **workflows:** use local timezone for scheduled trigger timestamps ([30d8092](https://github.com/tangemicioglu/Wardian/commit/30d809247a555ce18ccdbabbd9576619485bba6d))
+
+
+### Documentation
+
+* create implementation plan for provider status and resume alignment ([0b99495](https://github.com/tangemicioglu/Wardian/commit/0b99495a32092e97aea96584c470a562bba5b955))
+* **plans:** add implementation plan for responsive terminal width ([ada005c](https://github.com/tangemicioglu/Wardian/commit/ada005c1f47e1ea60f0c309ceb1ff56c6abf6fab))
+* promote Linux to stable support ([9fecd9c](https://github.com/tangemicioglu/Wardian/commit/9fecd9c084fffc20ed1f72e877ec3d040e5a8481))
+* **readme:** restructure intro, add demo gif and early-development notice ([b4e24fa](https://github.com/tangemicioglu/Wardian/commit/b4e24fab2713ada3af82807fa17210065bd450bb))
+* record bulk delete and opencode windows behavior ([9945c27](https://github.com/tangemicioglu/Wardian/commit/9945c272a1df2b587600216f77203710c65c754c))
+* replace personal absolute path in real-provider e2e example ([efacbcb](https://github.com/tangemicioglu/Wardian/commit/efacbcb5b55f61d5f0417ba1379432de2a23ea1e))
+* **specs:** add 022 responsive terminal width design ([c9be3ea](https://github.com/tangemicioglu/Wardian/commit/c9be3ea0192a9bcbb9eea7e8b33ee4f5d2039915))
+* **specs:** add spec 024 for wardian CLI and agent command ([ad217c1](https://github.com/tangemicioglu/Wardian/commit/ad217c1a1a68f4ab1929473943c35d152b369999))
+* **specs:** correct 022 to extend existing useLayoutStore ([f2129f4](https://github.com/tangemicioglu/Wardian/commit/f2129f43cdaec94ea7cb62c8ebcfcb27b2d52166))
+
 ## [0.3.0](https://github.com/tangemicioglu/Wardian/compare/v0.2.1...v0.3.0) (2026-04-20)
 
 
