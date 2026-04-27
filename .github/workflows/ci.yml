@@ -54,7 +54,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   backend-windows:
-    name: Backend (Windows - Full Test)
+    name: Backend (Windows - Lint & Test)
     runs-on: windows-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -67,25 +67,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy -- -D warnings
-      - name: Test with Coverage
+      - name: Test
         working-directory: src-tauri
-        run: |
-          mkdir -p ../coverage
-          cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info
-      - name: Upload Backend Coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/rust-lcov.info
-          flags: backend
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+        run: cargo test
 
   e2e-smoke:
     name: E2E Smoke Tests (Windows)
@@ -119,8 +106,8 @@ jobs:
           name: e2e-results
           path: e2e/test-results/
 
-  backend-linux-check:
-    name: Backend (Linux - Compile Check)
+  backend-linux-coverage:
+    name: Backend (Linux - Test & Coverage)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -137,10 +124,25 @@ jobs:
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Check Compilation
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Test with Coverage
         working-directory: src-tauri
-        run: cargo check
+        run: |
+          mkdir -p ../coverage
+          cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info
+      - name: Upload Backend Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/rust-lcov.info
+          flags: backend
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
