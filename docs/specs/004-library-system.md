@@ -25,14 +25,16 @@ Wardian requires a centralized, high-efficiency repository for managing reusable
      - **Classes**: Global agent type definitions (relocated from the sidebar for a more spacious management experience).
    - **Injection Hub**: The **Command Sidebar Tab** (`CommandPanel.tsx`) dynamically displays "Quick Prompts" (starred) for immediate injection into the focused terminal.
 
-4. **Skill Deployment Model (Direct Copying)**:
-   - To ensure strict agent isolation and avoid "bleedover" between sessions, skills are **physically copied** (recursively) from the Library to the target entity's `.agents/skills/` directory upon assignment.
+4. **Skill Deployment Model (Live Links with Copy Fallback)**:
+   - To keep provider skills current without manual redeployment, skills are deployed as **live directory links** from the Library to the target entity's `.agents/skills/` directory.
+   - Windows uses junction points (`mklink /J`) so standard users can link directories without elevation. Unix platforms use standard directory symlinks.
+   - If link creation fails, the backend falls back to the previous recursive copy behavior so skill assignment remains robust.
    - Target Scopes:
      - **All Agents (Global User Profile)**: `~/.wardian/common/.agents/skills/`
      - **Agent Class**: `~/.wardian/classes/[class_name]/.agents/skills/`
      - **Active Agent**: `~/.wardian/agents/[session_id]/.agents/skills/`
-   - **Precedence**: This ensures that an agent spawned from a class "inherits" its own local, immutable snapshot of that skill.
-   - **Updates**: Updating a skill in the Library will _not_ automatically update running agents; a deliberate "Deploy" action via the `AssignSkillModal` is required to refresh an agent's or class's skill set.
+   - **Precedence**: The physical target paths remain the provider-facing source of truth, while live links keep their contents synchronized with the Library.
+   - **Updates**: Updating a skill in the Library automatically updates every linked user, class, or agent skill deployment. Deploy actions still create or refresh the target path, but are no longer required for ordinary content edits.
 
 5. **Technical Implementation**:
    - New Tauri command `inject_session_input(session_id: String, text: String)` writes flattened text directly to the process stdin.

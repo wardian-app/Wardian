@@ -14,10 +14,10 @@ Prompts are reusable text injections that you can send directly to an agent's te
 
 ### 2. Skills
 
-Skills are modular capabilities (extensions) that can be physically deployed to your agents or classes.
+Skills are modular capabilities (extensions) that can be deployed to your agents or classes.
 
-- **Physical Deployment**: Unlike a simple configuration toggle, skills in Wardian use **Windows Junction Points** (or Symlinks on Unix).
-- **Live Sync**: When you edit a skill's source code in the Library, every agent or class that has that skill "Linked" will receive the update instantly.
+- **Physical Deployment**: Unlike a simple configuration toggle, skills in Wardian use **Windows Junction Points** or Unix symlinks. If link creation fails, Wardian falls back to a recursive copy.
+- **Live Sync**: When you edit a skill's source code in the Library, every agent or class that has that skill linked will receive the update instantly unless that deployment used the fallback copy path.
 - **Target Scopes**:
   - **Global**: Deploys the skill to all agents.
   - **Class**: Deploys the skill to a specific blueprint (e.g., all future `Coder` agents).

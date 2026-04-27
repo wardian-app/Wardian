@@ -308,15 +308,90 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
     Ok(())
 }
 
-#[tauri::command]
-pub async fn deploy_skill(
-    _app: AppHandle,
-    source_path: String,
-    target_type: String,
-    target_id: String,
+fn remove_existing_deployment(path: &Path) -> std::io::Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+
+    if metadata.file_type().is_symlink() {
+        #[cfg(target_os = "windows")]
+        {
+            return fs::remove_dir(path).or_else(|_| fs::remove_file(path));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            return fs::remove_file(path);
+        }
+    }
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn link_skill_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let src = src.canonicalize()?;
+    let dst = match (dst.parent(), dst.file_name()) {
+        (Some(parent), Some(file_name)) => parent.canonicalize()?.join(file_name),
+        _ => dst.to_path_buf(),
+    };
+
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&dst)
+        .arg(&src)
+        .output()?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(std::io::Error::other(format!(
+            "mklink /J failed: {}{}",
+            stdout, stderr
+        )))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn link_skill_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+fn deploy_skill_dir_with_linker<F>(src_dir: &Path, dst_dir: &Path, linker: F) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    remove_existing_deployment(dst_dir)?;
+
+    if let Some(parent) = dst_dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match linker(src_dir, dst_dir) {
+        Ok(()) => Ok(()),
+        Err(link_error) => {
+            log_debug(&format!(
+                "[Wardian] Failed to link skill {:?} to {:?}; falling back to copy: {}",
+                src_dir, dst_dir, link_error
+            ));
+            copy_dir_all(src_dir, dst_dir)
+        }
+    }
+}
+
+fn deploy_skill_from_library(
+    source_path: &str,
+    target_type: &str,
+    target_id: &str,
 ) -> Result<(), String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let src_dir = home.join(LIBRARY_SKILLS_DIR).join(&source_path);
+    let src_dir = home.join(LIBRARY_SKILLS_DIR).join(source_path);
 
     if !src_dir.exists() || !src_dir.is_dir() {
         return Err(format!(
@@ -325,21 +400,21 @@ pub async fn deploy_skill(
         ));
     }
 
-    let target_skills_dir = get_target_skills_dir(&target_type, &target_id)?;
-    if !target_skills_dir.exists() {
-        fs::create_dir_all(&target_skills_dir).map_err(|e| e.to_string())?;
-    }
-
-    let skill_name = Path::new(&source_path).file_name().unwrap_or_default();
+    let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
+    let skill_name = Path::new(source_path).file_name().unwrap_or_default();
     let dst_dir = target_skills_dir.join(skill_name);
 
-    if dst_dir.exists() {
-        fs::remove_dir_all(&dst_dir).map_err(|e| e.to_string())?;
-    }
+    deploy_skill_dir_with_linker(&src_dir, &dst_dir, link_skill_dir).map_err(|e| e.to_string())
+}
 
-    copy_dir_all(&src_dir, &dst_dir).map_err(|e| e.to_string())?;
-
-    Ok(())
+#[tauri::command]
+pub async fn deploy_skill(
+    _app: AppHandle,
+    source_path: String,
+    target_type: String,
+    target_id: String,
+) -> Result<(), String> {
+    deploy_skill_from_library(&source_path, &target_type, &target_id)
 }
 
 #[tauri::command]
@@ -455,4 +530,80 @@ pub async fn list_skill_deployments(
     }
 
     Ok(deployments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct WardianHomeGuard;
+
+    impl Drop for WardianHomeGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("WARDIAN_HOME") };
+        }
+    }
+
+    #[test]
+    fn deploy_skill_uses_live_link_for_agent_targets() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _env_guard = WardianHomeGuard;
+
+        let source_dir = temp.path().join("library").join("skills").join("planner");
+        fs::create_dir_all(&source_dir).expect("source skill dir");
+        fs::write(source_dir.join("SKILL.md"), "original").expect("source skill");
+
+        deploy_skill_from_library("planner", "agent", "agent-1").expect("deploy skill");
+
+        fs::write(source_dir.join("SKILL.md"), "updated").expect("update source skill");
+        let deployed_skill = temp
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join(".agents")
+            .join("skills")
+            .join("planner")
+            .join("SKILL.md");
+
+        let debug_log =
+            fs::read_to_string(temp.path().join("wardian_debug.log")).unwrap_or_default();
+        assert_eq!(
+            fs::read_to_string(deployed_skill).expect("deployed skill content"),
+            "updated",
+            "expected live-linked skill content; debug log:\n{}",
+            debug_log
+        );
+    }
+
+    #[test]
+    fn deploy_skill_copies_directory_when_link_creation_fails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_dir = temp.path().join("source");
+        let target_dir = temp.path().join("target");
+        fs::create_dir_all(source_dir.join("nested")).expect("source dirs");
+        fs::write(source_dir.join("SKILL.md"), "fallback").expect("source skill");
+        fs::write(source_dir.join("nested").join("notes.md"), "notes").expect("nested file");
+
+        deploy_skill_dir_with_linker(&source_dir, &target_dir, |_src, _dst| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "link denied",
+            ))
+        })
+        .expect("fallback copy");
+
+        fs::write(source_dir.join("SKILL.md"), "source changed").expect("update source skill");
+
+        assert_eq!(
+            fs::read_to_string(target_dir.join("SKILL.md")).expect("copied skill content"),
+            "fallback"
+        );
+        assert_eq!(
+            fs::read_to_string(target_dir.join("nested").join("notes.md")).expect("nested copy"),
+            "notes"
+        );
+    }
 }
