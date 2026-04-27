@@ -124,8 +124,8 @@ Wardian leverages native OS capabilities for high-performance terminal emulation
 | OS          | Level     | Backend Implementation                                |
 | :---------- | :-------- | :---------------------------------------------------- |
 | **Windows** | 🏆 Native | Full **ConPTY** integration via `portable-pty`.       |
-| **macOS**   | ✅ Stable | PTY-based emulation; hardening for M-series focus.    |
-| **Linux**   | 🧪 Beta   | Standard PTY; currently hardening for varied distros. |
+| **macOS**   | ✅ Stable | Standard Unix PTY via `portable-pty`.                 |
+| **Linux**   | ✅ Stable | Standard Unix PTY via `portable-pty`.                 |
 
 > Detailed platform-specific notes and troubleshooting can be found in [OS Support](docs/os-support.md).
 

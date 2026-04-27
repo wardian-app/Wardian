@@ -18,19 +18,19 @@ Windows is the primary development and testing platform for Wardian.
 
 Wardian is fully supported on macOS, with a focus on Apple Silicon (M-series) performance.
 
-- **Implementation**: standard unix PTY system via `portable-pty`.
+- **Implementation**: Standard Unix PTY via `portable-pty`.
 - **Status**: Stable. All core features (Library management, Workflows, Telemetry) are verified on macOS.
 - **Visuals**: The UI includes macOS-specific titlebar and sidebar width optimizations for a more native look and feel.
 
 ---
 
-## 🧪 Linux (Experimental / Hardening)
+## ✅ Linux (Stable Support)
 
-Linux support is currently in an active "hardening" phase.
+Wardian is fully supported on Linux.
 
-- **Implementation**: standard unix PTY system.
-- **Status**: Functional but experimental. Due to the variety of distributions and shell environments, some PTY-related quirks may occur (e.g., specific escape sequence interpretation).
-- **Roadmap**: Hardening for major distributions (Ubuntu, Fedora, Arch) is planned for Phase 4 of the roadmap.
+- **Implementation**: Standard Unix PTY via `portable-pty`.
+- **Status**: Stable. Core features verified on Linux. Distribution-specific shell environments are handled via the runtime shell selection feature.
+- **Packages**: `.AppImage` (portable, `chmod +x` and run) and `.deb` (install via `sudo dpkg -i wardian_*.deb`) are available from the Releases page.
 
 ---
 
