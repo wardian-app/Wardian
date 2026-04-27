@@ -103,6 +103,11 @@ export interface AgentTelemetry {
     log_path: string | null;
 }
 
+export interface AppTelemetry {
+    cpu_usage: number;
+    memory_mb: number;
+}
+
 export interface AgentClassDefinition {
     name: string;
     description: string;

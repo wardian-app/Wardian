@@ -1,17 +1,59 @@
-use crate::models::AgentTelemetry;
+use crate::models::{AgentTelemetry, AppTelemetry};
 use crate::state::AppState;
 use crate::utils::fs::get_wardian_home;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
-use super::codex::{
-    codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log,
-};
+use super::codex::{codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log};
+use super::display_log_path;
 use super::opencode::{
     apply_opencode_log_metrics, opencode_log_dirs, opencode_log_path_in,
     opencode_session_diff_path, opencode_should_fallback_to_idle,
 };
-use super::display_log_path;
+
+fn normalize_cpu_usage(raw_cpu_usage: f32, logical_cpu_count: usize) -> f32 {
+    let divisor = logical_cpu_count.max(1) as f32;
+    (raw_cpu_usage / divisor).clamp(0.0, 100.0)
+}
+
+fn bytes_to_mib(bytes: u64) -> f64 {
+    bytes as f64 / 1_048_576.0
+}
+
+fn collect_descendant_pids(
+    pid: u32,
+    children_map: &HashMap<u32, Vec<u32>>,
+    related_pids: &mut BTreeSet<u32>,
+) {
+    if !related_pids.insert(pid) {
+        return;
+    }
+
+    if let Some(children) = children_map.get(&pid) {
+        for &child_pid in children {
+            collect_descendant_pids(child_pid, children_map, related_pids);
+        }
+    }
+}
+
+fn collect_related_pids(
+    primary_pid: Option<u32>,
+    discovered_roots: &[u32],
+    children_map: &HashMap<u32, Vec<u32>>,
+) -> BTreeSet<u32> {
+    let mut related_pids = BTreeSet::new();
+
+    if let Some(pid) = primary_pid {
+        collect_descendant_pids(pid, children_map, &mut related_pids);
+    }
+
+    for &pid in discovered_roots {
+        collect_descendant_pids(pid, children_map, &mut related_pids);
+    }
+
+    related_pids
+}
+
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     struct AgentSnapshot {
         session_id: String,
@@ -55,11 +97,15 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         let mut results = Vec::new();
         let mut sys = sys_metrics.blocking_lock();
         sys.refresh_all();
+        let logical_cpu_count = sys.cpus().len();
 
-        let mut children_map: HashMap<sysinfo::Pid, Vec<sysinfo::Pid>> = HashMap::new();
+        let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
         for (pid, process) in sys.processes() {
             if let Some(parent) = process.parent() {
-                children_map.entry(parent).or_default().push(*pid);
+                children_map
+                    .entry(parent.as_u32())
+                    .or_default()
+                    .push(pid.as_u32());
             }
         }
 
@@ -67,36 +113,30 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             let mut cpu = 0.0;
             let mut mem = 0.0;
             let mut uptime = 0;
+            let mut related_process_ids = BTreeSet::new();
 
             if let Some(pid) = snap.process_id {
-                let root_pid = sysinfo::Pid::from_u32(pid);
-                fn sum_tree(
-                    pid: sysinfo::Pid,
-                    sys: &sysinfo::System,
-                    cmap: &HashMap<sysinfo::Pid, Vec<sysinfo::Pid>>,
-                    cpu: &mut f32,
-                    mem: &mut f64,
-                    uptime: &mut u64,
-                ) {
-                    if let Some(p) = sys.process(pid) {
-                        *cpu += p.cpu_usage();
-                        *mem += p.memory() as f64 / 1_048_576.0;
-                        *uptime = std::cmp::max(*uptime, p.run_time());
-                    }
-                    if let Some(children) = cmap.get(&pid) {
-                        for &cpid in children {
-                            sum_tree(cpid, sys, cmap, cpu, mem, uptime);
-                        }
+                #[cfg(windows)]
+                let discovered_roots = crate::utils::process::find_wardian_session_process_roots(
+                    &snap.session_id,
+                    Some(pid),
+                );
+                #[cfg(not(windows))]
+                let discovered_roots = Vec::new();
+
+                related_process_ids =
+                    collect_related_pids(Some(pid), &discovered_roots, &children_map);
+                let mut raw_cpu = 0.0;
+                let mut memory_bytes = 0_u64;
+                for pid in &related_process_ids {
+                    if let Some(process) = sys.process(sysinfo::Pid::from_u32(*pid)) {
+                        raw_cpu += process.cpu_usage();
+                        memory_bytes = memory_bytes.saturating_add(process.memory());
+                        uptime = std::cmp::max(uptime, process.run_time());
                     }
                 }
-                sum_tree(
-                    root_pid,
-                    &sys,
-                    &children_map,
-                    &mut cpu,
-                    &mut mem,
-                    &mut uptime,
-                );
+                cpu = normalize_cpu_usage(raw_cpu, logical_cpu_count);
+                mem = bytes_to_mib(memory_bytes);
 
                 // Phase 3: Uptime Alignment
                 // If we have a 'Born' date, calculate total lifetime uptime while active.
@@ -117,10 +157,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             }
 
             // Detect whether the agent process is still alive
-            let process_alive = snap
-                .process_id
-                .map(|pid| sys.process(sysinfo::Pid::from_u32(pid)).is_some())
-                .unwrap_or(false);
+            let process_alive = related_process_ids
+                .iter()
+                .any(|pid| sys.process(sysinfo::Pid::from_u32(*pid)).is_some());
 
             let mut q_count = *snap.query_count.lock().unwrap();
             let mut i_ts = snap.init_timestamp.lock().unwrap().clone();
@@ -423,4 +462,78 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     })
     .await
     .unwrap_or_default()
+}
+
+pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
+    let sys_metrics = state.system_metrics.clone();
+    tokio::task::spawn_blocking(move || {
+        // Reuse the snapshot refreshed by get_all_metrics in the telemetry loop.
+        // Refreshing again immediately would reset sysinfo's CPU deltas.
+        let sys = sys_metrics.blocking_lock();
+        let logical_cpu_count = sys.cpus().len();
+
+        let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, process) in sys.processes() {
+            if let Some(parent) = process.parent() {
+                children_map
+                    .entry(parent.as_u32())
+                    .or_default()
+                    .push(pid.as_u32());
+            }
+        }
+
+        let related_process_ids =
+            collect_related_pids(Some(std::process::id()), &[], &children_map);
+        let mut raw_cpu = 0.0;
+        let mut memory_bytes = 0_u64;
+        for pid in &related_process_ids {
+            if let Some(process) = sys.process(sysinfo::Pid::from_u32(*pid)) {
+                raw_cpu += process.cpu_usage();
+                memory_bytes = memory_bytes.saturating_add(process.memory());
+            }
+        }
+
+        AppTelemetry {
+            cpu_usage: normalize_cpu_usage(raw_cpu, logical_cpu_count),
+            memory_mb: bytes_to_mib(memory_bytes),
+        }
+    })
+    .await
+    .unwrap_or(AppTelemetry {
+        cpu_usage: 0.0,
+        memory_mb: 0.0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    #[test]
+    fn normalizes_process_tree_cpu_to_whole_machine_capacity() {
+        assert_eq!(super::normalize_cpu_usage(260.0, 4), 65.0);
+        assert_eq!(super::normalize_cpu_usage(800.0, 4), 100.0);
+        assert_eq!(super::normalize_cpu_usage(-5.0, 4), 0.0);
+    }
+
+    #[test]
+    fn treats_missing_cpu_count_as_single_cpu() {
+        assert_eq!(super::normalize_cpu_usage(260.0, 0), 100.0);
+    }
+
+    #[test]
+    fn converts_resident_bytes_to_mib() {
+        assert_eq!(super::bytes_to_mib(1_048_576), 1.0);
+        assert_eq!(super::bytes_to_mib(2_621_440), 2.5);
+    }
+
+    #[test]
+    fn collects_root_descendants_and_discovered_session_roots_without_duplicates() {
+        let children_map =
+            HashMap::from([(1, vec![2, 4]), (2, vec![3]), (4, vec![5]), (9, vec![10])]);
+
+        let related = super::collect_related_pids(Some(1), &[2, 9], &children_map);
+
+        assert_eq!(related, BTreeSet::from([1_u32, 2, 3, 4, 5, 9, 10]));
+    }
 }
