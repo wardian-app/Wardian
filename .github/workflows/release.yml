@@ -6,6 +6,14 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      tag:
+        description: "Git ref to build for manual runs (tag, branch, or SHA)"
+        required: false
+        default: ""
+      release_tag:
+        description: "Existing GitHub release tag to upload assets to when dry_run=false"
+        required: false
+        default: ""
       dry_run:
         description: "Dry run (build artifacts, do not create a release)"
         required: false
@@ -67,10 +75,30 @@ jobs:
             return res.data.id;
           result-encoding: string
 
+  resolve-release:
+    name: Resolve existing release
+    if: github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.lookup.outputs.release_id }}
+    steps:
+      - name: Resolve existing release
+        id: lookup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "release_tag is required when dry_run=false" >&2
+            exit 1
+          fi
+          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id)"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.platform.os }}${{ matrix.platform.arch && format(' / {0}', matrix.platform.arch) || '' }})
-    needs: [create-release]
-    if: always() && (needs.create-release.result == 'success' || github.event_name == 'workflow_dispatch')
+    needs: [create-release, resolve-release]
+    if: always() && (needs.create-release.result == 'success' || needs.resolve-release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'))
     strategy:
       fail-fast: false
       matrix:
@@ -92,6 +120,8 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -127,14 +157,23 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args || '' }}
 
+      - name: Build and upload (manual backfill)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.resolve-release.outputs.release_id }}
+          args: ${{ matrix.platform.args || '' }}
+
       - name: Build (dry run)
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
         uses: tauri-apps/tauri-action@v0
         with:
           args: ${{ matrix.platform.args || '' }}
 
       - name: Upload dry-run artifacts
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: wardian-${{ matrix.platform.name }}
@@ -151,17 +190,17 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [create-release, build]
-    if: github.event_name == 'push' && needs.build.result == 'success'
+    needs: [create-release, resolve-release, build]
+    if: needs.build.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
     runs-on: ubuntu-latest
     steps:
-      - name: Publish the draft release
+      - name: Publish the release
         uses: actions/github-script@v7
         with:
           script: |
             await github.rest.repos.updateRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              release_id: ${{ needs.create-release.outputs.release_id }},
+              release_id: ${{ github.event_name == 'push' && needs.create-release.outputs.release_id || needs.resolve-release.outputs.release_id }},
               draft: false,
             });

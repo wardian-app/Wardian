@@ -5,6 +5,7 @@
   "bump-patch-for-minor-pre-major": true,
   "include-v-in-tag": true,
   "include-component-in-tag": false,
+  "draft": true,
   "packages": {
     ".": {
       "package-name": "wardian",
