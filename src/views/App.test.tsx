@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import type { AgentConfig, AgentClassDefinition } from "../types";
@@ -351,6 +351,36 @@ describe("Agent Watchlist Sidebar", () => {
       expect(screen.getAllByText("Beta").length).toBeGreaterThanOrEqual(2);
     });
   });
+
+  it("replaces the maximized grid agent when double-clicking another watchlist row", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+
+    const alphaTerminal = await screen.findByTestId("terminal-agent-1");
+    const alphaCard = alphaTerminal.closest('[data-testid="agent-card"]');
+    expect(alphaCard).not.toBeNull();
+
+    fireEvent.click(within(alphaCard as HTMLElement).getAllByRole("button")[0]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("terminal-agent-1")).toBeInTheDocument();
+      expect(screen.queryByTestId("terminal-agent-2")).not.toBeInTheDocument();
+    });
+
+    const betaWatchlistRow = screen
+      .getAllByText("Beta")
+      .map((node) => node.closest("div.watchlist-row"))
+      .find((row): row is HTMLElement => Boolean(row));
+    if (!betaWatchlistRow) throw new Error("Beta watchlist row not found");
+
+    fireEvent.click(betaWatchlistRow);
+    fireEvent.click(betaWatchlistRow);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
+      expect(screen.getByTestId("terminal-agent-2")).toBeInTheDocument();
+    });
+  });
 });
 
 // ── View Mode Toggle Tests ─────────────────────────────────────────────
@@ -442,8 +472,6 @@ describe("Sidebar Navigation", () => {
 });
 
 // ── Agent Off State Tests ──────────────────────────────────────────────
-
-import { fireEvent } from "@testing-library/react";
 
 describe("Agent Off State Operations", () => {
   it("removes an agent from the main grid when paused and requires Start from context menu", async () => {

@@ -460,6 +460,29 @@ describe('AgentWatchlist', () => {
     expect(mockOnAddAgentToTeam).toHaveBeenCalledWith('team-2', 'agent-1');
   });
 
+  it('moves a dragged team member next to the target team in All Agents', async () => {
+    const agents: AgentConfig[] = [
+      ...sampleAgents,
+      { session_id: 'agent-3', session_name: 'Gamma', agent_class: 'QA', folder: 'C:/test', is_off: false },
+    ];
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        agents={agents}
+        teams={[
+          { id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] },
+          { id: 'team-2', name: 'Support Swarm', agentIds: ['agent-3'] },
+        ]}
+      />
+    );
+
+    fireEvent.mouseDown(within(screen.getByTestId('team-block-team-1')).getByText('Alpha').closest('.watchlist-row')!);
+    fireEvent.mouseUp(screen.getByTestId('team-header-team-2'));
+
+    expect(mockOnAddAgentToTeam).toHaveBeenCalledWith('team-2', 'agent-1');
+    expect(mockOnReorderAgents).toHaveBeenCalledWith(['agent-2', 'agent-3', 'agent-1']);
+  });
+
   it('reorders team members within the team', async () => {
     render(
       <AgentWatchlist

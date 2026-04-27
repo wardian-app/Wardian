@@ -418,6 +418,10 @@ function AppBody() {
   }, [draggedAgentId]);
 
   const scrollToAgent = (agentId: string) => {
+    if (viewMode === "grid" && maximizedAgentId) {
+      setMaximizedAgentId(agentId);
+      return;
+    }
     const el = document.getElementById(`agent-card-${agentId}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
