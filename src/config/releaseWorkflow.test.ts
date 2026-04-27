@@ -5,7 +5,10 @@ import releasePleaseWorkflow from "../../.github/workflows/release-please.yml?ra
 
 describe("release workflow contract", () => {
   it("keeps Release Please releases draft until assets are uploaded", () => {
-    expect(releasePleaseConfig).toMatchObject({ draft: true });
+    expect(releasePleaseConfig).toMatchObject({
+      draft: true,
+      "force-tag-creation": true,
+    });
     expect(releasePleaseWorkflow).toContain("actions: write");
     expect(releasePleaseWorkflow).toContain("Dispatch asset build");
     expect(releasePleaseWorkflow).toContain("gh workflow run release.yml");
