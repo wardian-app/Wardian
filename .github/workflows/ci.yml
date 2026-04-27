@@ -48,6 +48,7 @@ jobs:
         with:
           files: ./coverage/lcov.info
           flags: frontend
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
   backend-windows:
@@ -64,21 +65,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy -- -D warnings
-      - name: Test
+      - name: Test with Coverage
         working-directory: src-tauri
-        run: cargo test
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-      - name: Coverage Report
-        run: npm run test:coverage:rust
+        run: |
+          mkdir -p ../coverage
+          cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info
       - name: Upload Backend Coverage
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage/rust-lcov.info
           flags: backend
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
   e2e-smoke:
