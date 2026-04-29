@@ -38,6 +38,10 @@ vi.mock("@tauri-apps/api/window", () => ({
   })),
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
+
 // Mock xterm since it requires a real DOM canvas
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(() => ({
