@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { FolderOpen } from "lucide-react";
 import { AgentConfig, AgentClassDefinition } from "../../types";
 import { AdvancedSettings } from "../../components/AdvancedSettings";
 
@@ -72,6 +74,23 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
     }
   };
 
+  const chooseWorkspaceFolder = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose workspace folder",
+      });
+
+      if (typeof selected === "string") {
+        setNewFolder(selected);
+      }
+    } catch (error) {
+      console.error("Failed to choose workspace folder:", error);
+      alert(`Failed to choose workspace folder: ${error}`);
+    }
+  };
+
   return (
     <div className="mb-8">
       <h3 className="text-xs font-bold text-muted tracking-wide mb-4">
@@ -138,22 +157,33 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
           <label className="block text-[10px] font-bold text-muted-neutral mb-1">
             Workspace Path
           </label>
-          <div className="relative flex items-center">
-            <input
-            data-testid="spawn-workspace-path"
-            className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors pr-10"
-              placeholder="C:/projects/my-app"
-              value={newFolder}
-              onChange={(e) => setNewFolder(e.currentTarget.value)}
-            />
-            {newFolder && (
-              <span
-                className="absolute right-3 text-[10px]"
-                title={folderIsValid ? "Valid path" : "Invalid path"}
-              >
-                {folderIsValid === true ? "✅" : folderIsValid === false ? "⚠️" : ""}
-              </span>
-            )}
+          <div className="flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <input
+                data-testid="spawn-workspace-path"
+                className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors pr-10"
+                placeholder="C:/projects/my-app"
+                value={newFolder}
+                onChange={(e) => setNewFolder(e.currentTarget.value)}
+              />
+              {newFolder && (
+                <span
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px]"
+                  title={folderIsValid ? "Valid path" : "Invalid path"}
+                >
+                  {folderIsValid === true ? "✅" : folderIsValid === false ? "⚠️" : ""}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              aria-label="Choose workspace folder"
+              title="Choose workspace folder"
+              onClick={chooseWorkspaceFolder}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-wardian-light bg-[var(--color-wardian-input-bg)] text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)] focus:outline-none focus:border-[var(--color-wardian-accent)]"
+            >
+              <FolderOpen className="h-4 w-4" aria-hidden="true" />
+            </button>
           </div>
         </div>
         <div>
