@@ -385,7 +385,10 @@ pub async fn obtain_session_id(
             })
         })
         .unwrap_or("");
-    let habitat_root = prepare_provider_habitat(provider_name, cwd, class_name, None)?;
+    let bootstrap_session_id = config
+        .and_then(|cfg| (!cfg.session_id.trim().is_empty()).then_some(cfg.session_id.as_str()));
+    let habitat_root =
+        prepare_provider_habitat(provider_name, cwd, class_name, bootstrap_session_id)?;
     let codex_bootstrap = if provider_name == "codex" {
         let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
         Some(codex_bootstrap_launch_context(&wardian_home, cwd))
@@ -465,7 +468,7 @@ pub async fn obtain_session_id(
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
     } else if provider_name == "opencode" {
-        for (key, value) in opencode_env(cwd, class_name, None, config)? {
+        for (key, value) in opencode_env(cwd, class_name, bootstrap_session_id, config)? {
             cmd.env(key, value);
         }
         cmd.stdin(std::process::Stdio::null());

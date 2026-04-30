@@ -35,7 +35,10 @@ pub struct CloneAgentRequest {
     pub start: Option<bool>,
 }
 
-fn clone_unique_name(source_name: &str, existing_names: &std::collections::HashSet<String>) -> String {
+fn clone_unique_name(
+    source_name: &str,
+    existing_names: &std::collections::HashSet<String>,
+) -> String {
     let base = if source_name.trim().is_empty() {
         "agent"
     } else {
@@ -54,6 +57,52 @@ fn clone_unique_name(source_name: &str, existing_names: &std::collections::HashS
         }
         index += 1;
     }
+}
+
+fn clone_quote_custom_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "_-./:=,+".contains(ch))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\"'\"'"))
+}
+
+fn clone_custom_args_without_provider_memory(custom_args: Option<&str>) -> Option<String> {
+    let parsed = shlex::split(custom_args?.trim())?;
+    let mut filtered = Vec::with_capacity(parsed.len());
+    let mut iter = parsed.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        if matches!(arg.as_str(), "--resume" | "--session" | "--session-id" | "-r") {
+            let _ = iter.next();
+            continue;
+        }
+        if matches!(arg.as_str(), "--continue" | "-c") {
+            continue;
+        }
+        if arg.starts_with("--resume=")
+            || arg.starts_with("--session=")
+            || arg.starts_with("--session-id=")
+            || arg.starts_with("-r=")
+        {
+            continue;
+        }
+        if arg == "resume" {
+            let _ = iter.next_if(|next| !next.starts_with('-'));
+            continue;
+        }
+        filtered.push(arg);
+    }
+
+    (!filtered.is_empty()).then(|| {
+        filtered
+            .iter()
+            .map(|arg| clone_quote_custom_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
 }
 
 fn clone_sanitize_config(
@@ -81,6 +130,7 @@ fn clone_sanitize_config(
     config.codex_cleared_provider_sessions.clear();
     config.system_include_directories = None;
     config.opencode_port = None;
+    config.custom_args = clone_custom_args_without_provider_memory(config.custom_args.as_deref());
     config.is_off = !start;
     config
 }
@@ -97,6 +147,59 @@ fn clone_copy_file(source: &std::path::Path, destination: &std::path::Path) -> R
         .map_err(|e| e.to_string())
 }
 
+fn clone_remove_existing_path(path: &std::path::Path) {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+
+    if metadata.file_type().is_symlink() || std::fs::read_link(path).is_ok() {
+        let _ = std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path));
+        return;
+    }
+
+    if metadata.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                clone_remove_existing_path(&entry.path());
+            }
+        }
+        let _ = std::fs::remove_dir(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn clone_resolve_link_target(
+    link_path: &std::path::Path,
+    link_target: std::path::PathBuf,
+) -> std::path::PathBuf {
+    if link_target.is_absolute() {
+        link_target
+    } else {
+        link_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join(link_target)
+    }
+}
+
+fn clone_copy_link_or_target(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<bool, String> {
+    let Ok(link_target) = std::fs::read_link(source) else {
+        return Ok(false);
+    };
+    let resolved_target = clone_resolve_link_target(source, link_target);
+    clone_remove_existing_path(destination);
+    if resolved_target.is_dir() {
+        crate::utils::fs::create_directory_link(&resolved_target, destination)?;
+    } else if resolved_target.is_file() {
+        clone_copy_file(&resolved_target, destination)?;
+    }
+    Ok(true)
+}
+
 fn clone_copy_directory_recursive(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -104,15 +207,16 @@ fn clone_copy_directory_recursive(
     if !source.exists() {
         return Ok(());
     }
-    if destination.exists() || destination.symlink_metadata().is_ok() {
-        let _ = std::fs::remove_dir_all(destination).or_else(|_| std::fs::remove_file(destination));
-    }
+    clone_remove_existing_path(destination);
     std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
 
     for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
+        if clone_copy_link_or_target(&source_path, &destination_path)? {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&source_path).map_err(|e| e.to_string())?;
         if metadata.is_dir() {
             clone_copy_directory_recursive(&source_path, &destination_path)?;
@@ -133,11 +237,32 @@ fn clone_copy_agent_profile_files(
     let destination_root = wardian_home.join("agents").join(destination_session_id);
     std::fs::create_dir_all(&destination_root).map_err(|e| e.to_string())?;
 
-    clone_copy_file(&source_root.join("AGENTS.md"), &destination_root.join("AGENTS.md"))?;
+    clone_copy_file(
+        &source_root.join("AGENTS.md"),
+        &destination_root.join("AGENTS.md"),
+    )?;
     clone_copy_directory_recursive(
         &source_root.join(".agents").join("skills"),
         &destination_root.join(".agents").join("skills"),
     )
+}
+
+fn clone_ensure_profile_destination_available(
+    wardian_home: &std::path::Path,
+    destination_session_id: &str,
+    allowed_existing_session_id: Option<&str>,
+) -> Result<(), String> {
+    if allowed_existing_session_id == Some(destination_session_id) {
+        return Ok(());
+    }
+    let destination_root = wardian_home.join("agents").join(destination_session_id);
+    if destination_root.exists() || destination_root.symlink_metadata().is_ok() {
+        return Err(format!(
+            "Cannot clone profile into existing agent directory '{}'.",
+            destination_root.display()
+        ));
+    }
+    Ok(())
 }
 
 fn persisted_resume_session_for_provider(
@@ -284,18 +409,24 @@ async fn is_name_unique(state: &AppState, name: &str, exclude_session_id: Option
     })
 }
 
+async fn is_session_id_available(state: &AppState, session_id: &str) -> bool {
+    let agents = state.agents.lock().await;
+    !agents.contains_key(session_id)
+}
+
 async fn register_new_agent(
     mut config: AgentConfig,
     mut actual_resume: Option<String>,
     state: &AppState,
     app: &AppHandle,
+    clone_name_base: Option<&str>,
 ) -> Result<AgentConfig, String> {
     let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
         &config.agent_class,
         &session_id,
     ));
-    let active_agent = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
+    let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
     if config.provider == "codex" && actual_resume.is_none() {
         for _ in 0..40 {
@@ -353,15 +484,36 @@ async fn register_new_agent(
         cfg.resume_session = persisted_resume;
     }
 
-    // Register input sender BEFORE locking agents map
+    let mut agents = state.agents.lock().await;
+    let mut order = state.agent_order.lock().await;
+    if agents.contains_key(&session_id) {
+        manager::terminate_active_agent_process(&mut active_agent);
+        return Err(format!("An agent with session ID '{}' already exists.", session_id));
+    }
+    let existing_names = agents
+        .values()
+        .map(|agent| agent.config.lock().unwrap().session_name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    if existing_names.contains(&config.session_name) {
+        if let Some(base) = clone_name_base {
+            config.session_name = clone_unique_name(base, &existing_names);
+        } else {
+            manager::terminate_active_agent_process(&mut active_agent);
+            return Err(format!(
+                "An agent with the name '{}' already exists.",
+                config.session_name
+            ));
+        }
+    }
+    {
+        let mut cfg = active_agent.config.lock().unwrap();
+        cfg.session_name = config.session_name.clone();
+    }
     if let Some(ref tx) = active_agent.stdin_tx {
         if let Ok(mut senders) = state.input_senders.write() {
             senders.insert(session_id.clone(), tx.clone());
         }
     }
-
-    let mut agents = state.agents.lock().await;
-    let mut order = state.agent_order.lock().await;
     agents.insert(session_id.clone(), active_agent);
     order.push(session_id.clone());
     manager::save_state(app, &agents, &order);
@@ -440,7 +592,7 @@ pub async fn spawn_agent(
     config.folder = folder;
     config.resume_session = actual_resume.clone();
     config.is_off = is_off.unwrap_or(false);
-    register_new_agent(config, actual_resume, &state, &app).await
+    register_new_agent(config, actual_resume, &state, &app, None).await
 }
 
 #[tauri::command]
@@ -470,9 +622,9 @@ pub async fn clone_agent(
         (source, names)
     };
 
-    let session_name = req
-        .session_name
-        .filter(|name| !name.trim().is_empty())
+    let requested_session_name = req.session_name.filter(|name| !name.trim().is_empty());
+    let generated_session_name = requested_session_name.is_none();
+    let session_name = requested_session_name
         .unwrap_or_else(|| clone_unique_name(&source_config.session_name, &existing_names));
     if !is_valid_name(&session_name) {
         return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
@@ -499,9 +651,40 @@ pub async fn clone_agent(
     );
     let provider_name = config.provider.clone();
     let mut actual_resume = None;
-    let session_id = if provider_uses_generated_session_id(&provider_name) {
-        uuid::Uuid::new_v4().to_string()
+    let profile_home = if req.mode == CloneAgentMode::Profile {
+        Some(
+            crate::utils::fs::get_wardian_home()
+                .ok_or_else(|| "Could not find Wardian home".to_string())?,
+        )
     } else {
+        None
+    };
+    let provisional_profile_session_id = (profile_home.is_some()
+        && !provider_uses_generated_session_id(&provider_name))
+    .then(|| uuid::Uuid::new_v4().to_string());
+
+    let session_id = if provider_uses_generated_session_id(&provider_name) {
+        let generated_session_id = uuid::Uuid::new_v4().to_string();
+        config.session_id = generated_session_id.clone();
+        if let Some(home) = profile_home.as_ref() {
+            clone_ensure_profile_destination_available(home, &generated_session_id, None)?;
+            clone_copy_agent_profile_files(home, &source_session_id, &generated_session_id)?;
+        }
+        generated_session_id
+    } else {
+        if let (Some(home), Some(provisional_session_id)) = (
+            profile_home.as_ref(),
+            provisional_profile_session_id.as_ref(),
+        ) {
+            config.session_id = provisional_session_id.clone();
+            clone_ensure_profile_destination_available(home, provisional_session_id, None)?;
+            clone_copy_agent_profile_files(home, &source_session_id, provisional_session_id)?;
+            config.system_include_directories =
+                Some(crate::utils::fs::resolve_system_include_directories(
+                    &config.agent_class,
+                    provisional_session_id,
+                ));
+        }
         let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
         let real_sid = manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
             .await
@@ -517,13 +700,45 @@ pub async fn clone_agent(
     config.session_id = session_id.clone();
     config.resume_session = actual_resume.clone();
 
-    if req.mode == CloneAgentMode::Profile {
-        let home = crate::utils::fs::get_wardian_home()
-            .ok_or_else(|| "Could not find Wardian home".to_string())?;
-        clone_copy_agent_profile_files(&home, &source_session_id, &session_id)?;
+    if !is_session_id_available(&state, &session_id).await {
+        if let Some(home) = profile_home.as_ref() {
+            if let Some(provisional_session_id) = provisional_profile_session_id.as_deref() {
+                let provisional_root = home.join("agents").join(provisional_session_id);
+                clone_remove_existing_path(&provisional_root);
+            }
+        }
+        return Err(format!("An agent with session ID '{}' already exists.", session_id));
     }
 
-    register_new_agent(config, actual_resume, &state, &app).await
+    if let Some(home) = profile_home.as_ref() {
+        let allowed_existing_profile_session_id = if provider_uses_generated_session_id(&provider_name) {
+            Some(session_id.as_str())
+        } else {
+            provisional_profile_session_id.as_deref()
+        };
+        clone_ensure_profile_destination_available(
+            home,
+            &session_id,
+            allowed_existing_profile_session_id,
+        )?;
+        clone_copy_agent_profile_files(home, &source_session_id, &session_id)?;
+        if let Some(provisional_session_id) = provisional_profile_session_id
+            .as_deref()
+            .filter(|id| *id != session_id)
+        {
+            let provisional_root = home.join("agents").join(provisional_session_id);
+            clone_remove_existing_path(&provisional_root);
+        }
+    }
+
+    register_new_agent(
+        config,
+        actual_resume,
+        &state,
+        &app,
+        generated_session_name.then_some(source_config.session_name.as_str()),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -981,13 +1196,15 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        clone_copy_agent_profile_files, clone_sanitize_config, clone_unique_name,
-        codex_provider_session_is_new, persisted_resume_session_for_provider, prepare_clear_config,
-        prepare_resume_config, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, restore_runtime_state_after_resume,
+        clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
+        clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
+        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
+        restore_runtime_state_after_resume,
     };
     use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
     use crate::state::ActiveAgent;
+    use crate::utils::fs::create_directory_link;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
@@ -1054,6 +1271,7 @@ mod tests {
             provider: "codex".to_string(),
             model: Some("gpt-5.4".to_string()),
             resume_session: Some("provider-session".to_string()),
+            git_worktree: Some(true),
             fresh_provider_session_id: Some("fresh-provider-session".to_string()),
             codex_cleared_provider_sessions: vec!["old-provider-session".to_string()],
             is_off: true,
@@ -1061,26 +1279,60 @@ mod tests {
             ..Default::default()
         };
 
-        let clone = clone_sanitize_config(
-            &source,
-            "Alpha-copy".to_string(),
-            None,
-            None,
-            None,
-            true,
-        );
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
 
         assert_eq!(clone.session_id, "");
         assert_eq!(clone.session_name, "Alpha-copy");
         assert_eq!(clone.agent_class, "Coder");
         assert_eq!(clone.folder, "D:/Development/Wardian");
         assert_eq!(clone.provider, "codex");
+        assert_eq!(clone.git_worktree, Some(true));
         assert_eq!(clone.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(clone.custom_args.as_deref(), Some("--verbose"));
         assert_eq!(clone.resume_session, None);
         assert_eq!(clone.fresh_provider_session_id, None);
         assert!(clone.codex_cleared_provider_sessions.is_empty());
         assert!(!clone.is_off);
+    }
+
+    #[test]
+    fn clone_sanitize_config_strips_custom_provider_session_args() {
+        let source = AgentConfig {
+            custom_args: Some(
+                "--verbose --resume old-gemini --session ses_old --session-id old-claude -r old-short --continue -c resume old-codex --model 'kept model'".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+        let custom_args = clone.custom_args.expect("custom args");
+        let parsed = shlex::split(&custom_args).expect("parse sanitized custom args");
+
+        assert_eq!(
+            parsed,
+            vec![
+                "--verbose".to_string(),
+                "--model".to_string(),
+                "kept model".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn clone_sanitize_config_strips_equals_form_session_args() {
+        let source = AgentConfig {
+            custom_args: Some(
+                "--resume=old --session=ses_old --session-id=old -r=old --safe".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.custom_args.as_deref(), Some("--safe"));
     }
 
     #[test]
@@ -1121,14 +1373,21 @@ mod tests {
         std::fs::create_dir_all(source.join("claude")).expect("create claude dir");
         std::fs::write(source.join("AGENTS.md"), "# Agent Memory\n").expect("write agents");
         std::fs::write(
-            source.join(".agents").join("skills").join("skill-one").join("SKILL.md"),
+            source
+                .join(".agents")
+                .join("skills")
+                .join("skill-one")
+                .join("SKILL.md"),
             "# Skill\n",
         )
         .expect("write skill");
         std::fs::write(source.join("habitat").join("AGENTS.md"), "generated")
             .expect("write habitat");
-        std::fs::write(source.join("claude").join("permission-requests.jsonl"), "{}\n")
-            .expect("write log");
+        std::fs::write(
+            source.join("claude").join("permission-requests.jsonl"),
+            "{}\n",
+        )
+        .expect("write log");
 
         clone_copy_agent_profile_files(home, "source-agent", "dest-agent")
             .expect("copy profile files");
@@ -1148,7 +1407,77 @@ mod tests {
             "# Skill\n"
         );
         assert!(!dest.join("habitat").exists());
-        assert!(!dest.join("claude").join("permission-requests.jsonl").exists());
+        assert!(!dest
+            .join("claude")
+            .join("permission-requests.jsonl")
+            .exists());
+    }
+
+    #[test]
+    fn clone_profile_destination_rejects_existing_agent_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let destination = home.join("agents").join("existing-agent");
+        std::fs::create_dir_all(&destination).expect("create destination");
+        std::fs::write(destination.join("AGENTS.md"), "existing").expect("write existing profile");
+
+        let err = clone_ensure_profile_destination_available(home, "existing-agent", None)
+            .expect_err("existing destination should be rejected");
+
+        assert!(err.contains("Cannot clone profile into existing agent directory"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("AGENTS.md")).expect("read existing profile"),
+            "existing"
+        );
+    }
+
+    #[test]
+    fn clone_profile_destination_allows_provisional_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        std::fs::create_dir_all(home.join("agents").join("provisional-agent"))
+            .expect("create provisional destination");
+
+        clone_ensure_profile_destination_available(
+            home,
+            "provisional-agent",
+            Some("provisional-agent"),
+        )
+        .expect("matching provisional destination is allowed");
+    }
+
+    #[test]
+    fn clone_profile_copy_carries_linked_skills() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        let dest = home.join("agents").join("dest-agent");
+        let library_skill = home.join("library").join("skills").join("linked-skill");
+        let source_skills = source.join(".agents").join("skills");
+        let source_skill_link = source_skills.join("linked-skill");
+
+        std::fs::create_dir_all(&library_skill).expect("create library skill");
+        std::fs::create_dir_all(&source_skills).expect("create source skills");
+        std::fs::write(library_skill.join("SKILL.md"), "# Linked Skill\n")
+            .expect("write linked skill");
+        create_directory_link(&library_skill, &source_skill_link).expect("link source skill");
+
+        clone_copy_agent_profile_files(home, "source-agent", "dest-agent")
+            .expect("copy profile files");
+
+        assert_eq!(
+            std::fs::read_to_string(
+                dest.join(".agents")
+                    .join("skills")
+                    .join("linked-skill")
+                    .join("SKILL.md")
+            )
+            .expect("read copied linked skill"),
+            "# Linked Skill\n"
+        );
+        assert!(
+            std::fs::read_link(dest.join(".agents").join("skills").join("linked-skill")).is_ok()
+        );
     }
 
     #[test]

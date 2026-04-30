@@ -69,6 +69,7 @@ It resets or regenerates:
 - `fresh_provider_session_id`
 - `is_off`
 - provider session exclusion lists and other runtime-only resume helpers
+- provider session or resume flags embedded in `custom_args`
 - telemetry, terminal title, query count, log path, and status
 
 It does not copy:
@@ -165,4 +166,3 @@ E2E:
 
 - Browser E2E with mock provider for roster right-click fresh clone if the mock layer can prove the behavior.
 - Native E2E only if validating real provider spawn, filesystem projections, or PTY behavior.
-
