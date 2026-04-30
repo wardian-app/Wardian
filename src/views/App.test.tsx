@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { EventCallback } from "@tauri-apps/api/event";
 import App from "./App";
 import type { AgentConfig, AgentClassDefinition } from "../types";
+import type { AgentTelemetry } from "../types";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -25,13 +28,16 @@ vi.mock("../features/terminal/AgentTerminal", () => ({
 
 // Cast invoke to mock for test control
 const mockInvoke = vi.mocked(invoke);
+const mockListen = vi.mocked(listen);
 
 // Helper to set up mock return values for the initial load
 let currentAgents: AgentConfig[] = [];
 let currentWatchlists: unknown = [];
+let currentInteractions: unknown = {};
 function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefinition[] = []) {
   currentAgents = [...agents];
   currentWatchlists = [];
+  currentInteractions = {};
   mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
     switch (cmd) {
       case "list_agents":
@@ -42,6 +48,11 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return currentWatchlists;
       case "save_watchlists":
         currentWatchlists = args?.watchlists;
+        return null;
+      case "load_agent_interactions":
+        return currentInteractions;
+      case "save_agent_interactions":
+        currentInteractions = args?.interactions;
         return null;
       case "pause_agent":
         if (args?.sessionId) {
@@ -94,6 +105,7 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return null;
     }
   });
+  mockListen.mockImplementation(() => Promise.resolve(() => {}));
 }
 
 function setupDefaultMocksWithWatchlists(
@@ -103,6 +115,28 @@ function setupDefaultMocksWithWatchlists(
 ) {
   setupDefaultMocks(agents, classes);
   currentWatchlists = watchlists;
+}
+
+function setupDefaultMocksWithInteractions(
+  agents: AgentConfig[],
+  classes: AgentClassDefinition[],
+  interactions: unknown,
+) {
+  setupDefaultMocks(agents, classes);
+  currentInteractions = interactions;
+}
+
+function captureAgentMetricsListener() {
+  let metricsListener: EventCallback<AgentTelemetry[]> | null = null;
+  mockListen.mockImplementation((eventName, handler) => {
+    if (eventName === "agent-metrics") {
+      metricsListener = handler as EventCallback<AgentTelemetry[]>;
+    }
+    return Promise.resolve(() => {});
+  });
+  return (payload: AgentTelemetry[]) => {
+    metricsListener?.({ event: "agent-metrics", id: 0, payload });
+  };
 }
 
 const defaultClasses: AgentClassDefinition[] = [
@@ -270,6 +304,90 @@ describe("Agent Watchlist Sidebar", () => {
       const alphaElements = screen.getAllByText("Alpha");
       expect(alphaElements.length).toBeGreaterThanOrEqual(2);
     }, { timeout: 3000 });
+  });
+
+  it("does not overwrite persisted last queried timestamps from first metrics after relaunch", async () => {
+    setupDefaultMocksWithInteractions(sampleAgents, defaultClasses, {
+      "agent-1": "2026-04-29T12:00:00.000Z",
+    });
+    const emitAgentMetrics = captureAgentMetricsListener();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "agent-1",
+          current_status: "Idle",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 0,
+          query_count: 3,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_agent_interactions",
+      expect.objectContaining({
+        interactions: expect.objectContaining({ "agent-1": expect.any(String) }),
+      }),
+    );
+  });
+
+  it("persists last queried when query count increases after the first metrics sample", async () => {
+    setupDefaultMocksWithInteractions(sampleAgents, defaultClasses, {
+      "agent-1": "2026-04-29T12:00:00.000Z",
+    });
+    const emitAgentMetrics = captureAgentMetricsListener();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "agent-1",
+          current_status: "Idle",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 0,
+          query_count: 3,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "agent-1",
+          current_status: "Processing...",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 1,
+          query_count: 4,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "save_agent_interactions",
+      expect.objectContaining({
+        interactions: expect.objectContaining({ "agent-1": expect.any(String) }),
+      }),
+    );
   });
 
   it("shows Select All and Clear buttons", async () => {
