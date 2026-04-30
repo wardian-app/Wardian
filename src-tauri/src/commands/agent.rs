@@ -16,6 +16,130 @@ pub struct SpawnAgentRequest {
     pub config_override: Option<AgentConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneAgentMode {
+    Fresh,
+    Profile,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CloneAgentRequest {
+    pub source_session_id: String,
+    pub mode: CloneAgentMode,
+    pub session_name: Option<String>,
+    pub provider: Option<String>,
+    pub folder: Option<String>,
+    pub agent_class: Option<String>,
+    pub start: Option<bool>,
+}
+
+fn clone_unique_name(source_name: &str, existing_names: &std::collections::HashSet<String>) -> String {
+    let base = if source_name.trim().is_empty() {
+        "agent"
+    } else {
+        source_name.trim()
+    };
+    let first = format!("{}-copy", base);
+    if !existing_names.contains(&first) {
+        return first;
+    }
+
+    let mut index = 2;
+    loop {
+        let candidate = format!("{}-copy-{}", base, index);
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn clone_sanitize_config(
+    source: &AgentConfig,
+    session_name: String,
+    provider: Option<String>,
+    folder: Option<String>,
+    agent_class: Option<String>,
+    start: bool,
+) -> AgentConfig {
+    let mut config = source.clone();
+    config.session_id.clear();
+    config.session_name = session_name;
+    if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
+        config.provider = provider;
+    }
+    if let Some(folder) = folder {
+        config.folder = folder;
+    }
+    if let Some(agent_class) = agent_class.filter(|value| !value.trim().is_empty()) {
+        config.agent_class = agent_class;
+    }
+    config.resume_session = None;
+    config.fresh_provider_session_id = None;
+    config.codex_cleared_provider_sessions.clear();
+    config.system_include_directories = None;
+    config.opencode_port = None;
+    config.is_off = !start;
+    config
+}
+
+fn clone_copy_file(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
+    if !source.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn clone_copy_directory_recursive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+    if destination.exists() || destination.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_dir_all(destination).or_else(|_| std::fs::remove_file(destination));
+    }
+    std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+
+    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source_path).map_err(|e| e.to_string())?;
+        if metadata.is_dir() {
+            clone_copy_directory_recursive(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            clone_copy_file(&source_path, &destination_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn clone_copy_agent_profile_files(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+    destination_session_id: &str,
+) -> Result<(), String> {
+    let source_root = wardian_home.join("agents").join(source_session_id);
+    let destination_root = wardian_home.join("agents").join(destination_session_id);
+    std::fs::create_dir_all(&destination_root).map_err(|e| e.to_string())?;
+
+    clone_copy_file(&source_root.join("AGENTS.md"), &destination_root.join("AGENTS.md"))?;
+    clone_copy_directory_recursive(
+        &source_root.join(".agents").join("skills"),
+        &destination_root.join(".agents").join("skills"),
+    )
+}
+
 fn persisted_resume_session_for_provider(
     provider_name: &str,
     actual_resume: Option<String>,
@@ -160,78 +284,15 @@ async fn is_name_unique(state: &AppState, name: &str, exclude_session_id: Option
     })
 }
 
-#[tauri::command]
-pub async fn spawn_agent(
-    req: SpawnAgentRequest,
-    state: State<'_, AppState>,
-    app: AppHandle,
+async fn register_new_agent(
+    mut config: AgentConfig,
+    mut actual_resume: Option<String>,
+    state: &AppState,
+    app: &AppHandle,
 ) -> Result<AgentConfig, String> {
-    let session_name = req.session_name;
-    let agent_class = req.agent_class;
-    let folder = req.folder;
-    let resume_session = req.resume_session;
-    let is_off = req.is_off;
-    let config_override = req.config_override;
-
-    if !is_valid_name(&session_name) {
-        return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
-    }
-
-    if !is_name_unique(&state, &session_name, None).await {
-        return Err(format!(
-            "An agent with the name '{}' already exists.",
-            session_name
-        ));
-    }
-
-    manager::log_debug(&format!(
-        "[WARDIAN] spawn_agent called for session name: {}, class: {}",
-        session_name, agent_class
-    ));
-    let provider_name = config_override
-        .as_ref()
-        .map(|c| c.provider.clone())
-        .unwrap_or_else(|| "claude".to_string());
-    let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
-
-    let mut session_id = actual_resume.clone();
-
-    if actual_resume.is_none() {
-        if provider_uses_generated_session_id(&provider_name) {
-            session_id = Some(uuid::Uuid::new_v4().to_string());
-        } else {
-            let cwd = crate::utils::fs::resolve_cwd(&folder, "");
-
-            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref())
-                .await
-            {
-                Ok(real_sid) => {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] Intercepted stream-json session ID for {}: {}",
-                        provider_name, real_sid
-                    ));
-                    // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
-                    session_id = Some(real_sid.clone());
-                    actual_resume = Some(real_sid);
-                }
-                Err(e) => {
-                    return Err(format!("Failed to initialize the provider session: {}", e));
-                }
-            }
-        }
-    }
-
-    let session_id = session_id.ok_or_else(|| "Failed to determine session ID".to_string())?;
-
-    let mut config = config_override.unwrap_or_default();
-    config.session_id = session_id.clone();
-    config.session_name = session_name;
-    config.agent_class = agent_class.clone();
-    config.folder = folder;
-    config.resume_session = actual_resume.clone();
-    config.is_off = is_off.unwrap_or(false);
+    let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
-        &agent_class,
+        &config.agent_class,
         &session_id,
     ));
     let active_agent = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
@@ -303,9 +364,166 @@ pub async fn spawn_agent(
     let mut order = state.agent_order.lock().await;
     agents.insert(session_id.clone(), active_agent);
     order.push(session_id.clone());
-    manager::save_state(&app, &agents, &order);
+    manager::save_state(app, &agents, &order);
+    let _ = app.emit("agents-updated", ());
 
     Ok(config)
+}
+
+#[tauri::command]
+pub async fn spawn_agent(
+    req: SpawnAgentRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AgentConfig, String> {
+    let session_name = req.session_name;
+    let agent_class = req.agent_class;
+    let folder = req.folder;
+    let resume_session = req.resume_session;
+    let is_off = req.is_off;
+    let config_override = req.config_override;
+
+    if !is_valid_name(&session_name) {
+        return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
+    }
+
+    if !is_name_unique(&state, &session_name, None).await {
+        return Err(format!(
+            "An agent with the name '{}' already exists.",
+            session_name
+        ));
+    }
+
+    manager::log_debug(&format!(
+        "[WARDIAN] spawn_agent called for session name: {}, class: {}",
+        session_name, agent_class
+    ));
+    let provider_name = config_override
+        .as_ref()
+        .map(|c| c.provider.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
+
+    let mut session_id = actual_resume.clone();
+
+    if actual_resume.is_none() {
+        if provider_uses_generated_session_id(&provider_name) {
+            session_id = Some(uuid::Uuid::new_v4().to_string());
+        } else {
+            let cwd = crate::utils::fs::resolve_cwd(&folder, "");
+
+            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref())
+                .await
+            {
+                Ok(real_sid) => {
+                    manager::log_debug(&format!(
+                        "[WARDIAN] Intercepted stream-json session ID for {}: {}",
+                        provider_name, real_sid
+                    ));
+                    // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
+                    session_id = Some(real_sid.clone());
+                    actual_resume = Some(real_sid);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to initialize the provider session: {}", e));
+                }
+            }
+        }
+    }
+
+    let session_id = session_id.ok_or_else(|| "Failed to determine session ID".to_string())?;
+
+    let mut config = config_override.unwrap_or_default();
+    config.session_id = session_id.clone();
+    config.session_name = session_name;
+    config.agent_class = agent_class.clone();
+    config.folder = folder;
+    config.resume_session = actual_resume.clone();
+    config.is_off = is_off.unwrap_or(false);
+    register_new_agent(config, actual_resume, &state, &app).await
+}
+
+#[tauri::command]
+pub async fn clone_agent(
+    req: CloneAgentRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AgentConfig, String> {
+    let source_session_id = req.source_session_id.trim().to_string();
+    if source_session_id.is_empty() {
+        return Err("Source agent is required.".to_string());
+    }
+
+    let (source_config, existing_names) = {
+        let agents = state.agents.lock().await;
+        let source = agents
+            .get(&source_session_id)
+            .ok_or_else(|| format!("Agent {} not found", source_session_id))?
+            .config
+            .lock()
+            .unwrap()
+            .clone();
+        let names = agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().session_name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        (source, names)
+    };
+
+    let session_name = req
+        .session_name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| clone_unique_name(&source_config.session_name, &existing_names));
+    if !is_valid_name(&session_name) {
+        return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
+    }
+    if existing_names.contains(&session_name) {
+        return Err(format!(
+            "An agent with the name '{}' already exists.",
+            session_name
+        ));
+    }
+
+    manager::log_debug(&format!(
+        "[WARDIAN] clone_agent called for source session: {}, mode: {:?}",
+        source_session_id, req.mode
+    ));
+
+    let mut config = clone_sanitize_config(
+        &source_config,
+        session_name,
+        req.provider,
+        req.folder,
+        req.agent_class,
+        req.start.unwrap_or(true),
+    );
+    let provider_name = config.provider.clone();
+    let mut actual_resume = None;
+    let session_id = if provider_uses_generated_session_id(&provider_name) {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+        let real_sid = manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
+            .await
+            .map_err(|e| format!("Failed to initialize the provider session: {}", e))?;
+        manager::log_debug(&format!(
+            "[WARDIAN] Intercepted stream-json clone session ID for {}: {}",
+            provider_name, real_sid
+        ));
+        actual_resume = Some(real_sid.clone());
+        real_sid
+    };
+
+    config.session_id = session_id.clone();
+    config.resume_session = actual_resume.clone();
+
+    if req.mode == CloneAgentMode::Profile {
+        let home = crate::utils::fs::get_wardian_home()
+            .ok_or_else(|| "Could not find Wardian home".to_string())?;
+        clone_copy_agent_profile_files(&home, &source_session_id, &session_id)?;
+    }
+
+    register_new_agent(config, actual_resume, &state, &app).await
 }
 
 #[tauri::command]
@@ -763,12 +981,14 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
+        clone_copy_agent_profile_files, clone_sanitize_config, clone_unique_name,
         codex_provider_session_is_new, persisted_resume_session_for_provider, prepare_clear_config,
         prepare_resume_config, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, restore_runtime_state_after_resume,
     };
     use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
     use crate::state::ActiveAgent;
+    use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
     fn make_test_agent() -> ActiveAgent {
@@ -802,6 +1022,133 @@ mod tests {
         })
         .expect("save shell settings");
         (guard, temp)
+    }
+
+    fn clone_name_set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn clone_unique_name_uses_copy_suffix_when_available() {
+        assert_eq!(
+            clone_unique_name("Alpha", &clone_name_set(&["Alpha"])),
+            "Alpha-copy"
+        );
+    }
+
+    #[test]
+    fn clone_unique_name_increments_copy_suffix_until_available() {
+        assert_eq!(
+            clone_unique_name("Alpha", &clone_name_set(&["Alpha", "Alpha-copy"])),
+            "Alpha-copy-2"
+        );
+    }
+
+    #[test]
+    fn clone_sanitize_config_preserves_visible_setup_and_clears_runtime_memory() {
+        let source = AgentConfig {
+            session_id: "source-session".to_string(),
+            session_name: "Alpha".to_string(),
+            agent_class: "Coder".to_string(),
+            folder: "D:/Development/Wardian".to_string(),
+            provider: "codex".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            resume_session: Some("provider-session".to_string()),
+            fresh_provider_session_id: Some("fresh-provider-session".to_string()),
+            codex_cleared_provider_sessions: vec!["old-provider-session".to_string()],
+            is_off: true,
+            custom_args: Some("--verbose".to_string()),
+            ..Default::default()
+        };
+
+        let clone = clone_sanitize_config(
+            &source,
+            "Alpha-copy".to_string(),
+            None,
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(clone.session_id, "");
+        assert_eq!(clone.session_name, "Alpha-copy");
+        assert_eq!(clone.agent_class, "Coder");
+        assert_eq!(clone.folder, "D:/Development/Wardian");
+        assert_eq!(clone.provider, "codex");
+        assert_eq!(clone.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(clone.custom_args.as_deref(), Some("--verbose"));
+        assert_eq!(clone.resume_session, None);
+        assert_eq!(clone.fresh_provider_session_id, None);
+        assert!(clone.codex_cleared_provider_sessions.is_empty());
+        assert!(!clone.is_off);
+    }
+
+    #[test]
+    fn clone_sanitize_config_applies_custom_overrides() {
+        let source = AgentConfig {
+            session_name: "Alpha".to_string(),
+            agent_class: "Coder".to_string(),
+            folder: "D:/source".to_string(),
+            provider: "claude".to_string(),
+            ..Default::default()
+        };
+
+        let clone = clone_sanitize_config(
+            &source,
+            "Beta".to_string(),
+            Some("gemini".to_string()),
+            Some("D:/target".to_string()),
+            Some("Reviewer".to_string()),
+            false,
+        );
+
+        assert_eq!(clone.session_name, "Beta");
+        assert_eq!(clone.provider, "gemini");
+        assert_eq!(clone.folder, "D:/target");
+        assert_eq!(clone.agent_class, "Reviewer");
+        assert!(clone.is_off);
+    }
+
+    #[test]
+    fn clone_profile_copy_carries_whitelisted_files_and_excludes_runtime_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        let dest = home.join("agents").join("dest-agent");
+        std::fs::create_dir_all(source.join(".agents").join("skills").join("skill-one"))
+            .expect("create source skill");
+        std::fs::create_dir_all(source.join("habitat")).expect("create habitat");
+        std::fs::create_dir_all(source.join("claude")).expect("create claude dir");
+        std::fs::write(source.join("AGENTS.md"), "# Agent Memory\n").expect("write agents");
+        std::fs::write(
+            source.join(".agents").join("skills").join("skill-one").join("SKILL.md"),
+            "# Skill\n",
+        )
+        .expect("write skill");
+        std::fs::write(source.join("habitat").join("AGENTS.md"), "generated")
+            .expect("write habitat");
+        std::fs::write(source.join("claude").join("permission-requests.jsonl"), "{}\n")
+            .expect("write log");
+
+        clone_copy_agent_profile_files(home, "source-agent", "dest-agent")
+            .expect("copy profile files");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("AGENTS.md")).expect("read copied agents"),
+            "# Agent Memory\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                dest.join(".agents")
+                    .join("skills")
+                    .join("skill-one")
+                    .join("SKILL.md")
+            )
+            .expect("read copied skill"),
+            "# Skill\n"
+        );
+        assert!(!dest.join("habitat").exists());
+        assert!(!dest.join("claude").join("permission-requests.jsonl").exists());
     }
 
     #[test]
