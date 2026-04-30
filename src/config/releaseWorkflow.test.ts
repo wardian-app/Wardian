@@ -12,6 +12,7 @@ describe("release workflow contract", () => {
     expect(releasePleaseWorkflow).toContain("actions: write");
     expect(releasePleaseWorkflow).toContain("Dispatch asset build");
     expect(releasePleaseWorkflow).toContain("gh workflow run release.yml");
+    expect(releasePleaseWorkflow).toContain("--repo \"$GITHUB_REPOSITORY\"");
     expect(releasePleaseWorkflow).toContain("steps.release.outputs.tag_name");
   });
 

@@ -25,6 +25,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
         run: |
           gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
             --ref main \
             -f dry_run=false \
             -f tag="$RELEASE_TAG" \
