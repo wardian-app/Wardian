@@ -1,28 +1,61 @@
 use crate::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 use crate::state::AppState;
-use crate::utils::process::new_headless_std_command;
 use notify::Watcher;
+use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
 /// Run a git command in the given directory and return stdout as a String.
 ///
-/// Uses `new_headless_std_command` so no console window flashes on Windows.
+/// Uses a direct command with `CREATE_NO_WINDOW` on Windows so stdout can be
+/// captured without flashing a console window.
 /// Sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` so git never blocks
 /// waiting for credential input (mirrors VS Code's git extension behaviour).
 fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = new_headless_std_command("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "echo")
+        .env("GIT_ASKPASS", "echo");
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+
+    let output = command
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(git_failure_message(
+            output.status.code(),
+            stdout.as_ref(),
+            stderr.as_ref(),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_failure_message(status_code: Option<i32>, stdout: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+
+    match status_code {
+        Some(code) => format!("git exited with status {}", code),
+        None => "git exited unsuccessfully".to_string(),
+    }
 }
 
 /// Parse `git status --porcelain=v1 -b` output into a GitStatusResult.
@@ -353,5 +386,27 @@ mod tests {
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].path, "new/path.rs");
         assert!(result.files[0].is_staged);
+    }
+
+    #[test]
+    fn run_git_captures_stdout() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_str().unwrap();
+
+        run_git(cwd, &["init"]).unwrap();
+        let output = run_git(cwd, &["status", "--porcelain=v1", "-b"]).unwrap();
+
+        assert!(
+            output.contains("## "),
+            "expected porcelain status on stdout, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn git_failure_message_never_returns_empty_error() {
+        assert_eq!(
+            git_failure_message(Some(1), "", ""),
+            "git exited with status 1"
+        );
     }
 }

@@ -6,6 +6,8 @@ import { GitFileList } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
 import { useConfirm } from "../../components/ConfirmDialog";
 
+const DEFAULT_GIT_ERROR = "Unable to load git status.";
+
 interface GitPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
@@ -32,27 +34,44 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   // Commit history
   const [history, setHistory] = useState<GitLogEntry[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
-  const isNotGitRepoError = (error ?? "").toLowerCase().includes("not a git repository");
+  const errorMessage = error === null ? "" : error.trim() || DEFAULT_GIT_ERROR;
+  const isNotGitRepoError =
+    errorMessage.toLowerCase().includes("not a git repository") ||
+    errorMessage.toLowerCase().includes("not a git directory");
   // Branch starts with "wardian/" when the agent is actively running inside a worktree
   const isWorktreeActive = status?.branch?.startsWith("wardian/") ?? false;
   const isAgentRunning = (telemetry[selectedAgentId ?? ""]?.current_status ?? "Off") !== "Off";
 
+  const formatError = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.trim() || DEFAULT_GIT_ERROR;
+  };
 
   // Resolve the agent's working directory
   useEffect(() => {
     const fetchPath = async () => {
+      setStatus(null);
+      setHistory([]);
+      setHistoryError(null);
+      setError(null);
+      setRootPath(null);
+
       if (!selectedAgentId) {
-        setRootPath(null);
         return;
       }
       try {
         const path = await invoke<string>("get_explorer_root", { sessionId: selectedAgentId });
+        if (!path.trim()) {
+          setError("Agent workspace is not configured.");
+          return;
+        }
         setRootPath(path);
-      } catch {
-        setRootPath(null);
+      } catch (err) {
+        setError(formatError(err));
       }
     };
     fetchPath();
@@ -67,7 +86,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setError(null);
     } catch (err) {
       setStatus(null);
-      setError(String(err));
+      setError(formatError(err));
     }
   }, [rootPath]);
 
@@ -77,8 +96,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     try {
       const log = await invoke<GitLogEntry[]>("git_log", { cwd: rootPath, count: 50 });
       setHistory(log);
-    } catch {
+      setHistoryError(null);
+    } catch (err) {
       setHistory([]);
+      setHistoryError(formatError(err));
     }
   }, [rootPath]);
 
@@ -250,7 +271,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   }
 
   // Not a git repo or error
-  if (error) {
+  if (error !== null) {
     return (
       <div className="flex flex-col h-full w-full">
         <h2 className="text-xl font-bold text-primary tracking-tight mb-4">Source Control</h2>
@@ -267,7 +288,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           <p className="text-xs text-muted italic px-4">
             {isNotGitRepoError
               ? "The agent's workspace is not initialized as a git repository."
-              : error}
+              : errorMessage}
           </p>
         </div>
       </div>
@@ -395,14 +416,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         {/* Staged Changes */}
         {stagedFiles.length > 0 && (
           <section>
-            <button
-              onClick={() => setStagedOpen(!stagedOpen)}
-              className="flex items-center gap-1.5 w-full text-left py-1 group"
-            >
-              <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${stagedOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
-              </svg>
-              <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Staged Changes</span>
+            <div className="flex items-center gap-1.5 w-full py-1 group">
+              <button
+                onClick={() => setStagedOpen(!stagedOpen)}
+                className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+              >
+                <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${stagedOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Staged Changes</span>
+              </button>
               <div className="flex-1" />
               <button
                 onClick={(e) => { e.stopPropagation(); handleUnstageAll(); }}
@@ -416,7 +439,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
                 {stagedFiles.length}
               </span>
-            </button>
+            </div>
             {stagedOpen && (
               <GitFileList
                 files={stagedFiles}
@@ -430,14 +453,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         {/* Changes (unstaged tracked) */}
         {unstagedTracked.length > 0 && (
           <section>
-            <button
-              onClick={() => setChangesOpen(!changesOpen)}
-              className="flex items-center gap-1.5 w-full text-left py-1 group"
-            >
-              <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${changesOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
-              </svg>
-              <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Changes</span>
+            <div className="flex items-center gap-1.5 w-full py-1 group">
+              <button
+                onClick={() => setChangesOpen(!changesOpen)}
+                className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+              >
+                <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${changesOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Changes</span>
+              </button>
               <div className="flex-1" />
               <button
                 onClick={(e) => { e.stopPropagation(); handleStageAll(); }}
@@ -451,7 +476,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
                 {unstagedTracked.length}
               </span>
-            </button>
+            </div>
             {changesOpen && (
               <GitFileList
                 files={unstagedTracked}
@@ -466,14 +491,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         {/* Untracked Files */}
         {untrackedFiles.length > 0 && (
           <section>
-            <button
-              onClick={() => setUntrackedOpen(!untrackedOpen)}
-              className="flex items-center gap-1.5 w-full text-left py-1 group"
-            >
-              <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${untrackedOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
-              </svg>
-              <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Untracked</span>
+            <div className="flex items-center gap-1.5 w-full py-1 group">
+              <button
+                onClick={() => setUntrackedOpen(!untrackedOpen)}
+                className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+              >
+                <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${untrackedOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Untracked</span>
+              </button>
               <div className="flex-1" />
               <button
                 onClick={(e) => { e.stopPropagation(); handleStageAll(); }}
@@ -487,7 +514,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
                 {untrackedFiles.length}
               </span>
-            </button>
+            </div>
             {untrackedOpen && (
               <GitFileList
                 files={untrackedFiles}
@@ -509,7 +536,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         )}
 
         {/* Commit History */}
-        {history.length > 0 && (
+        {(history.length > 0 || historyError) && (
           <section className="mt-1 border-t border-wardian-border/30 pt-2">
             <button
               onClick={() => setHistoryOpen(!historyOpen)}
@@ -520,22 +547,28 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               </svg>
               <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">History</span>
               <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
-                {history.length}
+                {historyError ? "!" : history.length}
               </span>
             </button>
             {historyOpen && (
               <div className="flex flex-col">
-                {history.map((entry, i) => (
-                  <div key={entry.hash} className="flex items-center gap-2 py-[3px] px-1 hover:bg-wardian-card-bg-muted rounded group cursor-default">
-                    <div className="relative flex flex-col items-center shrink-0" style={{ width: 12 }}>
-                      {i > 0 && <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
-                      <div className={`w-2 h-2 rounded-full border shrink-0 z-10 ${i === 0 ? 'bg-[var(--color-wardian-accent)] border-[var(--color-wardian-accent)]' : 'bg-transparent border-[var(--color-wardian-text-muted)]'}`} />
-                      {i < history.length - 1 && <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
-                    </div>
-                    <span className="text-[11px] text-primary truncate flex-1 leading-snug">{entry.message}</span>
-                    <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">{entry.hash.slice(0, 7)}</span>
+                {historyError ? (
+                  <div className="px-1 py-2 text-[11px] text-[var(--color-wardian-text-muted)]">
+                    History unavailable
                   </div>
-                ))}
+                ) : (
+                  history.map((entry, i) => (
+                    <div key={entry.hash} className="flex items-center gap-2 py-[3px] px-1 hover:bg-wardian-card-bg-muted rounded group cursor-default">
+                      <div className="relative flex flex-col items-center shrink-0" style={{ width: 12 }}>
+                        {i > 0 && <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
+                        <div className={`w-2 h-2 rounded-full border shrink-0 z-10 ${i === 0 ? 'bg-[var(--color-wardian-accent)] border-[var(--color-wardian-accent)]' : 'bg-transparent border-[var(--color-wardian-text-muted)]'}`} />
+                        {i < history.length - 1 && <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
+                      </div>
+                      <span className="text-[11px] text-primary truncate flex-1 leading-snug">{entry.message}</span>
+                      <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">{entry.hash.slice(0, 7)}</span>
+                    </div>
+                  ))
+                )}
               </div>
             )}
           </section>
