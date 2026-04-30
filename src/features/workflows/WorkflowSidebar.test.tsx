@@ -124,18 +124,19 @@ describe('WorkflowSidebar', () => {
     expect(mockResumeAllTriggers).toHaveBeenCalled();
   });
 
-  it('creates a new scheduled run from the sidebar instead of launching an immediate execution', async () => {
-    renderWithProvider(<WorkflowSidebar />);
+  it('delegates configurable workflow runs to the main view instead of opening the modal in the sidebar', async () => {
+    const mockOpenRunModalInMain = vi.fn();
+    renderWithProvider(<WorkflowSidebar onOpenRunModalInMain={mockOpenRunModalInMain} />);
 
     fireEvent.click(screen.getByText('Alpha Workflow'));
 
-    // Because it's a scheduled trigger, it will open the RunPayloadModal first
-    await waitFor(() => expect(screen.getByRole('button', { name: /Schedule Workflow/i })).toBeInTheDocument());
-    
-    // Submit the modal to actually schedule it
-    fireEvent.click(screen.getByRole('button', { name: /Schedule Workflow/i }));
-
-    await waitFor(() => expect(mockCreateScheduledRun).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockOpenRunModalInMain).toHaveBeenCalledTimes(1));
+    expect(mockOpenRunModalInMain).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'wf-1' }),
+      'scheduled',
+    );
+    expect(screen.queryByRole('button', { name: /Schedule Workflow/i })).not.toBeInTheDocument();
+    expect(mockCreateScheduledRun).not.toHaveBeenCalled();
     expect(mockRunWorkflowById).not.toHaveBeenCalled();
   });
 

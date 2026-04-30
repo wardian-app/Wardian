@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useWorkflowStore } from '../../store/useWorkflowStore';
 import { WorkflowLibrary } from './WorkflowLibrary';
 import { ActiveMonitoring } from './ActiveMonitoring';
-import { RunPayloadModal, getManualTriggerSchema } from './RunPayloadModal';
+import { getManualTriggerSchema } from './RunPayloadModal';
 import type { WorkflowDefinition } from '../../types/workflow';
 import { useConfirm } from '../../components/ConfirmDialog';
 import {
@@ -21,14 +21,13 @@ const SearchIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentCol
 
 interface WorkflowSidebarProps {
   onOpenWorkflowBuilder?: () => void;
+  onOpenRunModalInMain?: (workflow: WorkflowDefinition, kind: WorkflowLaunchKind) => void;
 }
 
-interface PendingWorkflowLaunch {
-  workflow: WorkflowDefinition;
-  kind: WorkflowLaunchKind;
-}
-
-export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflowBuilder }) => {
+export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
+  onOpenWorkflowBuilder,
+  onOpenRunModalInMain,
+}) => {
   const {
     availableWorkflows,
     fetchWorkflows,
@@ -53,7 +52,6 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflow
 
   const confirm = useConfirm();
   const [searchQuery, setSearchQuery] = useState('');
-  const [pendingLaunch, setPendingLaunch] = useState<PendingWorkflowLaunch | null>(null);
 
   const executeWorkflowLaunch = async (
     workflow: WorkflowDefinition,
@@ -113,7 +111,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflow
     const requiresConfig = workflowNeedsRunConfig(normalized, Boolean(getManualTriggerSchema(normalized)));
 
     if (requiresConfig) {
-      setPendingLaunch({ workflow: normalized, kind });
+      onOpenRunModalInMain?.(normalized, kind);
       return;
     }
 
@@ -274,19 +272,6 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({ onOpenWorkflow
           />
         </div>
       </div>
-
-      {pendingLaunch && (
-        <RunPayloadModal
-          workflow={pendingLaunch.workflow}
-          isOpen={true}
-          agents={agents.map(a => ({ session_id: a.session_id, session_name: a.session_name }))}
-          onRun={async (payload) => {
-            await executeWorkflowLaunch(pendingLaunch.workflow, pendingLaunch.kind, payload);
-            setPendingLaunch(null);
-          }}
-          onCancel={() => setPendingLaunch(null)}
-        />
-      )}
     </div>
   );
 };

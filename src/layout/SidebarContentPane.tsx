@@ -11,6 +11,8 @@ import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
 import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
 import { GitPanel } from "../features/git/GitPanel";
+import type { WorkflowDefinition } from "../types/workflow";
+import type { WorkflowLaunchKind } from "../features/workflows/workflowLaunch";
 
 interface SidebarContentPaneProps {
   activeTab: SidebarTab;
@@ -26,9 +28,10 @@ interface SidebarContentPaneProps {
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
   onOpenWorkflowBuilder: () => void;
-  }
+  onOpenWorkflowRunModalInMain?: (workflow: WorkflowDefinition, kind: WorkflowLaunchKind) => void;
+}
 
-  export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
+export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   activeTab,
   leftCollapsed,
   selectedAgentIds,
@@ -42,10 +45,11 @@ interface SidebarContentPaneProps {
   setBroadcastMessage,
   onBroadcast,
   onOpenWorkflowBuilder,
-  }) => {
-    return (
-      <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
-        <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)] flex flex-col min-h-0 h-full">
+  onOpenWorkflowRunModalInMain,
+}) => {
+  return (
+    <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
+      <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)] flex flex-col min-h-0 h-full">
         {activeTab === "explorer" && (
           <ExplorerPanel selectedAgentIds={selectedAgentIds} />
         )}
@@ -108,7 +112,10 @@ interface SidebarContentPaneProps {
         )}
 
         {activeTab === "workflows" && (
-          <WorkflowSidebar onOpenWorkflowBuilder={onOpenWorkflowBuilder} />
+          <WorkflowSidebar
+            onOpenWorkflowBuilder={onOpenWorkflowBuilder}
+            onOpenRunModalInMain={onOpenWorkflowRunModalInMain}
+          />
         )}
 
         {activeTab === "settings" && (

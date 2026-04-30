@@ -37,6 +37,14 @@ import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
+import { RunPayloadModal } from "../features/workflows/RunPayloadModal";
+import {
+  buildScheduledRunFromWorkflow,
+  normalizeWorkflowForLaunch,
+  setWorkflowTriggerStatus,
+  type WorkflowLaunchKind,
+} from "../features/workflows/workflowLaunch";
+import type { WorkflowDefinition } from "../types/workflow";
 
 declare global {
   interface Window {
@@ -68,6 +76,10 @@ function AppBody() {
   const handleWorkflowStatusUpdate = useWorkflowStore(s => s.handleStatusUpdate);
   const fetchWorkflows = useWorkflowStore(s => s.fetchWorkflows);
   const loadScheduledRuns = useWorkflowStore(s => s.loadScheduledRuns);
+  const loadWorkflow = useWorkflowStore(s => s.loadWorkflow);
+  const saveWorkflow = useWorkflowStore(s => s.saveWorkflow);
+  const runWorkflowById = useWorkflowStore(s => s.runWorkflowById);
+  const createScheduledRun = useWorkflowStore(s => s.createScheduledRun);
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
 
   useEffect(() => {
@@ -137,6 +149,10 @@ function AppBody() {
   const [activeListId, setActiveListId] = useState<string>("all");
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
+  const [sidebarPendingWorkflowLaunch, setSidebarPendingWorkflowLaunch] = useState<{
+    workflow: WorkflowDefinition;
+    kind: WorkflowLaunchKind;
+  } | null>(null);
   const hasAutoPatched = useRef(false);
 
   useEffect(() => {
@@ -569,6 +585,58 @@ function AppBody() {
     } catch (e) { console.error(e); }
   }
 
+  const openWorkflowRunModalInMain = useCallback((workflow: WorkflowDefinition, kind: WorkflowLaunchKind) => {
+    loadWorkflow(workflow);
+    setActiveTab("workflows");
+    setViewMode("workflow-builder");
+    setSidebarPendingWorkflowLaunch({ workflow, kind });
+  }, [loadWorkflow]);
+
+  const executeSidebarWorkflowLaunch = useCallback(async (
+    workflow: WorkflowDefinition,
+    kind: WorkflowLaunchKind,
+    payload?: Record<string, any>,
+  ) => {
+    const mergedRoleMappings = payload?.role_mappings && typeof payload.role_mappings === 'object'
+      ? { ...(workflow.role_mappings || {}), ...payload.role_mappings }
+      : workflow.role_mappings || {};
+
+    const configuredWorkflow = normalizeWorkflowForLaunch({
+      ...workflow,
+      role_mappings: mergedRoleMappings,
+    });
+
+    if (kind === 'scheduled') {
+      let workflowForSchedule = configuredWorkflow;
+      if (payload?.schedule) {
+        workflowForSchedule = {
+          ...configuredWorkflow,
+          nodes: configuredWorkflow.nodes.map(n => {
+            if (n.type === 'trigger' && n.name === 'Scheduled Trigger') {
+              return { ...n, config: { ...n.config, schedule: { ...n.config?.schedule, ...payload.schedule } } };
+            }
+            return n;
+          }),
+        };
+        await saveWorkflow(workflowForSchedule);
+      }
+
+      const scheduledRun = buildScheduledRunFromWorkflow(workflowForSchedule);
+      if (scheduledRun) {
+        await createScheduledRun(scheduledRun);
+      }
+      return;
+    }
+
+    if (kind === 'listener') {
+      await saveWorkflow(setWorkflowTriggerStatus(configuredWorkflow, 'active'));
+      await fetchWorkflows();
+      return;
+    }
+
+    await runWorkflowById(configuredWorkflow.id, payload);
+  }, [createScheduledRun, fetchWorkflows, runWorkflowById, saveWorkflow]);
+
   const onPause = async (id: string) => {
     try {
       await invoke('pause_agent', { sessionId: id });
@@ -699,6 +767,7 @@ function AppBody() {
             setActiveTab("workflows");
             setViewMode("workflow-builder");
           }}
+          onOpenWorkflowRunModalInMain={openWorkflowRunModalInMain}
         />
 
         <main className="flex-1 h-full flex flex-col overflow-hidden relative">
@@ -781,6 +850,22 @@ function AppBody() {
               />
             )}
           </div>
+          {sidebarPendingWorkflowLaunch && (
+            <RunPayloadModal
+              workflow={sidebarPendingWorkflowLaunch.workflow}
+              isOpen={true}
+              agents={agents.map(a => ({ session_id: a.session_id, session_name: a.session_name }))}
+              onRun={async (payload) => {
+                await executeSidebarWorkflowLaunch(
+                  sidebarPendingWorkflowLaunch.workflow,
+                  sidebarPendingWorkflowLaunch.kind,
+                  payload,
+                );
+                setSidebarPendingWorkflowLaunch(null);
+              }}
+              onCancel={() => setSidebarPendingWorkflowLaunch(null)}
+            />
+          )}
         </main>
 
         <AgentWatchlist
