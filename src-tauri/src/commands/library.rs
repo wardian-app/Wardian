@@ -407,6 +407,25 @@ fn deploy_skill_from_library(
     deploy_skill_dir_with_linker(&src_dir, &dst_dir, link_skill_dir).map_err(|e| e.to_string())
 }
 
+fn list_deployed_skill_names(target_type: &str, target_id: &str) -> Result<Vec<String>, String> {
+    let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
+    let mut skills = Vec::new();
+
+    if !target_skills_dir.exists() {
+        return Ok(skills);
+    }
+
+    let entries = fs::read_dir(target_skills_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            skills.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    skills.sort();
+
+    Ok(skills)
+}
+
 #[tauri::command]
 pub async fn deploy_skill(
     _app: AppHandle,
@@ -440,22 +459,7 @@ pub async fn list_deployed_skills(
     target_type: String,
     target_id: String,
 ) -> Result<Vec<String>, String> {
-    let target_skills_dir = get_target_skills_dir(&target_type, &target_id)?;
-    let mut skills = Vec::new();
-
-    if target_skills_dir.exists() {
-        if let Ok(entries) = fs::read_dir(target_skills_dir) {
-            for entry in entries.flatten() {
-                if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_dir() {
-                        skills.push(entry.file_name().to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(skills)
+    list_deployed_skill_names(&target_type, &target_id)
 }
 
 #[tauri::command]
@@ -575,6 +579,25 @@ mod tests {
             "updated",
             "expected live-linked skill content; debug log:\n{}",
             debug_log
+        );
+    }
+
+    #[test]
+    fn list_deployed_skills_includes_linked_skill_directories() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _env_guard = WardianHomeGuard;
+
+        let source_dir = temp.path().join("library").join("skills").join("planner");
+        fs::create_dir_all(&source_dir).expect("source skill dir");
+        fs::write(source_dir.join("SKILL.md"), "linked").expect("source skill");
+
+        deploy_skill_from_library("planner", "agent", "agent-1").expect("deploy skill");
+
+        assert_eq!(
+            list_deployed_skill_names("agent", "agent-1").expect("list skills"),
+            vec!["planner".to_string()]
         );
     }
 
