@@ -475,7 +475,8 @@ function AppBody() {
         const next = { ...prev };
         const interactionUpdates: Record<string, string> = {};
         for (const [sessionId, metric] of Object.entries(mapping)) {
-          if ((metric.query_count ?? 0) > (prev[sessionId]?.query_count ?? 0)) {
+          const previousMetric = prev[sessionId];
+          if (previousMetric && (metric.query_count ?? 0) > (previousMetric.query_count ?? 0)) {
             interactionUpdates[sessionId] = new Date().toISOString();
           }
           next[sessionId] = metric;
