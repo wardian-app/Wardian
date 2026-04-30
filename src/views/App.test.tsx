@@ -57,6 +57,23 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
           );
         }
         return null;
+      case "clone_agent":
+        if (args?.req?.source_session_id) {
+          const source = currentAgents.find(a => a.session_id === args.req.source_session_id);
+          if (source) {
+            currentAgents = [
+              ...currentAgents,
+              {
+                ...source,
+                session_id: "agent-clone",
+                session_name: `${source.session_name}-copy`,
+                resume_session: undefined,
+                is_off: false,
+              },
+            ];
+          }
+        }
+        return currentAgents[currentAgents.length - 1] ?? null;
       case "get_agent_metrics":
         return [];
       case "attach_agent_pty":
@@ -349,6 +366,32 @@ describe("Agent Watchlist Sidebar", () => {
       expect(screen.getAllByTestId("agent-card")).toHaveLength(2);
       expect(screen.getAllByText("Alpha").length).toBeGreaterThanOrEqual(2);
       expect(screen.getAllByText("Beta").length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("invokes clone_agent from the single-agent context menu", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+
+    const alphaWatchlistRow = await waitFor(() => {
+      const row = screen
+        .getAllByText("Alpha")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Alpha watchlist row not found");
+      return row;
+    });
+
+    fireEvent.contextMenu(alphaWatchlistRow);
+    fireEvent.click(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Clone" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("clone_agent", {
+        req: {
+          source_session_id: "agent-1",
+          mode: "fresh",
+        },
+      });
     });
   });
 

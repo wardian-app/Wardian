@@ -39,6 +39,7 @@ interface GridViewProps {
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
   onClear: (agentId: string) => void;
+  onClone?: (agentId: string, mode: "fresh" | "profile") => void;
 }
 
 export const GridView: React.FC<GridViewProps> = ({
@@ -73,6 +74,7 @@ export const GridView: React.FC<GridViewProps> = ({
   onPause,
   onRestart,
   onClear,
+  onClone,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { layout, resetLayout, gridStacked } = useLayoutStore();
@@ -334,6 +336,7 @@ export const GridView: React.FC<GridViewProps> = ({
           onPause={onPause}
           onRestart={onRestart}
           onClear={onClear}
+          onClone={onClone}
           onAddToList={onAddToList}
           onRemoveFromList={onRemoveFromList}
           onDelete={onDelete}
