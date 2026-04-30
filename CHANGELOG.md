@@ -4,6 +4,40 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.2](https://github.com/tangemicioglu/Wardian/compare/v0.3.1...v0.3.2) (2026-04-30)
+
+
+### Features
+
+* **agent:** add backend clone command ([47b3a99](https://github.com/tangemicioglu/Wardian/commit/47b3a99d59a45398ea1eb955c83422b190df3895))
+* **agent:** add single-agent clone actions ([ada7fe9](https://github.com/tangemicioglu/Wardian/commit/ada7fe95e9be780ee3d436736ced7ad439b9949d))
+* **agent:** expose clone in context menu ([f47df1e](https://github.com/tangemicioglu/Wardian/commit/f47df1ebb7a4098bc9f0e16513b03cc6b6a48089))
+* **agents:** add workspace folder picker ([ee23a44](https://github.com/tangemicioglu/Wardian/commit/ee23a4491195cc5961e5a6936be558a51f6a5867))
+* **agents:** add workspace folder picker ([37f4415](https://github.com/tangemicioglu/Wardian/commit/37f4415a52db2f8942e51d4d46d272da65dbbdcd))
+
+
+### Bug Fixes
+
+* **agent:** harden profile clone behavior ([848b539](https://github.com/tangemicioglu/Wardian/commit/848b539de75390b54343ea7b80b3f7f2ff9bf2d5))
+* **git:** restore source control status ([8f1caa2](https://github.com/tangemicioglu/Wardian/commit/8f1caa268875daa66f4c7effe04f1ebca14b117d))
+* **git:** restore source control status ([94df3cc](https://github.com/tangemicioglu/Wardian/commit/94df3cca35a91a9c7085a21ca4d546f36661e42d))
+* **library:** list linked deployed skills ([fb526fc](https://github.com/tangemicioglu/Wardian/commit/fb526fcdbc14fddb8565247ad21e6a8f4b6f193a))
+* **library:** list linked deployed skills ([94fb233](https://github.com/tangemicioglu/Wardian/commit/94fb233db1335a407f4fe7fa7f179dca9f6b4e3b))
+* **release:** backfill tauri assets from release drafts ([5110d0f](https://github.com/tangemicioglu/Wardian/commit/5110d0fcd1975c06c6a446a6dd7017ccc37240f7))
+* **release:** force tags for draft releases ([ad32cf2](https://github.com/tangemicioglu/Wardian/commit/ad32cf22c3fa7433e31a2abe05e36f5ceaec6697))
+* **release:** force tags for draft releases ([736147d](https://github.com/tangemicioglu/Wardian/commit/736147d85f0cc1cd4eacca0f999385ebf5923fdb))
+* **release:** upload assets from release drafts ([b5368fe](https://github.com/tangemicioglu/Wardian/commit/b5368fe9417d6262d7ac1e2f3aed9a40be40be45))
+* **runtime:** import macos path helper for headless builds ([69c401a](https://github.com/tangemicioglu/Wardian/commit/69c401a254df6e0c304941355f09c3433a06be5d))
+* **watchlist:** preserve last queried on relaunch ([b9a6145](https://github.com/tangemicioglu/Wardian/commit/b9a6145092de2b8aaf76799a967a5ac9b609f713))
+* **watchlist:** preserve last queried on relaunch ([3512a4f](https://github.com/tangemicioglu/Wardian/commit/3512a4f4decabba96e619be8dc659859a82c50ba))
+* **workflows:** open run modal in main view ([6a32ae1](https://github.com/tangemicioglu/Wardian/commit/6a32ae17482dd6917aa4a38a527a251f9477c89f))
+
+
+### Documentation
+
+* **agent:** plan clone implementation ([c626d1d](https://github.com/tangemicioglu/Wardian/commit/c626d1dd4d45d5bb5df6f1811c98de8577dad80e))
+* **agent:** specify clone menu behavior ([3d4376e](https://github.com/tangemicioglu/Wardian/commit/3d4376e9c0479861fbeabbbc195d1c0886a3a467))
+
 ## [0.3.1](https://github.com/tangemicioglu/Wardian/compare/v0.3.0...v0.3.1) (2026-04-27)
 
 

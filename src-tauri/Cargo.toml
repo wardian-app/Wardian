@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.3.1"
+version = "0.3.2"
 description = "Local command center for multi-agent CLI workflows — see every session, swap skills on the fly, and chain agents into deterministic pipelines."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
