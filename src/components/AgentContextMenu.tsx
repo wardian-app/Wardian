@@ -20,6 +20,7 @@ export interface AgentContextMenuProps {
   onPause: (agentId: string) => MaybePromise;
   onRestart: (agentId: string) => MaybePromise;
   onClear: (agentId: string) => MaybePromise;
+  onClone?: (agentId: string, mode: "fresh" | "profile") => MaybePromise;
   onAddToList: (listId: string, agentId: string) => MaybePromise;
   onRemoveFromList: (listId: string, agentId: string) => MaybePromise;
   onAddAgentsToList?: (listId: string, agentIds: string[]) => MaybePromise;
@@ -47,6 +48,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   onPause,
   onRestart,
   onClear,
+  onClone,
   onAddToList,
   onRemoveFromList,
   onAddAgentsToList,
@@ -65,6 +67,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   const allTargetsOff = targetAgentIds.every((id) => offAgentIds.has(id));
   const anyTargetOff = targetAgentIds.some((id) => offAgentIds.has(id));
   const anyTargetRunning = targetAgentIds.some((id) => !offAgentIds.has(id));
+  const canClone = !isTeam && !isBulk && Boolean(onClone);
 
   const forEachTarget = async (handler: (id: string) => MaybePromise) => {
     for (const id of targetAgentIds) {
@@ -118,6 +121,45 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
         {isTeam ? 'Query Team' : isBulk ? 'Query Selected' : 'Query'}
       </button>
+
+      {canClone && (
+        <div className="context-menu-submenu">
+          <button
+            className="context-menu-item"
+            onMouseEnter={() => setSubMenuListId("clone")}
+            onClick={async () => {
+              await onClone?.(agentId, "fresh");
+              onClose();
+            }}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 8h10a2 2 0 012 2v8a2 2 0 01-2 2H8a2 2 0 01-2-2V8zm0 0V6a2 2 0 012-2h8M4 14H3a1 1 0 01-1-1V4a2 2 0 012-2h9a1 1 0 011 1v1" /></svg>
+            Clone
+            <svg className="w-3 h-3 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
+          </button>
+          {subMenuListId === "clone" && (
+            <div className={`context-submenu ${x > window.innerWidth / 2 ? 'flip-left' : ''}`}>
+              <button
+                className="context-menu-item"
+                onClick={async () => {
+                  await onClone?.(agentId, "fresh");
+                  onClose();
+                }}
+              >
+                Fresh Clone
+              </button>
+              <button
+                className="context-menu-item"
+                onClick={async () => {
+                  await onClone?.(agentId, "profile");
+                  onClose();
+                }}
+              >
+                Profile Clone
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="context-menu-divider" />
 

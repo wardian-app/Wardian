@@ -580,7 +580,10 @@ fn escape_posix_single_quoted(value: &str) -> String {
     value.replace('\'', "'\"'\"'")
 }
 
-fn create_directory_link(target: &std::path::Path, link: &std::path::Path) -> Result<(), String> {
+pub(crate) fn create_directory_link(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         if let Some(parent) = link.parent() {

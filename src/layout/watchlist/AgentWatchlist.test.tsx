@@ -30,6 +30,7 @@ describe('AgentWatchlist', () => {
   const mockOnClear = vi.fn();
   const mockOnDelete = vi.fn();
   const mockOnDeleteAgents = vi.fn();
+  const mockOnClone = vi.fn();
   const mockOnAddAgentsToList = vi.fn();
   const mockOnRemoveAgentsFromList = vi.fn();
   const mockOnCreateTeam = vi.fn();
@@ -73,6 +74,7 @@ describe('AgentWatchlist', () => {
     onClear: mockOnClear,
     onDelete: mockOnDelete,
     onDeleteAgents: mockOnDeleteAgents,
+    onClone: mockOnClone,
     onCreateTeam: mockOnCreateTeam,
     onUngroupTeam: mockOnUngroupTeam,
     onAddAgentToTeam: mockOnAddAgentToTeam,
@@ -164,6 +166,29 @@ describe('AgentWatchlist', () => {
     expect(mockOnClear).toHaveBeenCalledWith('agent-1');
   });
 
+  it('runs a fresh clone when clicking Clone from a single-agent context menu', async () => {
+    render(<AgentWatchlist {...defaultProps} />);
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row');
+
+    fireEvent.contextMenu(agentRow!);
+    fireEvent.click(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clone' }));
+
+    expect(mockOnClone).toHaveBeenCalledWith('agent-1', 'fresh');
+  });
+
+  it('offers fresh and profile clone modes from the clone submenu', async () => {
+    render(<AgentWatchlist {...defaultProps} />);
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row');
+
+    fireEvent.contextMenu(agentRow!);
+    fireEvent.mouseEnter(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clone' }));
+
+    expect(screen.getByRole('button', { name: 'Fresh Clone' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Profile Clone' }));
+
+    expect(mockOnClone).toHaveBeenCalledWith('agent-1', 'profile');
+  });
+
   it('uses a bulk context menu when right-clicking inside a multi-selection', async () => {
     render(
       <AgentWatchlist
@@ -178,6 +203,7 @@ describe('AgentWatchlist', () => {
     const menu = screen.getByTestId('agent-context-menu');
     expect(within(menu).getByRole('button', { name: 'Rename' })).toBeDisabled();
     expect(within(menu).getByRole('button', { name: 'Clear Selected' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('button', { name: 'Clone' })).not.toBeInTheDocument();
 
     fireEvent.click(within(menu).getByRole('button', { name: 'Clear Selected' }));
 
@@ -300,6 +326,7 @@ describe('AgentWatchlist', () => {
 
     const menu = screen.getByTestId('agent-context-menu');
     expect(within(menu).getByRole('button', { name: 'Rename Team' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('button', { name: 'Clone' })).not.toBeInTheDocument();
     fireEvent.click(within(menu).getByRole('button', { name: 'Query Team' }));
 
     await waitFor(() => {

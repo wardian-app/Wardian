@@ -16,6 +16,8 @@ pub struct AgentConfig {
     pub agent_class: String,
     #[serde(default)]
     pub folder: String,
+    #[serde(default)]
+    pub git_worktree: Option<bool>,
     pub resume_session: Option<String>,
     #[serde(default)]
     pub is_off: bool,
@@ -117,6 +119,7 @@ mod tests {
             session_name: "TestAgent".into(),
             agent_class: "Coder".into(),
             folder: "C:/project".into(),
+            git_worktree: Some(true),
             resume_session: Some("def-456".into()),
             codex_cleared_provider_sessions: vec!["old-codex-session".into()],
             is_off: true,
@@ -128,6 +131,7 @@ mod tests {
         assert_eq!(config.session_name, deserialized.session_name);
         assert_eq!(config.agent_class, deserialized.agent_class);
         assert_eq!(config.folder, deserialized.folder);
+        assert_eq!(config.git_worktree, deserialized.git_worktree);
         assert_eq!(config.resume_session, deserialized.resume_session);
         assert_eq!(
             config.codex_cleared_provider_sessions,

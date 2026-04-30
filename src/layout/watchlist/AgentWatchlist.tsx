@@ -74,6 +74,7 @@ interface AgentWatchlistProps {
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
   onClear: (agentId: string) => void;
+  onClone?: (agentId: string, mode: "fresh" | "profile") => void;
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
   onAddAgentsToList?: (listId: string, agentIds: string[]) => void;
@@ -113,6 +114,7 @@ export default function AgentWatchlist({
   onPause,
   onRestart,
   onClear,
+  onClone,
   onAddToList,
   onRemoveFromList,
   onAddAgentsToList,
@@ -1018,6 +1020,7 @@ export default function AgentWatchlist({
           onPause={onPause}
           onRestart={onRestart}
           onClear={onClear}
+          onClone={onClone}
           onAddToList={(listId, agentId) => {
             onAddToList(listId, agentId);
             setContextMenu(p => ({ ...p, visible: false }));
@@ -1065,6 +1068,7 @@ export default function AgentWatchlist({
             onPause={onPause}
             onRestart={onRestart}
             onClear={onClear}
+            onClone={onClone}
             onAddToList={(listId, id) => {
               onAddToList(listId, id);
               setTeamContextMenu((p) => ({ ...p, visible: false }));

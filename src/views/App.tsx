@@ -609,6 +609,21 @@ function AppBody() {
     }
   };
 
+  const onClone = async (id: string, mode: "fresh" | "profile") => {
+    try {
+      await invoke("clone_agent", {
+        req: {
+          source_session_id: id,
+          mode,
+        },
+      });
+      fetchAgents();
+    } catch (e) {
+      console.error(e);
+      alert(`Failed to clone agent: ${e}`);
+    }
+  };
+
   const onDelete = async (id: string) => {
     if (await confirm('Delete this agent?')) {
       try {
@@ -743,6 +758,7 @@ function AppBody() {
                 onPause={onPause}
                 onRestart={onRestart}
                 onClear={onClear}
+                onClone={onClone}
                 onMouseEnterCard={handleMouseEnterCard}
                 onMouseUp={handleMouseUp}
                 onMouseDown={handleMouseDown}
@@ -802,6 +818,7 @@ function AppBody() {
           onPause={onPause}
           onRestart={onRestart}
           onClear={onClear}
+          onClone={onClone}
           onDelete={onDelete}
           onDeleteAgents={onDeleteAgents}
           onAddToList={handleAddToList}
