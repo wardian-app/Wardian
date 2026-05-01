@@ -36,6 +36,9 @@ pub(crate) fn headless_provider_launch(
         });
     }
 
+    #[cfg(not(windows))]
+    let _ = provider_name;
+
     build_program_launch(bin, provider_args)
 }
 

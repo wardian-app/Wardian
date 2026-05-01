@@ -20,6 +20,8 @@ use super::{
     interactive_provider_cwd, interactive_provider_launch, set_agent_status,
 };
 
+#[cfg(target_os = "macos")]
+use super::macos_extended_path;
 #[cfg(windows)]
 use super::{
     app_process_supervisor_active, assign_pid_to_job, cleanup_stale_session_processes,
