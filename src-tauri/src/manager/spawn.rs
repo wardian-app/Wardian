@@ -25,7 +25,6 @@ use super::{
     app_process_supervisor_active, assign_pid_to_job, cleanup_stale_session_processes,
     create_kill_on_close_job,
 };
-#[cfg(windows)]
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
@@ -942,16 +941,6 @@ pub async fn spawn_agent(
         #[cfg(windows)]
         job_object,
     })
-}
-
-#[cfg(not(windows))]
-pub async fn spawn_agent(
-    _app: AppHandle,
-    _config: AgentConfig,
-    _is_restored: bool,
-    _initial_timestamp: Option<String>,
-) -> Result<ActiveAgent, String> {
-    Err("Interactive agent spawning is only supported on Windows".to_string())
 }
 
 pub async fn resize_pty(
