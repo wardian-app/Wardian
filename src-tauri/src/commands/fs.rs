@@ -96,8 +96,14 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
+        let reveal_path = Path::new(&path);
+        let open_path = if reveal_path.is_file() {
+            reveal_path.parent().unwrap_or(reveal_path)
+        } else {
+            reveal_path
+        };
         std::process::Command::new("xdg-open")
-            .arg(&path)
+            .arg(open_path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
