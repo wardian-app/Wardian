@@ -3,7 +3,7 @@
 This document tracks custom patches applied to the **Gemini CLI** bundle to enable missing features or fix upstream bugs that haven't been resolved in the official distribution.
 
 ## ⚠️ Important Note
-These patches directly modify the `gemini.js` bundle within your `node_modules` (typically in `%APPDATA%\npm\node_modules\@google\gemini-cli`). 
+These patches directly modify the Gemini CLI bundle within your global package installation. Wardian discovers that installation from `GEMINI_CLI_DIR`, npm/pnpm global roots, or the resolved `gemini` executable on `PATH`.
 **Upgrading the Gemini CLI will overwrite these changes.** Wardian provides a setting to automatically re-apply these patches upon application launch.
 
 ---
@@ -20,7 +20,7 @@ The `gemini-patch-skills.cjs` script performs a surgical regex-based replacement
 3. Load and register those skills with appropriate precedence.
 
 ### File Location
-The script is located at: `D:\Development\Wardian\scripts\gemini-patch-skills.cjs`
+The script is located at: `scripts/gemini-patch-skills.cjs`
 
 ### Usage in Wardian
 To enable this patch at launch, toggle the **"Auto-patch Gemini CLI"** setting in the Wardian **Advanced Settings** panel.

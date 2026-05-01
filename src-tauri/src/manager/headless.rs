@@ -231,6 +231,10 @@ pub async fn run_headless_with_options(
             cmd.env("WARDIAN_MOCK_SCRIPT", script);
         }
     }
+
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", macos_extended_path());
+
     cmd.current_dir(&provider_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
