@@ -292,7 +292,7 @@ pub(crate) fn apply_agent_status_event(
 /// Volta, and other user-level tool installs. Prepend the common locations so that
 /// `claude`, `gemini`, and similar CLIs can be found when spawning child processes.
 #[cfg(target_os = "macos")]
-fn macos_extended_path() -> String {
+pub(crate) fn macos_extended_path() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let existing = std::env::var("PATH").unwrap_or_default();
     let extra = format!(

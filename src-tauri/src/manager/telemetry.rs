@@ -511,6 +511,8 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
         let mut excluded_roots: BTreeSet<u32> = BTreeSet::new();
         for (session_id, process_id) in &agent_roots {
             excluded_roots.insert(*process_id);
+            #[cfg(not(windows))]
+            let _ = session_id;
             #[cfg(windows)]
             for discovered_pid in crate::utils::process::find_wardian_session_process_roots(
                 session_id,
