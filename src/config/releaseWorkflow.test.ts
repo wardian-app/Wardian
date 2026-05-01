@@ -24,12 +24,14 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("Publish release");
   });
 
-  it("can manually backfill assets onto an existing release", () => {
+  it("can manually backfill assets onto an existing draft release", () => {
     expect(releaseWorkflow).toContain("tag:");
     expect(releaseWorkflow).toContain("release_tag:");
     expect(releaseWorkflow).toContain("Resolve existing release");
-    expect(releaseWorkflow).toContain("/releases/tags/");
+    expect(releaseWorkflow).toContain("github.rest.repos.listReleases");
+    expect(releaseWorkflow).toContain("candidate.tag_name === releaseTag");
     expect(releaseWorkflow).toContain("needs.resolve-release.outputs.release_id");
     expect(releaseWorkflow).toContain("Publish the release");
+    expect(releaseWorkflow).toContain("always() && needs.build.result == 'success'");
   });
 });
