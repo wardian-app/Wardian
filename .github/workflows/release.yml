@@ -84,16 +84,29 @@ jobs:
     steps:
       - name: Resolve existing release
         id: lookup
+        uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          if [ -z "$RELEASE_TAG" ]; then
-            echo "release_tag is required when dry_run=false" >&2
-            exit 1
-          fi
-          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id)"
-          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+        with:
+          script: |
+            const releaseTag = process.env.RELEASE_TAG;
+            if (!releaseTag) {
+              core.setFailed('release_tag is required when dry_run=false');
+              return;
+            }
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const release = releases.find((candidate) => candidate.tag_name === releaseTag);
+            if (!release) {
+              core.setFailed(`Release ${releaseTag} was not found`);
+              return;
+            }
+
+            core.setOutput('release_id', String(release.id));
 
   build:
     name: Build (${{ matrix.platform.os }}${{ matrix.platform.arch && format(' / {0}', matrix.platform.arch) || '' }})
@@ -191,7 +204,7 @@ jobs:
   publish:
     name: Publish release
     needs: [create-release, resolve-release, build]
-    if: needs.build.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
+    if: always() && needs.build.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release
