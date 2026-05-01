@@ -4,6 +4,18 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.3](https://github.com/tangemicioglu/Wardian/compare/v0.3.2...v0.3.3) (2026-05-01)
+
+
+### Bug Fixes
+
+* **agent:** enable spawn on non-windows ([ce0ed2a](https://github.com/tangemicioglu/Wardian/commit/ce0ed2a18d65d667fa57a5395004f11cdbc7d898))
+* **agent:** enable spawn on non-Windows ([f716168](https://github.com/tangemicioglu/Wardian/commit/f71616822fdab3cf181abf9d309669b33d159386))
+* **release:** resolve draft releases for backfill ([135554a](https://github.com/tangemicioglu/Wardian/commit/135554a00ac7e3338f3ee031d98e8c5aaaf33048))
+* **release:** resolve draft releases for manual backfill ([edf21a9](https://github.com/tangemicioglu/Wardian/commit/edf21a9e82a96a430cc3b4f51c5695f91d85635a))
+* **runtime:** close non-windows compatibility gaps ([ced70af](https://github.com/tangemicioglu/Wardian/commit/ced70afa235e9d28f381ea89b05f815aa004fc91))
+* **runtime:** close non-Windows compatibility gaps ([0c4a3c4](https://github.com/tangemicioglu/Wardian/commit/0c4a3c465a1152095b81c5ea6f5a81485ea9eddd))
+
 ## [0.3.2](https://github.com/tangemicioglu/Wardian/compare/v0.3.1...v0.3.2) (2026-04-30)
 
 
