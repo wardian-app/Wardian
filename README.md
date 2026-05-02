@@ -6,8 +6,12 @@
 
 **Local command center for multi-agent CLI workflows** — see every session, swap skills on the fly, and chain agents into deterministic pipelines.
 
-[![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend)](https://codecov.io/gh/tangemicioglu/Wardian)
-[![Backend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=backend)](https://codecov.io/gh/tangemicioglu/Wardian)
+[![CI](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml)
+[![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend&label=frontend%20coverage)](https://codecov.io/gh/tangemicioglu/Wardian)
+[![Backend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=backend&label=backend%20coverage)](https://codecov.io/gh/tangemicioglu/Wardian)
+[![Release](https://img.shields.io/github/v/release/tangemicioglu/Wardian?label=release)](https://github.com/tangemicioglu/Wardian/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/tangemicioglu/Wardian/total?label=downloads)](https://github.com/tangemicioglu/Wardian/releases)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555)
 
 [![Wardian Demo](public/demo.gif)](public/demo.gif)
 
