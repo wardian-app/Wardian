@@ -24,6 +24,7 @@ pub fn wardian_home_for_manifest(manifest_dir: &Path) -> Option<PathBuf> {
 
     #[cfg(not(debug_assertions))]
     {
+        let _ = manifest_dir;
         dirs::home_dir().map(|home| home.join(".wardian"))
     }
 }
