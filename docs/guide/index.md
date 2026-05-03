@@ -9,6 +9,7 @@ Use this index to find user-facing documentation by task.
 
 ## Agent Operations
 
+- [Wardian CLI](./cli.md)
 - [Class Management](./class-management.md)
 - [Library](./library.md)
 - [Command Panel](./command-panel.md)

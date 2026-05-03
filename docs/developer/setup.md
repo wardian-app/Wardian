@@ -40,6 +40,32 @@ Required for `npm run test:e2e:native`. See [native-e2e.md](./native-e2e.md) for
 npm run setup:e2e:native
 ```
 
+## Local Builds
+
+Run the desktop app in development mode:
+
+```bash
+npm run dev
+```
+
+Build the standalone CLI:
+
+```bash
+cargo build -p wardian-cli
+```
+
+Stage the release CLI into the Tauri resource directory used by bundling:
+
+```bash
+npm run stage-cli
+```
+
+Build a production desktop bundle for the current platform:
+
+```bash
+npm run tauri build
+```
+
 ## Environment Variables
 
 | Variable | Purpose | Default |
