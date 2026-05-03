@@ -15,6 +15,7 @@ import {
   shouldSuppressDuplicateResizeRedraw,
   type TerminalOutputState,
 } from "./terminalCapabilities";
+import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -464,11 +465,23 @@ function clearRendererTimers(renderer: TerminalRendererEntry) {
   }
 }
 
+function applyTerminalAppearance(
+  term: Terminal,
+  appearance: { fontSize: number; fontFamily: string },
+  refit: (options?: { force?: boolean }) => void,
+) {
+  term.options.fontSize = appearance.fontSize;
+  term.options.fontFamily = appearance.fontFamily;
+  term.refresh(0, Math.max(term.rows - 1, 0));
+  requestAnimationFrame(() => refit({ force: true }));
+}
+
 function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
+  const { terminalFontFamily, terminalFontSize } = useSettingsStore.getState();
   const term = new Terminal({
     theme: entry.currentTheme,
-    fontFamily: '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace',
-    fontSize: 14,
+    fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
+    fontSize: terminalFontSize,
     customGlyphs: true,
     cursorBlink: true,
     scrollback: TERMINAL_SCROLLBACK_LINES,
@@ -515,6 +528,9 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   term.onData((data) => {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
+    }
+    if (term.buffer.active.viewportY < term.buffer.active.baseY) {
+      term.scrollToBottom();
     }
     invoke("send_input_to_agent", {
       sessionId,
@@ -634,6 +650,8 @@ export const AgentTerminal = memo(function AgentTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
   const [initError, setInitError] = useState<string | null>(null);
+  const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
+  const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
 
   const [effectiveTheme, setEffectiveTheme] = useState<"dark" | "light">(() => {
     if (theme === "system") {
@@ -660,13 +678,13 @@ export const AgentTerminal = memo(function AgentTerminal({
     onTitleChangeRef.current = onTitleChange;
   }, [onTitleChange]);
 
-  const performFit = useCallback(() => {
+  const performFit = useCallback((options?: { force?: boolean }) => {
     const container = terminalRef.current;
     const entry = terminalSessionMap.get(sessionId);
     if (!entry || !xtermRef.current || !fitAddonRef.current || !container) {
       return;
     }
-    void fitTerminalToContainer(sessionId, entry, container);
+    void fitTerminalToContainer(sessionId, entry, container, options);
   }, [sessionId]);
 
   useEffect(() => {
@@ -787,6 +805,17 @@ export const AgentTerminal = memo(function AgentTerminal({
       clearTimeout(timer);
     };
   }, [sessionId, isMaximized, performFit]);
+
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (!term) {
+      return;
+    }
+    applyTerminalAppearance(term, {
+      fontSize: terminalFontSize,
+      fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
+    }, performFit);
+  }, [performFit, terminalFontFamily, terminalFontSize]);
 
   return (
     <div className="relative w-full h-full overflow-hidden">
