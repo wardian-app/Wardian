@@ -1,4 +1,4 @@
-import { render, waitFor, cleanup, screen } from "@testing-library/react";
+import { render, waitFor, cleanup, act, screen } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -6,6 +6,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { AgentTerminal } from "./AgentTerminal";
+import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -24,6 +25,7 @@ describe("AgentTerminal scrollback", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useSettingsStore.setState({ terminalFontSize: 14, terminalFontFamily: "" });
     rectSpy = vi
       .spyOn(HTMLElement.prototype, "getBoundingClientRect")
       .mockReturnValue({
@@ -286,6 +288,90 @@ describe("AgentTerminal scrollback", () => {
     >;
     expect(terminalOptions.reflowCursorLine).toBe(false);
     expect("scrollOnEraseInDisplay" in terminalOptions).toBe(false);
+  });
+
+  it("applies the configured terminal font size and refits when it changes", async () => {
+    useSettingsStore.setState({ terminalFontSize: 16 });
+
+    render(<AgentTerminal sessionId="codex-font-size" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(terminalOptions.fontSize).toBe(16);
+
+    const instance = getLatestTerminalInstance();
+    const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value as {
+      proposeDimensions: ReturnType<typeof vi.fn>;
+    };
+    await waitFor(() => {
+      expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+    });
+    const baselineFitCalls = fitAddon.proposeDimensions.mock.calls.length;
+
+    act(() => {
+      useSettingsStore.getState().setTerminalFontSize(12);
+    });
+
+    await waitFor(() => {
+      expect(instance.options.fontSize).toBe(12);
+      expect(instance.refresh).toHaveBeenCalledWith(0, 23);
+      expect(fitAddon.proposeDimensions.mock.calls.length).toBeGreaterThan(baselineFitCalls);
+    });
+  });
+
+  it("uses the current platform's VS Code-style terminal font stack by default", async () => {
+    render(<AgentTerminal sessionId="codex-default-font" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(terminalOptions.fontFamily).toBe(defaultTerminalFontFamily());
+  });
+
+  it("applies the configured terminal font family and refits when it changes", async () => {
+    useSettingsStore.setState({ terminalFontFamily: "JetBrains Mono, monospace" });
+
+    render(<AgentTerminal sessionId="codex-font-family" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(terminalOptions.fontFamily).toBe("JetBrains Mono, monospace");
+
+    const instance = getLatestTerminalInstance();
+    const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value as {
+      proposeDimensions: ReturnType<typeof vi.fn>;
+    };
+    await waitFor(() => {
+      expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+    });
+    const baselineFitCalls = fitAddon.proposeDimensions.mock.calls.length;
+
+    act(() => {
+      useSettingsStore.getState().setTerminalFontFamily("Consolas, monospace");
+    });
+
+    await waitFor(() => {
+      expect(instance.options.fontFamily).toBe("Consolas, monospace");
+      expect(instance.refresh).toHaveBeenCalledWith(0, 23);
+      expect(fitAddon.proposeDimensions.mock.calls.length).toBeGreaterThan(baselineFitCalls);
+    });
   });
 
   it("loads the WebGL renderer so xterm custom glyphs render block art consistently", async () => {

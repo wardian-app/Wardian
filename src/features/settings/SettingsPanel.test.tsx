@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
@@ -13,6 +14,8 @@ describe('SettingsPanel', () => {
     useSettingsStore.setState({
       theme: 'system',
       autoPatchGemini: false,
+      terminalFontSize: 14,
+      terminalFontFamily: '',
       shell_id: 'auto',
       custom_executable: '',
       custom_args: '',
@@ -167,5 +170,56 @@ describe('SettingsPanel', () => {
     expect(await screen.findByText('Agent runtime updated.')).toBeInTheDocument();
     expect(screen.queryByText('Shell settings updated.')).not.toBeInTheDocument();
     expect(mockInvoke).not.toHaveBeenCalledWith('save_shell_settings', expect.anything());
+  });
+
+  it('adjusts the terminal font size preference', async () => {
+    render(<SettingsPanel />);
+
+    const input = await screen.findByLabelText('Terminal font size');
+    expect(input).toHaveValue(14);
+
+    fireEvent.change(input, { target: { value: '16' } });
+
+    expect(useSettingsStore.getState().terminalFontSize).toBe(16);
+    expect(input).toHaveValue(16);
+  });
+
+  it('keeps partial terminal font size edits local until they become valid', async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel />);
+
+    const input = await screen.findByLabelText('Terminal font size') as HTMLInputElement;
+
+    await user.clear(input);
+    expect(input.value).toBe('');
+    expect(useSettingsStore.getState().terminalFontSize).toBe(14);
+
+    await user.type(input, '1');
+    expect(input.value).toBe('1');
+    expect(useSettingsStore.getState().terminalFontSize).toBe(14);
+
+    await user.type(input, '2');
+    expect(input.value).toBe('12');
+    expect(useSettingsStore.getState().terminalFontSize).toBe(12);
+  });
+
+  it('adjusts the terminal font family preference from presets and custom input', async () => {
+    render(<SettingsPanel />);
+
+    const select = await screen.findByLabelText('Terminal font family');
+    expect(select).toHaveValue('');
+
+    fireEvent.change(select, { target: { value: 'JetBrains Mono, monospace' } });
+
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('JetBrains Mono, monospace');
+    expect(select).toHaveValue('JetBrains Mono, monospace');
+
+    fireEvent.change(select, { target: { value: '__custom__' } });
+
+    const customInput = screen.getByLabelText('Custom terminal font family');
+    fireEvent.change(customInput, { target: { value: 'FiraCode Nerd Font, monospace' } });
+
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('FiraCode Nerd Font, monospace');
+    expect(customInput).toHaveValue('FiraCode Nerd Font, monospace');
   });
 });

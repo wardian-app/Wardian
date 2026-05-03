@@ -3,9 +3,58 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ShellOption, ShellSettings } from '../types/settings';
 
+export const MIN_TERMINAL_FONT_SIZE = 10;
+export const MAX_TERMINAL_FONT_SIZE = 20;
+export const WINDOWS_TERMINAL_FONT_FAMILY = 'Consolas, "Courier New", monospace';
+export const MACOS_TERMINAL_FONT_FAMILY = 'Menlo, Monaco, "Courier New", monospace';
+export const LINUX_TERMINAL_FONT_FAMILY = '"Droid Sans Mono", monospace';
+
+type TerminalPlatform = 'windows' | 'macos' | 'linux';
+
+function detectTerminalPlatform(): TerminalPlatform {
+  const platform = navigator.platform.toLowerCase();
+  const userAgent = navigator.userAgent.toLowerCase();
+  if (platform.includes('mac') || userAgent.includes('mac os')) {
+    return 'macos';
+  }
+  if (platform.includes('win') || userAgent.includes('windows')) {
+    return 'windows';
+  }
+  return 'linux';
+}
+
+export function defaultTerminalFontSize(platform: TerminalPlatform = detectTerminalPlatform()) {
+  return platform === 'macos' ? 12 : 14;
+}
+
+export function defaultTerminalFontFamily(platform: TerminalPlatform = detectTerminalPlatform()) {
+  switch (platform) {
+    case 'macos':
+      return MACOS_TERMINAL_FONT_FAMILY;
+    case 'windows':
+      return WINDOWS_TERMINAL_FONT_FAMILY;
+    default:
+      return LINUX_TERMINAL_FONT_FAMILY;
+  }
+}
+
+export function normalizeTerminalFontSize(value: number) {
+  if (!Number.isFinite(value)) {
+    return defaultTerminalFontSize();
+  }
+  return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, Math.round(value)));
+}
+
+export function effectiveTerminalFontFamily(value: string | null | undefined) {
+  const trimmed = value?.trim() ?? '';
+  return trimmed || defaultTerminalFontFamily();
+}
+
 interface SettingsState {
   theme: 'dark' | 'light' | 'system';
   autoPatchGemini: boolean;
+  terminalFontSize: number;
+  terminalFontFamily: string;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -15,6 +64,8 @@ interface SettingsState {
   shells_loaded: boolean;
   setTheme: (theme: 'dark' | 'light' | 'system') => void;
   setAutoPatchGemini: (enabled: boolean) => void;
+  setTerminalFontSize: (value: number) => void;
+  setTerminalFontFamily: (value: string) => void;
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
@@ -37,6 +88,8 @@ export const useSettingsStore = create<SettingsState>()(
     (set, get) => ({
       theme: 'system',
       autoPatchGemini: false,
+      terminalFontSize: defaultTerminalFontSize(),
+      terminalFontFamily: '',
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -46,6 +99,10 @@ export const useSettingsStore = create<SettingsState>()(
       shells_loaded: false,
       setTheme: (theme) => set({ theme }),
       setAutoPatchGemini: (autoPatchGemini) => set({ autoPatchGemini }),
+      setTerminalFontSize: (terminalFontSize) => set({
+        terminalFontSize: normalizeTerminalFontSize(terminalFontSize),
+      }),
+      setTerminalFontFamily: (terminalFontFamily) => set({ terminalFontFamily }),
       setShellId: (shell_id) => set({ shell_id }),
       setCustomExecutable: (custom_executable) => set({ custom_executable }),
       setCustomArgs: (custom_args) => set({ custom_args }),
@@ -114,6 +171,8 @@ export const useSettingsStore = create<SettingsState>()(
       partialize: (state) => ({
         theme: state.theme,
         autoPatchGemini: state.autoPatchGemini,
+        terminalFontSize: normalizeTerminalFontSize(state.terminalFontSize),
+        terminalFontFamily: state.terminalFontFamily.trim(),
       }),
     }
   )
