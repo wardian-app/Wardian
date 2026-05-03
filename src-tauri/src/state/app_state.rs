@@ -1,7 +1,15 @@
 use crate::state::active_agent::ActiveAgent;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
+
+pub struct LibraryWatchRegistration {
+    pub watcher: notify::RecommendedWatcher,
+    pub ref_count: usize,
+    pub generation: u64,
+    pub watched_paths: Vec<PathBuf>,
+}
 
 pub struct AppState {
     // Map of session_id to ActiveAgent
@@ -19,6 +27,8 @@ pub struct AppState {
     pub scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     // Active git repo watchers keyed by workspace path
     pub git_watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
+    // Active library watchers keyed by library type, shared by mounted UI consumers
+    pub library_watchers: Mutex<HashMap<String, LibraryWatchRegistration>>,
 }
 
 impl AppState {
@@ -41,6 +51,7 @@ impl Default for AppState {
             triggers_paused: std::sync::atomic::AtomicBool::new(false),
             scheduler_handle: Mutex::new(None),
             git_watchers: Mutex::new(HashMap::new()),
+            library_watchers: Mutex::new(HashMap::new()),
         }
     }
 }
