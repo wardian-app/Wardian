@@ -55,6 +55,7 @@ Icon
 .Trashes
 
 # Tauri/Rust specifics
+target/
 src-tauri/*.log
 src-tauri/target/
 src-tauri/gen/
