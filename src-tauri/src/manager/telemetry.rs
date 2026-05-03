@@ -1,4 +1,4 @@
-use crate::models::{AgentTelemetry, AppTelemetry};
+use wardian_core::models::{AgentTelemetry, AppTelemetry};
 use crate::state::AppState;
 use crate::utils::fs::get_wardian_home;
 use std::collections::{BTreeSet, HashMap};

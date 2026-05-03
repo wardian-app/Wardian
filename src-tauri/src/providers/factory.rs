@@ -1,4 +1,4 @@
-use crate::models::provider::AgentProvider;
+use wardian_core::models::provider::AgentProvider;
 use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
 use crate::providers::gemini::GeminiProvider;

@@ -1,5 +1,5 @@
 use crate::manager;
-use crate::models::AgentClassDefinition;
+use wardian_core::models::AgentClassDefinition;
 use tauri::AppHandle;
 
 #[tauri::command]

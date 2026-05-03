@@ -305,7 +305,7 @@ pub(crate) fn migrate_codex_bootstrap_home(
 mod tests {
     use super::*;
     use crate::manager::{strip_flag_value_pairs, strip_standalone_flag};
-    use crate::models::AgentConfig;
+    use wardian_core::models::AgentConfig;
     use std::path::Path;
         #[test]
     fn codex_log_lookup_prefers_provider_thread_id_when_available() {

@@ -1,4 +1,4 @@
-use crate::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
+use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 use crate::state::AppState;
 use notify::Watcher;
 use std::process::{Command, Stdio};

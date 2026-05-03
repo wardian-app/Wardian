@@ -1,5 +1,5 @@
 use crate::manager;
-use crate::models::{
+use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
 };
 use crate::state::AppState;
@@ -1202,7 +1202,7 @@ mod tests {
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         restore_runtime_state_after_resume,
     };
-    use crate::models::{AgentConfig, AgentSessionPersistenceOverride};
+    use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
     use crate::state::ActiveAgent;
     use crate::utils::fs::create_directory_link;
     use std::collections::HashSet;
@@ -1234,7 +1234,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", temp.path());
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
-            agent_session_persistence: crate::models::AgentSessionPersistence::Resume,
+            agent_session_persistence: wardian_core::models::AgentSessionPersistence::Resume,
             ..Default::default()
         })
         .expect("save shell settings");
@@ -1784,7 +1784,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", temp.path());
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
-            agent_session_persistence: crate::models::AgentSessionPersistence::Fresh,
+            agent_session_persistence: wardian_core::models::AgentSessionPersistence::Fresh,
             ..Default::default()
         })
         .expect("save shell settings");
@@ -1810,7 +1810,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", temp.path());
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
-            agent_session_persistence: crate::models::AgentSessionPersistence::Resume,
+            agent_session_persistence: wardian_core::models::AgentSessionPersistence::Resume,
             ..Default::default()
         })
         .expect("save shell settings");
@@ -1837,7 +1837,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", temp.path());
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
-            agent_session_persistence: crate::models::AgentSessionPersistence::Fresh,
+            agent_session_persistence: wardian_core::models::AgentSessionPersistence::Fresh,
             ..Default::default()
         })
         .expect("save shell settings");
@@ -1864,7 +1864,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", temp.path());
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
-            agent_session_persistence: crate::models::AgentSessionPersistence::Fresh,
+            agent_session_persistence: wardian_core::models::AgentSessionPersistence::Fresh,
             ..Default::default()
         })
         .expect("save shell settings");

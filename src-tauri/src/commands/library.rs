@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::manager::log_debug;
-use crate::models::{
+use wardian_core::models::{
     DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
 };
 use crate::state::{AppState, LibraryWatchRegistration};
@@ -178,7 +178,7 @@ pub async fn get_library_tree(
                         let content = fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
                         let description = content.lines().next().unwrap_or("").to_string();
 
-                        children.push(LibraryNode::Skill(crate::models::LibrarySkill {
+                        children.push(LibraryNode::Skill(wardian_core::models::LibrarySkill {
                             path: file_rel_path,
                             name: file_name,
                             description,
@@ -744,14 +744,14 @@ pub async fn list_skill_deployments(
     _app: AppHandle,
     skill_name: String,
     source_path: Option<String>,
-) -> Result<Vec<crate::models::SkillDeployment>, String> {
+) -> Result<Vec<wardian_core::models::SkillDeployment>, String> {
     list_skill_deployments_for_source(&skill_name, source_path.as_deref())
 }
 
 fn list_skill_deployments_for_source(
     skill_name: &str,
     source_path: Option<&str>,
-) -> Result<Vec<crate::models::SkillDeployment>, String> {
+) -> Result<Vec<wardian_core::models::SkillDeployment>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let library_skills_dir = home.join(LIBRARY_SKILLS_DIR);
     let mut library_sources = Vec::new();
@@ -774,7 +774,7 @@ fn list_skill_deployments_for_source(
         &library_sources,
         &home,
     ) {
-        deployments.push(crate::models::SkillDeployment {
+        deployments.push(wardian_core::models::SkillDeployment {
             target_type: "user".to_string(),
             target_id: "global".to_string(),
         });
@@ -796,7 +796,7 @@ fn list_skill_deployments_for_source(
                             &library_sources,
                             &home,
                         ) {
-                            deployments.push(crate::models::SkillDeployment {
+                            deployments.push(wardian_core::models::SkillDeployment {
                                 target_type: "class".to_string(),
                                 target_id: class_name,
                             });
@@ -823,7 +823,7 @@ fn list_skill_deployments_for_source(
                             &library_sources,
                             &home,
                         ) {
-                            deployments.push(crate::models::SkillDeployment {
+                            deployments.push(wardian_core::models::SkillDeployment {
                                 target_type: "agent".to_string(),
                                 target_id: agent_id,
                             });

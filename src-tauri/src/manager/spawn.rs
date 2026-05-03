@@ -1,4 +1,4 @@
-use crate::models::{AgentConfig, AgentEvent};
+use wardian_core::models::{AgentConfig, AgentEvent};
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};

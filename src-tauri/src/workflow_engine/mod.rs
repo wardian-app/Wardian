@@ -2,7 +2,7 @@ pub mod agent_execution;
 mod migrate;
 
 use crate::manager::log_debug;
-use crate::models::{WorkflowDefinition, WorkflowTelemetryEvent};
+use wardian_core::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 use crate::utils::{
     build_shell_command, get_wardian_home, new_headless_command, validate_workspace_path,
 };
@@ -188,7 +188,7 @@ pub fn get_scheduled_runs_path() -> Option<PathBuf> {
     get_wardian_home().map(|h| h.join("scheduled_workflows.json"))
 }
 
-pub fn load_scheduled_runs() -> Vec<crate::models::ScheduledRun> {
+pub fn load_scheduled_runs() -> Vec<wardian_core::models::ScheduledRun> {
     if let Some(path) = get_scheduled_runs_path() {
         if let Ok(content) = fs::read_to_string(path) {
             return serde_json::from_str(&content).unwrap_or_default();
@@ -197,14 +197,14 @@ pub fn load_scheduled_runs() -> Vec<crate::models::ScheduledRun> {
     Vec::new()
 }
 
-pub fn save_scheduled_runs(runs: &[crate::models::ScheduledRun]) -> Result<(), String> {
+pub fn save_scheduled_runs(runs: &[wardian_core::models::ScheduledRun]) -> Result<(), String> {
     let path = get_scheduled_runs_path().ok_or("No home dir")?;
     let content = serde_json::to_string_pretty(runs).map_err(|e| e.to_string())?;
     fs::write(path, content).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-pub fn hydrate_scheduled_runs() -> Result<Vec<crate::models::ScheduledRun>, String> {
+pub fn hydrate_scheduled_runs() -> Result<Vec<wardian_core::models::ScheduledRun>, String> {
     let mut runs = load_scheduled_runs();
     let now_ms = Utc::now().timestamp_millis() as u64;
     let mut modified = false;
@@ -232,7 +232,7 @@ pub fn hydrate_scheduled_runs() -> Result<Vec<crate::models::ScheduledRun>, Stri
 
 pub fn toggle_scheduled_run_state(
     run_id: &str,
-) -> Result<Vec<crate::models::ScheduledRun>, String> {
+) -> Result<Vec<wardian_core::models::ScheduledRun>, String> {
     let mut runs = load_scheduled_runs();
     let now_ms = Utc::now().timestamp_millis() as u64;
 
@@ -261,9 +261,9 @@ pub fn toggle_scheduled_run_state(
 
 fn sync_scheduled_runs_for_workflow(
     wf: &WorkflowDefinition,
-    existing_runs: &[crate::models::ScheduledRun],
-) -> Vec<crate::models::ScheduledRun> {
-    let mut synced_runs: Vec<crate::models::ScheduledRun> = existing_runs
+    existing_runs: &[wardian_core::models::ScheduledRun],
+) -> Vec<wardian_core::models::ScheduledRun> {
+    let mut synced_runs: Vec<wardian_core::models::ScheduledRun> = existing_runs
         .iter()
         .filter(|run| run.workflow_id != wf.id)
         .cloned()
@@ -284,7 +284,7 @@ fn sync_scheduled_runs_for_workflow(
         }
 
         // Read the nested schedule object from config
-        let schedule: crate::models::ScheduleDefinition =
+        let schedule: wardian_core::models::ScheduleDefinition =
             if let Some(sched_val) = config.get("schedule") {
                 match serde_json::from_value(sched_val.clone()) {
                     Ok(s) => s,
@@ -310,7 +310,7 @@ fn sync_scheduled_runs_for_workflow(
                     .unwrap_or("");
 
                 match sched_type {
-                    "Minutes" => crate::models::ScheduleDefinition {
+                    "Minutes" => wardian_core::models::ScheduleDefinition {
                         schedule_type: "interval".to_string(),
                         interval_minutes: Some(interval.parse().unwrap_or(5)),
                         time_of_day: None,
@@ -325,7 +325,7 @@ fn sync_scheduled_runs_for_workflow(
                         occurrence_count: 0,
                         active: true,
                     },
-                    "Hours" => crate::models::ScheduleDefinition {
+                    "Hours" => wardian_core::models::ScheduleDefinition {
                         schedule_type: "interval".to_string(),
                         interval_minutes: Some(interval.parse::<u32>().unwrap_or(1) * 60),
                         time_of_day: None,
@@ -340,7 +340,7 @@ fn sync_scheduled_runs_for_workflow(
                         occurrence_count: 0,
                         active: true,
                     },
-                    "Daily" => crate::models::ScheduleDefinition {
+                    "Daily" => wardian_core::models::ScheduleDefinition {
                         schedule_type: "daily".to_string(),
                         interval_minutes: None,
                         time_of_day: Some(time.to_string()),
@@ -355,7 +355,7 @@ fn sync_scheduled_runs_for_workflow(
                         occurrence_count: 0,
                         active: true,
                     },
-                    "Weekly" => crate::models::ScheduleDefinition {
+                    "Weekly" => wardian_core::models::ScheduleDefinition {
                         schedule_type: "weekly".to_string(),
                         interval_minutes: None,
                         time_of_day: Some(time.to_string()),
@@ -370,7 +370,7 @@ fn sync_scheduled_runs_for_workflow(
                         occurrence_count: 0,
                         active: true,
                     },
-                    "One-Time" => crate::models::ScheduleDefinition {
+                    "One-Time" => wardian_core::models::ScheduleDefinition {
                         schedule_type: "one_time".to_string(),
                         interval_minutes: None,
                         time_of_day: None,
@@ -417,7 +417,7 @@ fn sync_scheduled_runs_for_workflow(
             }
         }
 
-        synced_runs.push(crate::models::ScheduledRun {
+        synced_runs.push(wardian_core::models::ScheduledRun {
             id: run_id.clone(),
             workflow_id: wf.id.clone(),
             workflow_name: wf.name.clone(),
@@ -452,7 +452,7 @@ fn sync_scheduled_runs_for_workflow(
 }
 
 fn record_scheduled_run_outcome(
-    runs: &mut [crate::models::ScheduledRun],
+    runs: &mut [wardian_core::models::ScheduledRun],
     scheduled_run_id: &str,
     status: &str,
     error: Option<String>,
@@ -468,7 +468,7 @@ fn record_scheduled_run_outcome(
     }
 }
 
-fn describe_schedule(schedule: &crate::models::ScheduleDefinition) -> String {
+fn describe_schedule(schedule: &wardian_core::models::ScheduleDefinition) -> String {
     match schedule.schedule_type.as_str() {
         "interval" => {
             let mins = schedule.interval_minutes.unwrap_or(0);
@@ -880,7 +880,7 @@ pub async fn start_scheduler(app: AppHandle) {
     *scheduler = Some(handle);
 }
 
-fn compute_next_run(schedule: &crate::models::ScheduleDefinition, now_ms: u64) -> Option<u64> {
+fn compute_next_run(schedule: &wardian_core::models::ScheduleDefinition, now_ms: u64) -> Option<u64> {
     match schedule.schedule_type.as_str() {
         "interval" => {
             let mins = schedule.interval_minutes.unwrap_or(0) as u64;
@@ -1347,7 +1347,7 @@ mod tests {
         parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,
         scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
     };
-    use crate::models::{
+    use wardian_core::models::{
         ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
     };
     use crate::utils::ShellLaunchSpec;
@@ -1989,7 +1989,7 @@ pub async fn run_workflow(
                         } else {
                             direct_id
                         };
-                        let mode = crate::models::AgentExecutionPolicy::from_legacy_session_type(
+                        let mode = wardian_core::models::AgentExecutionPolicy::from_legacy_session_type(
                             node.config.get("session_type").and_then(|v| v.as_str()),
                             node.config.get("mode").and_then(|v| v.as_str()),
                         )
@@ -2004,7 +2004,7 @@ pub async fn run_workflow(
                         prompt = interpolate_string(&prompt, &registry);
 
                         if agent_id.is_empty()
-                            && mode != crate::models::WorkflowAgentMode::Ephemeral
+                            && mode != wardian_core::models::WorkflowAgentMode::Ephemeral
                         {
                             node_error = Some(if !role.is_empty() {
                                 format!("Role '{}' not mapped to an agent. Set role_mappings before running.", role)
@@ -2026,7 +2026,7 @@ pub async fn run_workflow(
                                         std::fs::read_to_string(home.join("settings/state.json"))
                                     {
                                         if let Ok(configs) =
-                                            serde_json::from_str::<Vec<crate::models::AgentConfig>>(
+                                            serde_json::from_str::<Vec<wardian_core::models::AgentConfig>>(
                                                 &data,
                                             )
                                         {
@@ -2096,7 +2096,7 @@ pub async fn run_workflow(
                                     &exec_ctx.execution_session_id,
                                 );
 
-                                if exec_ctx.mode != crate::models::WorkflowAgentMode::InheritResume
+                                if exec_ctx.mode != wardian_core::models::WorkflowAgentMode::InheritResume
                                 {
                                     let run_result = run_with_optional_timeout(
                                         timeout_ms,

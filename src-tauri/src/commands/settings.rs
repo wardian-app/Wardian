@@ -1,4 +1,4 @@
-use crate::models::AgentSessionPersistence;
+use wardian_core::models::AgentSessionPersistence;
 use crate::utils::{ShellOption, ShellSettings};
 
 #[tauri::command]

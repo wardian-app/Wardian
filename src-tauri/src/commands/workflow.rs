@@ -1,4 +1,4 @@
-use crate::models::{ScheduledRun, WorkflowDefinition};
+use wardian_core::models::{ScheduledRun, WorkflowDefinition};
 use crate::workflow_engine;
 use serde_json::Value;
 use tauri::AppHandle;

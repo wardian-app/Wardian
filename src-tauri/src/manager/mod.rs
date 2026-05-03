@@ -31,7 +31,7 @@ pub use crate::utils::process::{
 };
 pub use crate::utils::shell::build_program_launch;
 
-use crate::models::{AgentConfig, AgentEvent};
+use wardian_core::models::{AgentConfig, AgentEvent};
 use crate::state::ActiveAgent;
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;

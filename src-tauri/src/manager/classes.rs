@@ -1,4 +1,4 @@
-use crate::models::AgentClassDefinition;
+use wardian_core::models::AgentClassDefinition;
 use crate::utils::fs::*;
 use tauri::{AppHandle, Manager};
 

@@ -1,4 +1,4 @@
-use crate::models::AgentConfig;
+use wardian_core::models::AgentConfig;
 use crate::utils::fs::*;
 use super::codex::codex_bootstrap_workspace_key;
 use chrono::TimeZone;
@@ -367,7 +367,7 @@ mod tests {
         session_bootstrap_prompt,
     };
     use crate::manager::headless::{headless_provider_args, headless_provider_launch};
-    use crate::models::AgentConfig;
+    use wardian_core::models::AgentConfig;
     use std::path::Path;
         #[test]
     fn opencode_title_maps_to_status() {

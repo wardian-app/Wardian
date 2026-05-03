@@ -1,12 +1,11 @@
 pub mod commands;
 pub mod manager;
-pub mod models;
 pub mod providers;
 pub mod state;
 pub mod utils;
 pub mod workflow_engine;
 
-use crate::models::AgentConfig;
+use wardian_core::models::AgentConfig;
 use crate::state::AppState;
 use tauri::{Emitter, Manager};
 

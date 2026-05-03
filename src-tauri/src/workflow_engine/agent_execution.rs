@@ -1,4 +1,4 @@
-use crate::models::{AgentConfig, AgentExecutionPolicy, WorkflowAgentMode};
+use wardian_core::models::{AgentConfig, AgentExecutionPolicy, WorkflowAgentMode};
 
 #[derive(Debug, Clone)]
 pub struct AgentExecutionContext {

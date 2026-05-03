@@ -1,4 +1,4 @@
-use crate::models::AgentSessionPersistence;
+use wardian_core::models::AgentSessionPersistence;
 use crate::utils::get_wardian_home;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;

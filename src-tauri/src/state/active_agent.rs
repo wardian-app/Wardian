@@ -1,4 +1,4 @@
-use crate::models::AgentConfig;
+use wardian_core::models::AgentConfig;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 

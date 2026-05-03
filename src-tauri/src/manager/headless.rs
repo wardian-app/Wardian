@@ -1,4 +1,4 @@
-use crate::models::{AgentConfig, AgentEvent, AgentProvider};
+use wardian_core::models::{AgentConfig, AgentEvent, AgentProvider};
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::utils::fs::*;
