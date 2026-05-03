@@ -395,6 +395,16 @@ function AppBody() {
       }
   }, [filteredAgents, selectedAgentIds]);
 
+  const selectSingleAgent = useCallback((agentId: string) => {
+    setSelectedAgentIds((prev) => {
+      if (prev.size === 1 && prev.has(agentId)) {
+        return prev;
+      }
+      return new Set([agentId]);
+    });
+    lastSelectedIdRef.current = agentId;
+  }, []);
+
   const handleMouseDown = (agentId: string) => setDraggedAgentId(agentId);
   const handleMouseEnterCard = (agentId: string) => {
     if (draggedAgentId && draggedAgentId !== agentId) setDragOverAgentId(agentId);
@@ -833,6 +843,7 @@ function AppBody() {
                 onMouseUp={handleMouseUp}
                 onMouseDown={handleMouseDown}
                 onCardClick={handleAgentCardClick}
+                onTerminalFocus={selectSingleAgent}
                 onMaximize={setMaximizedAgentId}
                 onDelete={onDelete}
                 onRename={renameAgent}

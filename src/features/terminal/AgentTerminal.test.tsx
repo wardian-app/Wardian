@@ -241,6 +241,22 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("reports terminal focus while still focusing the xterm instance on click", async () => {
+    const onTerminalFocus = vi.fn();
+    render(<AgentTerminal sessionId="codex-focus" theme="dark" onTerminalFocus={onTerminalFocus} />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const host = screen.getByTestId("agent-terminal-host");
+    host.focus();
+    host.click();
+
+    expect(onTerminalFocus).toHaveBeenCalledTimes(1);
+    expect(getLatestTerminalInstance().focus).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the OpenCode xterm viewport scrollable while hiding terminal scroll chrome", async () => {
     // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
     const { readFileSync } = await import("node:fs");
