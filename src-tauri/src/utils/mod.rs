@@ -1,4 +1,3 @@
-pub mod db;
 pub mod fs;
 pub mod logging;
 pub mod migration;
@@ -6,7 +5,6 @@ pub mod process;
 pub mod shell;
 pub mod terminal_input;
 
-pub use db::*;
 pub use fs::*;
 pub use logging::*;
 pub use process::*;

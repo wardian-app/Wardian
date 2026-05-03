@@ -7,20 +7,9 @@ pub struct ClaudePermissionHookPaths {
 }
 
 pub fn get_wardian_home() -> Option<std::path::PathBuf> {
-    if let Ok(val) = std::env::var("WARDIAN_HOME") {
-        if !val.is_empty() {
-            return Some(std::path::PathBuf::from(val));
-        }
-    }
-    #[cfg(debug_assertions)]
-    {
-        // Use Cargo target directory so debug state is isolated from production
-        // and is wiped automatically by `cargo clean`.
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Some(manifest_dir.join("target").join("debug").join(".wardian"))
-    }
-    #[cfg(not(debug_assertions))]
-    dirs::home_dir().map(|h| h.join(".wardian"))
+    wardian_core::paths::wardian_home_for_manifest(std::path::Path::new(env!(
+        "CARGO_MANIFEST_DIR"
+    )))
 }
 
 pub fn get_default_user_dir() -> std::path::PathBuf {

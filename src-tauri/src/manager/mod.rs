@@ -69,7 +69,7 @@ pub(crate) fn cleanup_stale_persisted_session_processes() {
         return;
     };
 
-    let db_status_map = crate::utils::db::get_all_agents()
+    let db_status_map = wardian_core::db::get_all_agents()
         .unwrap_or_default()
         .into_iter()
         .map(|agent| (agent.session_id, agent.last_status))
@@ -148,7 +148,7 @@ pub(crate) fn set_agent_status(
             *status = next_status.to_string();
 
             // Phase 2: Persist status change to SQLite
-            let _ = crate::utils::db::update_agent_status(session_id, next_status, None);
+            let _ = wardian_core::db::update_agent_status(session_id, next_status, None);
 
             let _ = app.emit(
                 "agent-status-updated",

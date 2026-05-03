@@ -4,6 +4,7 @@ pub mod providers;
 pub mod state;
 pub mod utils;
 pub mod workflow_engine;
+pub use wardian_core::models;
 
 use wardian_core::models::AgentConfig;
 use crate::state::AppState;
@@ -16,7 +17,7 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
     let mut sys = System::new_all();
     sys.refresh_all();
 
-    let agents = crate::utils::db::get_all_agents()?;
+    let agents = wardian_core::db::get_all_agents()?;
     for agent in agents {
         if agent.is_off {
             continue;
@@ -28,7 +29,7 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
                 let env_str = env_var.to_string_lossy();
                 if env_str.contains("WARDIAN_SESSION_ID=") && env_str.contains(&agent.session_id) {
                     found_alive = true;
-                    let _ = crate::utils::db::update_agent_status(
+                    let _ = wardian_core::db::update_agent_status(
                         &agent.session_id,
                         "Headless",
                         Some(process.pid().as_u32()),
@@ -42,7 +43,7 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
         }
 
         if !found_alive && agent.last_status.as_deref() != Some("Off") {
-            let _ = crate::utils::db::update_agent_status(&agent.session_id, "Off", None);
+            let _ = wardian_core::db::update_agent_status(&agent.session_id, "Off", None);
         }
     }
     Ok(())
@@ -65,7 +66,11 @@ pub fn run() {
 
     crate::utils::migration::migrate_home_layout();
 
-    if let Err(e) = crate::utils::db::init_db() {
+    let db_init_result = crate::utils::fs::get_wardian_home()
+        .map(|home| home.join("state.db"))
+        .ok_or_else(|| "Could not resolve Wardian home".to_string())
+        .and_then(|path| wardian_core::db::init_db_at_path(&path).map_err(|err| err.to_string()));
+    if let Err(e) = db_init_result {
         eprintln!("Failed to initialize database: {}", e);
     }
 
@@ -114,7 +119,7 @@ pub fn run() {
                             let mut order_map = state.agent_order.lock().await;
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
-                            let db_agents = crate::utils::db::get_all_agents().unwrap_or_default();
+                            let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();
                             type DbStatus = (Option<String>, Option<u32>, Option<String>);
                             let db_status_map: std::collections::HashMap<String, DbStatus> =
                                 db_agents

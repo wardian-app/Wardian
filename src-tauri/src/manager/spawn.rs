@@ -162,13 +162,17 @@ pub async fn spawn_agent(
     let born_to_save = initial_timestamp
         .clone()
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-    let _ = crate::utils::db::upsert_agent(
-        &config.session_id,
-        &config.session_name,
-        &config.agent_class,
-        config.is_off,
-        Some(&born_to_save),
-    );
+    let project = wardian_core::db::project_name_from_workspace(&expected_folder);
+    let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: &config.session_id,
+        session_name: &config.session_name,
+        agent_class: &config.agent_class,
+        provider: &config.provider,
+        workspace: Some(&expected_folder),
+        project: project.as_deref(),
+        is_off: config.is_off,
+        created_at: Some(&born_to_save),
+    });
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -177,7 +181,7 @@ pub async fn spawn_agent(
     let process_id = child.process_id();
 
     // Phase 2: Record/Update status in SQLite with the real PID
-    let _ = crate::utils::db::update_agent_status(
+    let _ = wardian_core::db::update_agent_status(
         &config.session_id,
         if config.is_off { "Off" } else { "Idle" },
         process_id,

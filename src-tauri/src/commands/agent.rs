@@ -783,7 +783,7 @@ pub async fn kill_agent(
         manager::terminate_active_agent_process(&mut agent);
 
         // Phase 2: Remove from SQLite
-        let _ = crate::utils::db::delete_agent(&session_id);
+        let _ = wardian_core::db::delete_agent(&session_id);
 
         // Cleanup: remove the agent's private directory
         if let Some(home) = crate::utils::fs::get_wardian_home() {
@@ -1059,13 +1059,20 @@ pub async fn clear_agent_session(
         {
             let config = agent.config.lock().unwrap();
             let born = agent.init_timestamp.lock().unwrap();
-            let _ = crate::utils::db::upsert_agent(
-                &config.session_id,
-                &config.session_name,
-                &config.agent_class,
-                config.is_off,
-                born.as_deref(),
-            );
+            let workspace = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id)
+                .to_string_lossy()
+                .to_string();
+            let project = wardian_core::db::project_name_from_workspace(&workspace);
+            let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+                session_id: &config.session_id,
+                session_name: &config.session_name,
+                agent_class: &config.agent_class,
+                provider: &config.provider,
+                workspace: Some(&workspace),
+                project: project.as_deref(),
+                is_off: config.is_off,
+                created_at: born.as_deref(),
+            });
         }
 
         // 8. Swap the struct
@@ -1115,20 +1122,35 @@ pub async fn rename_agent(
     let order = state.agent_order.lock().await;
 
     if let Some(agent) = agents.get_mut(&session_id) {
-        let (sid, name, class, is_off, born) = {
+        let (sid, name, class, provider, workspace, is_off, born) = {
             let mut config = agent.config.lock().unwrap();
             config.session_name = new_name;
+            let workspace = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id)
+                .to_string_lossy()
+                .to_string();
             (
                 config.session_id.clone(),
                 config.session_name.clone(),
                 config.agent_class.clone(),
+                config.provider.clone(),
+                workspace,
                 config.is_off,
                 agent.init_timestamp.lock().unwrap().clone(),
             )
         };
 
         // Phase 2: Update agent metadata in SQLite
-        let _ = crate::utils::db::upsert_agent(&sid, &name, &class, is_off, born.as_deref());
+        let project = wardian_core::db::project_name_from_workspace(&workspace);
+        let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: &sid,
+            session_name: &name,
+            agent_class: &class,
+            provider: &provider,
+            workspace: Some(&workspace),
+            project: project.as_deref(),
+            is_off,
+            created_at: born.as_deref(),
+        });
         manager::save_state(&app, &agents, &order);
         Ok(())
     } else {
