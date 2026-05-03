@@ -1,11 +1,25 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useSettingsStore } from "../../store/useSettingsStore";
+import {
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
+  defaultTerminalFontFamily,
+  normalizeTerminalFontSize,
+  useSettingsStore,
+} from "../../store/useSettingsStore";
 
 interface SettingsPanelProps {}
 
 const windowsAutoShellIds = ['pwsh', 'powershell', 'cmd', 'git-bash', 'wsl', 'bash'];
 const posixAutoShellIds = ['zsh', 'bash', 'sh', 'fish'];
+const CUSTOM_TERMINAL_FONT_FAMILY_VALUE = '__custom__';
+const terminalFontFamilyOptions = [
+  { label: 'Consolas', value: 'Consolas, "Courier New", monospace' },
+  { label: 'Menlo', value: 'Menlo, Monaco, "Courier New", monospace' },
+  { label: 'Droid Sans Mono', value: '"Droid Sans Mono", monospace' },
+  { label: 'Cascadia Mono', value: '"Cascadia Mono", "Cascadia Code", Consolas, monospace' },
+  { label: 'JetBrains Mono', value: 'JetBrains Mono, monospace' },
+];
 
 const resolveAutoShell = <T extends { id: string }>(availableShells: T[]) => {
   const hasWindowsShell = availableShells.some((option) =>
@@ -23,6 +37,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     setTheme,
     autoPatchGemini,
     setAutoPatchGemini,
+    terminalFontSize,
+    setTerminalFontSize,
+    terminalFontFamily,
+    setTerminalFontFamily,
     shell_id,
     custom_executable,
     custom_args,
@@ -45,6 +63,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
   const [shellMessage, setShellMessage] = useState("");
   const [agentRuntimeStatus, setAgentRuntimeStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [agentRuntimeMessage, setAgentRuntimeMessage] = useState("");
+  const [terminalFontSizeDraft, setTerminalFontSizeDraft] = useState(() => String(terminalFontSize));
+  const [terminalFontFamilyMode, setTerminalFontFamilyMode] = useState<'preset' | 'custom'>(() =>
+    terminalFontFamily === '' || terminalFontFamilyOptions.some((option) => option.value === terminalFontFamily)
+      ? 'preset'
+      : 'custom',
+  );
 
   useEffect(() => {
     if (!shell_settings_loaded) {
@@ -54,6 +78,28 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
       loadAvailableShells();
     }
   }, [loadAvailableShells, loadShellSettings, shell_settings_loaded, shells_loaded]);
+
+  useEffect(() => {
+    setTerminalFontSizeDraft(String(terminalFontSize));
+  }, [terminalFontSize]);
+
+  const commitTerminalFontSizeDraft = () => {
+    const nextSize = normalizeTerminalFontSize(Number(terminalFontSizeDraft));
+    setTerminalFontSize(nextSize);
+    setTerminalFontSizeDraft(String(nextSize));
+  };
+
+  const handleTerminalFontSizeChange = (value: string) => {
+    setTerminalFontSizeDraft(value);
+    const nextSize = Number(value);
+    if (
+      Number.isFinite(nextSize) &&
+      nextSize >= MIN_TERMINAL_FONT_SIZE &&
+      nextSize <= MAX_TERMINAL_FONT_SIZE
+    ) {
+      setTerminalFontSize(nextSize);
+    }
+  };
 
   const handleRunPatch = async () => {
     setPatchStatus("running");
@@ -109,6 +155,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
   const selectedShell = available_shells.find((option) => option.id === shell_id);
   const autoSelectedShell = resolveAutoShell(available_shells);
   const displayedShell = shell_id === 'auto' ? autoSelectedShell : selectedShell;
+  const terminalFontFamilySelectValue = terminalFontFamilyMode === 'custom'
+    ? CUSTOM_TERMINAL_FONT_FAMILY_VALUE
+    : terminalFontFamily === '' || terminalFontFamilyOptions.some((option) => option.value === terminalFontFamily)
+    ? terminalFontFamily
+    : CUSTOM_TERMINAL_FONT_FAMILY_VALUE;
 
   return (
     <div data-testid="settings-panel" className="flex flex-col h-full">
@@ -217,95 +268,166 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
         </div>
 
         <div className="border-t border-wardian-border pt-6">
-          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Default Shell</h3>
+          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Terminal</h3>
 
-          <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
-            <label className="text-sm font-bold text-primary" htmlFor="default-shell-select">
-              Shell / Interpreter
-            </label>
-            <select
-              data-testid="shell-select"
-              id="default-shell-select"
-              value={shell_id}
-              onChange={(e) => setShellId(e.target.value)}
-              className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
-            >
-              <option value="auto">Auto</option>
-              {available_shells.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-              <option value="custom">Custom</option>
-            </select>
-
-            {shell_id === 'custom' ? (
-              <>
-                <label className="text-xs font-bold text-primary" htmlFor="custom-shell-executable">
-                  Custom executable
-                </label>
-                <input
-                  data-testid="custom-shell-executable"
-                  id="custom-shell-executable"
-                  type="text"
-                  value={custom_executable}
-                  onChange={(e) => setCustomExecutable(e.target.value)}
-                  placeholder={navigator.platform.toLowerCase().includes('win') ? 'C:/Program Files/PowerShell/7/pwsh.exe' : '/usr/local/bin/fish'}
-                  className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
-                />
-                <label className="text-xs font-bold text-primary" htmlFor="custom-shell-args">
-                  Command args
-                </label>
-                <input
-                  id="custom-shell-args"
-                  type="text"
-                  value={custom_args}
-                  onChange={(e) => setCustomArgs(e.target.value)}
-                  placeholder={navigator.platform.toLowerCase().includes('win') ? '-NoProfile -Command' : '-lc'}
-                  className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
-                />
-              </>
-            ) : (
-              <div className="rounded-lg border border-wardian-border bg-wardian-bg px-3 py-2">
-                <p className="text-[11px] font-bold text-primary">
-                  {shell_id === 'auto'
-                    ? (displayedShell ? `Auto: ${displayedShell.label}` : 'Auto: detecting shell...')
-                    : displayedShell?.label ?? 'Loading shell details...'}
-                </p>
-                {displayedShell && (
-                  <p className="text-[10px] text-muted-neutral mt-1 break-all">
-                    {displayedShell.executable}
-                  </p>
-                )}
-              </div>
-            )}
-
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-[10px] text-muted-neutral">
-                {shells_loaded ? `${available_shells.length} discovered shell${available_shells.length === 1 ? '' : 's'}` : 'Detecting installed shells...'}
-              </p>
-              <button
-                type="button"
-                onClick={handleSaveShell}
-                disabled={!shell_settings_loaded || shellStatus === 'saving'}
-                className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
-                  shellStatus === 'saving'
-                    ? 'bg-wardian-border text-muted border-transparent cursor-not-allowed'
-                    : 'bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
-                }`}
+          <div className="flex flex-col gap-3">
+            <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
+              <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide">Shell</h4>
+              <label className="text-sm font-bold text-primary" htmlFor="default-shell-select">
+                Shell / Interpreter
+              </label>
+              <select
+                data-testid="shell-select"
+                id="default-shell-select"
+                value={shell_id}
+                onChange={(e) => setShellId(e.target.value)}
+                className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
               >
-                {shellStatus === 'saving' ? 'Saving...' : 'Save Shell'}
-              </button>
+                <option value="auto">Auto</option>
+                {available_shells.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </select>
+
+              {shell_id === 'custom' ? (
+                <>
+                  <label className="text-xs font-bold text-primary" htmlFor="custom-shell-executable">
+                    Custom executable
+                  </label>
+                  <input
+                    data-testid="custom-shell-executable"
+                    id="custom-shell-executable"
+                    type="text"
+                    value={custom_executable}
+                    onChange={(e) => setCustomExecutable(e.target.value)}
+                    placeholder={navigator.platform.toLowerCase().includes('win') ? 'C:/Program Files/PowerShell/7/pwsh.exe' : '/usr/local/bin/fish'}
+                    className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                  />
+                  <label className="text-xs font-bold text-primary" htmlFor="custom-shell-args">
+                    Command args
+                  </label>
+                  <input
+                    id="custom-shell-args"
+                    type="text"
+                    value={custom_args}
+                    onChange={(e) => setCustomArgs(e.target.value)}
+                    placeholder={navigator.platform.toLowerCase().includes('win') ? '-NoProfile -Command' : '-lc'}
+                    className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                  />
+                </>
+              ) : (
+                <div className="rounded-lg border border-wardian-border bg-wardian-bg px-3 py-2">
+                  <p className="text-[11px] font-bold text-primary">
+                    {shell_id === 'auto'
+                      ? (displayedShell ? `Auto: ${displayedShell.label}` : 'Auto: detecting shell...')
+                      : displayedShell?.label ?? 'Loading shell details...'}
+                  </p>
+                  {displayedShell && (
+                    <p className="text-[10px] text-muted-neutral mt-1 break-all">
+                      {displayedShell.executable}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[10px] text-muted-neutral">
+                  {shells_loaded ? `${available_shells.length} discovered shell${available_shells.length === 1 ? '' : 's'}` : 'Detecting installed shells...'}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleSaveShell}
+                  disabled={!shell_settings_loaded || shellStatus === 'saving'}
+                  className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
+                    shellStatus === 'saving'
+                      ? 'bg-wardian-border text-muted border-transparent cursor-not-allowed'
+                      : 'bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
+                  }`}
+                >
+                  {shellStatus === 'saving' ? 'Saving...' : 'Save Shell'}
+                </button>
+              </div>
+
+              {shellMessage && (
+                <div className={`p-2 mt-1 rounded border text-xs font-medium text-left ${
+                  shellStatus === 'success' ? 'bg-cyan-500/10 border-cyan-500/20 text-cyan-400' :
+                  'bg-red-500/10 border-red-500/20 text-red-400'
+                }`}>
+                  {shellMessage}
+                </div>
+              )}
             </div>
 
-            {shellMessage && (
-              <div className={`p-2 mt-1 rounded border text-xs font-medium text-left ${
-                shellStatus === 'success' ? 'bg-cyan-500/10 border-cyan-500/20 text-cyan-400' :
-                'bg-red-500/10 border-red-500/20 text-red-400'
-              }`}>
-                {shellMessage}
-              </div>
-            )}
+            <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
+              <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide">Appearance</h4>
+              <label className="text-sm font-bold text-primary" htmlFor="terminal-font-size">
+                Terminal font size
+              </label>
+              <input
+                id="terminal-font-size"
+                type="number"
+                min={MIN_TERMINAL_FONT_SIZE}
+                max={MAX_TERMINAL_FONT_SIZE}
+                step={1}
+                value={terminalFontSizeDraft}
+                onBlur={commitTerminalFontSizeDraft}
+                onChange={(e) => handleTerminalFontSizeChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    commitTerminalFontSizeDraft();
+                  }
+                }}
+                className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+              />
+              <p className="text-[10px] text-muted-neutral leading-relaxed">
+                Applies immediately to embedded agent terminals.
+              </p>
+              <label className="text-sm font-bold text-primary" htmlFor="terminal-font-family">
+                Terminal font family
+              </label>
+              <select
+                id="terminal-font-family"
+                value={terminalFontFamilySelectValue}
+                onChange={(e) => {
+                  if (e.target.value === CUSTOM_TERMINAL_FONT_FAMILY_VALUE) {
+                    setTerminalFontFamilyMode('custom');
+                  } else {
+                    setTerminalFontFamilyMode('preset');
+                    setTerminalFontFamily(e.target.value);
+                  }
+                }}
+                className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+              >
+                <option value="">Auto</option>
+                {terminalFontFamilyOptions.map((option) => (
+                  <option key={option.label} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+                <option value={CUSTOM_TERMINAL_FONT_FAMILY_VALUE}>Custom...</option>
+              </select>
+              {terminalFontFamilySelectValue === CUSTOM_TERMINAL_FONT_FAMILY_VALUE && (
+                <>
+                  <label className="text-xs font-bold text-primary" htmlFor="custom-terminal-font-family">
+                    Custom terminal font family
+                  </label>
+                  <input
+                    id="custom-terminal-font-family"
+                    type="text"
+                    value={terminalFontFamily}
+                    onChange={(e) => setTerminalFontFamily(e.target.value)}
+                    placeholder={defaultTerminalFontFamily()}
+                    className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                  />
+                </>
+              )}
+              <p className="text-[10px] text-muted-neutral leading-relaxed">
+                Auto uses {defaultTerminalFontFamily()}.
+              </p>
+            </div>
           </div>
         </div>
 
