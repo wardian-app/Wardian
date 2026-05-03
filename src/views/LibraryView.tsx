@@ -12,7 +12,7 @@ interface LibraryViewProps {
 }
 
 export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) => {
-    const { promptTree, skillTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab } = useLibraryStore();
+    const { promptTree, skillTree, isLoading, error, saveLibraryItem, updateLibraryMetadata, openLibraryFolder, activeTab, setActiveTab, subscribeToLibraryChanges } = useLibraryStore();
 
     // Navigation state
     const [currentPath, setCurrentPath] = useState<string[]>([]);
@@ -34,6 +34,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
         setCurrentPath([]);
         setSearchQuery('');
     }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab !== 'skills') return;
+        return subscribeToLibraryChanges('skills');
+    }, [activeTab, subscribeToLibraryChanges]);
 
     const currentFolder = useMemo(() => {
         const libraryTree = activeTab === 'prompts' ? promptTree : skillTree;

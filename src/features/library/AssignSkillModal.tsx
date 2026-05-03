@@ -21,7 +21,7 @@ export const AssignSkillModal: React.FC<AssignSkillModalProps> = ({ skill, isOpe
 
     const refreshDeployments = async () => {
         try {
-            const list = await listSkillDeployments(skill.name);
+            const list = await listSkillDeployments(skill.name, skill.path);
             setDeployments(list);
         } catch (e) {
             console.error('Failed to fetch deployments:', e);
@@ -38,7 +38,7 @@ export const AssignSkillModal: React.FC<AssignSkillModalProps> = ({ skill, isOpe
             invoke<AgentClassDefinition[]>('list_agent_classes').then(setClasses).catch(console.error);
             refreshDeployments();
         }
-    }, [isOpen, skill.name]);
+    }, [isOpen, skill.name, skill.path]);
 
     useEffect(() => {
         if (targetType === 'user') {

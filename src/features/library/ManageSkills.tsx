@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLibraryStore } from '../../store/useLibraryStore';
-import { LibraryFolder, LibrarySkill } from '../../types';
+import { DeployedSkillRef, LibraryFolder, LibrarySkill } from '../../types';
 
 interface ManageSkillsProps {
     targetType: 'agent' | 'class';
@@ -8,52 +8,76 @@ interface ManageSkillsProps {
 }
 
 export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId }) => {
-    const { skillTree, listDeployedSkills, deploySkill, removeDeployedSkill, fetchLibraryTree } = useLibraryStore();
-    const [deployedSkills, setDeployedSkills] = useState<string[]>([]);
+    const { skillTree, listDeployedSkillRefs, deploySkill, removeDeployedSkill, subscribeToLibraryChanges } = useLibraryStore();
+    const [deployedSkills, setDeployedSkills] = useState<DeployedSkillRef[]>([]);
     const [availableSkills, setAvailableSkills] = useState<LibrarySkill[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [selectedSkillToDeploy, setSelectedSkillToDeploy] = useState<string>('');
+    const refreshRequestIdRef = useRef(0);
+    const mountedRef = useRef(false);
 
-    const refreshSkills = async () => {
+    const refreshSkills = useCallback(async () => {
+        const requestId = refreshRequestIdRef.current + 1;
+        refreshRequestIdRef.current = requestId;
+        const requestTargetType = targetType;
+        const requestTargetId = targetId;
         setIsLoading(true);
         try {
-            const list = await listDeployedSkills(targetType, targetId);
-            setDeployedSkills(list);
+            const list = await listDeployedSkillRefs(requestTargetType, requestTargetId);
+            if (
+                mountedRef.current &&
+                refreshRequestIdRef.current === requestId &&
+                requestTargetType === targetType &&
+                requestTargetId === targetId
+            ) {
+                setDeployedSkills(list);
+            }
         } catch (e) {
             console.error('Failed to fetch deployed skills', e);
         } finally {
-            setIsLoading(false);
+            if (mountedRef.current && refreshRequestIdRef.current === requestId) {
+                setIsLoading(false);
+            }
         }
-    };
+    }, [listDeployedSkillRefs, targetId, targetType]);
 
     useEffect(() => {
-        refreshSkills();
-    }, [targetType, targetId]);
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            refreshRequestIdRef.current += 1;
+        };
+    }, []);
+
+    useEffect(() => subscribeToLibraryChanges('skills'), [subscribeToLibraryChanges]);
 
     useEffect(() => {
         if (!skillTree) {
-            fetchLibraryTree('skills');
-        } else {
-            const skills: LibrarySkill[] = [];
-            function traverse(folder: LibraryFolder) {
-                for (const child of folder.children) {
-                    if ('description' in child) {
-                        skills.push(child as LibrarySkill);
-                    } else if ('children' in child) {
-                        traverse(child as LibraryFolder);
-                    }
+            setAvailableSkills([]);
+            void refreshSkills();
+            return;
+        }
+
+        const skills: LibrarySkill[] = [];
+        function traverse(folder: LibraryFolder) {
+            for (const child of folder.children) {
+                if ('description' in child) {
+                    skills.push(child as LibrarySkill);
+                } else if ('children' in child) {
+                    traverse(child as LibraryFolder);
                 }
             }
-            traverse(skillTree);
-            setAvailableSkills(skills);
         }
-    }, [skillTree, fetchLibraryTree]);
+        traverse(skillTree);
+        setAvailableSkills(skills);
+        void refreshSkills();
+    }, [refreshSkills, skillTree]);
 
     const handleDeploy = async () => {
         if (!selectedSkillToDeploy) return;
         setIsLoading(true);
         try {
-            const skill = availableSkills.find(s => s.name === selectedSkillToDeploy);
+            const skill = availableSkills.find(s => s.path === selectedSkillToDeploy);
             if (skill) {
                 await deploySkill(skill.path, targetType, targetId);
                 await refreshSkills();
@@ -88,11 +112,11 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
                 {deployedSkills.length === 0 ? (
                     <p className="text-[10px] text-muted-neutral italic">No skills currently deployed.</p>
                 ) : (
-                    deployedSkills.map(skillName => (
-                        <div key={skillName} className="flex items-center justify-between group">
-                            <span className="text-xs text-primary font-mono">{skillName}</span>
+                    deployedSkills.map(skill => (
+                        <div key={skill.source_path ?? skill.name} className="flex items-center justify-between group">
+                            <span className="text-xs text-primary font-mono">{skill.source_path ?? skill.name}</span>
                             <button 
-                                onClick={() => handleRemove(skillName)}
+                                onClick={() => handleRemove(skill.name)}
                                 disabled={isLoading}
                                 className="text-muted hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
                                 title="Remove Skill"
@@ -112,8 +136,10 @@ export const ManageSkills: React.FC<ManageSkillsProps> = ({ targetType, targetId
                     className="flex-1 min-w-0 truncate bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)]"
                 >
                     <option value="">Select a skill to deploy...</option>
-                    {availableSkills.filter(s => !deployedSkills.includes(s.name)).map(s => (
-                        <option key={s.path} value={s.name}>{s.name}</option>
+                    {availableSkills.filter(s => !deployedSkills.some((skill) => (
+                        skill.source_path ? skill.source_path === s.path : skill.name === s.name
+                    ))).map(s => (
+                        <option key={s.path} value={s.path}>{s.name}{s.path !== s.name ? ` (${s.path})` : ''}</option>
                     ))}
                 </select>
                 <button 

@@ -87,7 +87,10 @@ This page documents the current command surface registered in `src-tauri/src/lib
 - `deploy_skill`
 - `remove_deployed_skill`
 - `list_deployed_skills`
+- `list_deployed_skill_refs`
 - `list_skill_deployments`
+- `library_watch`
+- `library_unwatch`
 
 ## Settings and Patch (`commands/settings.rs`, `commands/patch.rs`)
 
@@ -129,6 +132,7 @@ Common app-level events:
 - `workflow-status-updated`
 - `scheduled-runs-updated`
 - `git-changed`
+- `library-changed` with payload `{ "library_type": "skills" }`
 
 For payload semantics, see [IPC and Event Governance](./ipc-events.md) and the workflow engine docs.
 

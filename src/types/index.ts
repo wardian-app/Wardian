@@ -146,3 +146,8 @@ export interface LibraryFolder {
     name: string;
     children: (LibraryFolder | LibraryPrompt | LibrarySkill)[];
 }
+
+export interface DeployedSkillRef {
+    name: string;
+    source_path?: string | null;
+}

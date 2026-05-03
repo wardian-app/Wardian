@@ -50,6 +50,12 @@ pub struct SkillDeployment {
     pub target_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeployedSkillRef {
+    pub name: String,
+    pub source_path: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
