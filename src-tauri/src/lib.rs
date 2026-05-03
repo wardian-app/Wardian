@@ -86,6 +86,16 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState::new())
         .setup(|app| {
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                if let Err(err) =
+                    crate::utils::cli_install::install_cli_from_resources(&resource_dir)
+                {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] CLI install skipped: {err}"
+                    ));
+                }
+            }
+
             let app_handle = app.handle().clone();
             manager::init_agent_classes(&app_handle);
 
