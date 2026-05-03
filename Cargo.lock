@@ -4989,8 +4989,10 @@ name = "wardian-cli"
 version = "0.3.3"
 dependencies = [
  "clap",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "wardian-core",
 ]
 
