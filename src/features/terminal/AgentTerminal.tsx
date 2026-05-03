@@ -516,6 +516,9 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
+    if (entry.provider !== "opencode" && term.buffer.active.viewportY !== term.buffer.active.baseY) {
+      term.scrollToBottom();
+    }
     invoke("send_input_to_agent", {
       sessionId,
       input: data,
@@ -798,8 +801,11 @@ export const AgentTerminal = memo(function AgentTerminal({
       )}
       <div
         ref={terminalRef}
+        data-testid="agent-terminal-host"
         onClick={() => xtermRef.current?.focus()}
-        className="w-full h-full overflow-hidden"
+        className={`w-full h-full overflow-hidden ${
+          provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
+        }`}
       />
     </div>
   );

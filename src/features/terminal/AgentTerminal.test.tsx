@@ -1,4 +1,4 @@
-import { render, waitFor, cleanup } from "@testing-library/react";
+import { render, waitFor, cleanup, screen } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -77,6 +77,7 @@ describe("AgentTerminal scrollback", () => {
         dispose: vi.fn(),
         focus: vi.fn(),
         scrollToBottom: vi.fn(),
+        buffer: { active: { baseY: 10, viewportY: 10 } },
         refresh: vi.fn(),
         cols: 80,
         rows: 24,
@@ -182,6 +183,76 @@ describe("AgentTerminal scrollback", () => {
       sessionId: "codex-text",
       input: "abc",
     });
+  });
+
+  it("scrolls to the bottom before forwarding text input when the user has scrolled up", async () => {
+    render(<AgentTerminal sessionId="codex-scroll-input" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.viewportY = 2;
+    instance.buffer.active.baseY = 10;
+    instance.scrollToBottom.mockClear();
+    mockInvoke.mockClear();
+    const onData = instance.onData.mock.calls[0]?.[0] as ((data: string) => void);
+
+    onData("h");
+
+    expect(instance.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-scroll-input",
+      input: "h",
+    });
+  });
+
+  it("does not force OpenCode terminals to scroll when forwarding text input", async () => {
+    render(<AgentTerminal sessionId="opencode-scroll-input" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.viewportY = 2;
+    instance.buffer.active.baseY = 10;
+    instance.scrollToBottom.mockClear();
+    mockInvoke.mockClear();
+    const onData = instance.onData.mock.calls[0]?.[0] as ((data: string) => void);
+
+    onData("h");
+
+    expect(instance.scrollToBottom).not.toHaveBeenCalled();
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "opencode-scroll-input",
+      input: "h",
+    });
+  });
+
+  it("marks OpenCode terminals as TUI-owned scroll surfaces", async () => {
+    render(<AgentTerminal sessionId="opencode-scroll-owner" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-terminal-host")).toHaveClass("wardian-terminal--tui-owned-scroll");
+    });
+  });
+
+  it("keeps the OpenCode xterm viewport scrollable while hiding terminal scroll chrome", async () => {
+    // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
+    const { readFileSync } = await import("node:fs");
+    // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
+    const { cwd } = await import("node:process");
+    const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
+    const selector = ".wardian-terminal--tui-owned-scroll .xterm-viewport";
+    const ruleStart = appStyles.indexOf(selector);
+    const ruleEnd = appStyles.indexOf("}", ruleStart);
+    const viewportRule = appStyles.slice(ruleStart, ruleEnd);
+
+    expect(ruleStart).toBeGreaterThanOrEqual(0);
+    expect(viewportRule).toContain("scrollbar-width: none");
+    expect(viewportRule).not.toContain("overflow-y: hidden");
   });
 
   it("forwards codex enter as a plain carriage return", async () => {

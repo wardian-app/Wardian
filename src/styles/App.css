@@ -404,6 +404,19 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+.wardian-terminal--tui-owned-scroll .xterm-viewport {
+  scrollbar-width: none;
+}
+
+.wardian-terminal--tui-owned-scroll .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.wardian-terminal--tui-owned-scroll .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
+
 /* Hide xterm baseline cursor to stop duplicate ghosting since conpty renders its own */
 .xterm-cursor-layer {
   display: none !important;
