@@ -53,12 +53,12 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             scope,
             status,
             class_name,
-            project,
+            workspace,
         }) => handle_list(
             scope,
             status.clone(),
             class_name.clone(),
-            project.clone(),
+            workspace.clone(),
             &args,
         ),
         None => handle_show(args.target.as_deref(), &args),
@@ -78,28 +78,28 @@ fn handle_list(
     scope: &str,
     status: Option<String>,
     class_name: Option<String>,
-    project: Option<String>,
+    workspace: Option<String>,
     args: &AgentArgs,
 ) -> Result<String, CliError> {
     let conn = open_db()?;
-    let requested_scope = if project.is_some() {
+    let requested_scope = if workspace.is_some() {
         Scope::All
     } else {
         match scope {
-            "project" => Scope::Project,
+            "workspace" => Scope::Workspace,
             "all" => Scope::All,
             other => return Err(CliError::generic(format!("unknown scope: {other}"))),
         }
     };
-    let caller_project = if requested_scope == Scope::Project {
+    let caller_workspace = if requested_scope == Scope::Workspace {
         identity::resolve_self(&conn)
             .ok()
-            .map(|agent| agent.project)
-            .filter(|project| !project.is_empty())
+            .and_then(|agent| agent.workspace)
+            .filter(|workspace| !workspace.is_empty())
     } else {
         None
     };
-    let effective_scope = if requested_scope == Scope::Project && caller_project.is_none() {
+    let effective_scope = if requested_scope == Scope::Workspace && caller_workspace.is_none() {
         Scope::All
     } else {
         requested_scope
@@ -108,10 +108,10 @@ fn handle_list(
         &conn,
         &ListFilters {
             scope: effective_scope,
-            caller_project,
+            caller_workspace,
             status,
             class: class_name,
-            project,
+            workspace,
         },
     )
     .map_err(identity_error)?;

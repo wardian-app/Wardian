@@ -38,14 +38,14 @@ pub enum AgentCommand {
         target: Option<String>,
     },
     List {
-        #[arg(long, default_value = "project")]
+        #[arg(long, default_value = "workspace")]
         scope: String,
         #[arg(long)]
         status: Option<String>,
         #[arg(long = "class")]
         class_name: Option<String>,
         #[arg(long)]
-        project: Option<String>,
+        workspace: Option<String>,
     },
 }
 
@@ -82,8 +82,8 @@ mod tests {
             "idle",
             "--class",
             "Coder",
-            "--project",
-            "Wardian",
+            "--workspace",
+            "D:/Development/Wardian",
         ])
         .unwrap();
         let Command::Agent(args) = cli.command;
@@ -93,11 +93,11 @@ mod tests {
                 scope,
                 status,
                 class_name,
-                project
+                workspace
             }) if scope == "all"
                 && status.as_deref() == Some("idle")
                 && class_name.as_deref() == Some("Coder")
-                && project.as_deref() == Some("Wardian")
+                && workspace.as_deref() == Some("D:/Development/Wardian")
         ));
     }
 

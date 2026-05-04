@@ -36,8 +36,23 @@ fn seed_home() -> TempDir {
         },
     )
     .unwrap();
+    upsert_agent_with_conn(
+        &conn,
+        &AgentUpsert {
+            session_id: "uuid-3",
+            session_name: "fork-coder",
+            agent_class: "Coder",
+            provider: "codex",
+            workspace: Some("D:/Forks/Wardian"),
+            project: Some("Wardian"),
+            is_off: false,
+            created_at: Some("2026-05-03T20:04:00.000Z"),
+        },
+    )
+    .unwrap();
     update_agent_status_with_conn(&conn, "uuid-1", "Processing...", Some(111)).unwrap();
     update_agent_status_with_conn(&conn, "uuid-2", "Idle", None).unwrap();
+    update_agent_status_with_conn(&conn, "uuid-3", "Idle", None).unwrap();
     dir
 }
 
@@ -126,6 +141,8 @@ fn self_lookup_returns_agent_json() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(r#""schema":1"#));
     assert!(stdout.contains(r#""name":"coder-a1""#));
+    assert!(stdout.contains(r#""workspace":"D:/Development/Wardian""#));
+    assert!(!stdout.contains(r#""project""#));
 }
 
 #[test]
@@ -185,6 +202,7 @@ fn list_scope_all_returns_agents() {
     assert!(stdout.contains(r#""agents":["#));
     assert!(stdout.contains("coder-a1"));
     assert!(stdout.contains("architect-a1"));
+    assert!(stdout.contains("fork-coder"));
 }
 
 #[test]
@@ -203,6 +221,55 @@ fn legacy_state_db_is_migrated_before_cli_queries() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "idle\n");
+}
+
+#[test]
+fn list_scope_workspace_uses_callers_workspace() {
+    let home = seed_home();
+    let output = Command::new(bin())
+        .args(["agent", "list"])
+        .env("WARDIAN_HOME", home.path())
+        .env("WARDIAN_SESSION_ID", "uuid-1")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("coder-a1"));
+    assert!(stdout.contains("architect-a1"));
+    assert!(!stdout.contains("fork-coder"));
+}
+
+#[test]
+fn list_workspace_filter_matches_exact_workspace() {
+    let home = seed_home();
+    let output = Command::new(bin())
+        .args([
+            "agent",
+            "list",
+            "--workspace",
+            "D:/Forks/Wardian",
+            "--fields",
+            "name,workspace",
+        ])
+        .env("WARDIAN_HOME", home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("fork-coder"));
+    assert!(stdout.contains(r#""workspace":"D:/Forks/Wardian""#));
+    assert!(!stdout.contains("coder-a1"));
 }
 
 #[test]

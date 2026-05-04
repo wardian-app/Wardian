@@ -7,7 +7,6 @@ pub struct AgentIdentity {
     pub uuid: String,
     pub class: String,
     pub provider: String,
-    pub project: String,
     pub status: String,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
@@ -17,7 +16,7 @@ pub struct AgentIdentity {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Scope {
-    Project,
+    Workspace,
     #[default]
     All,
 }
@@ -25,10 +24,10 @@ pub enum Scope {
 #[derive(Debug, Clone, Default)]
 pub struct ListFilters {
     pub scope: Scope,
-    pub caller_project: Option<String>,
+    pub caller_workspace: Option<String>,
     pub status: Option<String>,
     pub class: Option<String>,
-    pub project: Option<String>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,17 +76,17 @@ pub fn list_agents(
         if !matches_status(&agent, filters.status.as_deref()) {
             continue;
         }
-        if !matches_optional(&agent.class, filters.class.as_deref()) {
+        if !matches_optional(Some(&agent.class), filters.class.as_deref()) {
             continue;
         }
-        if !matches_optional(&agent.project, filters.project.as_deref()) {
+        if !matches_optional(agent.workspace.as_deref(), filters.workspace.as_deref()) {
             continue;
         }
-        if filters.scope == Scope::Project {
-            let Some(caller_project) = filters.caller_project.as_deref() else {
+        if filters.scope == Scope::Workspace {
+            let Some(caller_workspace) = filters.caller_workspace.as_deref() else {
                 continue;
             };
-            if agent.project != caller_project {
+            if agent.workspace.as_deref() != Some(caller_workspace) {
                 continue;
             }
         }
@@ -119,7 +118,6 @@ fn row_to_identity(row: AgentRow) -> AgentIdentity {
         uuid: row.session_id,
         class: row.agent_class.unwrap_or_default(),
         provider: row.provider.unwrap_or_else(|| "claude".to_string()),
-        project: row.project.unwrap_or_default(),
         status: row
             .last_status
             .as_deref()
@@ -144,8 +142,8 @@ fn matches_status(agent: &AgentIdentity, status: Option<&str>) -> bool {
         .is_none_or(|expected| agent.status == expected)
 }
 
-fn matches_optional(actual: &str, expected: Option<&str>) -> bool {
-    expected.is_none_or(|expected| actual == expected)
+fn matches_optional(actual: Option<&str>, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| actual == Some(expected))
 }
 
 #[cfg(test)]
@@ -200,7 +198,7 @@ mod tests {
         assert_eq!(agent.uuid, "uuid-1");
         assert_eq!(agent.class, "Coder");
         assert_eq!(agent.provider, "codex");
-        assert_eq!(agent.project, "Wardian");
+        assert_eq!(agent.workspace.as_deref(), Some("D:/Development/Wardian"));
         assert_eq!(agent.status, "processing");
     }
 
@@ -233,13 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn list_project_scope_uses_caller_project() {
+    fn list_workspace_scope_uses_caller_workspace() {
         let conn = seed();
         let agents = list_agents(
             &conn,
             &ListFilters {
-                scope: Scope::Project,
-                caller_project: Some("Wardian".to_string()),
+                scope: Scope::Workspace,
+                caller_workspace: Some("D:/Development/Wardian".to_string()),
                 ..Default::default()
             },
         )

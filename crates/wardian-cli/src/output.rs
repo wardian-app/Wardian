@@ -2,18 +2,17 @@ use crate::errors::CliError;
 use serde_json::{Map, Value};
 use wardian_core::identity::AgentIdentity;
 
-const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "project", "status"];
-const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "workspace", "last_status_at"];
+const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "workspace", "status"];
+const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "last_status_at"];
 const ALL_FIELDS: &[&str] = &[
     "name",
     "uuid",
     "class",
     "provider",
-    "project",
+    "workspace",
     "status",
     "pid",
     "started_at",
-    "workspace",
     "last_status_at",
 ];
 
@@ -132,7 +131,6 @@ fn agent_to_map(agent: &AgentIdentity) -> Map<String, Value> {
         "provider".to_string(),
         Value::String(agent.provider.clone()),
     );
-    values.insert("project".to_string(), Value::String(agent.project.clone()));
     values.insert("status".to_string(), Value::String(agent.status.clone()));
     if let Some(pid) = agent.pid {
         values.insert("pid".to_string(), serde_json::json!(pid));
@@ -188,7 +186,6 @@ mod tests {
             uuid: "uuid-1".to_string(),
             class: "Coder".to_string(),
             provider: "codex".to_string(),
-            project: "Wardian".to_string(),
             status: "processing".to_string(),
             pid: Some(111),
             started_at: Some("2026-05-03T20:00:00.000Z".to_string()),

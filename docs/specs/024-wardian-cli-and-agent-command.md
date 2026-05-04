@@ -116,10 +116,10 @@ wardian agent list [filters]           # roster
 
 **`list` filters:**
 
-- `--scope=project|all` — default `project` when the caller is itself a Wardian agent (scoped by `project_id` of the caller's row), default `all` otherwise. The `--scope` flag is a forward-compatible hook: future values (`team`, `workspace`, `graph:<id>`) land under the same flag without breaking existing scripts.
+- `--scope=workspace|all` — default `workspace` when the caller is itself a Wardian agent and its row has a workspace, default `all` otherwise. The `--scope` flag is a forward-compatible hook: future values (`team`, `graph:<id>`) land under the same flag without breaking existing scripts.
 - `--status=<status>` — filter by `last_status` column (`idle`, `processing`, `action_required`, `error`, `off`, `headless`).
 - `--class=<class-name>` — filter by agent class (`Architect`, `Coder`, …).
-- `--project=<project-name>` — filter by project; implies `--scope=all`.
+- `--workspace=<absolute-path>` — exact workspace filter; implies `--scope=all`.
 
 ### Component 6 — Output: JSON-First
 
@@ -135,7 +135,7 @@ The CLI's primary consumer is an agent, not a human. All non-`--pretty` output i
     "uuid": "7f3e…c19d",
     "class": "Coder",
     "provider": "claude-code",
-    "project": "Wardian",
+    "workspace": "D:/Development/Wardian",
     "status": "processing"
   }
 }
@@ -150,9 +150,9 @@ The CLI's primary consumer is an agent, not a human. All non-`--pretty` output i
 }
 ```
 
-**Default field set:** `name`, `uuid`, `class`, `provider`, `project`, `status`. Deliberately small: these are what an agent almost always needs, the shape is stable, and the response parses fast.
+**Default field set:** `name`, `uuid`, `class`, `provider`, `workspace`, `status`. Deliberately small: these are what an agent almost always needs, the shape is stable, and the response parses fast.
 
-**`--verbose` adds:** `pid`, `started_at` (ISO 8601), `workspace` (absolute path), `last_status_at` (ISO 8601).
+**`--verbose` adds:** `pid`, `started_at` (ISO 8601), `last_status_at` (ISO 8601).
 
 **`--fields=…`:** explicit whitelist, replaces the default set entirely. Unknown field names error with code `invalid_field`.
 
@@ -226,7 +226,7 @@ Errors are emitted as JSON on stderr. Stdout is empty on error, so scripts can r
 
 1. **Workspace refactor merges first, behavior-neutral.** Verify GUI still builds, runs, and passes existing `cargo test` + `npm run test:e2e:native` suites.
 2. **CLI crate lands with `wardian agent show` for self-lookup only.** Ship behind no flag — the binary exists but isn't bundled yet. Unit + integration tests green.
-3. **Peer lookup and `list` land next.** Scope flag present but accepts only `project` / `all`.
+3. **Peer lookup and `list` land next.** Scope flag present but accepts only `workspace` / `all`.
 4. **Tauri resource bundling and first-launch install.** Validate on all three OSes via the `workflow_dispatch` release dry-run from spec 021.
 5. **Enable the CLI release-asset matrix job.** Cut a patch release to validate the full path from tag → bundled GUI with embedded CLI → standalone CLI assets on GitHub Releases.
 
