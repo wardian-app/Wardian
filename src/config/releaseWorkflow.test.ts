@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import releasePleaseConfig from "../../release-please-config.json";
 import releaseWorkflow from "../../.github/workflows/release.yml?raw";
 import releasePleaseWorkflow from "../../.github/workflows/release-please.yml?raw";
+import stageCliScript from "../../scripts/stage-cli.mjs?raw";
+import tauriConfig from "../../src-tauri/tauri.conf.json?raw";
 
 describe("release workflow contract", () => {
   it("keeps Release Please releases draft until assets are uploaded", () => {
@@ -33,24 +35,28 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("needs.resolve-release.outputs.release_id");
     expect(releaseWorkflow).toContain("Publish the release");
     expect(releaseWorkflow).toContain(
-      "always() && needs.build.result == 'success' && needs.build-cli.result == 'success'",
+      "always() && needs.build.result == 'success' && (github.event_name == 'push'",
     );
+    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build]");
+    expect(releaseWorkflow).not.toContain("needs.build-cli");
   });
 
-  it("publishes standalone CLI binaries with dry-run artifact support", () => {
-    expect(releaseWorkflow).toContain("Build CLI");
-    expect(releaseWorkflow).toContain("cargo build --release -p wardian-cli --target");
-    expect(releaseWorkflow).toContain("wardian-cli-x86_64-windows.exe");
-    expect(releaseWorkflow).toContain("wardian-cli-aarch64-macos");
-    expect(releaseWorkflow).toContain("wardian-cli-x86_64-macos");
-    expect(releaseWorkflow).toContain("wardian-cli-x86_64-linux");
-    expect(releaseWorkflow).toContain("gh release upload");
-    expect(releaseWorkflow).toContain("Upload CLI dry-run artifact");
+  it("publishes unified installers that carry the staged CLI", () => {
+    expect(releaseWorkflow).not.toContain("Build CLI");
+    expect(releaseWorkflow).not.toContain("cargo build --release -p wardian-cli --target");
+    expect(releaseWorkflow).not.toContain("wardian-cli-x86_64-windows.exe");
+    expect(releaseWorkflow).not.toContain("wardian-cli-aarch64-macos");
+    expect(releaseWorkflow).not.toContain("wardian-cli-x86_64-macos");
+    expect(releaseWorkflow).not.toContain("wardian-cli-x86_64-linux");
+    expect(releaseWorkflow).not.toContain("gh release upload");
+    expect(releaseWorkflow).not.toContain("Upload CLI dry-run artifact");
     expect(releaseWorkflow).toContain("crates/wardian-cli");
     expect(releaseWorkflow).toContain("WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}");
-    expect(releaseWorkflow).toContain('shell: pwsh');
-    expect(releaseWorkflow).toContain('gh release upload "$env:RELEASE_TAG"');
     expect(releaseWorkflow).toContain("target/release/bundle/**/*.exe");
     expect(releaseWorkflow).toContain("target/*/release/bundle/**/*.dmg");
+    expect(tauriConfig).toContain('"beforeBuildCommand": "npm run build && npm run stage-cli"');
+    expect(tauriConfig).toContain('"resources/bin/*"');
+    expect(stageCliScript).toContain("const buildArgs = ['build', '--release', '-p', 'wardian-cli'];");
+    expect(stageCliScript).toContain("const target = process.env.WARDIAN_CLI_TARGET?.trim();");
   });
 });
