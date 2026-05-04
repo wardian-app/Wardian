@@ -658,11 +658,23 @@ describe("Sidebar Navigation", () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    const buttons = screen.getAllByRole("button");
+    const buttons = within(screen.getByTestId("sidebar-icon-rail")).getAllByRole("button");
     const titles = buttons.map(b => b.getAttribute("title")).filter(Boolean);
     expect(titles).toContain("Agent Configuration");
     expect(titles).toContain("Command");
+    expect(titles).toContain("Terminal");
     expect(titles).toContain("Application Settings");
+    expect(titles.indexOf("Terminal")).toBeLessThan(titles.indexOf("Application Settings"));
+  });
+
+  it("opens the Terminal panel from the sidebar", async () => {
+    setupDefaultMocks([], defaultClasses);
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    fireEvent.click(screen.getByTitle("Terminal"));
+
+    expect(await screen.findByTestId("terminal-panel")).toBeInTheDocument();
   });
 });
 
