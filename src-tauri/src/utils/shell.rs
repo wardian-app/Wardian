@@ -44,6 +44,13 @@ pub struct ShellLaunchSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveShellLaunchSpec {
+    pub shell_id: String,
+    pub executable: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedShell {
     id: String,
     executable: String,
@@ -90,6 +97,12 @@ pub fn build_program_launch(program: &str, args: &[String]) -> Result<ShellLaunc
     let settings = load_shell_settings().unwrap_or_default();
     let available = list_available_shells();
     build_program_launch_with_settings(program, args, &settings, &available)
+}
+
+pub fn build_interactive_shell_launch() -> Result<InteractiveShellLaunchSpec, String> {
+    let settings = load_shell_settings().unwrap_or_default();
+    let available = list_available_shells();
+    build_interactive_shell_launch_with_settings(&settings, &available)
 }
 
 fn shell_settings_path() -> Result<PathBuf, String> {
@@ -206,6 +219,70 @@ pub fn build_program_launch_with_settings(
         executable: shell.executable,
         args,
     })
+}
+
+pub fn build_interactive_shell_launch_with_settings(
+    settings: &ShellSettings,
+    available: &[ShellOption],
+) -> Result<InteractiveShellLaunchSpec, String> {
+    let shell = resolve_shell(settings, available)?;
+    Ok(InteractiveShellLaunchSpec {
+        shell_id: shell.id.clone(),
+        executable: shell.executable,
+        args: interactive_shell_args(&shell.id),
+    })
+}
+
+fn interactive_shell_args(shell_id: &str) -> Vec<String> {
+    match shell_id {
+        "powershell" | "pwsh" => vec!["-NoProfile".to_string()],
+        "wsl" => vec!["-e".to_string(), "bash".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+pub fn build_shell_cd_command(shell_id: &str, path: &Path) -> String {
+    let value = shell_cd_path(shell_id, path);
+    match shell_id {
+        "cmd" => format!("cd /d {}\r", quote_cmd_arg(&value)),
+        "powershell" | "pwsh" => {
+            format!(
+                "Set-Location -LiteralPath {}\r",
+                quote_powershell_arg(&value)
+            )
+        }
+        _ => format!("cd {}\r", quote_posix_arg(&value)),
+    }
+}
+
+fn shell_cd_path(shell_id: &str, path: &Path) -> String {
+    let value = path.to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        match shell_id {
+            "wsl" => return windows_path_for_posix_shell(&value, "/mnt"),
+            "git-bash" | "bash" => return windows_path_for_posix_shell(&value, ""),
+            _ => {}
+        }
+    }
+    value
+}
+
+#[cfg(windows)]
+fn windows_path_for_posix_shell(value: &str, drive_prefix: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = normalized[2..].trim_start_matches('/');
+        if rest.is_empty() {
+            format!("{}/{}", drive_prefix, drive)
+        } else {
+            format!("{}/{}/{}", drive_prefix, drive, rest)
+        }
+    } else {
+        normalized
+    }
 }
 
 fn resolve_shell(
@@ -699,12 +776,67 @@ fn is_windows_cmd_shim(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_program_launch_with_settings, build_shell_command_with_settings, default_shell_args,
+        build_interactive_shell_launch_with_settings, build_program_launch_with_settings,
+        build_shell_cd_command, build_shell_command_with_settings, default_shell_args,
         load_shell_settings_from_path, save_shell_settings_to_path, shell_id_from_executable,
-        ShellOption, ShellSettings,
+        shell_option, ShellOption, ShellSettings,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    #[test]
+    fn interactive_shell_launch_omits_command_execution_flags() {
+        let available = vec![shell_option(
+            "pwsh",
+            "PowerShell 7",
+            PathBuf::from("pwsh.exe"),
+            default_shell_args("pwsh"),
+        )];
+        let settings = ShellSettings {
+            shell_id: "pwsh".to_string(),
+            ..ShellSettings::default()
+        };
+
+        let spec = build_interactive_shell_launch_with_settings(&settings, &available)
+            .expect("interactive launch");
+
+        assert_eq!(spec.shell_id, "pwsh");
+        assert_eq!(spec.executable, "pwsh.exe");
+        assert!(!spec.args.iter().any(|arg| arg == "-Command"));
+    }
+
+    #[test]
+    fn cd_command_quotes_shell_paths() {
+        assert_eq!(
+            build_shell_cd_command("pwsh", Path::new("C:/Users/tgemi/Project's Test")),
+            "Set-Location -LiteralPath 'C:/Users/tgemi/Project''s Test'\r"
+        );
+        assert_eq!(
+            build_shell_cd_command("cmd", Path::new("C:/Users/tgemi/Project Test")),
+            "cd /d \"C:/Users/tgemi/Project Test\"\r"
+        );
+        assert_eq!(
+            build_shell_cd_command("bash", Path::new("/tmp/project's test")),
+            "cd '/tmp/project'\"'\"'s test'\r"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cd_command_converts_windows_paths_for_posix_shells_on_windows() {
+        assert_eq!(
+            build_shell_cd_command("wsl", Path::new("C:/Users/tgemi/Project Test")),
+            "cd '/mnt/c/Users/tgemi/Project Test'\r"
+        );
+        assert_eq!(
+            build_shell_cd_command("git-bash", Path::new("C:/Users/tgemi/Project's Test")),
+            "cd '/c/Users/tgemi/Project'\"'\"'s Test'\r"
+        );
+        assert_eq!(
+            build_shell_cd_command("bash", Path::new("D:/Development/Wardian")),
+            "cd '/d/Development/Wardian'\r"
+        );
+    }
 
     #[test]
     fn shell_settings_round_trip_through_json_file() {

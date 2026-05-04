@@ -27,6 +27,7 @@ import { SidebarIconRail, SidebarTab } from "../layout/SidebarIconRail";
 import { SidebarContentPane } from "../layout/SidebarContentPane";
 import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
 import type { ViewMode } from "../layout/titlebar/CustomTitleBar";
+import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
@@ -329,6 +330,11 @@ function AppBody() {
 
   const leftSidebarWidth = useLayoutStore((s) => s.leftSidebarWidth);
   const rightSidebarWidth = useLayoutStore((s) => s.rightSidebarWidth);
+  const userTerminalOpen = useLayoutStore((s) => s.userTerminalOpen);
+  const userTerminalHeight = useLayoutStore((s) => s.userTerminalHeight);
+  const setUserTerminalOpen = useLayoutStore((s) => s.setUserTerminalOpen);
+  const setUserTerminalHeight = useLayoutStore((s) => s.setUserTerminalHeight);
+  const toggleUserTerminal = useLayoutStore((s) => s.toggleUserTerminal);
 
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -759,6 +765,10 @@ function AppBody() {
     fetchAgents();
   };
 
+  const selectedUserTerminalWorkspace = selectedAgentIds.size === 1
+    ? agents.find((agent) => agent.session_id === Array.from(selectedAgentIds)[0])?.folder?.trim() || null
+    : null;
+
   return (
     <div data-testid="app-shell" className="flex flex-col h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
       <CustomTitleBar
@@ -775,7 +785,13 @@ function AppBody() {
       />
 
       <div className="flex flex-1 overflow-hidden">
-        <SidebarIconRail activeTab={activeTab} setActiveTab={setActiveTab} setCollapsed={setLeftCollapsed} />
+        <SidebarIconRail
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          setCollapsed={setLeftCollapsed}
+          userTerminalOpen={userTerminalOpen}
+          onToggleUserTerminal={toggleUserTerminal}
+        />
         <SidebarContentPane 
           activeTab={activeTab}
           leftCollapsed={leftCollapsed}
@@ -798,7 +814,7 @@ function AppBody() {
 
         <main className="flex-1 h-full flex flex-col overflow-hidden relative">
           <div 
-            className="flex-1 overflow-y-auto p-2 flex flex-col"
+            className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col"
             onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
           >
             {viewMode === "workflow-builder" && (
@@ -892,6 +908,15 @@ function AppBody() {
                 setSidebarPendingWorkflowLaunch(null);
               }}
               onCancel={() => setSidebarPendingWorkflowLaunch(null)}
+            />
+          )}
+          {userTerminalOpen && (
+            <UserTerminalPanel
+              theme={theme}
+              height={userTerminalHeight}
+              selectedWorkspace={selectedUserTerminalWorkspace}
+              onHeightChange={setUserTerminalHeight}
+              onHide={() => setUserTerminalOpen(false)}
             />
           )}
         </main>

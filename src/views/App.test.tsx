@@ -6,6 +6,7 @@ import type { EventCallback } from "@tauri-apps/api/event";
 import App from "./App";
 import type { AgentConfig, AgentClassDefinition } from "../types";
 import type { AgentTelemetry } from "../types";
+import { useLayoutStore } from "../store/useLayoutStore";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -38,6 +39,21 @@ vi.mock("../features/terminal/AgentTerminal", () => ({
       Terminal {sessionId}
     </div>
   )
+}));
+
+vi.mock("../features/terminal/UserTerminalPanel", () => ({
+  UserTerminalPanel: ({
+    selectedWorkspace,
+    onHide,
+  }: {
+    selectedWorkspace: string | null;
+    onHide: () => void;
+  }) => (
+    <div data-testid="user-terminal-panel">
+      <button onClick={onHide}>Hide Terminal</button>
+      <span data-testid="selected-terminal-workspace">{selectedWorkspace ?? ""}</span>
+    </div>
+  ),
 }));
 
 // Cast invoke to mock for test control
@@ -170,6 +186,7 @@ const sampleAgents: AgentConfig[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useLayoutStore.getState().resetLayout();
   // Mock window.confirm
   window.confirm = vi.fn(() => true);
 });
@@ -672,9 +689,23 @@ describe("Sidebar Navigation", () => {
     render(<App />);
     await screen.findByText("No Active Instances");
 
+    expect(screen.getByText("Agent Config")).toBeInTheDocument();
+
     fireEvent.click(screen.getByTitle("Terminal"));
 
-    expect(await screen.findByTestId("terminal-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("user-terminal-panel")).toBeInTheDocument();
+    expect(screen.getByText("Agent Config")).toBeInTheDocument();
+    expect(screen.queryByTestId("terminal-panel")).not.toBeInTheDocument();
+  });
+
+  it("passes the single selected agent workspace to the user terminal", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+
+    fireEvent.focus(await screen.findByTestId("terminal-agent-1"));
+    fireEvent.click(screen.getByTitle("Terminal"));
+
+    expect(await screen.findByTestId("selected-terminal-workspace")).toHaveTextContent("C:/project");
   });
 });
 

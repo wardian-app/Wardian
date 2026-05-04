@@ -118,17 +118,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
           />
         )}
 
-        {activeTab === "terminal" && (
-          <div data-testid="terminal-panel" className="flex flex-col h-full">
-            <div className="flex items-center gap-4">
-              <h2 className="text-xl font-bold text-primary tracking-tight">Terminal</h2>
-            </div>
-            <div className="flex flex-1 items-center justify-center text-center p-6">
-              <p className="text-xs text-muted italic px-4">Terminal tools are coming soon.</p>
-            </div>
-          </div>
-        )}
-
         {activeTab === "settings" && (
           <SettingsPanel />
         )}

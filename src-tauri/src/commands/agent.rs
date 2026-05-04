@@ -630,11 +630,7 @@ async fn register_new_agent(
         .values()
         .map(|agent| agent.config.lock().unwrap().session_name.clone())
         .collect::<std::collections::HashSet<_>>();
-    match resolve_registered_session_name(
-        &config.session_name,
-        clone_name_base,
-        &existing_names,
-    ) {
+    match resolve_registered_session_name(&config.session_name, clone_name_base, &existing_names) {
         Ok(session_name) => config.session_name = session_name,
         Err(error) => {
             manager::terminate_active_agent_process(&mut active_agent);
@@ -1371,9 +1367,8 @@ mod tests {
     use super::{
         clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
         clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
-        generated_agent_name,
-        normalize_spawn_folder, persisted_resume_session_for_provider, prepare_clear_config,
-        prepare_resume_config, provider_needs_obtain_session_id_on_clear,
+        generated_agent_name, normalize_spawn_folder, persisted_resume_session_for_provider,
+        prepare_clear_config, prepare_resume_config, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_requested_spawn_session_name, restore_runtime_state_after_resume,
     };
@@ -1503,7 +1498,8 @@ mod tests {
         let doubled_backslash_input = slash_input.replace('/', "\\\\");
 
         let slash_normalized = normalize_spawn_folder(&slash_input).expect("slash path");
-        let backslash_normalized = normalize_spawn_folder(&backslash_input).expect("backslash path");
+        let backslash_normalized =
+            normalize_spawn_folder(&backslash_input).expect("backslash path");
         let doubled_backslash_normalized =
             normalize_spawn_folder(&doubled_backslash_input).expect("doubled backslash path");
 
