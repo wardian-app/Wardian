@@ -139,9 +139,11 @@ fn self_lookup_returns_agent_json() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#""schema":1"#));
-    assert!(stdout.contains(r#""name":"coder-a1""#));
-    assert!(stdout.contains(r#""workspace":"D:/Development/Wardian""#));
+    assert!(stdout.contains("{\n"));
+    assert!(stdout.contains(r#"  "schema": 1"#));
+    assert!(stdout.contains(r#""name": "coder-a1""#));
+    assert!(stdout.contains(r#""workspace": "D:/Development/Wardian""#));
+    assert!(!stdout.contains(r#""status_source""#));
     assert!(!stdout.contains(r#""project""#));
 }
 
@@ -199,10 +201,26 @@ fn list_scope_all_returns_agents() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#""agents":["#));
+    assert!(stdout.contains(r#""agents": ["#));
     assert!(stdout.contains("coder-a1"));
     assert!(stdout.contains("architect-a1"));
     assert!(stdout.contains("fork-coder"));
+    assert!(!stdout.contains(r#""status_source""#));
+}
+
+#[test]
+fn status_source_is_available_when_requested() {
+    let home = seed_home();
+    let output = Command::new(bin())
+        .args(["agent", "coder-a1", "--fields", "name,status_source"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(r#""name": "coder-a1""#));
+    assert!(stdout.contains(r#""status_source": "persisted""#));
 }
 
 #[test]
@@ -268,7 +286,7 @@ fn list_workspace_filter_matches_exact_workspace() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("fork-coder"));
-    assert!(stdout.contains(r#""workspace":"D:/Forks/Wardian""#));
+    assert!(stdout.contains(r#""workspace": "D:/Forks/Wardian""#));
     assert!(!stdout.contains("coder-a1"));
 }
 
@@ -283,8 +301,8 @@ fn fields_projection_omits_unrequested_fields() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#""name":"coder-a1""#));
-    assert!(stdout.contains(r#""status":"processing""#));
+    assert!(stdout.contains(r#""name": "coder-a1""#));
+    assert!(stdout.contains(r#""status": "processing""#));
     assert!(!stdout.contains(r#""uuid""#));
 }
 
@@ -331,7 +349,7 @@ fn list_accepts_output_fields_after_subcommand() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#""name":"coder-a1""#));
-    assert!(stdout.contains(r#""status":"processing""#));
+    assert!(stdout.contains(r#""name": "coder-a1""#));
+    assert!(stdout.contains(r#""status": "processing""#));
     assert!(!stdout.contains(r#""uuid""#));
 }

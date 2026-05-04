@@ -62,6 +62,14 @@ $env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
 cargo run -p wardian-cli -- agent list --scope all
 ```
 
+With the app running, CLI output comes from the live desktop endpoint. Request `status_source` explicitly when you need to verify that path:
+
+```powershell
+cargo run -p wardian-cli -- agent list --scope all --fields name,status,status_source
+```
+
+If the app is stopped, the same command falls back to `state.db` and reports `"status_source": "persisted"`.
+
 Build the standalone CLI:
 
 ```bash

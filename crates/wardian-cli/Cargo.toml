@@ -15,7 +15,8 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio = { version = "1.49.0", features = ["io-util", "net", "rt", "time"] }
 wardian-core = { path = "../wardian-core" }
 
 [dev-dependencies]

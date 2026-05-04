@@ -26,29 +26,6 @@ pub fn log_debug(msg: &str) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{debug_log_path, log_debug};
-
-    #[test]
-    fn log_debug_creates_parent_directory_for_custom_home() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        let wardian_home = temp.path().join("nested").join("wardian-home");
-
-        unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
-
-        log_debug("parent directory smoke test");
-        let path = debug_log_path();
-
-        unsafe { std::env::remove_var("WARDIAN_HOME") };
-
-        assert!(path.exists(), "expected debug log at {}", path.display());
-        let contents = std::fs::read_to_string(path).expect("read debug log");
-        assert!(contents.contains("parent directory smoke test"));
-    }
-}
-
 // No-op stubs when terminal-trace feature is disabled.
 // These allow call sites to remain unconditional without cfg guards.
 #[cfg(not(feature = "terminal-trace"))]
@@ -220,3 +197,26 @@ mod terminal_trace {
 
 #[cfg(feature = "terminal-trace")]
 pub use terminal_trace::{log_terminal_trace_bytes, log_terminal_trace_note};
+
+#[cfg(test)]
+mod tests {
+    use super::{debug_log_path, log_debug};
+
+    #[test]
+    fn log_debug_creates_parent_directory_for_custom_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let wardian_home = temp.path().join("nested").join("wardian-home");
+
+        unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
+
+        log_debug("parent directory smoke test");
+        let path = debug_log_path();
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        assert!(path.exists(), "expected debug log at {}", path.display());
+        let contents = std::fs::read_to_string(path).expect("read debug log");
+        assert!(contents.contains("parent directory smoke test"));
+    }
+}

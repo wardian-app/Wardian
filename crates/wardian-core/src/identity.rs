@@ -12,6 +12,14 @@ pub struct AgentIdentity {
     pub started_at: Option<String>,
     pub workspace: Option<String>,
     pub last_status_at: Option<String>,
+    pub status_source: StatusSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusSource {
+    Live,
+    Persisted,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -70,9 +78,20 @@ pub fn list_agents(
     conn: &rusqlite::Connection,
     filters: &ListFilters,
 ) -> Result<Vec<AgentIdentity>, IdentityError> {
+    Ok(filter_agents(
+        get_all_agents_with_conn(conn)?
+            .into_iter()
+            .map(row_to_identity),
+        filters,
+    ))
+}
+
+pub fn filter_agents(
+    candidates: impl IntoIterator<Item = AgentIdentity>,
+    filters: &ListFilters,
+) -> Vec<AgentIdentity> {
     let mut agents = Vec::new();
-    for row in get_all_agents_with_conn(conn)? {
-        let agent = row_to_identity(row);
+    for agent in candidates {
         if !matches_status(&agent, filters.status.as_deref()) {
             continue;
         }
@@ -92,7 +111,7 @@ pub fn list_agents(
         }
         agents.push(agent);
     }
-    Ok(agents)
+    agents
 }
 
 pub fn normalize_status(value: &str) -> String {
@@ -133,6 +152,7 @@ fn row_to_identity(row: AgentRow) -> AgentIdentity {
         started_at: row.created_at,
         workspace: row.workspace,
         last_status_at: row.last_status_at,
+        status_source: StatusSource::Persisted,
     }
 }
 

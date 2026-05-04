@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod control;
 pub mod manager;
 pub mod providers;
 pub mod state;
@@ -97,6 +98,7 @@ pub fn run() {
             }
 
             let app_handle = app.handle().clone();
+            control::spawn_control_server(app_handle.clone());
             manager::init_agent_classes(&app_handle);
 
             let metrics_handle = app.handle().clone();

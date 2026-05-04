@@ -25,7 +25,7 @@ The Rust backend will treat `WARDIAN_HOME` as the highest-priority home override
 
 * `get_wardian_home()` resolves `WARDIAN_HOME` first.
 * If `WARDIAN_HOME` is unset, Wardian continues to use `~/.wardian`.
-* Tests use `src-tauri/target/test/` or test-specific temp directories as their isolated runtime home.
+* Tests use repo-root `target/test/` or test-specific temp directories as their isolated runtime home.
 * All stateful runtime artifacts must respect that root:
   * agents
   * workflows
@@ -35,7 +35,7 @@ The Rust backend will treat `WARDIAN_HOME` as the highest-priority home override
   * logs
   * library data
 
-This gives the app a self-contained, disposable runtime environment that can be deleted by `cargo clean` or test cleanup.
+This gives the app a self-contained, disposable runtime environment that can be deleted by test cleanup.
 
 ### 2. Mock Provider
 Wardian will keep a backend mock provider for deterministic runtime and UI verification.

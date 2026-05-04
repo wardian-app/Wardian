@@ -48,4 +48,4 @@ Wardian uses a bidirectional event system, detailed in [IPC and Event Governance
 
 ## Wardian CLI
 
-The `crates/wardian-cli` binary reads `$WARDIAN_HOME/state.db` directly through `wardian-core`; it does not call Tauri IPC. The desktop app stages the binary as a Tauri resource and installs it into the user Wardian bin directory on startup.
+The `crates/wardian-cli` binary shares DTOs, paths, migrations, identity filters, and the live control protocol through `wardian-core`. For read commands it first tries the running desktop app's local control endpoint for the same `WARDIAN_HOME` and falls back to `$WARDIAN_HOME/state.db` when the app is not running. The desktop app stages the binary as a Tauri resource and installs it into the user Wardian bin directory on startup.

@@ -1,6 +1,6 @@
 use crate::errors::CliError;
 use serde_json::{Map, Value};
-use wardian_core::identity::AgentIdentity;
+use wardian_core::identity::{AgentIdentity, StatusSource};
 
 const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "workspace", "status"];
 const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "last_status_at"];
@@ -11,6 +11,7 @@ const ALL_FIELDS: &[&str] = &[
     "provider",
     "workspace",
     "status",
+    "status_source",
     "pid",
     "started_at",
     "last_status_at",
@@ -40,7 +41,7 @@ pub fn render_show(agent: &AgentIdentity, opts: &RenderOptions) -> Result<String
     });
     Ok(format!(
         "{}\n",
-        serde_json::to_string(&envelope).map_err(json_error)?
+        serde_json::to_string_pretty(&envelope).map_err(json_error)?
     ))
 }
 
@@ -73,7 +74,7 @@ pub fn render_list(agents: &[AgentIdentity], opts: &RenderOptions) -> Result<Str
     });
     Ok(format!(
         "{}\n",
-        serde_json::to_string(&envelope).map_err(json_error)?
+        serde_json::to_string_pretty(&envelope).map_err(json_error)?
     ))
 }
 
@@ -132,6 +133,13 @@ fn agent_to_map(agent: &AgentIdentity) -> Map<String, Value> {
         Value::String(agent.provider.clone()),
     );
     values.insert("status".to_string(), Value::String(agent.status.clone()));
+    values.insert(
+        "status_source".to_string(),
+        Value::String(match agent.status_source {
+            StatusSource::Live => "live".to_string(),
+            StatusSource::Persisted => "persisted".to_string(),
+        }),
+    );
     if let Some(pid) = agent.pid {
         values.insert("pid".to_string(), serde_json::json!(pid));
     }
@@ -191,23 +199,53 @@ mod tests {
             started_at: Some("2026-05-03T20:00:00.000Z".to_string()),
             workspace: Some("D:/Development/Wardian".to_string()),
             last_status_at: Some("2026-05-03T20:01:00.000Z".to_string()),
+            status_source: StatusSource::Persisted,
         }
     }
 
     #[test]
     fn render_show_outputs_json_envelope() {
         let rendered = render_show(&agent(), &RenderOptions::default()).unwrap();
-        assert!(rendered.contains(r#""schema":1"#));
+        assert!(rendered.contains("{\n"));
+        assert!(rendered.contains(r#"  "schema": 1"#));
         assert!(rendered.contains(r#""agent""#));
-        assert!(rendered.contains(r#""name":"coder-a1""#));
+        assert!(rendered.contains(r#""name": "coder-a1""#));
         assert!(!rendered.contains(r#""pid""#));
     }
 
     #[test]
     fn render_list_outputs_agents_envelope() {
         let rendered = render_list(&[agent()], &RenderOptions::default()).unwrap();
-        assert!(rendered.contains(r#""schema":1"#));
-        assert!(rendered.contains(r#""agents":["#));
+        assert!(rendered.contains("{\n"));
+        assert!(rendered.contains(r#"  "schema": 1"#));
+        assert!(rendered.contains(r#""agents": ["#));
+    }
+
+    #[test]
+    fn default_output_marks_persisted_status_source() {
+        let rendered = render_list(&[agent()], &RenderOptions::default()).unwrap();
+        assert!(!rendered.contains(r#""status_source""#));
+    }
+
+    #[test]
+    fn explicit_fields_can_include_status_source() {
+        let rendered = render_list(
+            &[agent()],
+            &RenderOptions {
+                fields: Some(vec!["name".to_string(), "status_source".to_string()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(rendered.contains(r#""status_source": "persisted""#));
+    }
+
+    #[test]
+    fn default_output_orders_name_before_class() {
+        let rendered = render_show(&agent(), &RenderOptions::default()).unwrap();
+        let name_pos = rendered.find(r#""name""#).unwrap();
+        let class_pos = rendered.find(r#""class""#).unwrap();
+        assert!(name_pos < class_pos);
     }
 
     #[test]
@@ -220,8 +258,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(rendered.contains(r#""pid":111"#));
-        assert!(rendered.contains(r#""workspace":"D:/Development/Wardian""#));
+        assert!(rendered.contains(r#""pid": 111"#));
+        assert!(rendered.contains(r#""workspace": "D:/Development/Wardian""#));
     }
 
     #[test]
@@ -234,8 +272,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(rendered.contains(r#""name":"coder-a1""#));
-        assert!(rendered.contains(r#""status":"processing""#));
+        assert!(rendered.contains(r#""name": "coder-a1""#));
+        assert!(rendered.contains(r#""status": "processing""#));
         assert!(!rendered.contains(r#""uuid""#));
     }
 

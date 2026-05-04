@@ -1345,6 +1345,7 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,

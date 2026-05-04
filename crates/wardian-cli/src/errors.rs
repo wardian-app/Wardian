@@ -23,7 +23,7 @@ pub struct ErrorBody<'a> {
     pub message: String,
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 #[derive(Debug)]
@@ -32,7 +32,7 @@ pub struct CliError {
     pub code: &'static str,
     pub message: String,
     pub hint: Option<String>,
-    pub details: Option<serde_json::Value>,
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 impl CliError {
@@ -45,10 +45,10 @@ impl CliError {
                 "Pass a name or uuid to look up a specific agent from outside a Wardian-managed agent process: `wardian agent <name>`."
                     .to_string(),
             ),
-            details: Some(serde_json::json!({
+            details: Some(Box::new(serde_json::json!({
                 "command": "agent",
                 "requested": "self",
-            })),
+            }))),
         }
     }
 
@@ -58,7 +58,7 @@ impl CliError {
             code: "not_found",
             message: format!("Agent was not found: {requested}"),
             hint: Some("Run `wardian agent list --scope all` to inspect known agents.".to_string()),
-            details: Some(serde_json::json!({ "requested": requested })),
+            details: Some(Box::new(serde_json::json!({ "requested": requested }))),
         }
     }
 
@@ -80,8 +80,8 @@ impl CliError {
             exit_code: ExitCode::Generic,
             code: "invalid_field",
             message: format!("Unknown field: {field}"),
-            hint: Some("Use one of: name, uuid, class, provider, workspace, status, pid, started_at, last_status_at.".to_string()),
-            details: Some(serde_json::json!({ "field": field })),
+            hint: Some("Use one of: name, uuid, class, provider, workspace, status, status_source, pid, started_at, last_status_at.".to_string()),
+            details: Some(Box::new(serde_json::json!({ "field": field }))),
         }
     }
 

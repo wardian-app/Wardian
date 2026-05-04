@@ -1226,8 +1226,7 @@ mod tests {
             .join("skills")
             .join("planner");
         copy_dir_all(
-            &temp
-                .path()
+            temp.path()
                 .join("library")
                 .join("skills")
                 .join("group-b")

@@ -1,3 +1,4 @@
+pub mod control;
 pub mod db;
 pub mod identity;
 pub mod models;

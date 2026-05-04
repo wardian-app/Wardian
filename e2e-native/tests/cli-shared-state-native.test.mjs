@@ -129,10 +129,23 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
   assert.equal(fieldResult.status, 0, fieldResult.stderr);
   assert.equal(fieldResult.stdout, `${LIVE_SESSION_ID}\n`);
 
+  const showResult = runCli(cliPath, harness, [
+    "agent",
+    LIVE_SESSION_NAME,
+    "--fields",
+    "uuid,status,status_source",
+  ]);
+  assert.equal(showResult.status, 0, showResult.stderr);
+  assert.deepEqual(JSON.parse(showResult.stdout).agent, {
+    uuid: LIVE_SESSION_ID,
+    status: "idle",
+    status_source: "live",
+  });
+
   const listResult = runCli(cliPath, harness, [
     "agent",
     "--fields",
-    "name,uuid,status",
+    "name,uuid,status,status_source",
     "list",
     "--scope",
     "all",
@@ -145,6 +158,7 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
     name: LIVE_SESSION_NAME,
     uuid: LIVE_SESSION_ID,
     status: "idle",
+    status_source: "live",
   });
 });
 

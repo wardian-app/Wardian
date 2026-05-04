@@ -30,7 +30,7 @@ This spec defines the first slice: a `wardian` command distributed alongside the
 
 - Shared auto-updater (`wardian update`) — separate spec, immediate follow-up.
 - Mutating agent commands (`wardian agent spawn`, `send`, `kill`, `logs`).
-- IPC channel between CLI and running GUI.
+- Mutating IPC between CLI and running GUI.
 - Other top-level namespaces (`wardian workflow`, `wardian library`, `wardian doctor`).
 - Distribution wrappers: npm, pip, cargo packages that download the binary from GitHub Releases.
 
@@ -82,11 +82,11 @@ The refactor is mechanical: move files, adjust `use` paths, update `Cargo.toml` 
 
 ### Component 3 — State Access Model
 
-The CLI opens `~/.wardian/state.db` directly, read-only, in WAL mode. This works whether the Tauri GUI is running or not, and SQLite's WAL mode makes concurrent reads safe alongside the GUI's writes.
+The CLI first tries the running desktop app's local control endpoint for the same `WARDIAN_HOME`. This endpoint is intentionally narrow: it returns live read-only agent snapshots so status reflects the Rust backend's in-memory source of truth while the app is running.
 
-No IPC channel is introduced in this spec. All identity information the CLI returns comes from the database. Spec 023 mandates that status transitions are written to the DB promptly, so "what the CLI sees" and "what the GUI shows" converge within one event-loop tick.
+If no desktop app is available for that home, the CLI opens `~/.wardian/state.db` directly, read-only, in WAL mode. This keeps introspection useful when the app is closed, and SQLite's WAL mode makes concurrent reads safe alongside the GUI's writes.
 
-IPC becomes necessary when the first mutating command lands (e.g., `wardian agent send`), which must push input into a live PTY. That is a future spec's problem. Designing it now would bake assumptions we don't yet have.
+The live control endpoint is not Tauri command IPC. It is a local OS endpoint keyed by `WARDIAN_HOME` so dev, e2e, and production homes do not collide. Mutating commands still require a later control-plane spec, because commands like `wardian agent send` must push input into a live PTY and need stronger request semantics.
 
 ### Component 4 — Self-Resolution via `WARDIAN_SESSION_ID`
 
@@ -123,7 +123,7 @@ wardian agent list [filters]           # roster
 
 ### Component 6 — Output: JSON-First
 
-The CLI's primary consumer is an agent, not a human. All non-`--pretty` output is JSON on stdout.
+The CLI's primary consumer is an agent, not a human. All non-`--pretty` output is JSON on stdout. JSON envelopes are indented by default so terminal output remains readable without piping through a formatter.
 
 **Self / peer show envelope:**
 
@@ -150,11 +150,11 @@ The CLI's primary consumer is an agent, not a human. All non-`--pretty` output i
 }
 ```
 
-**Default field set:** `name`, `uuid`, `class`, `provider`, `workspace`, `status`. Deliberately small: these are what an agent almost always needs, the shape is stable, and the response parses fast.
+**Default field set:** `name`, `uuid`, `class`, `provider`, `workspace`, `status`. Deliberately small: these are what an agent almost always needs, the shape is stable, and the response parses fast. `status_source` is available through `--fields` or `--field` when callers need to distinguish `live` snapshots from `persisted` DB fallback.
 
 **`--verbose` adds:** `pid`, `started_at` (ISO 8601), `last_status_at` (ISO 8601).
 
-**`--fields=…`:** explicit whitelist, replaces the default set entirely. Unknown field names error with code `invalid_field`.
+**`--fields=…`:** explicit whitelist, replaces the default set entirely while preserving indented JSON output. Unknown field names error with code `invalid_field`.
 
 **`--field <name>`:** emits the bare value followed by `\n`. No JSON wrapper, no schema envelope. Errors still go to stderr as JSON. This is the escape hatch for shell loops that don't want to shell out to `jq`.
 
