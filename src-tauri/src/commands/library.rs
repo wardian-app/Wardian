@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::manager::log_debug;
 use crate::state::{AppState, LibraryWatchRegistration};
-use crate::utils::fs::get_wardian_home;
+use crate::utils::fs::{copy_dir_all, get_wardian_home};
 use wardian_core::models::{
     DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
     SkillDeployment,
@@ -379,20 +379,6 @@ fn get_target_skills_dir(target_type: &str, target_id: &str) -> Result<std::path
         _ => return Err(format!("Unknown target type: {}", target_type)),
     };
     Ok(base.join(".agents").join("skills"))
-}
-
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        }
-    }
-    Ok(())
 }
 
 fn remove_existing_deployment(path: &Path) -> std::io::Result<()> {

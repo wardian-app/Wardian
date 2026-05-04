@@ -50,5 +50,7 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}");
     expect(releaseWorkflow).toContain('shell: pwsh');
     expect(releaseWorkflow).toContain('gh release upload "$env:RELEASE_TAG"');
+    expect(releaseWorkflow).toContain("target/release/bundle/**/*.exe");
+    expect(releaseWorkflow).toContain("target/*/release/bundle/**/*.dmg");
   });
 });

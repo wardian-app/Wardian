@@ -611,6 +611,24 @@ pub(crate) fn create_directory_link(
     }
 }
 
+pub(crate) fn copy_dir_all(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_entry = dst.as_ref().join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst_entry)?;
+        } else {
+            std::fs::copy(entry.path(), dst_entry)?;
+        }
+    }
+    Ok(())
+}
+
 fn project_file(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
     if target.exists() {
         let _ = std::fs::remove_file(target);

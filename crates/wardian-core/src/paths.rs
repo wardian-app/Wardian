@@ -19,7 +19,11 @@ pub fn wardian_home_for_manifest(manifest_dir: &Path) -> Option<PathBuf> {
 
     #[cfg(debug_assertions)]
     {
-        Some(manifest_dir.join("target").join("debug").join(".wardian"))
+        Some(
+            debug_target_dir_for_manifest(manifest_dir)
+                .join("debug")
+                .join(".wardian"),
+        )
     }
 
     #[cfg(not(debug_assertions))]
@@ -27,6 +31,20 @@ pub fn wardian_home_for_manifest(manifest_dir: &Path) -> Option<PathBuf> {
         let _ = manifest_dir;
         dirs::home_dir().map(|home| home.join(".wardian"))
     }
+}
+
+#[cfg(debug_assertions)]
+fn debug_target_dir_for_manifest(manifest_dir: &Path) -> PathBuf {
+    if manifest_dir
+        .file_name()
+        .is_some_and(|name| name == "src-tauri")
+    {
+        if let Some(workspace_root) = manifest_dir.parent() {
+            return workspace_root.join("target");
+        }
+    }
+
+    manifest_dir.join("target")
 }
 
 pub fn state_db_path() -> Option<PathBuf> {
@@ -76,5 +94,19 @@ mod tests {
         };
         assert!(cli_bin_path().unwrap().ends_with(expected));
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn debug_home_for_tauri_manifest_uses_workspace_target_dir() {
+        let _guard = crate::tests::env_lock();
+        std::env::remove_var("WARDIAN_HOME");
+
+        let workspace_root = PathBuf::from("/repo/Wardian");
+        let manifest_dir = workspace_root.join("src-tauri");
+
+        assert_eq!(
+            wardian_home_for_manifest(&manifest_dir).unwrap(),
+            workspace_root.join("target").join("debug").join(".wardian")
+        );
     }
 }

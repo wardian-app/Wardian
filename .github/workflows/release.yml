@@ -198,6 +198,14 @@ jobs:
         with:
           name: wardian-${{ matrix.platform.name }}
           path: |
+            target/release/bundle/**/*.exe
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.deb
+            target/*/release/bundle/**/*.exe
+            target/*/release/bundle/**/*.dmg
+            target/*/release/bundle/**/*.AppImage
+            target/*/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.dmg
             src-tauri/target/release/bundle/**/*.AppImage

@@ -1,5 +1,4 @@
 use crate::utils::fs::*;
-use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use wardian_core::models::AgentClassDefinition;
@@ -98,41 +97,26 @@ pub fn init_agent_classes(app: &AppHandle) {
     }
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dst_entry = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst_entry)?;
-        } else {
-            std::fs::copy(entry.path(), dst_entry)?;
-        }
-    }
-    Ok(())
-}
-
 fn remove_existing_path(path: &Path) -> std::io::Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
+    let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
 
     if is_directory_link(&metadata) {
-        return fs::remove_dir(path).or_else(|_| fs::remove_file(path));
+        return std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path));
     }
 
     if metadata.is_dir() {
-        fs::remove_dir_all(path)
+        std::fs::remove_dir_all(path)
     } else {
-        fs::remove_file(path)
+        std::fs::remove_file(path)
     }
 }
 
 #[cfg(windows)]
-fn is_directory_link(metadata: &fs::Metadata) -> bool {
+fn is_directory_link(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -140,7 +124,7 @@ fn is_directory_link(metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_directory_link(metadata: &fs::Metadata) -> bool {
+fn is_directory_link(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
@@ -159,6 +143,12 @@ fn seed_bundled_common_skill(
     app_dir: &Path,
     source_rel_path: &str,
 ) -> Result<(), String> {
+    if !source_rel_path.starts_with("wardian-skills/") {
+        return Err(format!(
+            "Bundled common skills must live under wardian-skills/: {source_rel_path}"
+        ));
+    }
+
     let source = source_root.join(source_rel_path);
     if !source.join("SKILL.md").is_file() {
         return Err(format!(
