@@ -4,6 +4,34 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.4](https://github.com/tangemicioglu/Wardian/compare/v0.3.3...v0.3.4) (2026-05-04)
+
+
+### Features
+
+* **agents:** order new sessions predictably ([#204](https://github.com/tangemicioglu/Wardian/issues/204)) ([3c91f24](https://github.com/tangemicioglu/Wardian/commit/3c91f24bb1757476fb28eac0a7aec44379a52896))
+* **cli:** implement Wardian agent command ([#193](https://github.com/tangemicioglu/Wardian/issues/193)) ([c2f1303](https://github.com/tangemicioglu/Wardian/commit/c2f1303cc022bd498f97eeea676c47bd95e5972a))
+* **library:** refresh skills while Wardian is online ([#190](https://github.com/tangemicioglu/Wardian/issues/190)) ([319eb25](https://github.com/tangemicioglu/Wardian/commit/319eb25b20f6cb99bff79559132a34addf40cdbc))
+* **settings:** add terminal font controls ([ffbc953](https://github.com/tangemicioglu/Wardian/commit/ffbc95387e3f6eae5f0c2ce19ed75d212bd2942b))
+* **settings:** add terminal font controls ([8ae8ef2](https://github.com/tangemicioglu/Wardian/commit/8ae8ef24dab646f37c54ca25b77e8c7a3f3c524b))
+* **sidebar:** add terminal navigation item ([#195](https://github.com/tangemicioglu/Wardian/issues/195)) ([8f02066](https://github.com/tangemicioglu/Wardian/commit/8f0206670ee6eb0e1f8573bba2bd59c31e933bd4))
+* **spawn:** generate names for blank agents ([#197](https://github.com/tangemicioglu/Wardian/issues/197)) ([7bd89d7](https://github.com/tangemicioglu/Wardian/commit/7bd89d7feb977ffee861f5b230857fe6657e45c8))
+* **terminal:** add standalone user terminal panel ([#198](https://github.com/tangemicioglu/Wardian/issues/198)) ([1079b31](https://github.com/tangemicioglu/Wardian/commit/1079b31ed66c5639eef331bbe8b2bd18fd6ee1dc))
+
+
+### Bug Fixes
+
+* **runtime:** repair macos build after spawn enablement ([a0cd827](https://github.com/tangemicioglu/Wardian/commit/a0cd827b9db16fcc27fb93909eec1e3bea9b0d35))
+* **runtime:** repair macOS build after spawn enablement ([2aec49d](https://github.com/tangemicioglu/Wardian/commit/2aec49d32313c9cded445b447e7ebb778b5b3745))
+* **terminal:** refine scroll behavior for TUI agents ([#188](https://github.com/tangemicioglu/Wardian/issues/188)) ([1b70b86](https://github.com/tangemicioglu/Wardian/commit/1b70b863b5cd6c48c0e368e71fef1edd8b5d258d))
+* **terminal:** select agent on terminal focus ([#189](https://github.com/tangemicioglu/Wardian/issues/189)) ([aba5ce3](https://github.com/tangemicioglu/Wardian/commit/aba5ce3f5d24414934f0705530dcec724ba7db96))
+
+
+### Documentation
+
+* add README status badges ([4d80542](https://github.com/tangemicioglu/Wardian/commit/4d8054261878a554420ddfd7d779c11e3ce6b5b0))
+* add README status badges ([f664700](https://github.com/tangemicioglu/Wardian/commit/f664700bbc6746c1263cfb8de8d58eb09c19a776))
+
 ## [0.3.3](https://github.com/tangemicioglu/Wardian/compare/v0.3.2...v0.3.3) (2026-05-01)
 
 
