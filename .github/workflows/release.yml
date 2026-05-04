@@ -150,7 +150,10 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            crates/wardian-core
+            crates/wardian-cli
 
       - name: Install Linux deps
         if: matrix.platform.os == 'ubuntu-22.04'
@@ -166,6 +169,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args || '' }}
@@ -175,6 +179,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
         with:
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
           args: ${{ matrix.platform.args || '' }}
@@ -182,6 +187,8 @@ jobs:
       - name: Build (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
         uses: tauri-apps/tauri-action@v0
+        env:
+          WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
         with:
           args: ${{ matrix.platform.args || '' }}
 
@@ -191,6 +198,14 @@ jobs:
         with:
           name: wardian-${{ matrix.platform.name }}
           path: |
+            target/release/bundle/**/*.exe
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.deb
+            target/*/release/bundle/**/*.exe
+            target/*/release/bundle/**/*.dmg
+            target/*/release/bundle/**/*.AppImage
+            target/*/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.dmg
             src-tauri/target/release/bundle/**/*.AppImage
@@ -201,10 +216,81 @@ jobs:
             src-tauri/target/*/release/bundle/**/*.deb
           if-no-files-found: warn
 
+  build-cli:
+    name: Build CLI (${{ matrix.platform.name }})
+    needs: [create-release, resolve-release]
+    if: always() && (needs.create-release.result == 'success' || needs.resolve-release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'))
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: windows-latest
+            name: x86_64-windows
+            rust-target: x86_64-pc-windows-msvc
+            exe: wardian-cli.exe
+            asset: wardian-cli-x86_64-windows.exe
+          - os: macos-latest
+            name: aarch64-macos
+            rust-target: aarch64-apple-darwin
+            exe: wardian-cli
+            asset: wardian-cli-aarch64-macos
+          - os: macos-latest
+            name: x86_64-macos
+            rust-target: x86_64-apple-darwin
+            exe: wardian-cli
+            asset: wardian-cli-x86_64-macos
+          - os: ubuntu-22.04
+            name: x86_64-linux
+            rust-target: x86_64-unknown-linux-gnu
+            exe: wardian-cli
+            asset: wardian-cli-x86_64-linux
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust-target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            crates/wardian-core
+            crates/wardian-cli
+
+      - name: Build CLI
+        shell: pwsh
+        run: |
+          cargo build --release -p wardian-cli --target "${{ matrix.platform.rust-target }}"
+          New-Item -ItemType Directory -Force dist-cli | Out-Null
+          $source = Join-Path "target/${{ matrix.platform.rust-target }}/release" "${{ matrix.platform.exe }}"
+          Copy-Item $source "dist-cli/${{ matrix.platform.asset }}"
+
+      - name: Upload CLI dry-run artifact
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.asset }}
+          path: dist-cli/${{ matrix.platform.asset }}
+          if-no-files-found: error
+
+      - name: Upload CLI release asset
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: gh release upload "$env:RELEASE_TAG" "dist-cli/${{ matrix.platform.asset }}" --clobber
+
   publish:
     name: Publish release
-    needs: [create-release, resolve-release, build]
-    if: always() && needs.build.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
+    needs: [create-release, resolve-release, build, build-cli]
+    if: always() && needs.build.result == 'success' && needs.build-cli.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release

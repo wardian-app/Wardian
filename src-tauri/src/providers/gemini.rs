@@ -1,5 +1,5 @@
-use crate::models::provider::{AgentEvent, AgentProvider};
-use crate::models::AgentConfig;
+use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::AgentConfig;
 
 /// The first concrete `AgentProvider` implementation, wrapping the Gemini CLI.
 pub struct GeminiProvider;

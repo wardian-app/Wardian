@@ -32,6 +32,25 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("candidate.tag_name === releaseTag");
     expect(releaseWorkflow).toContain("needs.resolve-release.outputs.release_id");
     expect(releaseWorkflow).toContain("Publish the release");
-    expect(releaseWorkflow).toContain("always() && needs.build.result == 'success'");
+    expect(releaseWorkflow).toContain(
+      "always() && needs.build.result == 'success' && needs.build-cli.result == 'success'",
+    );
+  });
+
+  it("publishes standalone CLI binaries with dry-run artifact support", () => {
+    expect(releaseWorkflow).toContain("Build CLI");
+    expect(releaseWorkflow).toContain("cargo build --release -p wardian-cli --target");
+    expect(releaseWorkflow).toContain("wardian-cli-x86_64-windows.exe");
+    expect(releaseWorkflow).toContain("wardian-cli-aarch64-macos");
+    expect(releaseWorkflow).toContain("wardian-cli-x86_64-macos");
+    expect(releaseWorkflow).toContain("wardian-cli-x86_64-linux");
+    expect(releaseWorkflow).toContain("gh release upload");
+    expect(releaseWorkflow).toContain("Upload CLI dry-run artifact");
+    expect(releaseWorkflow).toContain("crates/wardian-cli");
+    expect(releaseWorkflow).toContain("WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}");
+    expect(releaseWorkflow).toContain('shell: pwsh');
+    expect(releaseWorkflow).toContain('gh release upload "$env:RELEASE_TAG"');
+    expect(releaseWorkflow).toContain("target/release/bundle/**/*.exe");
+    expect(releaseWorkflow).toContain("target/*/release/bundle/**/*.dmg");
   });
 });

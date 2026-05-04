@@ -7,20 +7,7 @@ pub struct ClaudePermissionHookPaths {
 }
 
 pub fn get_wardian_home() -> Option<std::path::PathBuf> {
-    if let Ok(val) = std::env::var("WARDIAN_HOME") {
-        if !val.is_empty() {
-            return Some(std::path::PathBuf::from(val));
-        }
-    }
-    #[cfg(debug_assertions)]
-    {
-        // Use Cargo target directory so debug state is isolated from production
-        // and is wiped automatically by `cargo clean`.
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Some(manifest_dir.join("target").join("debug").join(".wardian"))
-    }
-    #[cfg(not(debug_assertions))]
-    dirs::home_dir().map(|h| h.join(".wardian"))
+    wardian_core::paths::wardian_home_for_manifest(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
 pub fn get_default_user_dir() -> std::path::PathBuf {
@@ -48,7 +35,8 @@ pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
     if !agent_id.is_empty() {
         if let Some(home) = get_wardian_home() {
             if let Ok(data) = std::fs::read_to_string(home.join("settings/state.json")) {
-                if let Ok(configs) = serde_json::from_str::<Vec<crate::models::AgentConfig>>(&data)
+                if let Ok(configs) =
+                    serde_json::from_str::<Vec<wardian_core::models::AgentConfig>>(&data)
                 {
                     if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
                         if !cfg.folder.is_empty() {
@@ -621,6 +609,24 @@ pub(crate) fn create_directory_link(
     {
         std::os::unix::fs::symlink(target, link).map_err(|e| e.to_string())
     }
+}
+
+pub(crate) fn copy_dir_all(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_entry = dst.as_ref().join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst_entry)?;
+        } else {
+            std::fs::copy(entry.path(), dst_entry)?;
+        }
+    }
+    Ok(())
 }
 
 fn project_file(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {

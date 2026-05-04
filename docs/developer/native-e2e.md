@@ -41,6 +41,12 @@ existing binary instead of rebuilding on every run:
 npm run test:e2e:native:fast
 ```
 
+Use the fast command only after rebuilding the native binary for Rust or bundled-asset changes:
+
+```bash
+npm run tauri -- build --debug --no-bundle
+```
+
 You can also target a specific file:
 
 ```bash
@@ -53,7 +59,16 @@ Use this layer when validating:
 - Tauri `invoke` commands
 - PTY-backed input/output
 - provider spawn, resume, or shutdown behavior
+- app and CLI shared-state behavior through isolated `WARDIAN_HOME`
 - workflow behavior that depends on native runtime state
+
+The CLI shared-state smoke can be run directly:
+
+```bash
+npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mjs
+```
+
+It starts the native app with an isolated `WARDIAN_HOME`, creates a mock agent through Tauri IPC, then runs the local `wardian-cli` binary against the same home and asserts the CLI can read the app-created agent through the live control endpoint. The CLI still falls back to `state.db` when the desktop app is not running.
 
 ## Real Providers
 

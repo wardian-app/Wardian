@@ -1,7 +1,7 @@
-use crate::models::{AgentTelemetry, AppTelemetry};
 use crate::state::AppState;
 use crate::utils::fs::get_wardian_home;
 use std::collections::{BTreeSet, HashMap};
+use wardian_core::models::{AgentTelemetry, AppTelemetry};
 
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
 use super::codex::{codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log};

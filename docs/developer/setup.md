@@ -40,6 +40,54 @@ Required for `npm run test:e2e:native`. See [native-e2e.md](./native-e2e.md) for
 npm run setup:e2e:native
 ```
 
+## Local Builds
+
+Run the desktop app in development mode:
+
+```bash
+npm run dev
+```
+
+When testing the CLI against a dev app, set the same explicit `WARDIAN_HOME` in both terminals:
+
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
+npm run dev
+```
+
+Then run CLI commands from another terminal with that same home:
+
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
+cargo run -p wardian-cli -- agent list --scope all
+```
+
+With the app running, CLI output comes from the live desktop endpoint. Request `status_source` explicitly when you need to verify that path:
+
+```powershell
+cargo run -p wardian-cli -- agent list --scope all --fields name,status,status_source
+```
+
+If the app is stopped, the same command falls back to `state.db` and reports `"status_source": "persisted"`.
+
+Build the standalone CLI:
+
+```bash
+cargo build -p wardian-cli
+```
+
+Stage the release CLI into the Tauri resource directory used by bundling:
+
+```bash
+npm run stage-cli
+```
+
+Build a production desktop bundle for the current platform:
+
+```bash
+npm run tauri build
+```
+
 ## Environment Variables
 
 | Variable | Purpose | Default |

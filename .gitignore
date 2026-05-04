@@ -55,9 +55,12 @@ Icon
 .Trashes
 
 # Tauri/Rust specifics
+target/
 src-tauri/*.log
 src-tauri/target/
 src-tauri/gen/
+src-tauri/resources/bin/wardian*
+!src-tauri/resources/bin/.gitkeep
 
 # Playwright
 e2e/test-results/

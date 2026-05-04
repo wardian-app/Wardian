@@ -23,7 +23,7 @@ fn basic_scenario_emits_expected_events() {
     let provider = MockProvider::new();
     let script = mock_script_path();
 
-    let child = Command::new("node")
+    let mut child = Command::new("node")
         .arg(&script)
         .env("WARDIAN_MOCK_SCENARIO", "basic")
         .env("WARDIAN_MOCK_DELAY_MS", "0")
@@ -32,7 +32,7 @@ fn basic_scenario_emits_expected_events() {
         .spawn()
         .expect("Failed to spawn mock-agent.cjs (is Node.js installed?)");
 
-    let stdout = child.stdout.unwrap();
+    let stdout = child.stdout.take().unwrap();
     let reader = std::io::BufReader::new(stdout);
 
     let events: Vec<AgentEvent> = reader
@@ -42,6 +42,8 @@ fn basic_scenario_emits_expected_events() {
             provider.parse_output(&line)
         })
         .collect();
+    let status = child.wait().expect("mock agent exits");
+    assert!(status.success(), "mock agent should exit successfully");
 
     assert!(
         events.len() >= 4,
@@ -123,7 +125,7 @@ fn long_output_scenario_emits_many_lines() {
     let provider = MockProvider::new();
     let script = mock_script_path();
 
-    let child = Command::new("node")
+    let mut child = Command::new("node")
         .arg(&script)
         .env("WARDIAN_MOCK_SCENARIO", "long_output")
         .env("WARDIAN_MOCK_DELAY_MS", "0")
@@ -132,7 +134,7 @@ fn long_output_scenario_emits_many_lines() {
         .spawn()
         .expect("Failed to spawn mock-agent.cjs");
 
-    let stdout = child.stdout.unwrap();
+    let stdout = child.stdout.take().unwrap();
     let reader = std::io::BufReader::new(stdout);
 
     let mut total_lines = 0;
@@ -144,6 +146,8 @@ fn long_output_scenario_emits_many_lines() {
             parsed_events += 1;
         }
     }
+    let status = child.wait().expect("mock agent exits");
+    assert!(status.success(), "mock agent should exit successfully");
 
     // 200 text lines + ~5 JSON event lines
     assert!(

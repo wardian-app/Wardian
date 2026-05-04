@@ -1,8 +1,8 @@
-use crate::models::AgentSessionPersistence;
 use crate::utils::get_wardian_home;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use wardian_core::models::AgentSessionPersistence;
 
 const SHELL_SETTINGS_FILE: &str = "settings/shell.json";
 

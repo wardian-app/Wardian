@@ -13,11 +13,12 @@ pub(crate) mod telemetry;
 pub use classes::{
     get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
 };
+pub use codex::latest_codex_session_index_entry;
 pub use headless::{
-    obtain_session_id, run_headless, run_headless_with_config, run_headless_with_options, HeadlessRunOptions,
+    obtain_session_id, run_headless, run_headless_with_config, run_headless_with_options,
+    HeadlessRunOptions,
 };
 pub use opencode::opencode_extract_created_session_id;
-pub use codex::latest_codex_session_index_entry;
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 
@@ -31,11 +32,11 @@ pub use crate::utils::process::{
 };
 pub use crate::utils::shell::build_program_launch;
 
-use crate::models::{AgentConfig, AgentEvent};
 use crate::state::ActiveAgent;
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
+use wardian_core::models::{AgentConfig, AgentEvent};
 pub(crate) fn session_bootstrap_prompt() -> &'static str {
     "Introduce yourself"
 }
@@ -69,7 +70,7 @@ pub(crate) fn cleanup_stale_persisted_session_processes() {
         return;
     };
 
-    let db_status_map = crate::utils::db::get_all_agents()
+    let db_status_map = wardian_core::db::get_all_agents()
         .unwrap_or_default()
         .into_iter()
         .map(|agent| (agent.session_id, agent.last_status))
@@ -148,7 +149,7 @@ pub(crate) fn set_agent_status(
             *status = next_status.to_string();
 
             // Phase 2: Persist status change to SQLite
-            let _ = crate::utils::db::update_agent_status(session_id, next_status, None);
+            let _ = wardian_core::db::update_agent_status(session_id, next_status, None);
 
             let _ = app.emit(
                 "agent-status-updated",
@@ -484,12 +485,11 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
-        #[test]
+    #[test]
     fn extract_terminal_titles_reads_bel_and_st_sequences() {
         let chunk = "\u{1b}]0;OpenCode\u{7}x\u{1b}]2;OC | Working\u{1b}\\";
 
@@ -499,7 +499,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn display_log_path_canonicalizes_existing_paths_for_ui() {
         let temp = tempfile::tempdir().expect("temp dir");
         let nested = temp.path().join("sessions");
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(display_log_path(missing), missing.to_string_lossy());
     }
 
-        #[test]
+    #[test]
     fn strip_flag_value_pairs_removes_all_add_dir_arguments() {
         let args = vec![
             "--model".to_string(),
@@ -548,7 +548,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn strip_standalone_flag_removes_only_the_matching_flag() {
         let args = vec![
             "resume".to_string(),
@@ -571,7 +571,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn opencode_interactive_launch_uses_habitat_root() {
         let workspace_cwd = Path::new("D:/Development/Wardian");
         let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
@@ -587,7 +587,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn opencode_interactive_launch_matches_bootstrap_workspace() {
         let workspace_cwd = Path::new("D:/Development/Wardian");
         let habitat_root = Some(Path::new("C:/Users/test/.wardian/agents/ses_test/habitat"));
@@ -601,7 +601,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn fresh_opencode_interactive_spawn_keeps_explicit_session_after_bootstrap() {
         let args = finalize_interactive_spawn_args(
             "opencode",
@@ -652,7 +652,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn claude_interactive_spawn_preserves_stream_json_flags() {
         let args = finalize_interactive_spawn_args(
             "claude",

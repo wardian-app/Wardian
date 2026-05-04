@@ -1,10 +1,10 @@
-use crate::models::provider::AgentProvider;
 use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::mock::MockProvider;
 use crate::providers::opencode::OpenCodeProvider;
 use std::sync::Arc;
+use wardian_core::models::provider::AgentProvider;
 
 /// Resolves the correct `AgentProvider` implementation based on the provider name
 /// stored in `AgentConfig`.

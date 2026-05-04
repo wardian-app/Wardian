@@ -26,6 +26,8 @@ function resolveAppPath() {
 
   if (process.platform === "win32") {
     return existingPath([
+      path.join(repoRoot, "target", "debug", "Wardian.exe"),
+      path.join(repoRoot, "target", "release", "Wardian.exe"),
       path.join(repoRoot, "src-tauri", "target", "debug", "Wardian.exe"),
       path.join(repoRoot, "src-tauri", "target", "release", "Wardian.exe"),
     ]);
@@ -33,6 +35,28 @@ function resolveAppPath() {
 
   if (process.platform === "darwin") {
     return existingPath([
+      path.join(
+        repoRoot,
+        "target",
+        "debug",
+        "bundle",
+        "macos",
+        "Wardian.app",
+        "Contents",
+        "MacOS",
+        "Wardian",
+      ),
+      path.join(
+        repoRoot,
+        "target",
+        "release",
+        "bundle",
+        "macos",
+        "Wardian.app",
+        "Contents",
+        "MacOS",
+        "Wardian",
+      ),
       path.join(
         repoRoot,
         "src-tauri",
@@ -61,6 +85,10 @@ function resolveAppPath() {
   }
 
   return existingPath([
+    path.join(repoRoot, "target", "debug", "Wardian"),
+    path.join(repoRoot, "target", "release", "Wardian"),
+    path.join(repoRoot, "target", "debug", "wardian"),
+    path.join(repoRoot, "target", "release", "wardian"),
     path.join(repoRoot, "src-tauri", "target", "debug", "Wardian"),
     path.join(repoRoot, "src-tauri", "target", "release", "Wardian"),
     path.join(repoRoot, "src-tauri", "target", "debug", "wardian"),

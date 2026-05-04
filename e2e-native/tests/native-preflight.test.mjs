@@ -7,7 +7,7 @@ test("native preflight reports missing tauri-driver clearly", () => {
   assert.throws(
     () =>
       assertNativePreflight({
-        appPath: "D:/Development/Wardian/src-tauri/target/debug/Wardian.exe",
+        appPath: "D:/Development/Wardian/target/debug/Wardian.exe",
         platform: "win32",
         tauriDriverPath: null,
         nativeDriverPath: "C:/WebDriver/msedgedriver.exe",
@@ -20,7 +20,7 @@ test("native preflight reports missing native driver clearly", () => {
   assert.throws(
     () =>
       assertNativePreflight({
-        appPath: "D:/Development/Wardian/src-tauri/target/debug/Wardian.exe",
+        appPath: "D:/Development/Wardian/target/debug/Wardian.exe",
         platform: "win32",
         tauriDriverPath: "C:/Users/test/.cargo/bin/tauri-driver.exe",
         nativeDriverPath: null,

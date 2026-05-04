@@ -1,5 +1,5 @@
-use crate::models::provider::{AgentEvent, AgentProvider};
-use crate::models::AgentConfig;
+use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::AgentConfig;
 
 /// A deterministic mock provider for automated testing.
 ///

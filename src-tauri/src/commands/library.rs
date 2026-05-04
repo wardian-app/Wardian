@@ -5,11 +5,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::manager::log_debug;
-use crate::models::{
-    DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
-};
 use crate::state::{AppState, LibraryWatchRegistration};
-use crate::utils::fs::get_wardian_home;
+use crate::utils::fs::{copy_dir_all, get_wardian_home};
+use wardian_core::models::{
+    DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
+    SkillDeployment,
+};
 
 const LIBRARY_PROMPTS_DIR: &str = "library/prompts";
 const LIBRARY_SKILLS_DIR: &str = "library/skills";
@@ -178,7 +179,7 @@ pub async fn get_library_tree(
                         let content = fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
                         let description = content.lines().next().unwrap_or("").to_string();
 
-                        children.push(LibraryNode::Skill(crate::models::LibrarySkill {
+                        children.push(LibraryNode::Skill(wardian_core::models::LibrarySkill {
                             path: file_rel_path,
                             name: file_name,
                             description,
@@ -378,20 +379,6 @@ fn get_target_skills_dir(target_type: &str, target_id: &str) -> Result<std::path
         _ => return Err(format!("Unknown target type: {}", target_type)),
     };
     Ok(base.join(".agents").join("skills"))
-}
-
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        }
-    }
-    Ok(())
 }
 
 fn remove_existing_deployment(path: &Path) -> std::io::Result<()> {
@@ -744,14 +731,14 @@ pub async fn list_skill_deployments(
     _app: AppHandle,
     skill_name: String,
     source_path: Option<String>,
-) -> Result<Vec<crate::models::SkillDeployment>, String> {
+) -> Result<Vec<SkillDeployment>, String> {
     list_skill_deployments_for_source(&skill_name, source_path.as_deref())
 }
 
 fn list_skill_deployments_for_source(
     skill_name: &str,
     source_path: Option<&str>,
-) -> Result<Vec<crate::models::SkillDeployment>, String> {
+) -> Result<Vec<SkillDeployment>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let library_skills_dir = home.join(LIBRARY_SKILLS_DIR);
     let mut library_sources = Vec::new();
@@ -774,7 +761,7 @@ fn list_skill_deployments_for_source(
         &library_sources,
         &home,
     ) {
-        deployments.push(crate::models::SkillDeployment {
+        deployments.push(SkillDeployment {
             target_type: "user".to_string(),
             target_id: "global".to_string(),
         });
@@ -796,7 +783,7 @@ fn list_skill_deployments_for_source(
                             &library_sources,
                             &home,
                         ) {
-                            deployments.push(crate::models::SkillDeployment {
+                            deployments.push(SkillDeployment {
                                 target_type: "class".to_string(),
                                 target_id: class_name,
                             });
@@ -823,7 +810,7 @@ fn list_skill_deployments_for_source(
                             &library_sources,
                             &home,
                         ) {
-                            deployments.push(crate::models::SkillDeployment {
+                            deployments.push(SkillDeployment {
                                 target_type: "agent".to_string(),
                                 target_id: agent_id,
                             });
@@ -1226,8 +1213,7 @@ mod tests {
             .join("skills")
             .join("planner");
         copy_dir_all(
-            &temp
-                .path()
+            temp.path()
                 .join("library")
                 .join("skills")
                 .join("group-b")

@@ -1,7 +1,7 @@
-use crate::models::AgentConfig;
-use crate::utils::fs::*;
 use super::codex::codex_bootstrap_workspace_key;
+use crate::utils::fs::*;
 use chrono::TimeZone;
+use wardian_core::models::AgentConfig;
 pub(crate) fn opencode_status_from_title(title: &str) -> Option<&'static str> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
@@ -210,7 +210,10 @@ fn opencode_log_path_after(
 ///
 /// Used for sessions recovered after an app restart (where no live watcher
 /// is running).
-pub(crate) fn opencode_log_path_in(base: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn opencode_log_path_in(
+    base: &std::path::Path,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let mut candidates = std::fs::read_dir(base)
         .ok()?
         .flatten()
@@ -358,18 +361,17 @@ pub(crate) fn apply_opencode_log_metrics(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manager::headless::{headless_provider_args, headless_provider_launch};
     use crate::manager::{
         finalize_interactive_spawn_args, interactive_provider_args, interactive_provider_launch,
         session_bootstrap_prompt,
     };
-    use crate::manager::headless::{headless_provider_args, headless_provider_launch};
-    use crate::models::AgentConfig;
     use std::path::Path;
-        #[test]
+    use wardian_core::models::AgentConfig;
+    #[test]
     fn opencode_title_maps_to_status() {
         assert_eq!(opencode_status_from_title("OpenCode"), Some("Idle"));
         assert_eq!(
@@ -383,7 +385,7 @@ mod tests {
         assert_eq!(opencode_status_from_title(""), None);
     }
 
-        #[test]
+    #[test]
     fn opencode_idle_fallback_triggers_after_quiet_period() {
         let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
         let last = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3);
@@ -396,7 +398,7 @@ mod tests {
         assert!(!opencode_should_fallback_to_idle("Idle", Some(last), now));
     }
 
-        #[test]
+    #[test]
     fn opencode_log_path_finds_newest_matching_log() {
         let temp = tempfile::tempdir().expect("temp dir");
         let log_dir = temp.path().join("log");
@@ -427,7 +429,7 @@ mod tests {
         assert_eq!(found, newer);
     }
 
-        #[test]
+    #[test]
     fn opencode_log_path_after_returns_newest_file_created_after_spawn() {
         let temp = tempfile::tempdir().expect("temp dir");
         let log_dir = temp.path().join("log");
@@ -473,7 +475,7 @@ mod tests {
         assert!(opencode_log_path_after(&log_dir, future).is_none());
     }
 
-        #[test]
+    #[test]
     fn opencode_metrics_from_log_counts_session_prompt_steps() {
         let content = concat!(
             "INFO  2026-03-30T07:35:53 +0ms service=session.prompt step=0 sessionID=ses_target loop\n",
@@ -576,7 +578,7 @@ mod tests {
         assert_eq!(current_status, "Idle");
     }
 
-        #[test]
+    #[test]
     fn opencode_interactive_args_include_dir_for_real_workspace_anchor() {
         let workspace_cwd = Path::new("D:/Development/Wardian");
 
@@ -585,7 +587,7 @@ mod tests {
         assert_eq!(args, vec!["D:/Development/Wardian".to_string()]);
     }
 
-        #[cfg(target_os = "windows")]
+    #[cfg(target_os = "windows")]
     #[test]
     fn opencode_interactive_launch_wraps_cmd_shims_through_cmd_exe() {
         let launch = interactive_provider_launch(
@@ -607,7 +609,7 @@ mod tests {
         assert!(launch.args[2].contains("ses_test"));
     }
 
-        #[test]
+    #[test]
     fn opencode_runtime_config_content_uses_class_system_and_user_roots() {
         let _guard = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -647,7 +649,7 @@ mod tests {
         assert!(parsed.get("skills").is_none());
     }
 
-        #[test]
+    #[test]
     fn opencode_interactive_env_includes_runtime_config_file_and_truecolor() {
         let _guard = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -722,7 +724,7 @@ mod tests {
         );
     }
 
-        #[cfg(windows)]
+    #[cfg(windows)]
     #[test]
     fn opencode_headless_launch_uses_cmd_host_on_windows() {
         let launch = headless_provider_launch(
@@ -751,7 +753,7 @@ mod tests {
         assert!(launch.args[2].contains(session_bootstrap_prompt()));
     }
 
-        #[test]
+    #[test]
     fn opencode_fresh_headless_args_omit_session_flag_but_keep_config() {
         let provider = crate::providers::ProviderFactory::resolve("opencode").unwrap();
         let config = AgentConfig {
@@ -775,7 +777,7 @@ mod tests {
         assert!(!args.contains(&"--session".to_string()));
     }
 
-        #[test]
+    #[test]
     fn opencode_interactive_launch_bypasses_shell_wrapper() {
         let launch = interactive_provider_launch(
             "opencode",
@@ -799,7 +801,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn fresh_opencode_interactive_spawn_keeps_explicit_session_after_bootstrap() {
         let args = finalize_interactive_spawn_args(
             "opencode",
@@ -823,7 +825,7 @@ mod tests {
         assert_eq!(args, vec!["--session".to_string(), "ses_test".to_string()]);
     }
 
-        #[test]
+    #[test]
     fn opencode_interactive_args_append_dir_after_flags() {
         let args = interactive_provider_args(
             "opencode",

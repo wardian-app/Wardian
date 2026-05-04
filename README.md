@@ -71,6 +71,7 @@ For complete user and developer docs, start here:
 
 - [Documentation Index](docs/index.md)
 - [User Guide Index](docs/guide/index.md)
+- [Wardian CLI](docs/guide/cli.md)
 - [Workflow Reference](docs/workflows/index.md)
 - [Developer Index](docs/developer/index.md)
 
@@ -120,6 +121,10 @@ Scale your workflows by coordinating independent, specialized agents rather than
 - **Persona Class System**: Spawn new agents from pre-configured default classes (e.g., Coder, Architect, Researcher) or define custom personas tailored exactly to your repository's conventions.
 - **Broadcast & Bulk Actions**: Dispatch unified instructions, project context, or terminal commands to all agents or a filtered subset simultaneously via the global Command Panel.
 
+### Wardian CLI
+
+The desktop app installs a `wardian` command into the user Wardian bin directory. Use `wardian agent`, `wardian agent <name-or-uuid>`, and `wardian agent list --scope all` to inspect active or persisted agent identity from a terminal. See the [CLI guide](docs/guide/cli.md) for output fields, filters, environment variables, and exit codes.
+
 ---
 
 ## Platform Support
@@ -155,9 +160,10 @@ Full details available in [ROADMAP.md](ROADMAP.md).
 | Framework   | [Tauri v2](https://tauri.app/)               |
 | Backend     | Rust, `portable-pty` (**ConPTY** on Windows) |
 | Frontend    | React 19, TypeScript 5.8, Vite 6             |
+| CLI         | Rust, `clap`, shared `wardian-core` state    |
 | Terminal    | xterm.js 6 + FitAddon                        |
 | Styling     | Tailwind CSS v4                              |
-| Persistence | `serde_json` (AppData local storage)         |
+| Persistence | SQLite `state.db` and JSON app settings      |
 
 ---
 

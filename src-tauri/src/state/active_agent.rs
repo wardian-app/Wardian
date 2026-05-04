@@ -1,6 +1,6 @@
-use crate::models::AgentConfig;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use wardian_core::models::AgentConfig;
 
 pub struct ActiveAgent {
     pub config: Arc<Mutex<AgentConfig>>,
