@@ -1,6 +1,8 @@
-# User Terminal Panel Design
+# Spec 031: User Terminal Panel Design
 
-Date: 2026-05-04
+- **Status:** Implemented
+- **Date:** 2026-05-04
+- **Decider:** Wardian maintainers
 
 ## Goal
 

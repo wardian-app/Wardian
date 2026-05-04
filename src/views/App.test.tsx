@@ -593,6 +593,86 @@ describe("Agent Watchlist Sidebar", () => {
     expect(alphaCard.className).not.toContain("ring-1");
     expect(betaCard.className).toContain("ring-1");
   });
+
+  it("updates team member order in the watchlist when team members are dragged in the main grid", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    });
+    render(<App />);
+
+    const alphaCard = (await screen.findByTestId("terminal-agent-1")).closest('[data-testid="agent-card"]');
+    const betaCard = (await screen.findByTestId("terminal-agent-2")).closest('[data-testid="agent-card"]');
+    if (!alphaCard || !betaCard) throw new Error("Expected terminal cards to render");
+    const alphaHeader = alphaCard.querySelector(".border-b");
+    if (!alphaHeader) throw new Error("Expected draggable card header");
+
+    fireEvent.mouseDown(alphaHeader);
+    fireEvent.mouseEnter(betaCard);
+    fireEvent.mouseUp(betaCard);
+
+    await waitFor(() => {
+      const teamRows = within(screen.getByTestId("team-block-team-1")).getAllByText(/Alpha|Beta/);
+      expect(teamRows.map((node) => node.textContent)).toEqual(["Beta", "Alpha"]);
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("reorder_agents", expect.anything());
+  });
+
+  it("removes a team member from its team when dragged onto a solo agent in the main grid", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    });
+    render(<App />);
+
+    const alphaCard = (await screen.findByTestId("terminal-agent-1")).closest('[data-testid="agent-card"]');
+    const gammaCard = (await screen.findByTestId("terminal-agent-3")).closest('[data-testid="agent-card"]');
+    if (!alphaCard || !gammaCard) throw new Error("Expected terminal cards to render");
+    const alphaHeader = alphaCard.querySelector(".border-b");
+    if (!alphaHeader) throw new Error("Expected draggable card header");
+
+    fireEvent.mouseDown(alphaHeader);
+    fireEvent.mouseEnter(gammaCard);
+    fireEvent.mouseUp(gammaCard);
+
+    await waitFor(() => {
+      const teamBlock = screen.getByTestId("team-block-team-1");
+      expect(within(teamBlock).queryByText("Alpha")).not.toBeInTheDocument();
+      expect(within(teamBlock).getByText("Beta")).toBeInTheDocument();
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("reorder_agents", {
+      sessionIds: ["agent-2", "agent-3", "agent-1"],
+    });
+  });
+
+  it("adds a solo agent to the target team when dragged onto a team member in the main grid", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    });
+    render(<App />);
+
+    const gammaCard = (await screen.findByTestId("terminal-agent-3")).closest('[data-testid="agent-card"]');
+    const alphaCard = (await screen.findByTestId("terminal-agent-1")).closest('[data-testid="agent-card"]');
+    if (!gammaCard || !alphaCard) throw new Error("Expected terminal cards to render");
+    const gammaHeader = gammaCard.querySelector(".border-b");
+    if (!gammaHeader) throw new Error("Expected draggable card header");
+
+    fireEvent.mouseDown(gammaHeader);
+    fireEvent.mouseEnter(alphaCard);
+    fireEvent.mouseUp(alphaCard);
+
+    await waitFor(() => {
+      const teamRows = within(screen.getByTestId("team-block-team-1")).getAllByText(/Alpha|Beta|Gamma/);
+      expect(teamRows.map((node) => node.textContent)).toEqual(["Gamma", "Alpha", "Beta"]);
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("reorder_agents", {
+      sessionIds: ["agent-3", "agent-1", "agent-2"],
+    });
+  });
 });
 
 // ── View Mode Toggle Tests ─────────────────────────────────────────────
