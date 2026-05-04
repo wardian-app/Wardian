@@ -170,3 +170,37 @@ fn missing_db_exits_four() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""code":"db_unavailable""#));
 }
+
+#[test]
+fn malformed_args_emit_json_error_and_exit_one() {
+    let output = Command::new(bin())
+        .args(["agent", "list", "--definitely-not-a-real-flag"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""schema":1"#));
+    assert!(stderr.contains(r#""code":"generic""#));
+}
+
+#[test]
+fn list_accepts_output_fields_after_subcommand() {
+    let home = seed_home();
+    let output = Command::new(bin())
+        .args(["agent", "list", "--scope", "all", "--fields", "name,status"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(r#""name":"coder-a1""#));
+    assert!(stdout.contains(r#""status":"processing""#));
+    assert!(!stdout.contains(r#""uuid""#));
+}

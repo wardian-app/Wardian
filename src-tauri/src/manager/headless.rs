@@ -1,13 +1,11 @@
-use wardian_core::models::{AgentConfig, AgentEvent, AgentProvider};
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::utils::fs::*;
 use crate::utils::process::new_headless_command;
 use crate::utils::shell::build_program_launch;
+use wardian_core::models::{AgentConfig, AgentEvent, AgentProvider};
 
-use super::codex::{
-    codex_bootstrap_launch_context, migrate_codex_bootstrap_home,
-};
+use super::codex::{codex_bootstrap_launch_context, migrate_codex_bootstrap_home};
 use super::opencode::opencode_env;
 use super::{
     interactive_provider_cwd, persisted_agent_config, session_bootstrap_prompt,
@@ -15,10 +13,10 @@ use super::{
 };
 use crate::utils::logging::log_debug;
 
-#[cfg(windows)]
-use super::quote_cmd_arg;
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
+#[cfg(windows)]
+use super::quote_cmd_arg;
 
 pub(crate) fn headless_provider_launch(
     provider_name: &str,
@@ -198,6 +196,7 @@ pub async fn run_headless_with_options(
     for arg in &launch_spec.args {
         cmd.arg(arg);
     }
+    apply_headless_identity_env(&mut cmd, wardian_session_id);
     if provider_name == "codex" {
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
@@ -463,6 +462,9 @@ pub async fn obtain_session_id(
     for arg in &launch_spec.args {
         cmd.arg(arg);
     }
+    if let Some(bootstrap_session_id) = bootstrap_session_id {
+        apply_headless_identity_env(&mut cmd, bootstrap_session_id);
+    }
 
     if provider_name == "codex" {
         if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {
@@ -643,17 +645,22 @@ pub async fn obtain_session_id(
     }
 }
 
+fn apply_headless_identity_env(cmd: &mut tokio::process::Command, wardian_session_id: &str) {
+    if !wardian_session_id.trim().is_empty() {
+        cmd.env("WARDIAN_SESSION_ID", wardian_session_id);
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
-        #[test]
+    #[test]
     fn bootstrap_session_prompt_uses_intro_prompt_for_providers_that_need_bootstrap() {
         assert_eq!(session_bootstrap_prompt(), "Introduce yourself");
     }
 
-        #[test]
+    #[test]
     fn codex_fresh_headless_args_omit_resume_subcommand() {
         let provider = crate::providers::ProviderFactory::resolve("codex").unwrap();
         let args = headless_provider_args(
@@ -671,7 +678,7 @@ mod tests {
         assert!(!args.contains(&"ses_source".to_string()));
     }
 
-        #[test]
+    #[test]
     fn claude_fresh_headless_args_omit_resume_flag() {
         let provider = crate::providers::ProviderFactory::resolve("claude").unwrap();
         let args = headless_provider_args(
@@ -688,7 +695,7 @@ mod tests {
         assert!(!args.contains(&"--resume".to_string()));
     }
 
-        #[test]
+    #[test]
     fn opencode_fresh_headless_args_omit_session_flag_but_keep_config() {
         let provider = crate::providers::ProviderFactory::resolve("opencode").unwrap();
         let config = AgentConfig {
@@ -710,5 +717,30 @@ mod tests {
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"build".to_string()));
         assert!(!args.contains(&"--session".to_string()));
+    }
+
+    #[test]
+    fn headless_identity_env_is_exported_when_session_id_exists() {
+        let mut cmd = crate::utils::process::new_headless_command("node");
+
+        apply_headless_identity_env(&mut cmd, "wardian-session-123");
+
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(envs.iter().any(|(key, value)| {
+            key.to_string_lossy() == "WARDIAN_SESSION_ID"
+                && value.map(|value| value.to_string_lossy()) == Some("wardian-session-123".into())
+        }));
+    }
+
+    #[test]
+    fn headless_identity_env_is_omitted_when_session_id_is_blank() {
+        let mut cmd = crate::utils::process::new_headless_command("node");
+
+        apply_headless_identity_env(&mut cmd, "  ");
+
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(!envs
+            .iter()
+            .any(|(key, _value)| key.to_string_lossy() == "WARDIAN_SESSION_ID"));
     }
 }

@@ -33,7 +33,7 @@ fn install_cli_from_resources_with_path_update<F>(
 where
     F: FnMut(&Path) -> Result<(), String>,
 {
-    let source = resources_dir.join("bin").join(bundled_cli_file_name());
+    let source = bundled_cli_source_path(resources_dir);
     if !source.is_file() {
         return Err(format!(
             "CLI resource was not found at {}",
@@ -52,11 +52,7 @@ where
     std::fs::create_dir_all(&target_dir)
         .map_err(|err| format!("Failed to create {}: {err}", target_dir.display()))?;
 
-    let should_copy_binary = match (std::fs::metadata(&source), std::fs::metadata(&target)) {
-        (Ok(source_meta), Ok(target_meta)) => source_meta.len() != target_meta.len(),
-        (Ok(_), Err(_)) => true,
-        (Err(err), _) => return Err(format!("Failed to inspect {}: {err}", source.display())),
-    };
+    let should_copy_binary = binary_needs_update(&source, &target)?;
     let should_write_launcher = launcher_needs_update(&launcher);
 
     let outcome = if should_copy_binary || should_write_launcher {
@@ -82,11 +78,35 @@ where
     Ok(outcome)
 }
 
+fn bundled_cli_source_path(resources_dir: &Path) -> PathBuf {
+    let direct = resources_dir.join("bin").join(bundled_cli_file_name());
+    if direct.is_file() {
+        return direct;
+    }
+
+    resources_dir
+        .join("resources")
+        .join("bin")
+        .join(bundled_cli_file_name())
+}
+
 fn launcher_needs_update(path: &Path) -> bool {
     match std::fs::read_to_string(path) {
         Ok(existing) => normalize_line_endings(&existing) != launcher_contents(),
         Err(_) => true,
     }
+}
+
+fn binary_needs_update(source: &Path, target: &Path) -> Result<bool, String> {
+    let source_contents = std::fs::read(source)
+        .map_err(|err| format!("Failed to read {}: {err}", source.display()))?;
+    let target_contents = match std::fs::read(target) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(err) => return Err(format!("Failed to read {}: {err}", target.display())),
+    };
+
+    Ok(source_contents != target_contents)
 }
 
 fn write_launcher(path: &Path) -> Result<(), String> {
@@ -112,6 +132,19 @@ fn launcher_contents() -> String {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+fn unix_path_marker(bin_dir: &Path) -> String {
+    format!(
+        "# wardian-cli\nexport PATH={}:\"$PATH\"\n# /wardian-cli\n",
+        shell_quote_path(bin_dir)
+    )
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+}
+
 #[cfg(windows)]
 fn path_contains_dir(path_value: &str, dir: &Path) -> bool {
     let target = normalize_windows_path_segment(dir);
@@ -121,10 +154,8 @@ fn path_contains_dir(path_value: &str, dir: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn append_unix_path_marker(profile_path: &Path, _bin_dir: &Path) -> Result<(), String> {
+fn append_unix_path_marker(profile_path: &Path, bin_dir: &Path) -> Result<(), String> {
     const MARKER_START: &str = "# wardian-cli";
-    const MARKER_BLOCK: &str =
-        "# wardian-cli\nexport PATH=\"$HOME/.wardian/bin:$PATH\"\n# /wardian-cli\n";
 
     let existing = match std::fs::read_to_string(profile_path) {
         Ok(content) => content,
@@ -150,7 +181,7 @@ fn append_unix_path_marker(profile_path: &Path, _bin_dir: &Path) -> Result<(), S
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str(MARKER_BLOCK);
+    next.push_str(&unix_path_marker(bin_dir));
     std::fs::write(profile_path, next).map_err(|err| {
         format!(
             "Failed to update shell profile {}: {err}",
@@ -263,7 +294,11 @@ mod tests {
 
     #[test]
     fn target_binary_name_matches_platform() {
-        let expected = if cfg!(windows) { "wardian.cmd" } else { "wardian" };
+        let expected = if cfg!(windows) {
+            "wardian.cmd"
+        } else {
+            "wardian"
+        };
 
         assert_eq!(launcher_file_name(), expected);
     }
@@ -309,6 +344,48 @@ mod tests {
     }
 
     #[test]
+    fn installer_finds_cli_under_packaged_resources_subdirectory() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = TempDir::new().unwrap();
+        let resources = TempDir::new().unwrap();
+        let source_dir = resources.path().join("resources").join("bin");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(bundled_cli_file_name()), b"packaged cli").unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let outcome =
+            install_cli_from_resources_with_path_update(resources.path(), |_bin_dir| Ok(()))
+                .unwrap();
+
+        let target_dir = home.path().join("bin");
+        assert_eq!(
+            outcome,
+            InstallOutcome::Installed(target_dir.join(launcher_file_name()))
+        );
+        assert_eq!(
+            std::fs::read(target_dir.join(bundled_cli_file_name())).unwrap(),
+            b"packaged cli"
+        );
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn installer_prefers_direct_resource_bin_when_present() {
+        let resources = TempDir::new().unwrap();
+        let direct_dir = resources.path().join("bin");
+        let packaged_dir = resources.path().join("resources").join("bin");
+        std::fs::create_dir_all(&direct_dir).unwrap();
+        std::fs::create_dir_all(&packaged_dir).unwrap();
+        let direct = direct_dir.join(bundled_cli_file_name());
+        let packaged = packaged_dir.join(bundled_cli_file_name());
+        std::fs::write(&direct, b"direct cli").unwrap();
+        std::fs::write(&packaged, b"packaged cli").unwrap();
+
+        assert_eq!(bundled_cli_source_path(resources.path()), direct);
+    }
+
+    #[test]
     fn installer_reports_already_installed_when_binary_matches() {
         let _guard = crate::utils::wardian_test_env_lock();
         let home = TempDir::new().unwrap();
@@ -338,6 +415,44 @@ mod tests {
         std::env::remove_var("WARDIAN_HOME");
     }
 
+    #[test]
+    fn installer_replaces_same_size_stale_binary() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = TempDir::new().unwrap();
+        let resources = TempDir::new().unwrap();
+        let source_dir = resources.path().join("bin");
+        let target_dir = home.path().join("bin");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(source_dir.join(bundled_cli_file_name()), b"new cli").unwrap();
+        std::fs::write(target_dir.join(bundled_cli_file_name()), b"old cli").unwrap();
+        std::fs::write(target_dir.join(launcher_file_name()), launcher_contents()).unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let outcome =
+            install_cli_from_resources_with_path_update(resources.path(), |_bin_dir| Ok(()))
+                .unwrap();
+
+        assert_eq!(
+            outcome,
+            InstallOutcome::Installed(target_dir.join(launcher_file_name()))
+        );
+        assert_eq!(
+            std::fs::read(target_dir.join(bundled_cli_file_name())).unwrap(),
+            b"new cli"
+        );
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn unix_path_marker_uses_custom_bin_dir() {
+        let marker = unix_path_marker(Path::new("/tmp/custom wardian/bin"));
+
+        assert!(marker.contains("export PATH='/tmp/custom wardian/bin':\"$PATH\""));
+        assert!(!marker.contains("$HOME/.wardian/bin"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_path_detection_is_case_insensitive() {
@@ -358,6 +473,6 @@ mod tests {
 
         let content = std::fs::read_to_string(profile).unwrap();
         assert_eq!(content.matches("# wardian-cli").count(), 1);
-        assert!(content.contains(r#"export PATH="$HOME/.wardian/bin:$PATH""#));
+        assert!(content.contains(r#"export PATH='/home/alice/.wardian/bin':"$PATH""#));
     }
 }

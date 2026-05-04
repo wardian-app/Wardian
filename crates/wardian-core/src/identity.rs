@@ -1,4 +1,4 @@
-use crate::db::{get_all_agents_with_conn, get_agent_by_session_id_with_conn, AgentRow};
+use crate::db::{get_agent_by_session_id_with_conn, get_all_agents_with_conn, AgentRow};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,8 +42,8 @@ pub enum IdentityError {
 }
 
 pub fn resolve_self(conn: &rusqlite::Connection) -> Result<AgentIdentity, IdentityError> {
-    let session_id = std::env::var("WARDIAN_SESSION_ID")
-        .map_err(|_| IdentityError::NotInSession)?;
+    let session_id =
+        std::env::var("WARDIAN_SESSION_ID").map_err(|_| IdentityError::NotInSession)?;
     resolve_by_name_or_uuid(conn, &session_id)
 }
 

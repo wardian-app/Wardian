@@ -6,9 +6,9 @@ pub mod utils;
 pub mod workflow_engine;
 pub use wardian_core::models;
 
-use wardian_core::models::AgentConfig;
 use crate::state::AppState;
 use tauri::{Emitter, Manager};
+use wardian_core::models::AgentConfig;
 
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;

@@ -19,16 +19,16 @@ pub struct AgentArgs {
     #[command(subcommand)]
     pub command: Option<AgentCommand>,
 
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub fields: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub field: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub verbose: bool,
 
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub pretty: bool,
 }
 
@@ -119,6 +119,24 @@ mod tests {
         assert_eq!(args.fields.as_deref(), Some("name,status"));
         assert_eq!(args.field.as_deref(), Some("status"));
         assert!(args.verbose);
+        assert!(args.pretty);
+    }
+
+    #[test]
+    fn parses_output_modifiers_after_list_subcommand() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "list",
+            "--scope",
+            "all",
+            "--fields",
+            "name,status",
+            "--pretty",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command;
+        assert_eq!(args.fields.as_deref(), Some("name,status"));
         assert!(args.pretty);
     }
 }

@@ -1,8 +1,8 @@
-use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 use crate::state::AppState;
 use notify::Watcher;
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
+use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 
 /// Run a git command in the given directory and return stdout as a String.
 ///

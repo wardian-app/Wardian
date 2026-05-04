@@ -13,7 +13,10 @@ fn main() {
 }
 
 fn run() -> i32 {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return handle_parse_error(error),
+    };
     let result = match cli.command {
         Command::Agent(args) => handle_agent(args),
     };
@@ -28,6 +31,19 @@ fn run() -> i32 {
             error.code_i32()
         }
     }
+}
+
+fn handle_parse_error(error: clap::Error) -> i32 {
+    if matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    ) {
+        print!("{error}");
+        return ExitCode::Success as i32;
+    }
+
+    CliError::generic(error.to_string()).emit();
+    ExitCode::Generic as i32
 }
 
 fn handle_agent(args: AgentArgs) -> Result<String, CliError> {

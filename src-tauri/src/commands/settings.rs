@@ -1,5 +1,5 @@
-use wardian_core::models::AgentSessionPersistence;
 use crate::utils::{ShellOption, ShellSettings};
+use wardian_core::models::AgentSessionPersistence;
 
 #[tauri::command]
 pub fn list_available_shells() -> Result<Vec<ShellOption>, String> {

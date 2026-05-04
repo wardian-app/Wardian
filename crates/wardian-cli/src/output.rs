@@ -39,7 +39,10 @@ pub fn render_show(agent: &AgentIdentity, opts: &RenderOptions) -> Result<String
         "schema": 1,
         "agent": projected,
     });
-    Ok(format!("{}\n", serde_json::to_string(&envelope).map_err(json_error)?))
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string(&envelope).map_err(json_error)?
+    ))
 }
 
 pub fn render_list(agents: &[AgentIdentity], opts: &RenderOptions) -> Result<String, CliError> {
@@ -69,10 +72,16 @@ pub fn render_list(agents: &[AgentIdentity], opts: &RenderOptions) -> Result<Str
         "schema": 1,
         "agents": projected,
     });
-    Ok(format!("{}\n", serde_json::to_string(&envelope).map_err(json_error)?))
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string(&envelope).map_err(json_error)?
+    ))
 }
 
-fn project_agent(agent: &AgentIdentity, opts: &RenderOptions) -> Result<Map<String, Value>, CliError> {
+fn project_agent(
+    agent: &AgentIdentity,
+    opts: &RenderOptions,
+) -> Result<Map<String, Value>, CliError> {
     let requested = requested_fields(opts);
     let values = agent_to_map(agent);
     let mut projected = Map::new();
@@ -119,7 +128,10 @@ fn agent_to_map(agent: &AgentIdentity) -> Map<String, Value> {
     values.insert("name".to_string(), Value::String(agent.name.clone()));
     values.insert("uuid".to_string(), Value::String(agent.uuid.clone()));
     values.insert("class".to_string(), Value::String(agent.class.clone()));
-    values.insert("provider".to_string(), Value::String(agent.provider.clone()));
+    values.insert(
+        "provider".to_string(),
+        Value::String(agent.provider.clone()),
+    );
     values.insert("project".to_string(), Value::String(agent.project.clone()));
     values.insert("status".to_string(), Value::String(agent.status.clone()));
     if let Some(pid) = agent.pid {

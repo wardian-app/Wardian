@@ -169,6 +169,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args || '' }}
@@ -178,6 +179,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
         with:
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
           args: ${{ matrix.platform.args || '' }}
@@ -185,6 +187,8 @@ jobs:
       - name: Build (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
         uses: tauri-apps/tauri-action@v0
+        env:
+          WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
         with:
           args: ${{ matrix.platform.args || '' }}
 
@@ -269,10 +273,11 @@ jobs:
 
       - name: Upload CLI release asset
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true')
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" "dist-cli/${{ matrix.platform.asset }}" --clobber
+        run: gh release upload "$env:RELEASE_TAG" "dist-cli/${{ matrix.platform.asset }}" --clobber
 
   publish:
     name: Publish release

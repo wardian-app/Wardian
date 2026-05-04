@@ -44,7 +44,9 @@ pub fn init_db_at_path(db_path: &std::path::Path) -> Result<(), Box<dyn std::err
     let conn = Connection::open(db_path)?;
     run_migrations(&conn)?;
 
-    let mut global_conn = DB_CONN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut global_conn = DB_CONN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *global_conn = Some(conn);
     Ok(())
 }
@@ -53,7 +55,9 @@ pub fn get_db_conn<F, T>(f: F) -> Result<T, Box<dyn std::error::Error>>
 where
     F: FnOnce(&Connection) -> Result<T, Box<dyn std::error::Error>>,
 {
-    let guard = DB_CONN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = DB_CONN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(ref conn) = *guard {
         f(conn)
     } else {
@@ -183,31 +187,42 @@ pub fn update_agent_status_with_conn(
     status: &str,
     pid: Option<u32>,
 ) -> rusqlite::Result<()> {
-    let last_status: Option<String> = conn
+    let current: Option<(Option<String>, Option<i64>)> = conn
         .query_row(
-            "SELECT last_status FROM agents WHERE session_id = ?1",
+            "SELECT last_status, last_pid FROM agents WHERE session_id = ?1",
             params![session_id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                ))
+            },
         )
-        .optional()?
-        .flatten();
+        .optional()?;
+    let (last_status, last_pid) = current.unwrap_or((None, None));
 
-    if last_status.as_deref() != Some(status) {
-        let timestamp =
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let should_clear_pid = pid.is_none() && status == "Off";
+    let pid_changed = pid
+        .map(i64::from)
+        .is_some_and(|next_pid| Some(next_pid) != last_pid);
+
+    if last_status.as_deref() != Some(status) || pid_changed || should_clear_pid {
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         conn.execute(
             "UPDATE agents
              SET last_status = ?1,
-                 last_pid = COALESCE(?2, last_pid),
-                 last_status_at = ?3
-             WHERE session_id = ?4",
-            params![status, pid, timestamp, session_id],
+                 last_pid = CASE WHEN ?3 THEN NULL ELSE COALESCE(?2, last_pid) END,
+                 last_status_at = ?4
+             WHERE session_id = ?5",
+            params![status, pid, should_clear_pid, timestamp, session_id],
         )?;
 
-        conn.execute(
-            "INSERT INTO events (session_id, event_type, payload) VALUES (?1, ?2, ?3)",
-            params![session_id, "status_change", status],
-        )?;
+        if last_status.as_deref() != Some(status) {
+            conn.execute(
+                "INSERT INTO events (session_id, event_type, payload) VALUES (?1, ?2, ?3)",
+                params![session_id, "status_change", status],
+            )?;
+        }
     }
     Ok(())
 }
@@ -406,5 +421,72 @@ mod tests {
         assert_eq!(row.last_status.as_deref(), Some("Processing..."));
         assert_eq!(row.last_pid, Some(123));
         assert!(row.last_status_at.is_some());
+    }
+
+    #[test]
+    fn off_status_clears_stale_pid() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        upsert_agent_with_conn(
+            &conn,
+            &AgentUpsert {
+                session_id: "uuid-1",
+                session_name: "coder-a1",
+                agent_class: "Coder",
+                provider: "codex",
+                workspace: None,
+                project: None,
+                is_off: false,
+                created_at: None,
+            },
+        )
+        .unwrap();
+
+        update_agent_status_with_conn(&conn, "uuid-1", "Processing...", Some(123)).unwrap();
+        update_agent_status_with_conn(&conn, "uuid-1", "Off", None).unwrap();
+
+        let row = get_agent_by_session_id_with_conn(&conn, "uuid-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_status.as_deref(), Some("Off"));
+        assert_eq!(row.last_pid, None);
+    }
+
+    #[test]
+    fn same_status_update_refreshes_changed_pid() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        upsert_agent_with_conn(
+            &conn,
+            &AgentUpsert {
+                session_id: "uuid-1",
+                session_name: "coder-a1",
+                agent_class: "Coder",
+                provider: "codex",
+                workspace: None,
+                project: None,
+                is_off: false,
+                created_at: None,
+            },
+        )
+        .unwrap();
+
+        update_agent_status_with_conn(&conn, "uuid-1", "Idle", Some(123)).unwrap();
+        update_agent_status_with_conn(&conn, "uuid-1", "Idle", Some(456)).unwrap();
+
+        let row = get_agent_by_session_id_with_conn(&conn, "uuid-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_status.as_deref(), Some("Idle"));
+        assert_eq!(row.last_pid, Some(456));
+
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND event_type = ?2",
+                params!["uuid-1", "status_change"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 1);
     }
 }

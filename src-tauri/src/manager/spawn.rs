@@ -1,4 +1,3 @@
-use wardian_core::models::{AgentConfig, AgentEvent};
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
@@ -7,6 +6,7 @@ use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_tr
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter};
+use wardian_core::models::{AgentConfig, AgentEvent};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
 use super::codex::{
@@ -43,7 +43,25 @@ pub async fn spawn_agent(
         config.folder.clone()
     };
 
+    // Phase 2: Record/Update agent in SQLite with explicit ISO 8601 timestamp
+    let born_to_save = initial_timestamp
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let project = wardian_core::db::project_name_from_workspace(&expected_folder);
+    let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: &config.session_id,
+        session_name: &config.session_name,
+        agent_class: &config.agent_class,
+        provider: &config.provider,
+        workspace: Some(&expected_folder),
+        project: project.as_deref(),
+        is_off: config.is_off,
+        created_at: Some(&born_to_save),
+    });
+
     if config.is_off {
+        let _ = wardian_core::db::update_agent_status(&config.session_id, "Off", None);
+
         return Ok(ActiveAgent {
             config: std::sync::Arc::new(std::sync::Mutex::new(config)),
             child_process: None,
@@ -53,7 +71,7 @@ pub async fn spawn_agent(
             output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             process_id: None,
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(initial_timestamp)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(Some(born_to_save))),
             current_status: std::sync::Arc::new(std::sync::Mutex::new("Off".to_string())),
             terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -158,21 +176,6 @@ pub async fn spawn_agent(
         is_restored
     ));
 
-    // Phase 2: Record/Update agent in SQLite with explicit ISO 8601 timestamp
-    let born_to_save = initial_timestamp
-        .clone()
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-    let project = wardian_core::db::project_name_from_workspace(&expected_folder);
-    let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
-        session_id: &config.session_id,
-        session_name: &config.session_name,
-        agent_class: &config.agent_class,
-        provider: &config.provider,
-        workspace: Some(&expected_folder),
-        project: project.as_deref(),
-        is_off: config.is_off,
-        created_at: Some(&born_to_save),
-    });
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -454,8 +457,10 @@ pub async fn spawn_agent(
                                             }
                                             if !session_id.trim().is_empty() {
                                                 let needs_save = {
-                                                    let mut config = config_lock_clone.lock().unwrap();
-                                                    let is_excluded = provider_name_for_pty == "codex"
+                                                    let mut config =
+                                                        config_lock_clone.lock().unwrap();
+                                                    let is_excluded = provider_name_for_pty
+                                                        == "codex"
                                                         && codex_provider_session_is_excluded(
                                                             session_id,
                                                             &config.codex_cleared_provider_sessions,

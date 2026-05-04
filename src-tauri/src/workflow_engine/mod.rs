@@ -2,7 +2,6 @@ pub mod agent_execution;
 mod migrate;
 
 use crate::manager::log_debug;
-use wardian_core::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 use crate::utils::{
     build_shell_command, get_wardian_home, new_headless_command, validate_workspace_path,
 };
@@ -17,6 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Listener, Manager};
+use wardian_core::models::{WorkflowDefinition, WorkflowTelemetryEvent};
 
 // ... (interpolate_string, get_registry_value, evaluate_logic remain above)
 
@@ -880,7 +880,10 @@ pub async fn start_scheduler(app: AppHandle) {
     *scheduler = Some(handle);
 }
 
-fn compute_next_run(schedule: &wardian_core::models::ScheduleDefinition, now_ms: u64) -> Option<u64> {
+fn compute_next_run(
+    schedule: &wardian_core::models::ScheduleDefinition,
+    now_ms: u64,
+) -> Option<u64> {
     match schedule.schedule_type.as_str() {
         "interval" => {
             let mins = schedule.interval_minutes.unwrap_or(0) as u64;
@@ -1347,13 +1350,13 @@ mod tests {
         parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,
         scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
     };
-    use wardian_core::models::{
-        ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
-    };
     use crate::utils::ShellLaunchSpec;
     use chrono::Local;
     use serde_json::json;
     use std::collections::HashMap;
+    use wardian_core::models::{
+        ScheduleDefinition, ScheduledRun, WorkflowDefinition, WorkflowNode, WorkflowSettings,
+    };
 
     fn workflow_with_schedule(status: &str) -> WorkflowDefinition {
         WorkflowDefinition {
@@ -1494,7 +1497,9 @@ mod tests {
             Local::now().offset().local_minus_utc()
         );
         assert_eq!(
-            payload.get("scheduled_run_id").and_then(|value| value.as_str()),
+            payload
+                .get("scheduled_run_id")
+                .and_then(|value| value.as_str()),
             Some("sched-1")
         );
     }
@@ -1989,11 +1994,12 @@ pub async fn run_workflow(
                         } else {
                             direct_id
                         };
-                        let mode = wardian_core::models::AgentExecutionPolicy::from_legacy_session_type(
-                            node.config.get("session_type").and_then(|v| v.as_str()),
-                            node.config.get("mode").and_then(|v| v.as_str()),
-                        )
-                        .mode;
+                        let mode =
+                            wardian_core::models::AgentExecutionPolicy::from_legacy_session_type(
+                                node.config.get("session_type").and_then(|v| v.as_str()),
+                                node.config.get("mode").and_then(|v| v.as_str()),
+                            )
+                            .mode;
 
                         let mut prompt = node
                             .config
@@ -2026,9 +2032,9 @@ pub async fn run_workflow(
                                         std::fs::read_to_string(home.join("settings/state.json"))
                                     {
                                         if let Ok(configs) =
-                                            serde_json::from_str::<Vec<wardian_core::models::AgentConfig>>(
-                                                &data,
-                                            )
+                                            serde_json::from_str::<
+                                                Vec<wardian_core::models::AgentConfig>,
+                                            >(&data)
                                         {
                                             configs.into_iter().find(|c| c.session_id == agent_id)
                                         } else {
@@ -2096,7 +2102,8 @@ pub async fn run_workflow(
                                     &exec_ctx.execution_session_id,
                                 );
 
-                                if exec_ctx.mode != wardian_core::models::WorkflowAgentMode::InheritResume
+                                if exec_ctx.mode
+                                    != wardian_core::models::WorkflowAgentMode::InheritResume
                                 {
                                     let run_result = run_with_optional_timeout(
                                         timeout_ms,

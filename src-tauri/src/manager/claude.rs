@@ -17,7 +17,10 @@ pub(crate) fn claude_is_real_user_query(line: &serde_json::Value) -> bool {
     classify_claude_user_event(line) == ClaudeUserEventKind::RealQuery
 }
 
-pub(crate) fn claude_permission_hook_matches_session(event: &serde_json::Value, session_id: &str) -> bool {
+pub(crate) fn claude_permission_hook_matches_session(
+    event: &serde_json::Value,
+    session_id: &str,
+) -> bool {
     if session_id.trim().is_empty() {
         return false;
     }
@@ -101,11 +104,10 @@ pub(crate) fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<Stri
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-        #[test]
+    #[test]
     fn claude_status_from_log_ignores_local_commands_after_idle() {
         let lines = vec![
             serde_json::json!({
@@ -168,7 +170,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn claude_permission_hook_ignores_other_transcript_sessions() {
         let event = serde_json::json!({
             "session_id": "other-session",
@@ -196,7 +198,7 @@ mod tests {
         ));
     }
 
-        #[test]
+    #[test]
     fn claude_status_from_log_does_not_look_past_turn_boundary() {
         let lines = vec![
             serde_json::json!({ "type": "system", "subtype": "turn_duration" }), // Turn 1

@@ -1,6 +1,6 @@
-use wardian_core::models::FileNode;
 use std::fs;
 use std::path::Path;
+use wardian_core::models::FileNode;
 
 #[tauri::command]
 pub fn resolve_system_include_directories(class_name: String, session_id: String) -> Vec<String> {
@@ -139,7 +139,13 @@ mod tests {
         fs::write(&file_path, "test").expect("write file");
 
         let args = windows_explorer_args(Path::new("D:/Development/Wardian/file.txt"));
-        assert_eq!(args, vec!["/select,".to_string(), "D:\\Development\\Wardian\\file.txt".to_string()]);
+        assert_eq!(
+            args,
+            vec![
+                "/select,".to_string(),
+                "D:\\Development\\Wardian\\file.txt".to_string()
+            ]
+        );
     }
 
     #[cfg(target_os = "windows")]

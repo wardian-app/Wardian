@@ -7,9 +7,7 @@ pub struct ClaudePermissionHookPaths {
 }
 
 pub fn get_wardian_home() -> Option<std::path::PathBuf> {
-    wardian_core::paths::wardian_home_for_manifest(std::path::Path::new(env!(
-        "CARGO_MANIFEST_DIR"
-    )))
+    wardian_core::paths::wardian_home_for_manifest(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
 pub fn get_default_user_dir() -> std::path::PathBuf {
@@ -37,7 +35,8 @@ pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
     if !agent_id.is_empty() {
         if let Some(home) = get_wardian_home() {
             if let Ok(data) = std::fs::read_to_string(home.join("settings/state.json")) {
-                if let Ok(configs) = serde_json::from_str::<Vec<wardian_core::models::AgentConfig>>(&data)
+                if let Ok(configs) =
+                    serde_json::from_str::<Vec<wardian_core::models::AgentConfig>>(&data)
                 {
                     if let Some(cfg) = configs.iter().find(|c| c.session_id == agent_id) {
                         if !cfg.folder.is_empty() {

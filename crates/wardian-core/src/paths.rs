@@ -38,7 +38,11 @@ pub fn cli_bin_dir() -> Option<PathBuf> {
 }
 
 pub fn cli_bin_path() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "wardian.cmd" } else { "wardian" };
+    let name = if cfg!(windows) {
+        "wardian.cmd"
+    } else {
+        "wardian"
+    };
     cli_bin_dir().map(|dir| dir.join(name))
 }
 

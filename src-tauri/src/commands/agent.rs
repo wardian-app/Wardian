@@ -1,9 +1,9 @@
 use crate::manager;
+use crate::state::AppState;
+use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
 };
-use crate::state::AppState;
-use tauri::{AppHandle, Emitter, State};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +75,10 @@ fn clone_custom_args_without_provider_memory(custom_args: Option<&str>) -> Optio
     let mut filtered = Vec::with_capacity(parsed.len());
     let mut iter = parsed.into_iter().peekable();
     while let Some(arg) = iter.next() {
-        if matches!(arg.as_str(), "--resume" | "--session" | "--session-id" | "-r") {
+        if matches!(
+            arg.as_str(),
+            "--resume" | "--session" | "--session-id" | "-r"
+        ) {
             let _ = iter.next();
             continue;
         }
@@ -488,7 +491,10 @@ async fn register_new_agent(
     let mut order = state.agent_order.lock().await;
     if agents.contains_key(&session_id) {
         manager::terminate_active_agent_process(&mut active_agent);
-        return Err(format!("An agent with session ID '{}' already exists.", session_id));
+        return Err(format!(
+            "An agent with session ID '{}' already exists.",
+            session_id
+        ));
     }
     let existing_names = agents
         .values()
@@ -707,15 +713,19 @@ pub async fn clone_agent(
                 clone_remove_existing_path(&provisional_root);
             }
         }
-        return Err(format!("An agent with session ID '{}' already exists.", session_id));
+        return Err(format!(
+            "An agent with session ID '{}' already exists.",
+            session_id
+        ));
     }
 
     if let Some(home) = profile_home.as_ref() {
-        let allowed_existing_profile_session_id = if provider_uses_generated_session_id(&provider_name) {
-            Some(session_id.as_str())
-        } else {
-            provisional_profile_session_id.as_deref()
-        };
+        let allowed_existing_profile_session_id =
+            if provider_uses_generated_session_id(&provider_name) {
+                Some(session_id.as_str())
+            } else {
+                provisional_profile_session_id.as_deref()
+            };
         clone_ensure_profile_destination_available(
             home,
             &session_id,
@@ -1224,11 +1234,11 @@ mod tests {
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         restore_runtime_state_after_resume,
     };
-    use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
     use crate::state::ActiveAgent;
     use crate::utils::fs::create_directory_link;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
+    use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
 
     fn make_test_agent() -> ActiveAgent {
         ActiveAgent {

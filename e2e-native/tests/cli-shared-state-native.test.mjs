@@ -13,8 +13,10 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-cli-${RUN_ID}`;
-const SESSION_NAME = `E2E-CLI-${RUN_ID}`;
+const LIVE_SESSION_ID = `e2e-cli-live-${RUN_ID}`;
+const LIVE_SESSION_NAME = `E2E-CLI-LIVE-${RUN_ID}`;
+const OFF_SESSION_ID = `e2e-cli-off-${RUN_ID}`;
+const OFF_SESSION_NAME = `E2E-CLI-OFF-${RUN_ID}`;
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -57,22 +59,22 @@ function runCli(cliPath, harness, args) {
   };
 }
 
-async function createOffMockAgent(driver, workspacePath) {
-  const result = await driver.executeAsyncScript((sessionId, sessionName, folder, done) => {
+async function createMockAgent(driver, workspacePath, { sessionId, sessionName, isOff }) {
+  const result = await driver.executeAsyncScript((sessionId, sessionName, folder, isOff, done) => {
     window.__TAURI_INTERNALS__.invoke("spawn_agent", {
       req: {
         sessionName,
         agentClass: "TestClass",
         folder,
         resumeSession: sessionId,
-        isOff: false,
+        isOff,
         configOverride: { provider: "mock" },
       },
     }).then(
       (agent) => done({ ok: true, agent }),
       (error) => done({ ok: false, error: String(error) }),
     );
-  }, SESSION_ID, SESSION_NAME, workspacePath);
+  }, sessionId, sessionName, workspacePath, isOff);
 
   assert.equal(result.ok, true, `spawn_agent failed: ${result.error}`);
   return result.agent;
@@ -109,19 +111,23 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
   });
 
   await waitForAppShell(session.driver, 20000);
-  const agent = await createOffMockAgent(session.driver, workspacePath);
+  const agent = await createMockAgent(session.driver, workspacePath, {
+    sessionId: LIVE_SESSION_ID,
+    sessionName: LIVE_SESSION_NAME,
+    isOff: false,
+  });
 
-  assert.equal(agent.session_id, SESSION_ID);
-  assert.equal(agent.session_name, SESSION_NAME);
+  assert.equal(agent.session_id, LIVE_SESSION_ID);
+  assert.equal(agent.session_name, LIVE_SESSION_NAME);
 
   const fieldResult = runCli(cliPath, harness, [
     "agent",
-    SESSION_NAME,
+    LIVE_SESSION_NAME,
     "--field",
     "uuid",
   ]);
   assert.equal(fieldResult.status, 0, fieldResult.stderr);
-  assert.equal(fieldResult.stdout, `${SESSION_ID}\n`);
+  assert.equal(fieldResult.stdout, `${LIVE_SESSION_ID}\n`);
 
   const listResult = runCli(cliPath, harness, [
     "agent",
@@ -134,10 +140,60 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
   assert.equal(listResult.status, 0, listResult.stderr);
 
   const parsed = JSON.parse(listResult.stdout);
-  const cliAgent = parsed.agents.find((entry) => entry.uuid === SESSION_ID);
+  const cliAgent = parsed.agents.find((entry) => entry.uuid === LIVE_SESSION_ID);
   assert.deepEqual(cliAgent, {
-    name: SESSION_NAME,
-    uuid: SESSION_ID,
+    name: LIVE_SESSION_NAME,
+    uuid: LIVE_SESSION_ID,
     status: "idle",
   });
+});
+
+test("native app-created off agent is readable through the CLI", { timeout: 180000 }, async (t) => {
+  const harness = await createNativeHarness();
+  assert.ok(harness.appPath);
+
+  try {
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
+    }
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  prepareIsolatedHome(harness);
+
+  const cliPath = buildCli(harness);
+  const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+  let session;
+  try {
+    session = await startNativeSession(harness);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  t.after(async () => {
+    await session.close();
+  });
+
+  await waitForAppShell(session.driver, 20000);
+  const agent = await createMockAgent(session.driver, workspacePath, {
+    sessionId: OFF_SESSION_ID,
+    sessionName: OFF_SESSION_NAME,
+    isOff: true,
+  });
+
+  assert.equal(agent.session_id, OFF_SESSION_ID);
+  assert.equal(agent.session_name, OFF_SESSION_NAME);
+
+  const statusResult = runCli(cliPath, harness, [
+    "agent",
+    OFF_SESSION_NAME,
+    "--field",
+    "status",
+  ]);
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  assert.equal(statusResult.stdout, "off\n");
 });

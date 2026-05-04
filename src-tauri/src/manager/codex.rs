@@ -300,14 +300,13 @@ pub(crate) fn migrate_codex_bootstrap_home(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manager::{strip_flag_value_pairs, strip_standalone_flag};
-    use wardian_core::models::AgentConfig;
     use std::path::Path;
-        #[test]
+    use wardian_core::models::AgentConfig;
+    #[test]
     fn codex_log_lookup_prefers_provider_thread_id_when_available() {
         assert_eq!(
             codex_log_lookup_session_id(
@@ -326,7 +325,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn latest_codex_session_entry_reads_history_when_index_is_missing() {
         let temp = tempfile::tempdir().expect("temp dir");
         let codex_home = temp.path();
@@ -384,7 +383,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn codex_bootstrap_launch_context_is_stable_for_same_workspace() {
         let wardian_home = Path::new("C:/Users/test/.wardian");
         let workspace_cwd = Path::new("D:/Development/Wardian");
@@ -430,7 +429,7 @@ mod tests {
         assert_ne!(bootstrap_home, workspace_cwd);
     }
 
-        #[test]
+    #[test]
     fn codex_bootstrap_exec_mode_keeps_skip_git_repo_check() {
         let config = AgentConfig {
             provider: "codex".to_string(),

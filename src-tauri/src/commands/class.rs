@@ -1,6 +1,6 @@
 use crate::manager;
-use wardian_core::models::AgentClassDefinition;
 use tauri::AppHandle;
+use wardian_core::models::AgentClassDefinition;
 
 #[tauri::command]
 pub async fn list_agent_classes(app: AppHandle) -> Result<Vec<AgentClassDefinition>, String> {

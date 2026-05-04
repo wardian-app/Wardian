@@ -1,6 +1,6 @@
 # Spec 024: Wardian CLI and `wardian agent` Command
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-04-21
 - **Decider:** Wardian Claude
 
@@ -10,7 +10,7 @@ Wardian has no command-line interface. Every interaction — spawning agents, in
 
 Spec 023 already lays the groundwork for this by making the Rust backend the source of truth for agent identity and status via `~/.wardian/state.db`, and by injecting `WARDIAN_SESSION_ID` into every spawned agent's environment. Spec 021 reserves a slot for a `wardian-cli` binary in the release pipeline and documents its intended bundle location. What is missing is the CLI itself.
 
-This spec defines the first slice: a `wardian` binary distributed alongside the GUI, sharing Rust code with the Tauri app through a workspace refactor, always on the user's `PATH`, and exposing one noun — `wardian agent` — for self- and peer-introspection. Mutating commands (`spawn`, `send`, `kill`), auto-update, and distribution wrappers (npm/pip/cargo) are explicitly deferred to follow-up specs. The command surface is designed so those follow-ups slot in without restructuring.
+This spec defines the first slice: a `wardian` command distributed alongside the GUI, sharing Rust code with the Tauri app through a workspace refactor, always on the user's `PATH`, and exposing one noun — `wardian agent` — for self- and peer-introspection. Mutating commands (`spawn`, `send`, `kill`), auto-update, and distribution wrappers (npm/pip/cargo) are explicitly deferred to follow-up specs. The command surface is designed so those follow-ups slot in without restructuring.
 
 ## Proposed Decision
 
@@ -18,12 +18,12 @@ This spec defines the first slice: a `wardian` binary distributed alongside the 
 
 **In scope:**
 
-- Cargo workspace refactor extracting `wardian-core` (shared models, DB access, identity resolution) from the existing Tauri crate.
-- New `wardian-cli` binary crate producing a single `wardian` executable.
+- Cargo workspace refactor extracting `wardian-core` (shared models, DB access, identity resolution) from the existing Tauri crate while keeping the Tauri app in `src-tauri/`.
+- New `wardian-cli` binary crate producing the CLI implementation binary.
 - `wardian agent` command surface: self-lookup, peer lookup, list.
 - JSON-first output with schema versioning; human-readable `--pretty` variant.
 - Structured error envelope with stable `code`, human `message`, actionable `hint`, optional `details`, and a defined exit-code table.
-- Per-user install to `~/.wardian/bin/wardian[.exe]`, with the GUI adding that directory to user `PATH` on first launch.
+- Per-user install to `~/.wardian/bin/wardian` on macOS/Linux and `%USERPROFILE%\.wardian\bin\wardian.cmd` on Windows, with the GUI adding that directory to user `PATH` on first launch.
 - Forward-compatible `--scope` flag as a placeholder for future team / workspace / comm-graph scoping.
 
 **Out of scope (deferred):**
@@ -40,9 +40,9 @@ The repository moves from a single `src-tauri/` crate to a Cargo workspace at re
 
 ```
 Cargo.toml                 # workspace manifest
+src-tauri/                 # existing Tauri app crate
 crates/
   wardian-core/            # shared library
-  wardian-app/             # existing Tauri app (renamed from src-tauri/)
   wardian-cli/             # new binary crate
 ```
 
@@ -53,7 +53,7 @@ crates/
 - `identity/` — resolution logic (`resolve_self_from_env`, `resolve_by_name_or_uuid`, `list_scoped`).
 - `paths/` — the `~/.wardian/` directory layout constants (state DB path, agents dir, bin dir).
 
-**`wardian-app`** keeps everything Tauri-specific: `commands/`, `providers/`, `workflow_engine/`, `manager.rs`, PTY lifecycle, window and IPC code. It depends on `wardian-core`.
+**`src-tauri`** keeps everything Tauri-specific: `commands/`, `providers/`, `workflow_engine/`, `manager.rs`, PTY lifecycle, window and IPC code. It depends on `wardian-core`.
 
 **`wardian-cli`** is a thin binary. It depends on `wardian-core`, uses `clap` for argument parsing, `serde_json` for output, and nothing Tauri-related.
 
@@ -61,20 +61,20 @@ The refactor is mechanical: move files, adjust `use` paths, update `Cargo.toml` 
 
 ### Component 2 — Binary, Distribution, Install
 
-**Binary name:** `wardian` (no `-cli` suffix; agents type `wardian agent`).
+**Binary names:** the implementation binary is `wardian-cli` / `wardian-cli.exe` so it can coexist with the desktop app's `Wardian.exe` on Windows. The user-facing command remains `wardian`: macOS/Linux install a `wardian` shell launcher, and Windows installs `wardian.cmd`, both delegating to the adjacent `wardian-cli` binary.
 
 **Build outputs:**
 
-- Bundled inside the Tauri app under `resources/bin/wardian[.exe]` via `src-tauri/tauri.conf.json` → `bundle.resources`. Spec 021 already reserves this slot.
-- Per-platform release assets on GitHub Releases: `wardian-{arch}-{os}[.exe]`. Spec 021's stubbed CLI matrix job is enabled as part of this spec.
+- Bundled inside the Tauri app under `resources/bin/wardian-cli[.exe]` via `src-tauri/tauri.conf.json` -> `bundle.resources`. Spec 021 already reserves this slot.
+- Per-platform release assets on GitHub Releases: `wardian-cli-{arch}-{os}[.exe]`. Spec 021's stubbed CLI matrix job is enabled as part of this spec.
 
-**Install location:** `~/.wardian/bin/wardian` on macOS/Linux, `%USERPROFILE%\.wardian\bin\wardian.exe` on Windows. Per-user, no elevation required, inside the Wardian-owned tree alongside `state.db`, `agents/`, `classes/`.
+**Install location:** `~/.wardian/bin/wardian` on macOS/Linux, `%USERPROFILE%\.wardian\bin\wardian.cmd` on Windows, with the implementation binary beside it. Per-user, no elevation required, inside the Wardian-owned tree alongside `state.db`, `agents/`, `classes/`.
 
 **Install-time behavior:**
 
-1. On first GUI launch (detected by absence of `~/.wardian/bin/wardian`), the Tauri app copies the binary from `resources/bin/` into `~/.wardian/bin/` and prepends `~/.wardian/bin` to the user's `PATH`:
+1. On first GUI launch or bundled CLI change, the Tauri app copies the implementation binary from `resources/bin/` into `~/.wardian/bin/`, writes the `wardian` launcher, and prepends the install directory to the user's `PATH`:
    - **Windows:** write to `HKCU\Environment\Path` and broadcast `WM_SETTINGCHANGE`.
-   - **Unix:** append an `export PATH="$HOME/.wardian/bin:$PATH"` line to the user's shell profile (`.zshrc`, `.bashrc`, guarded by a `# wardian-cli` marker to stay idempotent).
+   - **Unix:** append an `export PATH=<actual-wardian-bin>:"$PATH"` line to the user's shell profile (`.zshrc`, `.bashrc`, guarded by a `# wardian-cli` marker to stay idempotent).
 2. If either step fails (read-only FS, no profile file, etc.), the GUI surfaces a dismissible notification with a copy-pasteable fallback command. The app continues to function; only the CLI is unreachable from user shells.
 3. The binary inside the app bundle is a *source* artifact. The live binary is whatever is in `~/.wardian/bin/`. This separation is deliberate: the forthcoming updater swaps the live binary, not the bundled one, so GUI and CLI update paths decouple cleanly.
 
@@ -203,7 +203,7 @@ Errors are emitted as JSON on stderr. Stdout is empty on error, so scripts can r
 - **Unit tests in `wardian-core`:** DB query functions (self-resolution, name-or-uuid resolution, list with filters), path-constant correctness.
 - **Unit tests in `wardian-cli`:** argument parsing (all subcommand shapes), JSON output shaping for `show` / `list` / `--field` / `--pretty`, error envelope shaping, exit-code mapping.
 - **Integration test:** seed a temp `state.db` via `wardian-core` helpers, spawn the binary with `WARDIAN_SESSION_ID` set to a seeded UUID, assert stdout JSON matches expected shape and exit code is 0. Runs under `cargo test` on all platforms; no special harness.
-- **Native E2E harness is unchanged.** The CLI does not touch PTYs, so the existing `npm run test:e2e:native` suite is not extended by this spec.
+- **Native E2E coverage:** the native harness includes a shared-state test that creates agents through the running Tauri app and reads them back through the CLI using the same isolated `WARDIAN_HOME`.
 - **`WARDIAN_HOME` isolation:** all tests honor the existing `WARDIAN_HOME` env var so they run against throwaway state directories.
 
 ### File Changes Introduced
@@ -217,9 +217,9 @@ Errors are emitted as JSON on stderr. Stdout is empty on error, so scripts can r
 
 **Modified:**
 
-- `src-tauri/` moves to `crates/wardian-app/`; imports updated to use `wardian-core`.
-- `src-tauri/tauri.conf.json` (at its new path): `bundle.resources` includes `bin/wardian[.exe]`.
-- `.github/workflows/release.yml`: the stubbed CLI matrix job is uncommented and wired up to upload `wardian-{arch}-{os}[.exe]` assets.
+- `src-tauri/`: imports updated to use `wardian-core`.
+- `src-tauri/tauri.conf.json`: `bundle.resources` includes `resources/bin/wardian-cli[.exe]`.
+- `.github/workflows/release.yml`: the stubbed CLI matrix job is uncommented and wired up to upload `wardian-cli-{arch}-{os}[.exe]` assets.
 - Tauri first-launch logic (in `wardian-app`): install-and-PATH routine for `~/.wardian/bin/wardian`.
 
 ### Testing & Rollout Plan

@@ -1,6 +1,6 @@
-use wardian_core::models::AgentClassDefinition;
 use crate::utils::fs::*;
 use tauri::{AppHandle, Manager};
+use wardian_core::models::AgentClassDefinition;
 
 pub fn get_all_agent_classes(_app: &AppHandle) -> Vec<AgentClassDefinition> {
     if let Some(app_dir) = get_wardian_home() {
