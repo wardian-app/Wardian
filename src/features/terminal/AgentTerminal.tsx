@@ -529,7 +529,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
-    if (term.buffer.active.viewportY < term.buffer.active.baseY) {
+    if (entry.provider !== "opencode" && term.buffer.active.viewportY < term.buffer.active.baseY) {
       term.scrollToBottom();
     }
     invoke("send_input_to_agent", {
@@ -638,12 +638,14 @@ export const AgentTerminal = memo(function AgentTerminal({
   isMaximized,
   theme,
   onTitleChange,
+  onTerminalFocus,
 }: {
   sessionId: string;
   provider?: string;
   isMaximized?: boolean;
   theme: "dark" | "light" | "system";
   onTitleChange?: (title: string) => void;
+  onTerminalFocus?: () => void;
 }) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
@@ -686,6 +688,10 @@ export const AgentTerminal = memo(function AgentTerminal({
     }
     void fitTerminalToContainer(sessionId, entry, container, options);
   }, [sessionId]);
+
+  const focusTerminal = useCallback(() => {
+    xtermRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
@@ -827,8 +833,13 @@ export const AgentTerminal = memo(function AgentTerminal({
       )}
       <div
         ref={terminalRef}
-        onClick={() => xtermRef.current?.focus()}
-        className="w-full h-full overflow-hidden"
+        data-testid="agent-terminal-host"
+        tabIndex={-1}
+        onFocusCapture={onTerminalFocus}
+        onClick={focusTerminal}
+        className={`w-full h-full overflow-hidden ${
+          provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
+        }`}
       />
     </div>
   );

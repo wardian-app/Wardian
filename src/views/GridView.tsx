@@ -40,6 +40,7 @@ interface GridViewProps {
   onRestart: (agentId: string) => void;
   onClear: (agentId: string) => void;
   onClone?: (agentId: string, mode: "fresh" | "profile") => void;
+  onTerminalFocus?: (agentId: string) => void;
 }
 
 export const GridView: React.FC<GridViewProps> = ({
@@ -75,6 +76,7 @@ export const GridView: React.FC<GridViewProps> = ({
   onRestart,
   onClear,
   onClone,
+  onTerminalFocus,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { layout, resetLayout, gridStacked } = useLayoutStore();
@@ -236,6 +238,7 @@ export const GridView: React.FC<GridViewProps> = ({
                   provider={agent.provider}
                   isMaximized={isAgentMaximized}
                   theme={theme}
+                  onTerminalFocus={() => onTerminalFocus?.(agentId)}
                   onTitleChange={(title) => handleTitleChange(agentId, title)} 
                 />
               </div>

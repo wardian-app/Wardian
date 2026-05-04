@@ -5,7 +5,21 @@ import type { AgentConfig, AgentTelemetry } from '../types';
 import { useLayoutStore } from '../store/useLayoutStore';
 
 vi.mock('../features/terminal/AgentTerminal', () => ({
-  AgentTerminal: ({ sessionId }: { sessionId: string }) => <div data-testid={`terminal-${sessionId}`}>Terminal {sessionId}</div>,
+  AgentTerminal: ({
+    sessionId,
+    onTerminalFocus,
+  }: {
+    sessionId: string;
+    onTerminalFocus?: () => void;
+  }) => (
+    <div
+      data-testid={`terminal-${sessionId}`}
+      tabIndex={0}
+      onFocus={onTerminalFocus}
+    >
+      Terminal {sessionId}
+    </div>
+  ),
 }));
 
 const agents: AgentConfig[] = [
@@ -15,7 +29,11 @@ const agents: AgentConfig[] = [
 
 const telemetry: Record<string, AgentTelemetry> = {};
 
-function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig[] = agents) {
+function renderGrid(
+  maximizedAgentId: string | null,
+  filteredAgents: AgentConfig[] = agents,
+  onTerminalFocus = vi.fn(),
+) {
   return render(
     <GridView
       filteredAgents={filteredAgents}
@@ -49,11 +67,21 @@ function renderGrid(maximizedAgentId: string | null, filteredAgents: AgentConfig
       onPause={vi.fn()}
       onRestart={vi.fn()}
       onClear={vi.fn()}
+      onTerminalFocus={onTerminalFocus}
     />
   );
 }
 
 describe('GridView maximize behavior', () => {
+  it('reports the owning agent when its terminal receives focus', () => {
+    const onTerminalFocus = vi.fn();
+    renderGrid(null, agents, onTerminalFocus);
+
+    screen.getByTestId('terminal-agent-2').focus();
+
+    expect(onTerminalFocus).toHaveBeenCalledWith('agent-2');
+  });
+
   it('does not size each mobile card to the full viewport height', () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });

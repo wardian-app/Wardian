@@ -23,7 +23,21 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 vi.mock("../features/terminal/AgentTerminal", () => ({
-  AgentTerminal: ({ sessionId }: { sessionId: string }) => <div data-testid={`terminal-${sessionId}`}>Terminal {sessionId}</div>
+  AgentTerminal: ({
+    sessionId,
+    onTerminalFocus,
+  }: {
+    sessionId: string;
+    onTerminalFocus?: () => void;
+  }) => (
+    <div
+      data-testid={`terminal-${sessionId}`}
+      tabIndex={0}
+      onFocus={onTerminalFocus}
+    >
+      Terminal {sessionId}
+    </div>
+  )
 }));
 
 // Cast invoke to mock for test control
@@ -541,6 +555,26 @@ describe("Agent Watchlist Sidebar", () => {
       expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
       expect(screen.getByTestId("terminal-agent-2")).toBeInTheDocument();
     });
+  });
+
+  it("selects only the owning agent when a terminal receives focus", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+
+    const alphaTerminal = await screen.findByTestId("terminal-agent-1");
+    const betaTerminal = await screen.findByTestId("terminal-agent-2");
+    const alphaCard = alphaTerminal.closest('[data-testid="agent-card"]');
+    const betaCard = betaTerminal.closest('[data-testid="agent-card"]');
+    if (!alphaCard || !betaCard) throw new Error("Expected terminal cards to render");
+
+    fireEvent.click(alphaCard.querySelector(".border-b") ?? alphaCard);
+    expect(alphaCard.className).toContain("ring-1");
+    expect(betaCard.className).not.toContain("ring-1");
+
+    fireEvent.focus(betaTerminal);
+
+    expect(alphaCard.className).not.toContain("ring-1");
+    expect(betaCard.className).toContain("ring-1");
   });
 });
 

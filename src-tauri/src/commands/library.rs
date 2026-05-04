@@ -9,6 +9,7 @@ use crate::state::{AppState, LibraryWatchRegistration};
 use crate::utils::fs::get_wardian_home;
 use wardian_core::models::{
     DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
+    SkillDeployment,
 };
 
 const LIBRARY_PROMPTS_DIR: &str = "library/prompts";
@@ -744,14 +745,14 @@ pub async fn list_skill_deployments(
     _app: AppHandle,
     skill_name: String,
     source_path: Option<String>,
-) -> Result<Vec<wardian_core::models::SkillDeployment>, String> {
+) -> Result<Vec<SkillDeployment>, String> {
     list_skill_deployments_for_source(&skill_name, source_path.as_deref())
 }
 
 fn list_skill_deployments_for_source(
     skill_name: &str,
     source_path: Option<&str>,
-) -> Result<Vec<wardian_core::models::SkillDeployment>, String> {
+) -> Result<Vec<SkillDeployment>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let library_skills_dir = home.join(LIBRARY_SKILLS_DIR);
     let mut library_sources = Vec::new();
@@ -774,7 +775,7 @@ fn list_skill_deployments_for_source(
         &library_sources,
         &home,
     ) {
-        deployments.push(wardian_core::models::SkillDeployment {
+        deployments.push(SkillDeployment {
             target_type: "user".to_string(),
             target_id: "global".to_string(),
         });
@@ -796,7 +797,7 @@ fn list_skill_deployments_for_source(
                             &library_sources,
                             &home,
                         ) {
-                            deployments.push(wardian_core::models::SkillDeployment {
+                            deployments.push(SkillDeployment {
                                 target_type: "class".to_string(),
                                 target_id: class_name,
                             });
@@ -823,7 +824,7 @@ fn list_skill_deployments_for_source(
                             &library_sources,
                             &home,
                         ) {
-                            deployments.push(wardian_core::models::SkillDeployment {
+                            deployments.push(SkillDeployment {
                                 target_type: "agent".to_string(),
                                 target_id: agent_id,
                             });
