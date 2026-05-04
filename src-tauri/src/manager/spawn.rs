@@ -967,11 +967,18 @@ pub async fn resize_pty(
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
             #[cfg(feature = "terminal-trace")]
-            log_terminal_trace_note(
-                &session_id,
-                &agent.config.provider,
-                &format!("resize cols={} rows={}", cols, rows),
-            );
+            {
+                let provider = agent
+                    .config
+                    .lock()
+                    .map(|config| config.provider.clone())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().provider.clone());
+                log_terminal_trace_note(
+                    &session_id,
+                    &provider,
+                    &format!("resize cols={} rows={}", cols, rows),
+                );
+            }
             agent
                 .pty_master
                 .clone()

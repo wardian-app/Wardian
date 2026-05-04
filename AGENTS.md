@@ -82,6 +82,7 @@ Wardian has multiple test layers. Before marking a task as complete, run the app
    - Setup: `npm run setup:e2e:native`
    - Run: `npm run test:e2e:native`
    - CLI shared-state smoke: `npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mjs`
+   - User terminal smoke: `npm run test:e2e:native:fast -- e2e-native/tests/user-terminal-native.test.mjs`
    - Generated native driver artifacts live under `tools/e2e-native/` and are intentionally ignored by git.
 5. **Real Provider E2E**: run only when a change specifically depends on provider-specific native behavior and the native runtime harness is available.
    - Keep these runs isolated and opt-in.
@@ -97,6 +98,7 @@ When writing a test, pick the **lowest** layer that can prove the behavior:
 | Agent lifecycle with mock provider (spawn/status/kill) | Browser E2E |
 | PTY resize, `invoke` IPC commands | Native E2E |
 | App-created agent readable through CLI state | Native E2E |
+| Standalone user terminal PTY behavior | Native E2E |
 | Real filesystem ops (junctions, workspace init) | Native E2E |
 | Provider-specific spawn or token behavior | Real Provider E2E |
 

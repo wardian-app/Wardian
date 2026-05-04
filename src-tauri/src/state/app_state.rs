@@ -30,6 +30,8 @@ pub struct AppState {
     pub git_watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     // Active library watchers keyed by library type, shared by mounted UI consumers
     pub library_watchers: Mutex<HashMap<String, LibraryWatchRegistration>>,
+    // Single standalone terminal session for the human user.
+    pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
 }
 
 impl AppState {
@@ -54,6 +56,7 @@ impl Default for AppState {
             scheduler_handle: Mutex::new(None),
             git_watchers: Mutex::new(HashMap::new()),
             library_watchers: Mutex::new(HashMap::new()),
+            user_terminal: Mutex::new(None),
         }
     }
 }
