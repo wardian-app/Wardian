@@ -15,6 +15,8 @@ Wardian also attempts to add that `bin` directory to the user PATH. Restart the 
 
 Set `WARDIAN_HOME` to redirect state and the CLI install location for tests or isolated runs. The CLI reads `state.db` from that home directory.
 
+For development, set the same `WARDIAN_HOME` before starting the desktop app and before running CLI commands. Otherwise the app debug home and the CLI default production home may differ.
+
 ## Agent Identity
 
 Wardian injects `WARDIAN_SESSION_ID` into managed agent processes. Inside an agent terminal, `wardian agent` resolves that session automatically.

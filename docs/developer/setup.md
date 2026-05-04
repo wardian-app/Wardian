@@ -48,6 +48,20 @@ Run the desktop app in development mode:
 npm run dev
 ```
 
+When testing the CLI against a dev app, set the same explicit `WARDIAN_HOME` in both terminals:
+
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
+npm run dev
+```
+
+Then run CLI commands from another terminal with that same home:
+
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
+cargo run -p wardian-cli -- agent list --scope all
+```
+
 Build the standalone CLI:
 
 ```bash
