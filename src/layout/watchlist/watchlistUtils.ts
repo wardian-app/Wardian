@@ -264,7 +264,7 @@ export function getAgentsForList(
   list: Watchlist | null,
   teams: AgentTeam[] = [],
 ): AgentConfig[] {
-  if (!list) return agents;
+  if (!list) return flattenDisplayItems(getDisplayItemsForList(agents, null, teams));
   return flattenDisplayItems(getDisplayItemsForList(agents, list, teams));
 }
 

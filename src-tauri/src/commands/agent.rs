@@ -406,6 +406,30 @@ fn resolve_registered_session_name(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentOrderPlacement<'a> {
+    Top,
+    After(&'a str),
+}
+
+fn insert_new_agent_order(
+    order: &mut Vec<String>,
+    session_id: &str,
+    placement: AgentOrderPlacement<'_>,
+) {
+    order.retain(|id| id != session_id);
+    match placement {
+        AgentOrderPlacement::Top => order.insert(0, session_id.to_string()),
+        AgentOrderPlacement::After(source_session_id) => {
+            let index = order
+                .iter()
+                .position(|id| id == source_session_id)
+                .map_or(0, |index| index + 1);
+            order.insert(index, session_id.to_string());
+        }
+    }
+}
+
 struct SpawnNameReservation {
     session_name: String,
 }
@@ -553,6 +577,7 @@ async fn register_new_agent(
     app: &AppHandle,
     clone_name_base: Option<&str>,
     reserved_session_name: Option<&str>,
+    placement: AgentOrderPlacement<'_>,
 ) -> Result<AgentConfig, String> {
     let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
@@ -651,7 +676,7 @@ async fn register_new_agent(
         }
     }
     agents.insert(session_id.clone(), active_agent);
-    order.push(session_id.clone());
+    insert_new_agent_order(&mut order, &session_id, placement);
     manager::save_state(app, &agents, &order);
     let _ = app.emit("agents-updated", ());
 
@@ -729,6 +754,7 @@ pub async fn spawn_agent(
         &app,
         None,
         Some(&session_name),
+        AgentOrderPlacement::Top,
     )
     .await;
     if registered.is_err() {
@@ -884,6 +910,7 @@ pub async fn clone_agent(
         &app,
         generated_session_name.then_some(source_config.session_name.as_str()),
         None,
+        AgentOrderPlacement::After(&source_session_id),
     )
     .await
 }
@@ -1367,10 +1394,11 @@ mod tests {
     use super::{
         clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
         clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
-        generated_agent_name, normalize_spawn_folder, persisted_resume_session_for_provider,
-        prepare_clear_config, prepare_resume_config, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, reserve_spawn_session_name,
-        resolve_requested_spawn_session_name, restore_runtime_state_after_resume,
+        generated_agent_name, insert_new_agent_order, normalize_spawn_folder,
+        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
+        reserve_spawn_session_name, resolve_requested_spawn_session_name,
+        restore_runtime_state_after_resume, AgentOrderPlacement,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -1413,6 +1441,50 @@ mod tests {
 
     fn clone_name_set(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn fresh_spawn_order_inserts_new_agent_at_top() {
+        let mut order = vec!["alpha".to_string(), "beta".to_string()];
+
+        insert_new_agent_order(&mut order, "gamma", AgentOrderPlacement::Top);
+
+        assert_eq!(order, vec!["gamma", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn clone_order_inserts_new_agent_after_source() {
+        let mut order = vec!["alpha".to_string(), "beta".to_string()];
+
+        insert_new_agent_order(
+            &mut order,
+            "alpha-copy",
+            AgentOrderPlacement::After("alpha"),
+        );
+
+        assert_eq!(order, vec!["alpha", "alpha-copy", "beta"]);
+    }
+
+    #[test]
+    fn clone_order_falls_back_to_top_when_source_is_missing() {
+        let mut order = vec!["alpha".to_string(), "beta".to_string()];
+
+        insert_new_agent_order(
+            &mut order,
+            "orphan-copy",
+            AgentOrderPlacement::After("missing"),
+        );
+
+        assert_eq!(order, vec!["orphan-copy", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn new_agent_order_removes_duplicate_session_before_inserting() {
+        let mut order = vec!["alpha".to_string(), "beta".to_string(), "alpha".to_string()];
+
+        insert_new_agent_order(&mut order, "alpha", AgentOrderPlacement::Top);
+
+        assert_eq!(order, vec!["alpha", "beta"]);
     }
 
     #[test]

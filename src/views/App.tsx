@@ -416,21 +416,73 @@ function AppBody() {
     if (draggedAgentId && draggedAgentId !== agentId) setDragOverAgentId(agentId);
   };
 
+  const reorderGlobalAgentsAroundTarget = async (
+    agentId: string,
+    targetAgentId: string,
+    position: "before" | "after",
+  ) => {
+    const remainingAgents = agents.filter((agent) => agent.session_id !== agentId);
+    const targetIndex = remainingAgents.findIndex((agent) => agent.session_id === targetAgentId);
+    const draggedAgent = agents.find((agent) => agent.session_id === agentId);
+    if (!draggedAgent || targetIndex === -1) return;
+
+    const nextAgents = [...remainingAgents];
+    nextAgents.splice(targetIndex + (position === "after" ? 1 : 0), 0, draggedAgent);
+    setAgents(nextAgents);
+    try {
+      await invoke("reorder_agents", { sessionIds: nextAgents.map((agent) => agent.session_id) });
+    } catch (err) {
+      console.error("Failed to reorder:", err);
+    }
+  };
+
   const handleMouseUp = async () => {
     if (draggedAgentId && dragOverAgentId && draggedAgentId !== dragOverAgentId) {
       const newDisplayList = [...filteredAgents];
       const fromIndex = newDisplayList.findIndex(a => a.session_id === draggedAgentId);
       const toIndex = newDisplayList.findIndex(a => a.session_id === dragOverAgentId);
       if (fromIndex !== -1 && toIndex !== -1) {
-        const [draggedItem] = newDisplayList.splice(fromIndex, 1);
-        newDisplayList.splice(toIndex, 0, draggedItem);
-        const newOrder = newDisplayList.map(a => a.session_id);
-        if (activeListId !== 'all') {
-          const updatedWatchlists = watchlists.map(l => l.id === activeListId ? { ...l, entries: newOrder.map(agentId => ({ type: "agent" as const, agentId })) } : l);
-          await persistWatchlists(updatedWatchlists);
+        const draggedTeam = teams.find((team) => team.agentIds.includes(draggedAgentId));
+        const targetTeam = teams.find((team) => team.agentIds.includes(dragOverAgentId));
+        const position = fromIndex < toIndex ? "after" : "before";
+        const watchlistState = { version: 2 as const, watchlists, teams };
+        if (draggedTeam && draggedTeam.id === targetTeam?.id) {
+          await handleReorderTeamMember(draggedTeam.id, draggedAgentId, dragOverAgentId, position);
+        } else if (targetTeam) {
+          const next = reorderTeamMember(
+            addAgentToTeam(watchlistState, targetTeam.id, draggedAgentId),
+            targetTeam.id,
+            draggedAgentId,
+            dragOverAgentId,
+            position,
+          );
+          await persistWatchlistState(next);
+          if (activeListId === "all") {
+            await reorderGlobalAgentsAroundTarget(draggedAgentId, dragOverAgentId, position);
+          }
+        } else if (draggedTeam) {
+          const next = removeAgentFromTeam(
+            watchlistState,
+            draggedTeam.id,
+            draggedAgentId,
+            dragOverAgentId,
+            position,
+          );
+          await persistWatchlistState(next);
+          if (activeListId === "all") {
+            await reorderGlobalAgentsAroundTarget(draggedAgentId, dragOverAgentId, position);
+          }
         } else {
-          setAgents(newDisplayList);
-          try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (err) { console.error("Failed to reorder:", err); }
+          const [draggedItem] = newDisplayList.splice(fromIndex, 1);
+          newDisplayList.splice(toIndex, 0, draggedItem);
+          const newOrder = newDisplayList.map(a => a.session_id);
+          if (activeListId !== 'all') {
+            const updatedWatchlists = watchlists.map(l => l.id === activeListId ? { ...l, entries: newOrder.map(agentId => ({ type: "agent" as const, agentId })) } : l);
+            await persistWatchlists(updatedWatchlists);
+          } else {
+            setAgents(newDisplayList);
+            try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (err) { console.error("Failed to reorder:", err); }
+          }
         }
         wasDraggingRef.current = true;
       }

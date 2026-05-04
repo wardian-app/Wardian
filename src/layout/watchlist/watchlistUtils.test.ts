@@ -495,6 +495,14 @@ describe("getAgentsForList", () => {
     expect(getAgentsForList(agents, null)).toEqual(agents);
   });
 
+  it("uses team member order when the all-agents list is grouped", () => {
+    const result = getAgentsForList(agents, null, [
+      { id: "team-1", name: "Core", agentIds: ["b", "a"] },
+    ]);
+
+    expect(result.map((agent) => agent.session_id)).toEqual(["b", "a", "c"]);
+  });
+
   it("returns agents in watchlist order", () => {
     const list: Watchlist = { id: "l1", name: "L1", agentIds: ["c", "a"] };
     const result = getAgentsForList(agents, list);
