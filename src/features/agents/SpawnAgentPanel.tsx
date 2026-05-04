@@ -16,7 +16,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
   const [newAgentClass, setNewAgentClass] = useState("Generalist");
 
   const validateName = (name: string) => {
-    if (!name.trim()) return "Name is required";
+    if (!name.trim()) return null;
     const re = /^[a-zA-Z0-9_-]+$/;
     if (!re.test(name)) {
       return "Names must be alphanumeric, underscores, or hyphens (no spaces).";
