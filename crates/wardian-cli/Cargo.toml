@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [[bin]]
-name = "wardian"
+name = "wardian-cli"
 path = "src/main.rs"
 
 [dependencies]

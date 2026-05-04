@@ -6,8 +6,10 @@ Wardian includes a standalone `wardian` command for inspecting known agent sessi
 
 The desktop app copies the bundled CLI on startup:
 
-- Windows: `%USERPROFILE%\.wardian\bin\wardian.exe`
-- macOS/Linux: `$HOME/.wardian/bin/wardian`
+- Windows command: `%USERPROFILE%\.wardian\bin\wardian.cmd`
+- Windows implementation binary: `%USERPROFILE%\.wardian\bin\wardian-cli.exe`
+- macOS/Linux command: `$HOME/.wardian/bin/wardian`
+- macOS/Linux implementation binary: `$HOME/.wardian/bin/wardian-cli`
 
 Wardian also attempts to add that `bin` directory to the user PATH. Restart the terminal after first launch if `wardian` is not found.
 

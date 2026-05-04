@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const isWindows = process.platform === 'win32';
-const exe = isWindows ? 'wardian.exe' : 'wardian';
+const exe = isWindows ? 'wardian-cli.exe' : 'wardian-cli';
 
 const result = spawnSync('cargo', ['build', '--release', '-p', 'wardian-cli'], {
   cwd: root,

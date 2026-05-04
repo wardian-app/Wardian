@@ -41,8 +41,25 @@ fn seed_home() -> TempDir {
     dir
 }
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_wardian")
+fn bin() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_wardian-cli") {
+        return path.into();
+    }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_wardian_cli") {
+        return path.into();
+    }
+
+    let exe = if cfg!(windows) {
+        "wardian-cli.exe"
+    } else {
+        "wardian-cli"
+    };
+    std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(|deps| deps.parent())
+        .unwrap()
+        .join(exe)
 }
 
 #[test]

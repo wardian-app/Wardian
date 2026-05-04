@@ -40,10 +40,10 @@ describe("release workflow contract", () => {
   it("publishes standalone CLI binaries with dry-run artifact support", () => {
     expect(releaseWorkflow).toContain("Build CLI");
     expect(releaseWorkflow).toContain("cargo build --release -p wardian-cli --target");
-    expect(releaseWorkflow).toContain("wardian-x86_64-windows.exe");
-    expect(releaseWorkflow).toContain("wardian-aarch64-macos");
-    expect(releaseWorkflow).toContain("wardian-x86_64-macos");
-    expect(releaseWorkflow).toContain("wardian-x86_64-linux");
+    expect(releaseWorkflow).toContain("wardian-cli-x86_64-windows.exe");
+    expect(releaseWorkflow).toContain("wardian-cli-aarch64-macos");
+    expect(releaseWorkflow).toContain("wardian-cli-x86_64-macos");
+    expect(releaseWorkflow).toContain("wardian-cli-x86_64-linux");
     expect(releaseWorkflow).toContain("gh release upload");
     expect(releaseWorkflow).toContain("Upload CLI dry-run artifact");
     expect(releaseWorkflow).toContain("crates/wardian-cli");

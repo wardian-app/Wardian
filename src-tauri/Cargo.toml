@@ -18,6 +18,10 @@ homepage = "https://github.com/tangemicioglu/Wardian"
 name = "wardian_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "Wardian"
+path = "src/main.rs"
+
 [features]
 terminal-trace = []
 

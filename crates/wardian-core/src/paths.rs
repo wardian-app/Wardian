@@ -19,7 +19,7 @@ pub fn wardian_home_for_manifest(manifest_dir: &Path) -> Option<PathBuf> {
 
     #[cfg(debug_assertions)]
     {
-        return Some(manifest_dir.join("target").join("debug").join(".wardian"));
+        Some(manifest_dir.join("target").join("debug").join(".wardian"))
     }
 
     #[cfg(not(debug_assertions))]
@@ -38,7 +38,7 @@ pub fn cli_bin_dir() -> Option<PathBuf> {
 }
 
 pub fn cli_bin_path() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "wardian.exe" } else { "wardian" };
+    let name = if cfg!(windows) { "wardian.cmd" } else { "wardian" };
     cli_bin_dir().map(|dir| dir.join(name))
 }
 
@@ -66,7 +66,7 @@ mod tests {
         let _guard = crate::tests::env_lock();
         std::env::set_var("WARDIAN_HOME", "/tmp/wardian-cli-bin");
         let expected = if cfg!(windows) {
-            "wardian.exe"
+            "wardian.cmd"
         } else {
             "wardian"
         };

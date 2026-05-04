@@ -8,7 +8,15 @@ pub enum InstallOutcome {
 
 pub fn bundled_cli_file_name() -> &'static str {
     if cfg!(windows) {
-        "wardian.exe"
+        "wardian-cli.exe"
+    } else {
+        "wardian-cli"
+    }
+}
+
+pub fn launcher_file_name() -> &'static str {
+    if cfg!(windows) {
+        "wardian.cmd"
     } else {
         "wardian"
     }
@@ -33,38 +41,75 @@ where
         ));
     }
 
-    let target = wardian_core::paths::cli_bin_path()
+    let launcher = wardian_core::paths::cli_bin_path()
         .ok_or_else(|| "Could not resolve Wardian CLI install path".to_string())?;
-    let target_dir = target
+    let target_dir = launcher
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "Could not resolve Wardian CLI install directory".to_string())?;
+    let target = target_dir.join(bundled_cli_file_name());
 
     std::fs::create_dir_all(&target_dir)
         .map_err(|err| format!("Failed to create {}: {err}", target_dir.display()))?;
 
-    let should_copy = match (std::fs::metadata(&source), std::fs::metadata(&target)) {
+    let should_copy_binary = match (std::fs::metadata(&source), std::fs::metadata(&target)) {
         (Ok(source_meta), Ok(target_meta)) => source_meta.len() != target_meta.len(),
         (Ok(_), Err(_)) => true,
         (Err(err), _) => return Err(format!("Failed to inspect {}: {err}", source.display())),
     };
+    let should_write_launcher = launcher_needs_update(&launcher);
 
-    let outcome = if should_copy {
-        std::fs::copy(&source, &target).map_err(|err| {
-            format!(
-                "Failed to copy CLI from {} to {}: {err}",
-                source.display(),
-                target.display()
-            )
-        })?;
-        make_executable(&target)?;
-        InstallOutcome::Installed(target)
+    let outcome = if should_copy_binary || should_write_launcher {
+        if should_copy_binary {
+            std::fs::copy(&source, &target).map_err(|err| {
+                format!(
+                    "Failed to copy CLI from {} to {}: {err}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+            make_executable(&target)?;
+        }
+
+        write_launcher(&launcher)?;
+        make_executable(&launcher)?;
+        InstallOutcome::Installed(launcher)
     } else {
-        InstallOutcome::AlreadyInstalled(target)
+        InstallOutcome::AlreadyInstalled(launcher)
     };
 
     update_path(&target_dir)?;
     Ok(outcome)
+}
+
+fn launcher_needs_update(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(existing) => normalize_line_endings(&existing) != launcher_contents(),
+        Err(_) => true,
+    }
+}
+
+fn write_launcher(path: &Path) -> Result<(), String> {
+    let contents = if cfg!(windows) {
+        launcher_contents().replace('\n', "\r\n")
+    } else {
+        launcher_contents()
+    };
+
+    std::fs::write(path, contents)
+        .map_err(|err| format!("Failed to write CLI launcher {}: {err}", path.display()))
+}
+
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n")
+}
+
+fn launcher_contents() -> String {
+    if cfg!(windows) {
+        "@echo off\n\"%~dp0wardian-cli.exe\" %*\n".to_string()
+    } else {
+        "#!/usr/bin/env sh\nexec \"$(dirname \"$0\")/wardian-cli\" \"$@\"\n".to_string()
+    }
 }
 
 #[cfg(windows)]
@@ -218,10 +263,17 @@ mod tests {
 
     #[test]
     fn target_binary_name_matches_platform() {
+        let expected = if cfg!(windows) { "wardian.cmd" } else { "wardian" };
+
+        assert_eq!(launcher_file_name(), expected);
+    }
+
+    #[test]
+    fn implementation_binary_name_matches_platform() {
         let expected = if cfg!(windows) {
-            "wardian.exe"
+            "wardian-cli.exe"
         } else {
-            "wardian"
+            "wardian-cli"
         };
 
         assert_eq!(bundled_cli_file_name(), expected);
@@ -244,9 +296,13 @@ mod tests {
         })
         .unwrap();
 
-        let target = home.path().join("bin").join(bundled_cli_file_name());
-        assert_eq!(outcome, InstallOutcome::Installed(target.clone()));
-        assert_eq!(std::fs::read(target).unwrap(), b"wardian cli");
+        let impl_target = home.path().join("bin").join(bundled_cli_file_name());
+        let launcher_target = home.path().join("bin").join(launcher_file_name());
+        assert_eq!(outcome, InstallOutcome::Installed(launcher_target.clone()));
+        assert_eq!(std::fs::read(impl_target).unwrap(), b"wardian cli");
+        assert!(std::fs::read_to_string(launcher_target)
+            .unwrap()
+            .contains("wardian-cli"));
         assert_eq!(path_updates, 1);
 
         std::env::remove_var("WARDIAN_HOME");
@@ -263,6 +319,11 @@ mod tests {
         std::fs::create_dir_all(&target_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
         std::fs::write(target_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        std::fs::write(
+            target_dir.join(launcher_file_name()),
+            launcher_contents().replace('\n', "\r\n"),
+        )
+        .unwrap();
         std::env::set_var("WARDIAN_HOME", home.path());
 
         let outcome =
@@ -271,7 +332,7 @@ mod tests {
 
         assert_eq!(
             outcome,
-            InstallOutcome::AlreadyInstalled(target_dir.join(bundled_cli_file_name()))
+            InstallOutcome::AlreadyInstalled(target_dir.join(launcher_file_name()))
         );
 
         std::env::remove_var("WARDIAN_HOME");
