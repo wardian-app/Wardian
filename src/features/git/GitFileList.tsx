@@ -44,6 +44,7 @@ export const GitFileList: React.FC<GitFileListProps> = ({
           >
             <button
               className="flex-1 min-w-0 text-left truncate text-primary hover:underline cursor-pointer"
+              aria-label={`View diff for ${file.path}`}
               title={file.path}
               onClick={() => onDiff?.(file.path, file.is_staged)}
             >
@@ -56,6 +57,7 @@ export const GitFileList: React.FC<GitFileListProps> = ({
               {file.is_staged && onUnstage && (
                 <button
                   className="p-0.5 rounded hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors"
+                  aria-label={`Unstage ${file.path}`}
                   title="Unstage"
                   onClick={() => onUnstage(file.path)}
                 >
@@ -67,6 +69,7 @@ export const GitFileList: React.FC<GitFileListProps> = ({
               {!file.is_staged && onStage && (
                 <button
                   className="p-0.5 rounded hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors"
+                  aria-label={`Stage ${file.path}`}
                   title="Stage"
                   onClick={() => onStage(file.path)}
                 >
@@ -78,6 +81,7 @@ export const GitFileList: React.FC<GitFileListProps> = ({
               {!file.is_staged && onDiscard && file.status !== "?" && (
                 <button
                   className="p-0.5 rounded hover:bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_80%)] text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] transition-colors"
+                  aria-label={`Discard changes to ${file.path}`}
                   title="Discard Changes"
                   onClick={() => onDiscard(file.path)}
                 >

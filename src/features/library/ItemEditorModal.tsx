@@ -9,6 +9,8 @@ interface ItemEditorModalProps {
 }
 
 export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, onClose, onSave }) => {
+    const contentInputId = React.useId();
+    const tagsInputId = React.useId();
     const [content, setContent] = useState(item.content);
     const [tagsText, setTagsText] = useState(item.metadata.tags.join(', '));
     const [isStarred, setIsStarred] = useState(item.metadata.is_starred);
@@ -40,6 +42,8 @@ export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, 
                     <div className="flex items-center gap-2">
                         <button 
                             onClick={() => setIsStarred(!isStarred)}
+                            aria-label={isStarred ? 'Unstar item' : 'Star item'}
+                            title={isStarred ? 'Unstar item' : 'Star item'}
                             className={`transition-colors ${isStarred ? 'text-yellow-400 hover:text-yellow-300' : 'text-muted-neutral hover:text-primary'}`}
                         >
                             <svg className="w-5 h-5" fill={isStarred ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
@@ -48,15 +52,16 @@ export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, 
                         </button>
                         <h2 className="text-xl font-bold text-primary">{item.name}</h2>
                     </div>
-                    <button onClick={onClose} className="text-muted hover:text-primary transition-colors">
+                    <button onClick={onClose} aria-label="Close editor" title="Close editor" className="text-muted hover:text-primary transition-colors">
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
                 </div>
                 
                 <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
                     <div className="flex flex-col gap-1">
-                        <label className="text-xs font-bold text-muted tracking-wide border-b border-wardian-border/20 pb-1 mb-1">Content</label>
+                        <label htmlFor={contentInputId} className="text-xs font-bold text-muted tracking-wide border-b border-wardian-border/20 pb-1 mb-1">Content</label>
                         <textarea
+                            id={contentInputId}
                             className="w-full h-64 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded p-3 text-primary text-sm focus:outline-none focus:border-[var(--color-wardian-accent)] font-mono resize-y"
                             value={content}
                             onChange={e => setContent(e.target.value)}
@@ -64,8 +69,9 @@ export const ItemEditorModal: React.FC<ItemEditorModalProps> = ({ item, isOpen, 
                     </div>
                     
                     <div className="flex flex-col gap-1">
-                        <label className="text-xs font-bold text-muted tracking-wide border-b border-wardian-border/20 pb-1 mb-1">Tags (comma separated)</label>
+                        <label htmlFor={tagsInputId} className="text-xs font-bold text-muted tracking-wide border-b border-wardian-border/20 pb-1 mb-1">Tags (comma separated)</label>
                         <input
+                            id={tagsInputId}
                             type="text"
                             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-primary text-sm focus:outline-none focus:border-[var(--color-wardian-accent)]"
                             value={tagsText}

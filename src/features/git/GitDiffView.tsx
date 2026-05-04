@@ -11,6 +11,7 @@ export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClos
 
   return (
     <div
+      data-testid="git-diff-backdrop"
       className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-8 backdrop-blur-sm animate-in fade-in"
       onClick={onClose}
     >
@@ -24,6 +25,8 @@ export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClos
           </h3>
           <button
             onClick={onClose}
+            aria-label="Close diff"
+            title="Close diff"
             className="text-[var(--color-wardian-text-muted)] hover:text-wardian-error font-bold transition-colors w-8 h-8 flex items-center justify-center rounded-md hover:bg-wardian-error/10"
           >
             ✕

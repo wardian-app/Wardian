@@ -11,6 +11,9 @@ interface AssignSkillModalProps {
 
 export const AssignSkillModal: React.FC<AssignSkillModalProps> = ({ skill, isOpen, onClose }) => {
     const { deploySkill, listSkillDeployments, removeDeployedSkill } = useLibraryStore();
+    const targetScopeId = React.useId();
+    const classSelectId = React.useId();
+    const agentSelectId = React.useId();
     const [targetType, setTargetType] = useState<'user' | 'class' | 'agent'>('user');
     const [selectedTargetId, setSelectedTargetId] = useState<string>('global');
     const [isDeploying, setIsDeploying] = useState(false);
@@ -130,8 +133,9 @@ export const AssignSkillModal: React.FC<AssignSkillModalProps> = ({ skill, isOpe
                     <div className="flex flex-col gap-3">
                         <h3 className="text-xs font-bold text-muted uppercase tracking-widest">New Deployment</h3>
                         <div className="flex flex-col gap-2">
-                            <label className="text-xs font-bold text-muted-neutral">Target Scope</label>
+                            <label htmlFor={targetScopeId} className="text-xs font-bold text-muted-neutral">Target Scope</label>
                             <select 
+                                id={targetScopeId}
                                 value={targetType}
                                 onChange={(e) => setTargetType(e.target.value as any)}
                                 disabled={isDeploying}
@@ -145,8 +149,9 @@ export const AssignSkillModal: React.FC<AssignSkillModalProps> = ({ skill, isOpe
 
                         {targetType === 'class' && (
                             <div className="flex flex-col gap-2 animate-in slide-in-from-top-2 duration-200">
-                                <label className="text-xs font-bold text-muted-neutral">Select Class</label>
+                                <label htmlFor={classSelectId} className="text-xs font-bold text-muted-neutral">Select Class</label>
                                 <select 
+                                    id={classSelectId}
                                     value={selectedTargetId}
                                     onChange={(e) => setSelectedTargetId(e.target.value)}
                                     disabled={isDeploying || classes.length === 0}
@@ -162,8 +167,9 @@ export const AssignSkillModal: React.FC<AssignSkillModalProps> = ({ skill, isOpe
 
                         {targetType === 'agent' && (
                             <div className="flex flex-col gap-2 animate-in slide-in-from-top-2 duration-200">
-                                <label className="text-xs font-bold text-muted-neutral">Select Agent</label>
+                                <label htmlFor={agentSelectId} className="text-xs font-bold text-muted-neutral">Select Agent</label>
                                 <select 
+                                    id={agentSelectId}
                                     value={selectedTargetId}
                                     onChange={(e) => setSelectedTargetId(e.target.value)}
                                     disabled={isDeploying || agents.length === 0}

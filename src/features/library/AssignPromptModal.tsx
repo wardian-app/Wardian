@@ -10,6 +10,7 @@ interface AssignPromptModalProps {
 }
 
 export const AssignPromptModal: React.FC<AssignPromptModalProps> = ({ prompt, isOpen, onClose }) => {
+    const agentSelectId = React.useId();
     const [selectedTargetId, setSelectedTargetId] = useState<string>('');
     const [isInjecting, setIsInjecting] = useState(false);
     const [agents, setAgents] = useState<AgentConfig[]>([]);
@@ -60,8 +61,9 @@ export const AssignPromptModal: React.FC<AssignPromptModalProps> = ({ prompt, is
                 
                 <div className="p-5 flex flex-col gap-4">
                     <div className="flex flex-col gap-2">
-                        <label className="text-xs font-bold text-muted uppercase tracking-widest">Select Agent</label>
+                        <label htmlFor={agentSelectId} className="text-xs font-bold text-muted uppercase tracking-widest">Select Agent</label>
                         <select 
+                            id={agentSelectId}
                             value={selectedTargetId}
                             onChange={(e) => setSelectedTargetId(e.target.value)}
                             disabled={isInjecting || agents.length === 0}
