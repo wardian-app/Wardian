@@ -81,6 +81,7 @@ Wardian has multiple test layers. Before marking a task as complete, run the app
    - This is the required layer for real terminal and provider-runtime claims.
    - Setup: `npm run setup:e2e:native`
    - Run: `npm run test:e2e:native`
+   - CLI shared-state smoke: `npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mjs`
    - Generated native driver artifacts live under `tools/e2e-native/` and are intentionally ignored by git.
 5. **Real Provider E2E**: run only when a change specifically depends on provider-specific native behavior and the native runtime harness is available.
    - Keep these runs isolated and opt-in.
@@ -95,6 +96,7 @@ When writing a test, pick the **lowest** layer that can prove the behavior:
 | UI rendering, navigation, form inputs | Browser E2E |
 | Agent lifecycle with mock provider (spawn/status/kill) | Browser E2E |
 | PTY resize, `invoke` IPC commands | Native E2E |
+| App-created agent readable through CLI state | Native E2E |
 | Real filesystem ops (junctions, workspace init) | Native E2E |
 | Provider-specific spawn or token behavior | Real Provider E2E |
 
@@ -119,6 +121,20 @@ Set `WARDIAN_HOME` to redirect all state to an isolated directory:
 WARDIAN_HOME=/tmp/wardian-test npm run tauri dev
 ```
 This prevents test runs from interfering with production `~/.wardian` state.
+
+When testing the dev app and CLI together, set the same explicit `WARDIAN_HOME` in both terminals. The CLI defaults to production `~/.wardian`, while the dev app may use debug state unless this is set.
+
+PowerShell:
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
+npm run dev
+```
+
+Second terminal:
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-cli-dev"
+cargo run -p wardian-cli -- agent list --scope all
+```
 
 ## 🛠️ Workflow Rules
 - **Surgical Code Changes**: Use the `replace` tool for precise, context-aware edits. Avoid overwriting entire files unless scaffolding new modules.
