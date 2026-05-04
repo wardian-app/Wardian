@@ -280,6 +280,7 @@ export const ScheduleEditor: React.FC<ScheduleEditorProps> = ({ value, onChange,
           <label className={labelClass}>Date & Time</label>
           <input
             type="datetime-local"
+            aria-label="Date & Time"
             value={value.run_at || ''}
             onChange={(e) => update({ run_at: e.target.value })}
             className={inputClass}
@@ -304,6 +305,7 @@ export const ScheduleEditor: React.FC<ScheduleEditorProps> = ({ value, onChange,
                     if (ec === 'on_date' && !value.end_date) payload.end_date = new Date().toISOString().split('T')[0];
                     update(payload);
                   }}
+                  aria-label={label}
                   className="accent-[var(--color-wardian-accent)] cursor-pointer"
                 />
                 <span className="text-[11px] text-[var(--color-wardian-text)]">{label}</span>
