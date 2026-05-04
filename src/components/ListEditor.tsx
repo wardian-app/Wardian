@@ -111,6 +111,8 @@ export const ListEditor: React.FC<ListEditorProps> = ({
               type="button"
               onClick={() => onChange(safeValues.filter((_, i) => i !== idx))}
               className="text-muted-neutral hover:text-red-400 p-0.5 transition-colors shrink-0"
+              aria-label={`Remove ${label.toLowerCase()} value ${idx + 1}`}
+              title={`Remove ${label.toLowerCase()} value ${idx + 1}`}
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
