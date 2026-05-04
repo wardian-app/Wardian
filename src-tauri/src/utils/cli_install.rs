@@ -74,7 +74,9 @@ where
         InstallOutcome::AlreadyInstalled(launcher)
     };
 
-    update_path(&target_dir)?;
+    if std::env::var_os("WARDIAN_HOME").is_none() {
+        update_path(&target_dir)?;
+    }
     Ok(outcome)
 }
 
@@ -338,7 +340,29 @@ mod tests {
         assert!(std::fs::read_to_string(launcher_target)
             .unwrap()
             .contains("wardian-cli"));
-        assert_eq!(path_updates, 1);
+        assert_eq!(path_updates, 0);
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn installer_skips_user_path_update_for_custom_wardian_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = TempDir::new().unwrap();
+        let resources = TempDir::new().unwrap();
+        let source_dir = resources.path().join("bin");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let mut path_updates = 0;
+        install_cli_from_resources_with_path_update(resources.path(), |_bin_dir| {
+            path_updates += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(path_updates, 0);
 
         std::env::remove_var("WARDIAN_HOME");
     }
