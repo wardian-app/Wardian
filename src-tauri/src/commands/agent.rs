@@ -317,6 +317,135 @@ fn is_valid_name(name: &str) -> bool {
     re.is_match(name)
 }
 
+fn generated_agent_name(
+    agent_class: &str,
+    existing_names: &std::collections::HashSet<String>,
+) -> String {
+    generated_agent_name_from_base(&generated_agent_name_base(agent_class), existing_names)
+}
+
+fn generated_agent_name_base(agent_class: &str) -> String {
+    let mut previous_was_separator = false;
+    let mut base = String::new();
+
+    for ch in agent_class.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            base.push(ch);
+            previous_was_separator = false;
+        } else if !previous_was_separator && !base.is_empty() {
+            base.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    let base = base.trim_matches('-');
+    if base.is_empty() {
+        "Agent".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+fn generated_agent_name_from_base(
+    base: &str,
+    existing_names: &std::collections::HashSet<String>,
+) -> String {
+    let mut index = 1;
+    loop {
+        let candidate = format!("{}-{}", base, index);
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn invalid_agent_name_error() -> String {
+    "Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string()
+}
+
+fn resolve_requested_spawn_session_name(
+    requested_session_name: &str,
+    agent_class: &str,
+    existing_names: &std::collections::HashSet<String>,
+) -> Result<String, String> {
+    if requested_session_name.trim().is_empty() {
+        return Ok(generated_agent_name(agent_class, existing_names));
+    }
+
+    if !is_valid_name(requested_session_name) {
+        return Err(invalid_agent_name_error());
+    }
+
+    if existing_names.contains(requested_session_name) {
+        return Err(format!(
+            "An agent with the name '{}' already exists.",
+            requested_session_name
+        ));
+    }
+
+    Ok(requested_session_name.to_string())
+}
+
+fn resolve_registered_session_name(
+    session_name: &str,
+    clone_name_base: Option<&str>,
+    existing_names: &std::collections::HashSet<String>,
+) -> Result<String, String> {
+    if !existing_names.contains(session_name) {
+        return Ok(session_name.to_string());
+    }
+
+    if let Some(base) = clone_name_base {
+        return Ok(clone_unique_name(base, existing_names));
+    }
+
+    Err(format!(
+        "An agent with the name '{}' already exists.",
+        session_name
+    ))
+}
+
+struct SpawnNameReservation {
+    session_name: String,
+}
+
+async fn reserve_spawn_session_name(
+    state: &AppState,
+    requested_session_name: &str,
+    agent_class: &str,
+) -> Result<SpawnNameReservation, String> {
+    let agents = state.agents.lock().await;
+    let mut existing_names = agents
+        .values()
+        .map(|agent| agent.config.lock().unwrap().session_name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut reservations = state.agent_name_reservations.lock().await;
+    existing_names.extend(reservations.iter().cloned());
+    let session_name =
+        resolve_requested_spawn_session_name(requested_session_name, agent_class, &existing_names)?;
+    reservations.insert(session_name.clone());
+    Ok(SpawnNameReservation { session_name })
+}
+
+async fn release_spawn_name_reservation(state: &AppState, session_name: &str) {
+    let mut reservations = state.agent_name_reservations.lock().await;
+    reservations.remove(session_name);
+}
+
+fn normalize_workspace_record_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn normalize_spawn_folder(folder: &str) -> Result<String, String> {
+    if folder.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    crate::utils::fs::validate_workspace_path(std::path::Path::new(folder))
+        .map(|path| normalize_workspace_record_path(&path))
+}
+
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
 
@@ -423,6 +552,7 @@ async fn register_new_agent(
     state: &AppState,
     app: &AppHandle,
     clone_name_base: Option<&str>,
+    reserved_session_name: Option<&str>,
 ) -> Result<AgentConfig, String> {
     let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
@@ -500,16 +630,20 @@ async fn register_new_agent(
         .values()
         .map(|agent| agent.config.lock().unwrap().session_name.clone())
         .collect::<std::collections::HashSet<_>>();
-    if existing_names.contains(&config.session_name) {
-        if let Some(base) = clone_name_base {
-            config.session_name = clone_unique_name(base, &existing_names);
-        } else {
+    match resolve_registered_session_name(
+        &config.session_name,
+        clone_name_base,
+        &existing_names,
+    ) {
+        Ok(session_name) => config.session_name = session_name,
+        Err(error) => {
             manager::terminate_active_agent_process(&mut active_agent);
-            return Err(format!(
-                "An agent with the name '{}' already exists.",
-                config.session_name
-            ));
+            return Err(error);
         }
+    }
+    if let Some(reserved_session_name) = reserved_session_name {
+        let mut reservations = state.agent_name_reservations.lock().await;
+        reservations.remove(reserved_session_name);
     }
     {
         let mut cfg = active_agent.config.lock().unwrap();
@@ -534,23 +668,16 @@ pub async fn spawn_agent(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AgentConfig, String> {
-    let session_name = req.session_name;
+    let requested_session_name = req.session_name;
     let agent_class = req.agent_class;
-    let folder = req.folder;
+    let folder = normalize_spawn_folder(&req.folder)?;
     let resume_session = req.resume_session;
     let is_off = req.is_off;
     let config_override = req.config_override;
 
-    if !is_valid_name(&session_name) {
-        return Err("Invalid agent name. Names must contain only alphanumeric characters, underscores, or hyphens (no spaces).".to_string());
-    }
-
-    if !is_name_unique(&state, &session_name, None).await {
-        return Err(format!(
-            "An agent with the name '{}' already exists.",
-            session_name
-        ));
-    }
+    let name_reservation =
+        reserve_spawn_session_name(&state, &requested_session_name, &agent_class).await?;
+    let session_name = name_reservation.session_name.clone();
 
     manager::log_debug(&format!(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
@@ -583,6 +710,7 @@ pub async fn spawn_agent(
                     actual_resume = Some(real_sid);
                 }
                 Err(e) => {
+                    release_spawn_name_reservation(&state, &session_name).await;
                     return Err(format!("Failed to initialize the provider session: {}", e));
                 }
             }
@@ -593,12 +721,24 @@ pub async fn spawn_agent(
 
     let mut config = config_override.unwrap_or_default();
     config.session_id = session_id.clone();
-    config.session_name = session_name;
+    config.session_name = session_name.clone();
     config.agent_class = agent_class.clone();
     config.folder = folder;
     config.resume_session = actual_resume.clone();
     config.is_off = is_off.unwrap_or(false);
-    register_new_agent(config, actual_resume, &state, &app, None).await
+    let registered = register_new_agent(
+        config,
+        actual_resume,
+        &state,
+        &app,
+        None,
+        Some(&session_name),
+    )
+    .await;
+    if registered.is_err() {
+        release_spawn_name_reservation(&state, &session_name).await;
+    }
+    registered
 }
 
 #[tauri::command]
@@ -747,6 +887,7 @@ pub async fn clone_agent(
         &state,
         &app,
         generated_session_name.then_some(source_config.session_name.as_str()),
+        None,
     )
     .await
 }
@@ -1230,11 +1371,13 @@ mod tests {
     use super::{
         clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
         clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
-        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        restore_runtime_state_after_resume,
+        generated_agent_name,
+        normalize_spawn_folder, persisted_resume_session_for_provider, prepare_clear_config,
+        prepare_resume_config, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, reserve_spawn_session_name,
+        resolve_requested_spawn_session_name, restore_runtime_state_after_resume,
     };
-    use crate::state::ActiveAgent;
+    use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
@@ -1290,6 +1433,87 @@ mod tests {
         assert_eq!(
             clone_unique_name("Alpha", &clone_name_set(&["Alpha", "Alpha-copy"])),
             "Alpha-copy-2"
+        );
+    }
+
+    #[test]
+    fn generated_agent_name_uses_class_and_lowest_available_suffix() {
+        assert_eq!(
+            generated_agent_name("Coder", &clone_name_set(&["Coder-1", "Coder-2"])),
+            "Coder-3"
+        );
+    }
+
+    #[test]
+    fn generated_agent_name_sanitizes_class_name() {
+        assert_eq!(
+            generated_agent_name("Data Analyst", &HashSet::new()),
+            "Data-Analyst-1"
+        );
+    }
+
+    #[test]
+    fn generated_agent_name_falls_back_when_class_has_no_valid_name_chars() {
+        assert_eq!(generated_agent_name(" !!! ", &HashSet::new()), "Agent-1");
+    }
+
+    #[test]
+    fn explicit_spawn_name_with_spaces_still_fails_validation() {
+        let err = resolve_requested_spawn_session_name(" Coder ", "Coder", &HashSet::new())
+            .expect_err("explicit names with spaces must remain invalid");
+
+        assert!(err.contains("Invalid agent name"));
+    }
+
+    #[tokio::test]
+    async fn blank_spawn_name_reservations_choose_unique_names_before_spawn() {
+        let state = AppState::new();
+
+        let first = reserve_spawn_session_name(&state, "", "Coder")
+            .await
+            .expect("first reservation");
+        let second = reserve_spawn_session_name(&state, "", "Coder")
+            .await
+            .expect("second reservation");
+
+        assert_eq!(first.session_name, "Coder-1");
+        assert_eq!(second.session_name, "Coder-2");
+    }
+
+    #[test]
+    fn normalize_spawn_folder_stores_forward_slash_absolute_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let slash_input = workspace.to_string_lossy().replace('\\', "/");
+        let normalized = normalize_spawn_folder(&slash_input).expect("normalize slash path");
+
+        assert!(!normalized.contains('\\'));
+        assert!(std::path::Path::new(&normalized).is_absolute());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_spawn_folder_accepts_windows_separator_variants() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let slash_input = workspace.to_string_lossy().replace('\\', "/");
+        let backslash_input = slash_input.replace('/', "\\");
+        let doubled_backslash_input = slash_input.replace('/', "\\\\");
+
+        let slash_normalized = normalize_spawn_folder(&slash_input).expect("slash path");
+        let backslash_normalized = normalize_spawn_folder(&backslash_input).expect("backslash path");
+        let doubled_backslash_normalized =
+            normalize_spawn_folder(&doubled_backslash_input).expect("doubled backslash path");
+
+        assert_eq!(
+            slash_normalized, backslash_normalized,
+            "single backslash path should normalize the same as slash path"
+        );
+        assert_eq!(
+            slash_normalized, doubled_backslash_normalized,
+            "doubled backslash path should normalize the same as slash path"
         );
     }
 

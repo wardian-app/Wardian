@@ -1,5 +1,5 @@
 use crate::state::active_agent::ActiveAgent;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -16,6 +16,7 @@ pub struct AppState {
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
     pub system_metrics: Arc<Mutex<sysinfo::System>>,
     pub agent_order: Mutex<Vec<String>>,
+    pub agent_name_reservations: Mutex<HashSet<String>>,
     // Separate, lightweight map for stdin senders — completely independent from the
     // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
     pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
@@ -45,6 +46,7 @@ impl Default for AppState {
             agents: Mutex::new(HashMap::new()),
             system_metrics: Arc::new(Mutex::new(sys)),
             agent_order: Mutex::new(Vec::new()),
+            agent_name_reservations: Mutex::new(HashSet::new()),
             input_senders: RwLock::new(HashMap::new()),
             workflow_triggers: Mutex::new(HashMap::new()),
             workflow_runs: Mutex::new(HashMap::new()),

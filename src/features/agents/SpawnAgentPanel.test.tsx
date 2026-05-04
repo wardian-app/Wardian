@@ -67,4 +67,50 @@ describe("SpawnAgentPanel", () => {
 
     expect(workspacePath).toHaveValue("C:\\projects\\typed-app");
   });
+
+  it("submits a blank name so the backend can generate one", async () => {
+    invokeMock.mockResolvedValue({
+      session_id: "agent-1",
+      session_name: "Generalist-1",
+      agent_class: "Generalist",
+      folder: "",
+      is_off: false,
+    });
+    const user = userEvent.setup();
+    const onSpawned = vi.fn();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={onSpawned}
+      />,
+    );
+
+    await user.click(screen.getByTestId("spawn-submit"));
+
+    expect(invokeMock).toHaveBeenCalledWith("spawn_agent", {
+      req: expect.objectContaining({
+        sessionName: "",
+        agentClass: "Generalist",
+      }),
+    });
+    expect(onSpawned).toHaveBeenCalled();
+  });
+
+  it("blocks explicit names with spaces", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    await user.type(screen.getByTestId("spawn-agent-name"), " Coder ");
+    await user.click(screen.getByTestId("spawn-submit"));
+
+    expect(invokeMock).not.toHaveBeenCalledWith("spawn_agent", expect.anything());
+    expect(screen.getByText(/Names must be alphanumeric/)).toBeInTheDocument();
+  });
 });
