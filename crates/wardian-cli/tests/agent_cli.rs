@@ -41,6 +41,52 @@ fn seed_home() -> TempDir {
     dir
 }
 
+fn seed_legacy_home() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("state.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agents (
+            session_id TEXT PRIMARY KEY,
+            session_name TEXT UNIQUE,
+            agent_class TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_off BOOLEAN DEFAULT 0,
+            last_status TEXT,
+            last_pid INTEGER
+        );
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            event_type TEXT,
+            payload TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agents (
+            session_id,
+            session_name,
+            agent_class,
+            created_at,
+            is_off,
+            last_status,
+            last_pid
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            "legacy-uuid-1",
+            "legacy-coder",
+            "Coder",
+            "2026-05-03T20:00:00.000Z",
+            false,
+            "Idle",
+            42
+        ],
+    )
+    .unwrap();
+    dir
+}
+
 fn bin() -> std::path::PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_wardian-cli") {
         return path.into();
@@ -139,6 +185,24 @@ fn list_scope_all_returns_agents() {
     assert!(stdout.contains(r#""agents":["#));
     assert!(stdout.contains("coder-a1"));
     assert!(stdout.contains("architect-a1"));
+}
+
+#[test]
+fn legacy_state_db_is_migrated_before_cli_queries() {
+    let home = seed_legacy_home();
+    let output = Command::new(bin())
+        .args(["agent", "legacy-coder", "--field", "status"])
+        .env("WARDIAN_HOME", home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "idle\n");
 }
 
 #[test]

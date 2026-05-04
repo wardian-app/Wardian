@@ -66,7 +66,7 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
 }
 
 fn handle_show(target: Option<&str>, args: &AgentArgs) -> Result<String, CliError> {
-    let conn = open_readonly_db()?;
+    let conn = open_db()?;
     let agent = match target {
         Some(target) => identity::resolve_by_name_or_uuid(&conn, target).map_err(identity_error)?,
         None => identity::resolve_self(&conn).map_err(identity_error)?,
@@ -81,7 +81,7 @@ fn handle_list(
     project: Option<String>,
     args: &AgentArgs,
 ) -> Result<String, CliError> {
-    let conn = open_readonly_db()?;
+    let conn = open_db()?;
     let requested_scope = if project.is_some() {
         Scope::All
     } else {
@@ -134,7 +134,7 @@ fn render_options(args: &AgentArgs) -> RenderOptions {
     }
 }
 
-fn open_readonly_db() -> Result<rusqlite::Connection, CliError> {
+fn open_db() -> Result<rusqlite::Connection, CliError> {
     let path = wardian_core::paths::state_db_path()
         .ok_or_else(|| CliError::db_unavailable("Could not resolve Wardian state.db path"))?;
     if !path.exists() {
@@ -143,8 +143,11 @@ fn open_readonly_db() -> Result<rusqlite::Connection, CliError> {
             path.display()
         )));
     }
-    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| CliError::db_unavailable(error.to_string()))
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|error| CliError::db_unavailable(error.to_string()))?;
+    wardian_core::db::run_migrations(&conn)
+        .map_err(|error| CliError::db_unavailable(error.to_string()))?;
+    Ok(conn)
 }
 
 fn identity_error(error: identity::IdentityError) -> CliError {
