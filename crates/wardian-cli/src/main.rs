@@ -63,6 +63,12 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             &args,
         ),
         None => handle_show(args.target.as_deref(), &args),
+        // Phase A lifecycle commands — implemented in Task 5
+        Some(AgentCommand::Kill { .. })
+        | Some(AgentCommand::Pause { .. })
+        | Some(AgentCommand::Resume { .. })
+        | Some(AgentCommand::Spawn { .. })
+        | Some(AgentCommand::Clone { .. }) => Err(CliError::generic("not yet implemented")),
     }
 }
 

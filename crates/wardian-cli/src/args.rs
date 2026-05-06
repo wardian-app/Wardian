@@ -47,6 +47,28 @@ pub enum AgentCommand {
         #[arg(long)]
         workspace: Option<String>,
     },
+    Kill {
+        target: String,
+    },
+    Pause {
+        target: String,
+    },
+    Resume {
+        target: String,
+    },
+    Spawn {
+        #[arg(long = "class")]
+        class: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    Clone {
+        target: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -120,6 +142,60 @@ mod tests {
         assert_eq!(args.field.as_deref(), Some("status"));
         assert!(args.verbose);
         assert!(args.pretty);
+    }
+
+    #[test]
+    fn parses_agent_kill() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "kill", "coder-a1"]).unwrap();
+        let Command::Agent(args) = cli.command else { panic!() };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Kill { target }) if target == "coder-a1"
+        ));
+    }
+
+    #[test]
+    fn parses_agent_pause() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "pause", "coder-a1"]).unwrap();
+        let Command::Agent(args) = cli.command else { panic!() };
+        assert!(matches!(args.command, Some(AgentCommand::Pause { .. })));
+    }
+
+    #[test]
+    fn parses_agent_resume() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "resume", "coder-a1"]).unwrap();
+        let Command::Agent(args) = cli.command else { panic!() };
+        assert!(matches!(args.command, Some(AgentCommand::Resume { .. })));
+    }
+
+    #[test]
+    fn parses_agent_spawn_with_class() {
+        let cli = Cli::try_parse_from([
+            "wardian", "agent", "spawn", "--class", "Coder",
+            "--name", "coder-b1", "--workspace", "D:/Projects/foo",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else { panic!() };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Spawn { ref class, ref name, ref workspace })
+            if class == "Coder"
+                && name.as_deref() == Some("coder-b1")
+                && workspace.as_deref() == Some("D:/Projects/foo")
+        ));
+    }
+
+    #[test]
+    fn parses_agent_clone() {
+        let cli =
+            Cli::try_parse_from(["wardian", "agent", "clone", "coder-a1", "--name", "coder-a2"])
+                .unwrap();
+        let Command::Agent(args) = cli.command else { panic!() };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Clone { ref target, ref name })
+            if target == "coder-a1" && name.as_deref() == Some("coder-a2")
+        ));
     }
 
     #[test]
