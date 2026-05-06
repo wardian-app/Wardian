@@ -321,6 +321,21 @@ fn missing_db_exits_four() {
 }
 
 #[test]
+fn kill_without_app_running_exits_six() {
+    let home = seed_home();
+    let output = Command::new(bin())
+        .args(["agent", "kill", "coder-a1"])
+        .env("WARDIAN_HOME", home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(6));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"app_not_running""#));
+}
+
+#[test]
 fn malformed_args_emit_json_error_and_exit_one() {
     let output = Command::new(bin())
         .args(["agent", "list", "--definitely-not-a-real-flag"])

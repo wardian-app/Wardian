@@ -9,6 +9,7 @@ pub enum ExitCode {
     NotInSession = 3,
     DbUnavailable = 4,
     Ambiguous = 5,
+    AppNotRunning = 6,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +83,16 @@ impl CliError {
             message: format!("Unknown field: {field}"),
             hint: Some("Use one of: name, uuid, class, provider, workspace, status, status_source, pid, started_at, last_status_at.".to_string()),
             details: Some(Box::new(serde_json::json!({ "field": field }))),
+        }
+    }
+
+    pub fn app_not_running() -> Self {
+        Self {
+            exit_code: ExitCode::AppNotRunning,
+            code: "app_not_running",
+            message: "Wardian is not running. Start the app to use this command.".to_string(),
+            hint: Some("Launch Wardian, then retry.".to_string()),
+            details: None,
         }
     }
 
