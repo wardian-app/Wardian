@@ -10,6 +10,55 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Agent(AgentArgs),
+    Workflow(WorkflowArgs),
+    Send(SendArgs),
+}
+
+// ---------------------------------------------------------------------------
+// wardian workflow
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct WorkflowArgs {
+    #[command(subcommand)]
+    pub command: WorkflowCommand,
+
+    #[arg(long, global = true)]
+    pub pretty: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    List,
+    Show { target: String },
+    Run { target: String },
+    Stop { run_instance_id: String },
+}
+
+// ---------------------------------------------------------------------------
+// wardian send
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct SendArgs {
+    /// Message text (omit when using --stdin or --file)
+    pub message: Option<String>,
+
+    /// Target: agent name, UUID, "class:<ClassName>", or "all"
+    #[arg(long)]
+    pub to: String,
+
+    /// Read message from stdin
+    #[arg(long, conflicts_with = "message")]
+    pub stdin: bool,
+
+    /// Read message from a file
+    #[arg(long, conflicts_with_all = ["message", "stdin"])]
+    pub file: Option<String>,
+
+    /// Thread name for grouped conversations
+    #[arg(long)]
+    pub thread: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -85,7 +134,7 @@ mod tests {
     #[test]
     fn parses_agent_show_explicit_target() {
         let cli = Cli::try_parse_from(["wardian", "agent", "show", "coder-a1"]).unwrap();
-        let Command::Agent(args) = cli.command;
+        let Command::Agent(args) = cli.command else { panic!("expected Agent command") };
         assert!(matches!(
             args.command,
             Some(AgentCommand::Show { target }) if target.as_deref() == Some("coder-a1")
@@ -108,7 +157,7 @@ mod tests {
             "D:/Development/Wardian",
         ])
         .unwrap();
-        let Command::Agent(args) = cli.command;
+        let Command::Agent(args) = cli.command else { panic!("expected Agent command") };
         assert!(matches!(
             args.command,
             Some(AgentCommand::List {
@@ -137,7 +186,7 @@ mod tests {
             "--pretty",
         ])
         .unwrap();
-        let Command::Agent(args) = cli.command;
+        let Command::Agent(args) = cli.command else { panic!("expected Agent command") };
         assert_eq!(args.fields.as_deref(), Some("name,status"));
         assert_eq!(args.field.as_deref(), Some("status"));
         assert!(args.verbose);
@@ -211,7 +260,7 @@ mod tests {
             "--pretty",
         ])
         .unwrap();
-        let Command::Agent(args) = cli.command;
+        let Command::Agent(args) = cli.command else { panic!("expected Agent command") };
         assert_eq!(args.fields.as_deref(), Some("name,status"));
         assert!(args.pretty);
     }

@@ -3,7 +3,9 @@ mod errors;
 mod live;
 mod output;
 
-use args::{AgentArgs, AgentCommand, Cli, Command};
+use std::io::Read as _;
+
+use args::{AgentArgs, AgentCommand, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand};
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
@@ -20,6 +22,8 @@ fn run() -> i32 {
     };
     let result = match cli.command {
         Command::Agent(args) => handle_agent(args),
+        Command::Workflow(args) => handle_workflow(args),
+        Command::Send(args) => handle_send(args),
     };
 
     match result {
@@ -47,6 +51,10 @@ fn handle_parse_error(error: clap::Error) -> i32 {
     ExitCode::Generic as i32
 }
 
+// ---------------------------------------------------------------------------
+// wardian agent
+// ---------------------------------------------------------------------------
+
 fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
     match &args.command {
         Some(AgentCommand::Show { target }) => handle_show(target.as_deref(), &args),
@@ -63,12 +71,148 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             &args,
         ),
         None => handle_show(args.target.as_deref(), &args),
-        // Phase A lifecycle commands — implemented in Task 5
-        Some(AgentCommand::Kill { .. })
-        | Some(AgentCommand::Pause { .. })
-        | Some(AgentCommand::Resume { .. })
-        | Some(AgentCommand::Spawn { .. })
-        | Some(AgentCommand::Clone { .. }) => Err(CliError::generic("not yet implemented")),
+        Some(AgentCommand::Kill { target }) => handle_agent_kill(target),
+        Some(AgentCommand::Pause { target }) => handle_agent_pause(target),
+        Some(AgentCommand::Resume { target }) => handle_agent_resume(target),
+        Some(AgentCommand::Spawn { class, name, workspace }) => {
+            handle_agent_spawn(class, name.as_deref(), workspace.as_deref(), &args)
+        }
+        Some(AgentCommand::Clone { target, name }) => {
+            handle_agent_clone(target, name.as_deref(), &args)
+        }
+    }
+}
+
+fn handle_agent_kill(target: &str) -> Result<String, CliError> {
+    live::agent_kill(target).map_err(control_error)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true,"target":target}))
+            .unwrap()
+    ))
+}
+
+fn handle_agent_pause(target: &str) -> Result<String, CliError> {
+    live::agent_pause(target).map_err(control_error)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true,"target":target}))
+            .unwrap()
+    ))
+}
+
+fn handle_agent_resume(target: &str) -> Result<String, CliError> {
+    live::agent_resume(target).map_err(control_error)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true,"target":target}))
+            .unwrap()
+    ))
+}
+
+fn handle_agent_spawn(
+    class: &str,
+    name: Option<&str>,
+    workspace: Option<&str>,
+    args: &AgentArgs,
+) -> Result<String, CliError> {
+    let agent = live::agent_spawn(class, name, workspace).map_err(control_error)?;
+    render_show(&agent, &render_options(args))
+}
+
+fn handle_agent_clone(
+    target: &str,
+    name: Option<&str>,
+    args: &AgentArgs,
+) -> Result<String, CliError> {
+    let agent = live::agent_clone(target, name).map_err(control_error)?;
+    render_show(&agent, &render_options(args))
+}
+
+// ---------------------------------------------------------------------------
+// wardian workflow
+// ---------------------------------------------------------------------------
+
+fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
+    match args.command {
+        WorkflowCommand::List => {
+            let workflows = live::list_workflows_from_disk()
+                .map_err(|e| CliError::generic(e.to_string()))?;
+            output::render_workflow_list(&workflows, args.pretty)
+        }
+        WorkflowCommand::Show { target } => {
+            let workflows = live::list_workflows_from_disk()
+                .map_err(|e| CliError::generic(e.to_string()))?;
+            let wf = workflows
+                .into_iter()
+                .find(|w| w.id == target || w.name == target)
+                .ok_or_else(|| CliError::not_found(&target))?;
+            output::render_workflow_show(&wf, args.pretty)
+        }
+        WorkflowCommand::Run { target } => {
+            live::workflow_run(&target).map_err(control_error)?;
+            Ok(format!(
+                "{}\n",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"schema":1,"ok":true,"workflow":target})
+                )
+                .unwrap()
+            ))
+        }
+        WorkflowCommand::Stop { run_instance_id } => {
+            live::workflow_stop(&run_instance_id).map_err(control_error)?;
+            Ok(format!(
+                "{}\n",
+                serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true})).unwrap()
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wardian send
+// ---------------------------------------------------------------------------
+
+fn handle_send(args: SendArgs) -> Result<String, CliError> {
+    let message = if args.stdin {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| CliError::generic(e.to_string()))?;
+        buf
+    } else if let Some(path) = &args.file {
+        std::fs::read_to_string(path).map_err(|e| CliError::generic(e.to_string()))?
+    } else {
+        args.message
+            .clone()
+            .ok_or_else(|| CliError::generic("Provide a message, --stdin, or --file".to_string()))?
+    };
+
+    live::send_message(&args.to, &message, args.thread.as_deref()).map_err(control_error)?;
+
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(
+            &serde_json::json!({"schema":1,"ok":true,"target":args.to})
+        )
+        .unwrap()
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+fn control_error(e: std::io::Error) -> CliError {
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::TimedOut
+    ) {
+        CliError::app_not_running()
+    } else {
+        CliError::generic(e.to_string())
     }
 }
 
