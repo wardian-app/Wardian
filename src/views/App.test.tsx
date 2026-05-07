@@ -488,6 +488,64 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
+  it("adds an agent completion to the queue when agent metrics transition from active to Idle", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const emitAgentMetrics = captureAgentMetricsListener();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "agent-1",
+          current_status: "Processing...",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 1,
+          query_count: 1,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "agent-1",
+          current_status: "Idle",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 2,
+          query_count: 1,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "save_queue_items",
+        expect.objectContaining({
+          items: [
+            expect.objectContaining({
+              type: "agent_completed",
+              agent_session_id: "agent-1",
+              agent_name: "Alpha",
+              summary: "Completed",
+              read: false,
+            }),
+          ],
+        }),
+      );
+    });
+  });
+
   it("shows Select All and Clear buttons", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {

@@ -95,6 +95,13 @@ function AppBody() {
   const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
   const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
+  const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+    const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
+    if (currentStatus === "Idle" && (wasActive || hasAgentBufferedContent(sessionId))) {
+      const agent = agentsRef.current.find((a) => a.session_id === sessionId);
+      flushAgentCompletion(sessionId, agent?.session_name ?? sessionId);
+    }
+  }, [flushAgentCompletion, hasAgentBufferedContent]);
 
   useEffect(() => {
     const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
@@ -584,6 +591,7 @@ function AppBody() {
       const mapping: Record<string, AgentTelemetry> = {};
       for (const m of event.payload) mapping[m.session_id] = m;
       for (const [sessionId, metric] of Object.entries(mapping)) {
+        maybeFlushAgentQueueCompletion(sessionId, metric.current_status, agentStatusRef.current[sessionId]);
         agentStatusRef.current[sessionId] = metric.current_status;
       }
       setTelemetry(prev => {
@@ -615,13 +623,8 @@ function AppBody() {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
       }
       const previousStatus = agentStatusRef.current[session_id];
-      const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
-      const shouldFlush = current_status === "Idle" && (wasActive || hasAgentBufferedContent(session_id));
+      maybeFlushAgentQueueCompletion(session_id, current_status, previousStatus);
       agentStatusRef.current[session_id] = current_status;
-      if (shouldFlush) {
-        const agent = agentsRef.current.find((a) => a.session_id === session_id);
-        flushAgentCompletion(session_id, agent?.session_name ?? session_id);
-      }
       setTelemetry(prev => {
         return {
           ...prev,
@@ -643,7 +646,7 @@ function AppBody() {
       unlistenAppMetrics.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
-  }, [flushAgentCompletion, hasAgentBufferedContent]);
+  }, [maybeFlushAgentQueueCompletion]);
 
   async function sendCommand(sessionId: string, cmd: string) {
     try {
