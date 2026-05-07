@@ -34,7 +34,7 @@ interface ScheduleEditorProps {
 
 const inputClass = "w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-lg px-3 py-1.5 text-[11px] text-[var(--color-wardian-text)] outline-none focus:border-[var(--color-wardian-accent)]/50 transition-colors";
 const selectClass = inputClass + " cursor-pointer";
-const labelClass = "text-[10px] font-bold text-muted-neutral uppercase tracking-wider";
+const labelClass = "text-[11px] font-bold text-muted-neutral tracking-wide";
 
 export const ScheduleEditor: React.FC<ScheduleEditorProps> = ({ value, onChange, compact }) => {
   const schedType = value.schedule_type || 'interval';

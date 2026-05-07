@@ -424,7 +424,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                 <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${stagedOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
                 </svg>
-                <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Staged Changes</span>
+                <span className="text-[11px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">Staged changes</span>
               </button>
               <div className="flex-1" />
               <button
@@ -461,7 +461,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                 <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${changesOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
                 </svg>
-                <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Changes</span>
+                <span className="text-[11px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">Changes</span>
               </button>
               <div className="flex-1" />
               <button
@@ -499,7 +499,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                 <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${untrackedOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
                 </svg>
-                <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">Untracked</span>
+                <span className="text-[11px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">Untracked</span>
               </button>
               <div className="flex-1" />
               <button
@@ -545,7 +545,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${historyOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
               </svg>
-              <span className="text-[10px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide uppercase">History</span>
+              <span className="text-[11px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">History</span>
               <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
                 {historyError ? "!" : history.length}
               </span>

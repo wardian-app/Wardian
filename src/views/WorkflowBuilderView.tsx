@@ -96,7 +96,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
   const confirm = useConfirm();
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
   const [isLibraryOpen, setIsBlockLibraryOpen] = React.useState(false);
-  const [activeCategory, setActiveCategory] = React.useState("ALL");
+  const [activeCategory, setActiveCategory] = React.useState("All");
   const [searchQuery, setSearchQuery] = React.useState("");
   
   const [isRenamingWf, setIsRenamingWf] = React.useState(false);
@@ -398,9 +398,9 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     [nodes, nodeStatuses]
   );
 
-  const categories = ["ALL", ...Array.from(new Set(BLOCK_LIBRARY.map(b => b.category)))];
+  const categories = ["All", ...Array.from(new Set(BLOCK_LIBRARY.map(b => b.category)))];
   const filteredBlocks = BLOCK_LIBRARY.filter(b => 
-    (activeCategory === "ALL" || b.category === activeCategory) &&
+    (activeCategory === "All" || b.category === activeCategory) &&
     (b.name.toLowerCase().includes(searchQuery.toLowerCase()) || b.description.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
@@ -541,14 +541,14 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                 }
               }
             }}
-            className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'hidden'}`}
+            className={`px-4 py-1.5 rounded-md text-[11px] font-bold tracking-wide transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'hidden'}`}
           >
             Reset
           </button>
           <button 
             disabled={!activeWorkflowId}
             onClick={handleSave}
-            className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed hidden'}`}
+            className={`px-4 py-1.5 rounded-md text-[11px] font-bold tracking-wide transition-all ${activeWorkflowId ? 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),var(--color-wardian-text)_10%)] hover:text-[var(--color-wardian-text)] border border-wardian-border cursor-pointer' : 'bg-[var(--color-wardian-card-bg-muted)] text-[var(--color-wardian-text-muted-neutral)] cursor-not-allowed hidden'}`}
           >
             {isSaving ? 'Saving...' : 'Save Changes'}
           </button>
@@ -556,7 +556,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
             data-testid="run-workflow-button"
             onClick={handleRun}
             disabled={!activeWorkflowId || hasGraphErrors}
-            className={`px-6 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer shadow-wardian-accent' : 'bg-wardian-error/10 text-wardian-error/50 cursor-not-allowed border border-wardian-error/20 shadow-none scale-100'}`}
+            className={`px-6 py-1.5 rounded-md text-[11px] font-bold tracking-wide transition-all ${activeWorkflowId && !hasGraphErrors ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] hover:bg-[var(--color-wardian-accent-hover)] hover:scale-105 active:scale-95 cursor-pointer shadow-wardian-accent' : 'bg-wardian-error/10 text-wardian-error/50 cursor-not-allowed border border-wardian-error/20 shadow-none scale-100'}`}
             title={hasGraphErrors ? "Cannot run: Fix node errors first" : undefined}
           >
             {hasGraphErrors ? 'Graph Error' : 'Run Workflow'}
@@ -679,7 +679,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                       onClick={() => setActiveCategory(cat)}
                       className={`w-full text-left px-4 py-3 rounded-xl text-xs font-bold tracking-wide transition-all cursor-pointer ${activeCategory === cat ? 'bg-[var(--color-wardian-accent)]/10 text-[var(--color-wardian-accent)] shadow-sm' : 'text-muted-neutral hover:bg-[var(--color-wardian-card-bg-muted)] hover:text-[var(--color-wardian-text)]'}`}
                     >
-                      {cat === "ALL" ? "✦ All Blocks" : cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase()}
+                      {cat === "All" ? "✦ All blocks" : cat}
                     </button>
                   ))}
                 </nav>
@@ -688,7 +688,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
               {/* Main Content */}
               <div className="flex-1 flex flex-col min-w-0">
                 <div className="h-16 border-b border-wardian-border flex items-center justify-between px-8 bg-[var(--color-wardian-card)]">
-                  <span className="text-sm font-mono font-bold text-muted-neutral tracking-wide">{activeCategory.charAt(0).toUpperCase() + activeCategory.slice(1).toLowerCase()} Blocks ({filteredBlocks.length})</span>
+                  <span className="text-sm font-mono font-bold text-muted-neutral tracking-wide">{activeCategory} blocks ({filteredBlocks.length})</span>
                   <button 
                     onClick={() => setIsBlockLibraryOpen(false)}
                     className="p-2 hover:bg-[var(--color-wardian-card-bg-muted)] rounded-full text-muted-neutral hover:text-[var(--color-wardian-text)] transition-all cursor-pointer"
@@ -713,11 +713,11 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                         
                         <div className="space-y-3 mt-auto pt-2 border-t border-white/5">
                           <div className="flex flex-col gap-1">
-                            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[var(--color-wardian-text-muted)] opacity-80">Input</span>
+                            <span className="text-[11px] font-mono font-bold tracking-wide text-[var(--color-wardian-text-muted)] opacity-80">Input</span>
                             <span className="text-sm font-mono text-[var(--color-wardian-text)]/80 break-all leading-tight">{block.inputs}</span>
                           </div>
                           <div className="flex flex-col gap-1">
-                            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[var(--color-wardian-text-muted)] opacity-80">Output</span>
+                            <span className="text-[11px] font-mono font-bold tracking-wide text-[var(--color-wardian-text-muted)] opacity-80">Output</span>
                             <span className="text-sm font-mono text-[var(--color-wardian-processing)] break-all leading-tight">{block.outputs}</span>
                           </div>
                         </div>
@@ -809,7 +809,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                   if (field.name === 'agent_id') {
                     return (
                       <div key={field.name} className="flex flex-col gap-2">
-                        <label className="text-[10px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{field.label}</label>
+                        <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] tracking-wide">{field.label}</label>
                         <select
                           className="p-3 rounded-xl bg-[var(--color-wardian-bg)] border border-wardian-border text-sm text-[var(--color-wardian-text)] w-full outline-none focus:ring-2 focus:ring-[var(--color-wardian-accent)] cursor-pointer"
                           value={val}
@@ -861,7 +861,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
                     
                     {blockDef.advancedFields && blockDef.advancedFields.length > 0 && (
                       <div className="pt-8 border-t border-wardian-border space-y-6">
-                        <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em]">Advanced Configuration</h4>
+                        <h4 className="text-[11px] font-bold text-muted-neutral tracking-wide">Advanced configuration</h4>
                         {blockDef.advancedFields.map(f => renderField(f))}
                       </div>
                     )}
@@ -871,7 +871,7 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
 
               <div className="pt-8 border-t border-wardian-border space-y-6">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-[10px] font-bold text-muted-neutral uppercase tracking-[0.3em]">Parameter Schema</h4>
+                  <h4 className="text-[11px] font-bold text-muted-neutral tracking-wide">Parameter schema</h4>
                 </div>
                 <p className="text-[10px] text-muted-neutral">Define required parameters and default values for this node.</p>
                 <SchemaEditor 
@@ -912,8 +912,6 @@ export const WorkflowBuilderView: React.FC<WorkflowBuilderViewProps> = ({ theme 
     </div>
   );
 };
-
-
 
 
 

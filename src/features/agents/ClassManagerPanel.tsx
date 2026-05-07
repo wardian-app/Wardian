@@ -52,7 +52,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   };
   
   const resetAllPrompts = async () => {
-    if (!confirm("Reset ALL default agent prompts to system defaults? This will overwrite your current AGENTS.md instructions for all default classes.")) return;
+    if (!confirm("Reset all default agent prompts to system defaults? This will overwrite your current AGENTS.md instructions for all default classes.")) return;
     try {
       await invoke("reset_all_class_prompts");
       alert("All default agent prompts have been reset to system defaults.");
@@ -148,9 +148,9 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
         <div className="px-1 mt-4">
             <button
                 onClick={resetAllPrompts}
-                className="w-full text-[9px] font-bold text-muted hover:text-[var(--color-wardian-accent)] uppercase tracking-[0.2em] py-3 border border-dashed border-wardian-light/20 rounded-lg transition-all hover:border-[var(--color-wardian-accent)]/30 group/reset"
+                className="w-full text-[11px] font-bold text-muted hover:text-[var(--color-wardian-accent)] tracking-wide py-3 border border-dashed border-wardian-light/20 rounded-lg transition-all hover:border-[var(--color-wardian-accent)]/30 group/reset"
             >
-                Reset All Default Prompts
+                Reset all default prompts
             </button>
             <p className="text-[9px] text-muted-neutral text-center mt-2 opacity-50 italic">
                 This will overwrite AGENTS.md for all default roles.

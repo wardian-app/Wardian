@@ -269,7 +269,7 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                         <span className="opacity-30">•</span>
                         <span className="truncate">{targetSummary}</span>
                       </div>
-                      <div className="mt-1 flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--color-wardian-accent)]/80">
+                      <div className="mt-1 flex items-center gap-1.5 text-[10px] font-bold tracking-wide text-[var(--color-wardian-accent)]/80">
                         <span>
                           {lastFailure
                             ? `Last failed: ${lastFailure}`
@@ -303,19 +303,19 @@ export const ActiveMonitoring: React.FC<ActiveMonitoringProps> = ({
                   {isExpanded && (
                     <div className="border-t border-wardian-border/20 px-2.5 py-2.5">
                       <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[9px] text-muted-neutral">
-                        <span className="font-bold uppercase tracking-[0.12em]">Schedule</span>
+                        <span className="font-bold tracking-wide">Schedule</span>
                         <span className="truncate">{formatScheduleSummary(schedule.schedule)}</span>
-                        <span className="font-bold uppercase tracking-[0.12em]">Status</span>
+                        <span className="font-bold tracking-wide">Status</span>
                         <span className="truncate">{status}</span>
-                        <span className="font-bold uppercase tracking-[0.12em]">Next</span>
+                        <span className="font-bold tracking-wide">Next</span>
                         <span className="truncate">{formatNextRun(schedule.next_run_epoch_ms)}</span>
-                        <span className="font-bold uppercase tracking-[0.12em]">Target</span>
+                        <span className="font-bold tracking-wide">Target</span>
                         <span className="truncate">{targetSummary}</span>
                         {roleMappings.map(([role, agentId]) => {
                           const agentName = agents.find(agent => agent.session_id === agentId)?.session_name || agentId;
                           return (
                             <React.Fragment key={role}>
-                              <span className="font-mono uppercase tracking-[0.08em]">{role}</span>
+                              <span className="font-mono tracking-wide">{role}</span>
                               <span className="truncate">{agentName}</span>
                             </React.Fragment>
                           );

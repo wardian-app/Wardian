@@ -62,8 +62,8 @@ describe('AssignSkillModal', () => {
 
     expect(await screen.findByText('Coder One')).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Target Scope'), 'class');
-    expect(screen.getByLabelText('Select Class')).toHaveValue('Coder');
-    await user.selectOptions(screen.getByLabelText('Select Class'), 'Reviewer');
+    expect(screen.getByLabelText('Select class')).toHaveValue('Coder');
+    await user.selectOptions(screen.getByLabelText('Select class'), 'Reviewer');
     await user.click(screen.getByRole('button', { name: 'Deploy Skill' }));
 
     expect(mockInvoke).toHaveBeenCalledWith('deploy_skill', {
@@ -80,7 +80,7 @@ describe('AssignSkillModal', () => {
 
     expect(await screen.findByText('Coder One')).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Target Scope'), 'agent');
-    expect(screen.getByLabelText('Select Agent')).toHaveValue('agent-1');
+    expect(screen.getByLabelText('Select agent')).toHaveValue('agent-1');
     await user.click(screen.getByRole('button', { name: 'Deploy Skill' }));
 
     expect(mockInvoke).toHaveBeenCalledWith('deploy_skill', {

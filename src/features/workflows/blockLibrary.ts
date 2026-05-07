@@ -42,7 +42,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'trigger', 
     name: 'Manual Trigger', 
-    category: 'TRIGGER', 
+    category: 'Trigger',
     description: 'Fires the initial sequence pulse.', 
     inputs: 'Provided Payload', 
     outputs: 'Trigger Context', 
@@ -52,7 +52,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'trigger', 
     name: 'File Watcher', 
-    category: 'TRIGGER', 
+    category: 'Trigger',
     description: 'Fires on file system events.', 
     inputs: 'Glob Pattern', 
     outputs: 'Trigger Context', 
@@ -66,7 +66,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   {
     type: 'trigger',
     name: 'Scheduled Trigger',
-    category: 'TRIGGER',
+    category: 'Trigger',
     description: 'Runs on a scheduled interval or at a specific time.',
     inputs: 'Schedule Config',
     outputs: 'Trigger Context',
@@ -76,17 +76,17 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     ]
   },
   
-  // EXECUTION
+  // Execution
   { 
     type: 'agent', 
     name: 'Agent', 
-    category: 'EXECUTION', 
+    category: 'Execution',
     description: 'Structured prompt execution via LLM.', 
     inputs: 'Registry Context', 
     outputs: 'Agent Result', 
     ports: DEFAULT_PORTS,
     fields: [
-      { name: 'agent_id', label: 'Target Agent', type: 'select', placeholder: 'Select Agent' },
+      { name: 'agent_id', label: 'Target agent', type: 'select', placeholder: 'Select agent' },
       { name: 'agent_class', label: 'Agent Class', type: 'select', placeholder: 'Select Class' },
       { name: 'prompt', label: 'Prompt Template', type: 'textarea', placeholder: 'Analyze {{nodes.step1.output}}', required: true },
       { name: 'mode', label: 'Run Mode', type: 'select', options: ['ephemeral', 'inherit_fresh', 'inherit_resume'], default: 'ephemeral' },
@@ -102,7 +102,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'command', 
     name: 'Shell Command', 
-    category: 'EXECUTION', 
+    category: 'Execution',
     description: 'Native PTY execution.', 
     inputs: 'Registry Context', 
     outputs: 'Cmd Result', 
@@ -120,7 +120,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'script', 
     name: 'Script', 
-    category: 'EXECUTION', 
+    category: 'Execution',
     description: 'Isolated local file execution.', 
     inputs: 'Registry Context', 
     outputs: 'Script Result', 
@@ -137,7 +137,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'tool', 
     name: 'Tool Call', 
-    category: 'EXECUTION', 
+    category: 'Execution',
     description: 'Direct MCP tool invocation.', 
     inputs: 'Registry Context', 
     outputs: 'Tool Result', 
@@ -146,11 +146,11 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     advancedFields: SIMPLE_ADVANCED
   },
 
-  // FLOW CONTROL
+  // Flow control
   { 
     type: 'logic', 
     name: 'Branch', 
-    category: 'FLOW CONTROL', 
+    category: 'Flow control',
     description: 'Branching based on conditions.', 
     inputs: 'Registry Context', 
     outputs: 'True/False Path',
@@ -160,7 +160,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'loop', 
     name: 'Loop', 
-    category: 'FLOW CONTROL', 
+    category: 'Flow control',
     description: 'Iterative execution pulse.', 
     inputs: 'Registry Context', 
     outputs: 'Body / Done', 
@@ -175,7 +175,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'wait', 
     name: 'Wait', 
-    category: 'FLOW CONTROL', 
+    category: 'Flow control',
     description: 'Synchronization barrier.', 
     inputs: 'Multiple Temporal signals', 
     outputs: 'Sync Stamp', 
@@ -185,7 +185,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'subflow', 
     name: 'Sub-Flow', 
-    category: 'FLOW CONTROL', 
+    category: 'Flow control',
     description: 'Invoke an existing workflow.', 
     inputs: 'Explicit Args', 
     outputs: 'Final Registry State', 
@@ -196,11 +196,11 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     ]
   },
 
-  // PERSISTENCE
+  // Persistence
   { 
     type: 'memory', 
     name: 'KV Storage', 
-    category: 'PERSISTENCE', 
+    category: 'Persistence',
     description: 'Read/Write to shared storage.', 
     inputs: 'Registry Context', 
     outputs: 'Result/Status', 
@@ -213,11 +213,11 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
     ]
   },
   
-  // COMMUNICATION
+  // Communication
   { 
     type: 'communication', 
     name: 'Notify', 
-    category: 'COMMUNICATION', 
+    category: 'Communication',
     description: 'Send UI toast or message.', 
     inputs: 'Registry Context', 
     outputs: 'Delivery Status', 
@@ -227,7 +227,7 @@ export const BLOCK_LIBRARY: BlockDefinition[] = [
   { 
     type: 'communication', 
     name: 'Broadcast', 
-    category: 'COMMUNICATION', 
+    category: 'Communication',
     description: 'Unified message to all agents.', 
     inputs: 'Registry Context', 
     outputs: 'Status', 
