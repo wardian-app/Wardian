@@ -134,6 +134,7 @@ describe("CommandPanel", () => {
 
     renderCommandPanel({ selectedAgentIds: new Set() });
     await user.click(screen.getByRole("button", { name: /Review Notes/i }));
+    expect(screen.getByText(/broadcast the prompt to all agents/i)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Confirm" }));
 
     await waitFor(() => {
@@ -170,6 +171,7 @@ describe("CommandPanel", () => {
     });
     await user.click(screen.getByTestId("broadcast-submit"));
     expect(onBroadcast).not.toHaveBeenCalled();
+    expect(screen.getByText(/broadcast to all agents/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onBroadcast).toHaveBeenCalledTimes(1);

@@ -307,6 +307,95 @@ fn restore_runtime_state_snapshot_after_resume(
     }
 }
 
+fn promote_fresh_provider_session_after_resume(
+    provider: &str,
+    new_active: &mut crate::state::ActiveAgent,
+) {
+    if provider != "claude" {
+        return;
+    }
+
+    let mut new_config = new_active.config.lock().unwrap();
+    if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
+        new_config.resume_session = Some(fresh_provider_session_id);
+    }
+}
+
+fn sync_resumed_input_sender(
+    state: &AppState,
+    session_id: &str,
+    stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+) {
+    if let Ok(mut senders) = state.input_senders.write() {
+        if let Some(tx) = stdin_tx {
+            senders.insert(session_id.to_string(), tx);
+        } else {
+            senders.remove(session_id);
+        }
+    }
+}
+
+fn agent_status_update_payload(session_id: &str, current_status: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "current_status": current_status,
+    })
+}
+
+struct ResumeRuntimeSnapshot {
+    config: AgentConfig,
+    init_timestamp: Option<String>,
+    query_count: usize,
+    log_path: Option<std::path::PathBuf>,
+}
+
+fn capture_resume_runtime_snapshot(agent: &crate::state::ActiveAgent) -> ResumeRuntimeSnapshot {
+    ResumeRuntimeSnapshot {
+        config: agent.config.lock().unwrap().clone(),
+        init_timestamp: agent.init_timestamp.lock().unwrap().clone(),
+        query_count: agent.query_count.lock().map(|count| *count).unwrap_or(0),
+        log_path: agent.log_path.lock().ok().and_then(|path| path.clone()),
+    }
+}
+
+fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
+    let provider = {
+        let config = agent.config.lock().unwrap();
+        config.provider.clone()
+    };
+
+    if provider != "opencode" {
+        return;
+    }
+
+    let mut config = agent.config.lock().unwrap();
+    if config
+        .resume_session
+        .as_deref()
+        .map(|s| !s.starts_with("ses_"))
+        .unwrap_or(true)
+    {
+        let log_path_snap = agent.log_path.lock().ok().and_then(|guard| guard.clone());
+        if let Some(log_path) = log_path_snap {
+            if let Some(ses_id) = manager::opencode_extract_created_session_id(&log_path) {
+                config.resume_session = Some(ses_id);
+            }
+        }
+    }
+}
+
+fn mark_agent_paused_off(agent: &mut crate::state::ActiveAgent) {
+    agent.pty_master = None;
+    agent.stdin_tx = None;
+    {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+    }
+    if let Ok(mut status) = agent.current_status.lock() {
+        *status = "Off".to_string();
+    }
+}
+
 fn is_valid_name(name: &str) -> bool {
     let re = regex::Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
     re.is_match(name)
@@ -999,38 +1088,10 @@ pub async fn pause_agent(
 
         // For opencode: capture the real ses_xxx session ID from the log so
         // resume can pass --session ses_xxx rather than the internal UUID.
-        let provider = {
-            let config = agent.config.lock().unwrap();
-            config.provider.clone()
-        };
+        capture_opencode_pause_resume_session(agent);
+        mark_agent_paused_off(agent);
 
-        if provider == "opencode" {
-            let mut config = agent.config.lock().unwrap();
-            if config
-                .resume_session
-                .as_deref()
-                .map(|s| !s.starts_with("ses_"))
-                .unwrap_or(true)
-            {
-                let log_path_snap = agent.log_path.lock().ok().and_then(|guard| guard.clone());
-                if let Some(log_path) = log_path_snap {
-                    if let Some(ses_id) = manager::opencode_extract_created_session_id(&log_path) {
-                        config.resume_session = Some(ses_id);
-                    }
-                }
-            }
-        }
-
-        agent.pty_master = None;
-        agent.stdin_tx = None;
-        {
-            let mut config = agent.config.lock().unwrap();
-            config.is_off = true;
-        }
         // Remove from input_senders
-        if let Ok(mut status) = agent.current_status.lock() {
-            *status = "Off".to_string();
-        }
         if let Ok(mut senders) = state.input_senders.write() {
             senders.remove(&session_id);
         }
@@ -1038,10 +1099,7 @@ pub async fn pause_agent(
         let _ = app.emit("agents-updated", ());
         let _ = app.emit(
             "agent-status-updated",
-            serde_json::json!({
-                "session_id": session_id,
-                "current_status": "Off",
-            }),
+            agent_status_update_payload(&session_id, "Off"),
         );
         Ok(())
     } else {
@@ -1059,31 +1117,30 @@ pub async fn resume_agent(
         "[WARDIAN] resume_agent called for session: {}",
         session_id
     ));
-    let (mut config, born, query_count, log_path) = {
+    let snapshot = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&session_id)
             .ok_or_else(|| format!("Agent {} not found", session_id))?;
-        let config = agent.config.lock().unwrap().clone();
-        let born = agent.init_timestamp.lock().unwrap().clone();
-        let query_count = agent.query_count.lock().map(|count| *count).unwrap_or(0);
-        let log_path = agent.log_path.lock().ok().and_then(|path| path.clone());
-        (config, born, query_count, log_path)
+        capture_resume_runtime_snapshot(agent)
     };
 
+    let mut config = snapshot.config;
     prepare_resume_config(&mut config)?;
-    let mut new_active =
-        manager::spawn_agent(app.clone(), config.clone(), true, born.clone()).await?;
-    restore_runtime_state_snapshot_after_resume(&mut new_active, query_count, born, log_path);
-
-    {
-        let mut new_config = new_active.config.lock().unwrap();
-        if config.provider == "claude" {
-            if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
-                new_config.resume_session = Some(fresh_provider_session_id);
-            }
-        }
-    }
+    let mut new_active = manager::spawn_agent(
+        app.clone(),
+        config.clone(),
+        true,
+        snapshot.init_timestamp.clone(),
+    )
+    .await?;
+    restore_runtime_state_snapshot_after_resume(
+        &mut new_active,
+        snapshot.query_count,
+        snapshot.init_timestamp,
+        snapshot.log_path,
+    );
+    promote_fresh_provider_session_after_resume(&config.provider, &mut new_active);
 
     let stdin_tx = new_active.stdin_tx.clone();
     let mut old_agent = {
@@ -1098,21 +1155,12 @@ pub async fn resume_agent(
         old_agent
     };
 
-    if let Ok(mut senders) = state.input_senders.write() {
-        if let Some(tx) = stdin_tx {
-            senders.insert(session_id.clone(), tx);
-        } else {
-            senders.remove(&session_id);
-        }
-    }
+    sync_resumed_input_sender(&state, &session_id, stdin_tx);
 
     let _ = app.emit("agents-updated", ());
     let _ = app.emit(
         "agent-status-updated",
-        serde_json::json!({
-            "session_id": session_id,
-            "current_status": "Idle",
-        }),
+        agent_status_update_payload(&session_id, "Idle"),
     );
     manager::terminate_active_agent_process(&mut old_agent);
     Ok(())
@@ -1407,13 +1455,16 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
-        clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
-        generated_agent_name, insert_new_agent_order, normalize_spawn_folder,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        agent_status_update_payload, capture_opencode_pause_resume_session,
+        capture_resume_runtime_snapshot, clone_copy_agent_profile_files,
+        clone_ensure_profile_destination_available, clone_sanitize_config, clone_unique_name,
+        codex_provider_session_is_new, generated_agent_name, insert_new_agent_order,
+        mark_agent_paused_off, normalize_spawn_folder, persisted_resume_session_for_provider,
+        prepare_clear_config, prepare_resume_config, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         reserve_spawn_session_name, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, AgentOrderPlacement,
+        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
+        AgentOrderPlacement,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -1861,6 +1912,154 @@ mod tests {
         assert_eq!(
             new_active.log_path.lock().unwrap().as_deref(),
             Some(std::path::Path::new("C:/tmp/session.json"))
+        );
+    }
+
+    #[test]
+    fn claude_resume_promotes_fresh_provider_session_to_resume_session() {
+        let mut new_active = make_test_agent();
+        {
+            let mut config = new_active.config.lock().unwrap();
+            config.fresh_provider_session_id = Some("claude-fresh-session".to_string());
+            config.resume_session = None;
+        }
+
+        promote_fresh_provider_session_after_resume("claude", &mut new_active);
+
+        let config = new_active.config.lock().unwrap();
+        assert_eq!(
+            config.resume_session.as_deref(),
+            Some("claude-fresh-session")
+        );
+        assert_eq!(config.fresh_provider_session_id, None);
+    }
+
+    #[test]
+    fn non_claude_resume_keeps_fresh_provider_session_field() {
+        let mut new_active = make_test_agent();
+        {
+            let mut config = new_active.config.lock().unwrap();
+            config.fresh_provider_session_id = Some("provider-session".to_string());
+            config.resume_session = None;
+        }
+
+        promote_fresh_provider_session_after_resume("codex", &mut new_active);
+
+        let config = new_active.config.lock().unwrap();
+        assert_eq!(config.resume_session, None);
+        assert_eq!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("provider-session")
+        );
+    }
+
+    #[test]
+    fn sync_resumed_input_sender_inserts_or_removes_sender() {
+        let state = AppState::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        sync_resumed_input_sender(&state, "agent-1", Some(tx));
+        assert!(state.input_senders.read().unwrap().contains_key("agent-1"));
+
+        sync_resumed_input_sender(&state, "agent-1", None);
+        assert!(!state.input_senders.read().unwrap().contains_key("agent-1"));
+    }
+
+    #[test]
+    fn agent_status_update_payload_uses_frontend_status_contract() {
+        assert_eq!(
+            agent_status_update_payload("agent-1", "Idle"),
+            serde_json::json!({
+                "session_id": "agent-1",
+                "current_status": "Idle",
+            })
+        );
+    }
+
+    #[test]
+    fn capture_resume_runtime_snapshot_reads_resume_fields_without_holding_state_locks() {
+        let active = make_test_agent();
+        {
+            let mut config = active.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.provider = "codex".to_string();
+        }
+        *active.init_timestamp.lock().unwrap() = Some("2026-05-07T00:00:00Z".to_string());
+        *active.query_count.lock().unwrap() = 7;
+        *active.log_path.lock().unwrap() = Some(std::path::PathBuf::from("D:/tmp/agent.log"));
+
+        let snapshot = capture_resume_runtime_snapshot(&active);
+
+        assert_eq!(snapshot.config.session_id, "agent-1");
+        assert_eq!(snapshot.config.provider, "codex");
+        assert_eq!(
+            snapshot.init_timestamp.as_deref(),
+            Some("2026-05-07T00:00:00Z")
+        );
+        assert_eq!(snapshot.query_count, 7);
+        assert_eq!(
+            snapshot.log_path.as_deref(),
+            Some(std::path::Path::new("D:/tmp/agent.log"))
+        );
+    }
+
+    #[test]
+    fn mark_agent_paused_off_clears_runtime_channels_and_status() {
+        let mut active = make_test_agent();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        active.stdin_tx = Some(tx);
+        {
+            let mut config = active.config.lock().unwrap();
+            config.is_off = false;
+        }
+
+        mark_agent_paused_off(&mut active);
+
+        assert!(active.stdin_tx.is_none());
+        assert!(active.pty_master.is_none());
+        assert!(active.config.lock().unwrap().is_off);
+        assert_eq!(active.current_status.lock().unwrap().as_str(), "Off");
+    }
+
+    #[test]
+    fn opencode_pause_captures_real_session_id_from_log() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("opencode.log");
+        std::fs::write(
+            &log_path,
+            "INFO service=session id=ses_old created\nINFO service=session id=ses_new created\n",
+        )
+        .expect("write opencode log");
+        let active = make_test_agent();
+        {
+            let mut config = active.config.lock().unwrap();
+            config.provider = "opencode".to_string();
+            config.resume_session = Some("stale-uuid".to_string());
+        }
+        *active.log_path.lock().unwrap() = Some(log_path);
+
+        capture_opencode_pause_resume_session(&active);
+
+        assert_eq!(
+            active.config.lock().unwrap().resume_session.as_deref(),
+            Some("ses_new")
+        );
+    }
+
+    #[test]
+    fn opencode_pause_keeps_existing_real_session_id() {
+        let active = make_test_agent();
+        {
+            let mut config = active.config.lock().unwrap();
+            config.provider = "opencode".to_string();
+            config.resume_session = Some("ses_existing".to_string());
+        }
+
+        capture_opencode_pause_resume_session(&active);
+
+        assert_eq!(
+            active.config.lock().unwrap().resume_session.as_deref(),
+            Some("ses_existing")
         );
     }
 

@@ -210,6 +210,44 @@ mod tests {
     }
 
     #[test]
+    fn existing_script_path_returns_canonical_existing_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script = temp.path().join("mock-agent.cjs");
+        std::fs::write(&script, "console.log('mock');").expect("write script");
+
+        let resolved = MockProvider::existing_script_path(script.clone()).unwrap();
+
+        assert_eq!(
+            std::path::PathBuf::from(resolved),
+            std::fs::canonicalize(script).expect("canonical script path")
+        );
+    }
+
+    #[test]
+    fn existing_script_path_rejects_missing_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        assert!(MockProvider::existing_script_path(temp.path().join("missing.cjs")).is_none());
+    }
+
+    #[test]
+    fn resolve_mock_script_path_prefers_existing_env_override() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script = temp.path().join("custom-mock-agent.cjs");
+        std::fs::write(&script, "console.log('custom mock');").expect("write script");
+        std::env::set_var("WARDIAN_MOCK_SCRIPT", &script);
+
+        let resolved = MockProvider::resolve_mock_script_path();
+
+        assert_eq!(
+            std::path::PathBuf::from(resolved),
+            std::fs::canonicalize(&script).expect("canonical script path")
+        );
+        std::env::remove_var("WARDIAN_MOCK_SCRIPT");
+    }
+
+    #[test]
     fn spawn_args_empty_for_fresh_session() {
         let config = AgentConfig::default();
         let args = make_provider().get_spawn_args(&config, false);
