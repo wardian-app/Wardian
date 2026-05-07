@@ -294,6 +294,8 @@ pub fn run() {
             commands::watchlist::save_watchlists,
             commands::watchlist::load_watchlist_prefs,
             commands::watchlist::save_watchlist_prefs,
+            commands::watchlist::load_queue_items,
+            commands::watchlist::save_queue_items,
             commands::watchlist::load_agent_interactions,
             commands::watchlist::save_agent_interactions,
             commands::workflow::list_workflows,

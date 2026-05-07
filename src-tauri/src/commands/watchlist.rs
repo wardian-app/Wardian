@@ -75,3 +75,30 @@ pub async fn save_agent_interactions(
     std::fs::write(path, json).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[tauri::command]
+pub async fn load_queue_items(_app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    if let Some(home) = crate::utils::fs::get_wardian_home() {
+        let path = home.join("queue/items.json");
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&data).unwrap_or_else(|_| serde_json::json!([]));
+            return Ok(parsed);
+        }
+    }
+    Ok(serde_json::json!([]))
+}
+
+#[tauri::command]
+pub async fn save_queue_items(
+    items: serde_json::Value,
+    _app: tauri::AppHandle,
+) -> Result<(), String> {
+    let home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not find home directory".to_string())?;
+    let _ = std::fs::create_dir_all(home.join("queue"));
+    let path = home.join("queue/items.json");
+    let json = serde_json::to_string_pretty(&items).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
