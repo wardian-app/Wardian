@@ -11,33 +11,52 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
         .to_string()
 }
 
-pub async fn submit_prompt_via_sender(
-    tx: &Sender<Vec<u8>>,
-    prompt: &str,
-    provider_name: &str,
-) -> Result<(), String> {
+pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let submit_key = if provider_name == "codex" {
+        b"\x1b\r".to_vec()
+    } else {
+        TERMINAL_SUBMIT_KEY.to_vec()
+    };
+
+    Ok(vec![normalized.into_bytes(), submit_key])
+}
+
+pub async fn submit_prompt_chunks_via_sender(
+    tx: &Sender<Vec<u8>>,
+    provider_name: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let chunks = provider_submit_chunks(provider_name, prompt)?;
+    if chunks.is_empty() {
         return Ok(());
     }
 
-    tx.send(normalized.into_bytes())
+    tx.send(chunks[0].clone())
         .await
         .map_err(|e| format!("Failed to send prompt text: {}", e))?;
 
     tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
 
-    let submit_key = if provider_name == "codex" {
-        b"\x1b\r".as_slice()
-    } else {
-        TERMINAL_SUBMIT_KEY
-    };
-
-    tx.send(submit_key.to_vec())
-        .await
-        .map_err(|e| format!("Failed to send prompt submit key: {}", e))?;
+    if let Some(submit_key) = chunks.get(1) {
+        tx.send(submit_key.clone())
+            .await
+            .map_err(|e| format!("Failed to send prompt submit key: {}", e))?;
+    }
 
     Ok(())
+}
+
+pub async fn submit_prompt_via_sender(
+    tx: &Sender<Vec<u8>>,
+    prompt: &str,
+    provider_name: &str,
+) -> Result<(), String> {
+    submit_prompt_chunks_via_sender(tx, provider_name, prompt).await
 }
 
 #[cfg(test)]

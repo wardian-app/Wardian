@@ -128,12 +128,29 @@ pub enum AgentCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    Watch {
+        target: String,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        include: Option<String>,
+        #[arg(long = "tail")]
+        tail: Option<usize>,
+        #[arg(long, default_value = "10m")]
+        timeout: String,
+        #[arg(long)]
+        follow: bool,
+    },
     Wait {
         target: String,
         #[arg(long)]
         until: String,
         #[arg(long, default_value = "10m")]
         timeout: String,
+        #[arg(long)]
+        next: bool,
     },
 }
 
@@ -309,8 +326,66 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            Some(AgentCommand::Wait { ref target, ref until, ref timeout })
+            Some(AgentCommand::Wait { ref target, ref until, ref timeout, next: false })
             if target == "reviewer-a1" && until == "idle" && timeout == "30s"
+        ));
+    }
+
+    #[test]
+    fn parses_agent_watch_options() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "watch",
+            "Wardian-Codex",
+            "--since",
+            "agent-1:0001",
+            "--until",
+            "output:OK",
+            "--include",
+            "status,output",
+            "--tail",
+            "4096",
+            "--timeout",
+            "30s",
+        ])
+        .unwrap();
+
+        let Command::Agent(args) = cli.command else {
+            panic!("agent")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Watch { ref target, ref since, ref until, ref include, tail, ref timeout, follow })
+                if target == "Wardian-Codex"
+                    && since.as_deref() == Some("agent-1:0001")
+                    && until.as_deref() == Some("output:OK")
+                    && include.as_deref() == Some("status,output")
+                    && tail == Some(4096)
+                    && timeout == "30s"
+                    && !follow
+        ));
+    }
+
+    #[test]
+    fn parses_agent_wait_next() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "wait",
+            "Wardian-Codex",
+            "--until",
+            "idle",
+            "--next",
+        ])
+        .unwrap();
+
+        let Command::Agent(args) = cli.command else {
+            panic!("agent")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Wait { next: true, .. })
         ));
     }
 

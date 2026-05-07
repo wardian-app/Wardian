@@ -353,6 +353,20 @@ test("native CLI control commands operate through the running app", { timeout: 1
     ]);
     assert.equal(JSON.parse(sendResult.stdout).status, "idle");
 
+    const watchResult = runCliOk(cliPath, harness, [
+      "agent",
+      "watch",
+      CONTROL_SESSION_NAME,
+      "--until",
+      "output:Action approved",
+      "--include",
+      "status,output,delivery",
+      "--timeout",
+      "30s",
+    ]);
+    const watched = JSON.parse(watchResult.stdout);
+    assert.match(watched.output.text, /Action approved/);
+
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
     const cloneResult = runCliOk(cliPath, harness, [
       "agent",
@@ -379,6 +393,27 @@ test("native CLI control commands operate through the running app", { timeout: 1
     const killedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
     assert.equal(killedShow.status, 2, killedShow.stderr);
     assert.match(killedShow.stderr, /"code":"not_found"/);
+
+    const removed = await session.driver.executeAsyncScript((sessionId, done) => {
+      window.__TAURI_INTERNALS__.invoke("debug_remove_agent_input_sender", { sessionId }).then(
+        () => done({ ok: true }),
+        (error) => done({ ok: false, error: String(error) }),
+      );
+    }, source.uuid);
+    assert.equal(removed.ok, true, `debug_remove_agent_input_sender failed: ${removed.error}`);
+
+    const missingSender = runCli(cliPath, harness, [
+      "send",
+      "hello",
+      "--to",
+      CONTROL_SESSION_NAME,
+    ]);
+    assert.notEqual(missingSender.status, 0);
+    const missingSenderError = JSON.parse(missingSender.stderr);
+    const delivery = missingSenderError.error.details.delivery[0];
+    assert.equal(delivery.runtime_state, "restored_without_sender");
+    assert.equal(delivery.delivery_state, "failed");
+    assert.equal(delivery.error.code, "no_input_channel");
   });
 });
 

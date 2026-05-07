@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod class;
+pub mod debug;
 pub mod fs;
 pub mod git;
 pub mod library;
@@ -11,6 +12,7 @@ pub mod workflow;
 
 pub use agent::*;
 pub use class::*;
+pub use debug::*;
 pub use fs::*;
 pub use library::*;
 pub use patch::*;

@@ -87,3 +87,24 @@ fn send_no_message_no_stdin_exits_one() {
     // since control pipe check happens before message validation)
     assert_ne!(output.status.code(), Some(0));
 }
+
+#[test]
+fn send_wait_until_rejects_class_selector_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "send",
+            "hello",
+            "--to",
+            "class:Coder",
+            "--wait-until",
+            "idle",
+        ])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+}
