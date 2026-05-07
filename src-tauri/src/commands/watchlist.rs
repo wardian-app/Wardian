@@ -102,3 +102,11 @@ pub async fn save_queue_items(
     std::fs::write(path, json).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[tauri::command]
+pub async fn load_opencode_last_assistant_text(
+    session_id: String,
+    _app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    crate::manager::opencode_last_assistant_text(&session_id)
+}

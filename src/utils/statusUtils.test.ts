@@ -503,6 +503,16 @@ describe("extractTerminalQueueContent", () => {
     expect(extractTerminalQueueContent(chunk)).toBe("Test received.");
   });
 
+  it("ignores OpenCode input placeholders", () => {
+    expect(extractTerminalQueueContent("\u001b[24;2H> Type your message or @path/to/file"))
+      .toBeUndefined();
+  });
+
+  it("ignores OpenCode status and prompt chrome", () => {
+    const chunk = "\u001b[1;1H▣ Build · GPT-5.5 · 1.6s┃ List 50 rows of numbers.┃▣ Build · GPT-5.5 ■⬝⬝⬝⬝⬝⬝⬝esc interrupt";
+    expect(extractTerminalQueueContent(chunk)).toBeUndefined();
+  });
+
   it("ignores control-only terminal output", () => {
     expect(extractTerminalQueueContent("\u001b[?2026h\u001b[?2026l\u001b[H")).toBeUndefined();
   });

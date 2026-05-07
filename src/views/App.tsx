@@ -77,6 +77,7 @@ function AppBody() {
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const agentsRef = React.useRef(agents);
   const agentStatusRef = React.useRef<Record<string, string>>({});
+  const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
@@ -98,8 +99,25 @@ function AppBody() {
   const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
     const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
     if (currentStatus === "Idle" && (wasActive || hasAgentBufferedContent(sessionId))) {
+      if (pendingQueueFlushRef.current.has(sessionId)) return;
+      pendingQueueFlushRef.current.add(sessionId);
       const agent = agentsRef.current.find((a) => a.session_id === sessionId);
-      flushAgentCompletion(sessionId, agent?.session_name ?? sessionId);
+      const agentName = agent?.session_name ?? sessionId;
+      const finishFlush = (summary?: string | null) => {
+        try {
+          flushAgentCompletion(sessionId, agentName, summary);
+        } finally {
+          pendingQueueFlushRef.current.delete(sessionId);
+        }
+      };
+
+      if (agent?.provider === "opencode" && sessionId.startsWith("ses_")) {
+        invoke<string | null>("load_opencode_last_assistant_text", { sessionId })
+          .then(finishFlush)
+          .catch(() => finishFlush());
+      } else {
+        finishFlush();
+      }
     }
   }, [flushAgentCompletion, hasAgentBufferedContent]);
 

@@ -395,6 +395,15 @@ const TERMINAL_CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const TERMINAL_ESC_SEQUENCE = /\u001b[@-_]/g;
 const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 
+function isTerminalQueueChrome(line: string): boolean {
+  const lower = line.toLowerCase();
+  if (lower.includes("type your message") || lower.includes("@path/to/file")) return true;
+  if (lower.includes("esc interrupt")) return true;
+  if (line.includes("▣") && line.includes("GPT-")) return true;
+  if (/^·\s*\d+(?:\.\d+)?s\s+\d+$/.test(line)) return true;
+  return false;
+}
+
 export function extractTerminalQueueContent(data: string): string | undefined {
   const plain = data
     .replace(TERMINAL_OSC_SEQUENCE, "")
@@ -409,7 +418,8 @@ export function extractTerminalQueueContent(data: string): string | undefined {
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter((line) => line.length > 0)
     .filter((line) => /[A-Za-z0-9]/.test(line))
-    .filter((line) => !/^[0-9?;$<>= ]+$/.test(line));
+    .filter((line) => !/^[0-9?;$<>= ]+$/.test(line))
+    .filter((line) => !isTerminalQueueChrome(line));
 
   return candidates[candidates.length - 1];
 }

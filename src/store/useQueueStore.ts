@@ -17,7 +17,7 @@ interface QueueState {
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
   appendAgentTerminalOutput: (sessionId: string, data: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
-  flushAgentCompletion: (sessionId: string, agentName: string) => void;
+  flushAgentCompletion: (sessionId: string, agentName: string, summaryOverride?: string | null) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
   addWorkflowCompletion: (
     payload: { workflow_id: string; run_instance_id?: string; status: "completed" | "failed"; error?: string },
@@ -95,14 +95,15 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     return (get()._agentBuffers[sessionId] ?? "").trim().length > 0;
   },
 
-  flushAgentCompletion(sessionId, agentName) {
+  flushAgentCompletion(sessionId, agentName, summaryOverride) {
     const { items, _agentBuffers } = get();
     const recent = items.find(
       (i) => i.type === "agent_completed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS,
     );
     if (recent) return;
 
-    const raw = (_agentBuffers[sessionId] ?? "").trim();
+    const override = summaryOverride?.trim();
+    const raw = override || (_agentBuffers[sessionId] ?? "").trim();
     const summary = raw || "Completed";
     const item: QueueItem = {
       id: crypto.randomUUID(),

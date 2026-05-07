@@ -73,6 +73,28 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().items[0].summary).toBe("Delayed final text.");
   });
 
+  it("does not use terminal prompt chrome as a completion summary", () => {
+    useQueueStore.getState().appendAgentTerminalOutput(
+      "agent-1",
+      "\u001b[24;2H> Type your message or @path/to/file",
+    );
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+  });
+
+  it("uses an explicit completion summary instead of terminal fallback text", () => {
+    useQueueStore.getState().appendAgentTerminalOutput(
+      "agent-1",
+      "\u001b[1;1H▣ Build · GPT-5.5 · 1.6s┃ List 50 rows of numbers.┃▣ Build · GPT-5.5 ■⬝⬝⬝⬝⬝⬝⬝esc interrupt",
+    );
+    useQueueStore.getState().flushAgentCompletion(
+      "agent-1",
+      "My Agent",
+      "1\n2\n3\n4\n5",
+    );
+    expect(useQueueStore.getState().items[0].summary).toBe("1\n2\n3\n4\n5");
+  });
+
   it("flushAgentCompletion creates an item with the buffered summary", () => {
     useQueueStore.getState().appendAgentEvent("agent-1", {
       type: "result",

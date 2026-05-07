@@ -19,6 +19,7 @@ pub use headless::{
     HeadlessRunOptions,
 };
 pub use opencode::opencode_extract_created_session_id;
+pub(crate) use opencode::opencode_last_assistant_text;
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 

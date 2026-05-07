@@ -29,6 +29,92 @@ pub(crate) fn opencode_session_diff_path(session_id: &str) -> std::path::PathBuf
         .join(format!("{session_id}.json"))
 }
 
+fn opencode_data_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(d) = dirs::data_local_dir() {
+        dirs.push(d.join("opencode"));
+    }
+    if let Some(d) = dirs::data_dir() {
+        let p = d.join("opencode");
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    if let Some(h) = dirs::home_dir() {
+        let p = h.join(".local").join("share").join("opencode");
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
+pub(crate) fn opencode_database_path() -> Option<std::path::PathBuf> {
+    opencode_data_dirs()
+        .into_iter()
+        .map(|dir| dir.join("opencode.db"))
+        .find(|path| path.exists())
+}
+
+pub(crate) fn opencode_last_assistant_text(session_id: &str) -> Result<Option<String>, String> {
+    let Some(db_path) = opencode_database_path() else {
+        return Ok(None);
+    };
+    opencode_last_assistant_text_from_db(&db_path, session_id)
+}
+
+pub(crate) fn opencode_last_assistant_text_from_db(
+    db_path: &std::path::Path,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|err| err.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.data, m.data
+             FROM part p
+             JOIN message m ON m.id = p.message_id
+             WHERE p.session_id = ?1 AND m.session_id = ?1
+             ORDER BY p.time_created DESC
+             LIMIT 100",
+        )
+        .map_err(|err| err.to_string())?;
+
+    let rows = stmt
+        .query_map([session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|err| err.to_string())?;
+
+    for row in rows {
+        let (part_data, message_data) = row.map_err(|err| err.to_string())?;
+        let message: serde_json::Value =
+            serde_json::from_str(&message_data).map_err(|err| err.to_string())?;
+        if message.get("role").and_then(|value| value.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let part: serde_json::Value =
+            serde_json::from_str(&part_data).map_err(|err| err.to_string())?;
+        if part.get("type").and_then(|value| value.as_str()) != Some("text") {
+            continue;
+        }
+
+        if let Some(text) = part
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Ok(Some(text.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
 pub(crate) fn opencode_should_fallback_to_idle(
     current_status: &str,
     last_output_at: Option<std::time::SystemTime>,
@@ -427,6 +513,121 @@ mod tests {
         let found = opencode_log_path_in(&log_dir, "ses_target").expect("matching log path");
 
         assert_eq!(found, newer);
+    }
+
+    #[test]
+    fn opencode_last_assistant_text_from_db_returns_newest_assistant_text() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE message (
+                id text PRIMARY KEY,
+                session_id text NOT NULL,
+                time_created integer NOT NULL,
+                time_updated integer NOT NULL,
+                data text NOT NULL
+            );
+            CREATE TABLE part (
+                id text PRIMARY KEY,
+                message_id text NOT NULL,
+                session_id text NOT NULL,
+                time_created integer NOT NULL,
+                time_updated integer NOT NULL,
+                data text NOT NULL
+            );
+            "#,
+        )
+        .expect("create schema");
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["user-1", "ses_test", 1, 1, r#"{"role":"user"}"#],
+        )
+        .expect("insert user message");
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "user-part",
+                "user-1",
+                "ses_test",
+                2,
+                2,
+                r#"{"type":"text","text":"Prompt text"}"#,
+            ],
+        )
+        .expect("insert user part");
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["assistant-1", "ses_test", 3, 3, r#"{"role":"assistant"}"#],
+        )
+        .expect("insert assistant message");
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "assistant-finish",
+                "assistant-1",
+                "ses_test",
+                5,
+                5,
+                r#"{"type":"step-finish","reason":"stop"}"#,
+            ],
+        )
+        .expect("insert finish part");
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "assistant-text",
+                "assistant-1",
+                "ses_test",
+                4,
+                4,
+                r#"{"type":"text","text":"Actual assistant text"}"#,
+            ],
+        )
+        .expect("insert assistant text");
+        drop(conn);
+
+        let text = opencode_last_assistant_text_from_db(&db_path, "ses_test")
+            .expect("read assistant text");
+
+        assert_eq!(text, Some("Actual assistant text".to_string()));
+    }
+
+    #[test]
+    fn opencode_last_assistant_text_from_db_skips_empty_text() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE message (
+                id text PRIMARY KEY,
+                session_id text NOT NULL,
+                time_created integer NOT NULL,
+                time_updated integer NOT NULL,
+                data text NOT NULL
+            );
+            CREATE TABLE part (
+                id text PRIMARY KEY,
+                message_id text NOT NULL,
+                session_id text NOT NULL,
+                time_created integer NOT NULL,
+                time_updated integer NOT NULL,
+                data text NOT NULL
+            );
+            INSERT INTO message VALUES ('assistant-1', 'ses_test', 1, 1, '{"role":"assistant"}');
+            INSERT INTO part VALUES ('blank', 'assistant-1', 'ses_test', 2, 2, '{"type":"text","text":"   "}');
+            "#,
+        )
+        .expect("create db");
+        drop(conn);
+
+        let text = opencode_last_assistant_text_from_db(&db_path, "ses_test")
+            .expect("read assistant text");
+
+        assert_eq!(text, None);
     }
 
     #[test]

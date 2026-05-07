@@ -214,6 +214,17 @@ const sampleAgents: AgentConfig[] = [
   { session_id: "agent-3", session_name: "Gamma", agent_class: "DevOps", folder: "/tmp", is_off: false },
 ];
 
+const opencodeAgents: AgentConfig[] = [
+  {
+    session_id: "ses_opencode",
+    session_name: "OpenCode Agent",
+    agent_class: "Coder",
+    folder: "C:/project",
+    is_off: false,
+    provider: "opencode",
+  },
+];
+
 beforeEach(() => {
   vi.clearAllMocks();
   useLayoutStore.getState().resetLayout();
@@ -538,6 +549,89 @@ describe("Agent Watchlist Sidebar", () => {
               agent_session_id: "agent-1",
               agent_name: "Alpha",
               summary: "Completed",
+              read: false,
+            }),
+          ],
+        }),
+      );
+    });
+  });
+
+  it("uses OpenCode assistant database text when an OpenCode agent completes", async () => {
+    setupDefaultMocks(opencodeAgents, defaultClasses);
+    mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
+      if (cmd === "load_opencode_last_assistant_text" && args?.sessionId === "ses_opencode") {
+        return "1\n2\n3\n4\n5";
+      }
+      switch (cmd) {
+        case "list_agents":
+          return opencodeAgents;
+        case "list_agent_classes":
+        case "load_watchlists":
+        case "load_queue_items":
+        case "list_workflows":
+        case "list_scheduled_runs":
+        case "list_deployed_skills":
+          return [];
+        case "get_library_tree":
+          return { type: "Folder", path: "", name: "Root", children: [] };
+        case "load_workflow_library":
+          return { folders: [], rootWorkflowIds: [] };
+        default:
+          return null;
+      }
+    });
+    const emitAgentMetrics = captureAgentMetricsListener();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "ses_opencode",
+          current_status: "Processing...",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 1,
+          query_count: 1,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "ses_opencode",
+          current_status: "Idle",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 2,
+          query_count: 1,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("load_opencode_last_assistant_text", {
+        sessionId: "ses_opencode",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "save_queue_items",
+        expect.objectContaining({
+          items: [
+            expect.objectContaining({
+              type: "agent_completed",
+              agent_session_id: "ses_opencode",
+              agent_name: "OpenCode Agent",
+              summary: "1\n2\n3\n4\n5",
               read: false,
             }),
           ],
