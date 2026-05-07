@@ -1,4 +1,3 @@
-import React from "react";
 import { X } from "lucide-react";
 import { useQueueStore } from "../store/useQueueStore";
 import type { QueueItem } from "../types";
