@@ -42,6 +42,15 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState()._agentBuffers["agent-1"]).toBe("");
   });
 
+  it("reports whether an agent has buffered completion content", () => {
+    expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(false);
+    useQueueStore.getState().appendAgentEvent("agent-1", {
+      type: "result",
+      result: "Final answer here",
+    });
+    expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(true);
+  });
+
   it("flushAgentCompletion creates an item with the buffered summary", () => {
     useQueueStore.getState().appendAgentEvent("agent-1", {
       type: "result",

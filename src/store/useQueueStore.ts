@@ -15,6 +15,7 @@ interface QueueState {
 
   loadItems: () => Promise<void>;
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
+  hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (sessionId: string, agentName: string) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
   addWorkflowCompletion: (
@@ -58,6 +59,10 @@ export const useQueueStore = create<QueueState>((set, get) => ({
         },
       }));
     }
+  },
+
+  hasAgentBufferedContent(sessionId) {
+    return (get()._agentBuffers[sessionId] ?? "").trim().length > 0;
   },
 
   flushAgentCompletion(sessionId, agentName) {

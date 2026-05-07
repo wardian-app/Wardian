@@ -76,6 +76,7 @@ function AppBody() {
   const confirm = useConfirm();
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const agentsRef = React.useRef(agents);
+  const agentStatusRef = React.useRef<Record<string, string>>({});
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
@@ -89,6 +90,7 @@ function AppBody() {
   const createScheduledRun = useWorkflowStore(s => s.createScheduledRun);
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
+  const hasAgentBufferedContent = useQueueStore((s) => s.hasAgentBufferedContent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
   const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
   const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
@@ -581,6 +583,9 @@ function AppBody() {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
       const mapping: Record<string, AgentTelemetry> = {};
       for (const m of event.payload) mapping[m.session_id] = m;
+      for (const [sessionId, metric] of Object.entries(mapping)) {
+        agentStatusRef.current[sessionId] = metric.current_status;
+      }
       setTelemetry(prev => {
         const next = { ...prev };
         const interactionUpdates: Record<string, string> = {};
@@ -609,12 +614,15 @@ function AppBody() {
       if (current_status === "Idle" || current_status === "Off" || current_status === "Action Needed") {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
       }
+      const previousStatus = agentStatusRef.current[session_id];
+      const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
+      const shouldFlush = current_status === "Idle" && (wasActive || hasAgentBufferedContent(session_id));
+      agentStatusRef.current[session_id] = current_status;
+      if (shouldFlush) {
+        const agent = agentsRef.current.find((a) => a.session_id === session_id);
+        flushAgentCompletion(session_id, agent?.session_name ?? session_id);
+      }
       setTelemetry(prev => {
-        const previousStatus = prev[session_id]?.current_status;
-        if (current_status === "Idle" && previousStatus && ACTIVE_STATUSES.has(previousStatus)) {
-          const agent = agentsRef.current.find((a) => a.session_id === session_id);
-          flushAgentCompletion(session_id, agent?.session_name ?? session_id);
-        }
         return {
           ...prev,
           [session_id]: {
@@ -635,7 +643,7 @@ function AppBody() {
       unlistenAppMetrics.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
-  }, [flushAgentCompletion]);
+  }, [flushAgentCompletion, hasAgentBufferedContent]);
 
   async function sendCommand(sessionId: string, cmd: string) {
     try {
