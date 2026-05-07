@@ -513,6 +513,12 @@ describe("extractTerminalQueueContent", () => {
     expect(extractTerminalQueueContent(chunk)).toBeUndefined();
   });
 
+  it("ignores Gemini thinking and overflow hint chrome", () => {
+    expect(extractTerminalQueueContent("⁝ Thinking... (esc to cancel, 8s) press tab twice for more"))
+      .toBeUndefined();
+    expect(extractTerminalQueueContent("press tab twice for more")).toBeUndefined();
+  });
+
   it("ignores control-only terminal output", () => {
     expect(extractTerminalQueueContent("\u001b[?2026h\u001b[?2026l\u001b[H")).toBeUndefined();
   });

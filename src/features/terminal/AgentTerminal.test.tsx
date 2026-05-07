@@ -175,6 +175,34 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("does not capture Gemini terminal redraws for queue summaries", async () => {
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return readCount++ === 0
+            ? "⁝ Thinking... (esc to cancel, 8s) press tab twice for more"
+            : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="gemini-summary" provider="gemini" theme="dark" />);
+
+    await waitFor(() => {
+      const instance = getLatestTerminalInstance();
+      expect(instance.write).toHaveBeenCalledWith(
+        "⁝ Thinking... (esc to cancel, 8s) press tab twice for more",
+        expect.any(Function),
+      );
+    });
+
+    expect(useQueueStore.getState()._agentBuffers["gemini-summary"]).toBeUndefined();
+  });
+
   it("forwards xterm binary input through the byte-preserving PTY path", async () => {
     render(<AgentTerminal sessionId="codex-2" theme="dark" />);
 

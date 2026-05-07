@@ -399,6 +399,8 @@ function isTerminalQueueChrome(line: string): boolean {
   const lower = line.toLowerCase();
   if (lower.includes("type your message") || lower.includes("@path/to/file")) return true;
   if (lower.includes("esc interrupt")) return true;
+  if (lower.includes("press tab twice for more")) return true;
+  if (lower.includes("thinking...") && lower.includes("esc to cancel")) return true;
   if (line.includes("▣") && line.includes("GPT-")) return true;
   if (/^·\s*\d+(?:\.\d+)?s\s+\d+$/.test(line)) return true;
   return false;

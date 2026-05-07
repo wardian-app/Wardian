@@ -363,7 +363,7 @@ async function drainPty(sessionId: string) {
         const batchedWrite = rawChunks
           .map((data) => normalizeOpenCodeOutput(data, entry.provider, entry))
           .join("");
-        useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite);
+        useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
         entry.existingScrollbackLines = undefined;
         entry.parser.write(batchedWrite);
         if (entry.renderer) {

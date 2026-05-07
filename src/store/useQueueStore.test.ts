@@ -55,6 +55,7 @@ describe("useQueueStore - agent completion", () => {
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
       "\u001b[10;6HTest received.\u001b[15;6H",
+      "opencode",
     );
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
     expect(useQueueStore.getState().items[0].summary).toBe("Test received.");
@@ -67,16 +68,34 @@ describe("useQueueStore - agent completion", () => {
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
       "\u001b[10;6HDelayed final text.\u001b[15;6H",
+      "opencode",
     );
 
     expect(useQueueStore.getState().items).toHaveLength(1);
     expect(useQueueStore.getState().items[0].summary).toBe("Delayed final text.");
   });
 
+  it("does not use Gemini terminal redraws as queue completion summaries", () => {
+    useQueueStore.getState().appendAgentTerminalOutput(
+      "agent-1",
+      "⁝ Thinking... (esc to cancel, 8s) press tab twice for more",
+      "gemini",
+    );
+    expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(false);
+
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+
+    useQueueStore.getState().appendAgentTerminalOutput("agent-1", "> What", "gemini");
+    expect(useQueueStore.getState().items).toHaveLength(1);
+    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+  });
+
   it("does not use terminal prompt chrome as a completion summary", () => {
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
       "\u001b[24;2H> Type your message or @path/to/file",
+      "opencode",
     );
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
     expect(useQueueStore.getState().items[0].summary).toBe("Completed");
@@ -86,6 +105,7 @@ describe("useQueueStore - agent completion", () => {
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
       "\u001b[1;1H▣ Build · GPT-5.5 · 1.6s┃ List 50 rows of numbers.┃▣ Build · GPT-5.5 ■⬝⬝⬝⬝⬝⬝⬝esc interrupt",
+      "opencode",
     );
     useQueueStore.getState().flushAgentCompletion(
       "agent-1",

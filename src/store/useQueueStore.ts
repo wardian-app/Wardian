@@ -15,7 +15,7 @@ interface QueueState {
 
   loadItems: () => Promise<void>;
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
-  appendAgentTerminalOutput: (sessionId: string, data: string) => void;
+  appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (sessionId: string, agentName: string, summaryOverride?: string | null) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
@@ -62,7 +62,9 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     }
   },
 
-  appendAgentTerminalOutput(sessionId, data) {
+  appendAgentTerminalOutput(sessionId, data, provider) {
+    if (provider && provider !== "opencode") return;
+
     const text = extractTerminalQueueContent(data);
     if (!text) return;
     const now = Date.now();
