@@ -388,3 +388,28 @@ export function extractQueueContent(data: Record<string, unknown>): {
 
   return { isToolCall: false };
 }
+
+const TERMINAL_OSC_SEQUENCE = /\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g;
+const TERMINAL_DCS_SEQUENCE = /\u001bP[\s\S]*?\u001b\\/g;
+const TERMINAL_CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const TERMINAL_ESC_SEQUENCE = /\u001b[@-_]/g;
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+export function extractTerminalQueueContent(data: string): string | undefined {
+  const plain = data
+    .replace(TERMINAL_OSC_SEQUENCE, "")
+    .replace(TERMINAL_DCS_SEQUENCE, "")
+    .replace(TERMINAL_CSI_SEQUENCE, "")
+    .replace(TERMINAL_ESC_SEQUENCE, "")
+    .replace(/\r/g, "\n")
+    .replace(TERMINAL_CONTROL_CHARS, "");
+
+  const candidates = plain
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => /[A-Za-z0-9]/.test(line))
+    .filter((line) => !/^[0-9?;$<>= ]+$/.test(line));
+
+  return candidates[candidates.length - 1];
+}

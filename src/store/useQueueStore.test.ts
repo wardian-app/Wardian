@@ -51,6 +51,28 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(true);
   });
 
+  it("uses terminal output as the completion summary when no JSON result is available", () => {
+    useQueueStore.getState().appendAgentTerminalOutput(
+      "agent-1",
+      "\u001b[10;6HTest received.\u001b[15;6H",
+    );
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    expect(useQueueStore.getState().items[0].summary).toBe("Test received.");
+  });
+
+  it("replaces a recent fallback Completed summary when terminal output arrives after flush", () => {
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+
+    useQueueStore.getState().appendAgentTerminalOutput(
+      "agent-1",
+      "\u001b[10;6HDelayed final text.\u001b[15;6H",
+    );
+
+    expect(useQueueStore.getState().items).toHaveLength(1);
+    expect(useQueueStore.getState().items[0].summary).toBe("Delayed final text.");
+  });
+
   it("flushAgentCompletion creates an item with the buffered summary", () => {
     useQueueStore.getState().appendAgentEvent("agent-1", {
       type: "result",

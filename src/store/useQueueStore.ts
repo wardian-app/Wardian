@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { QueueItem } from "../types";
-import { extractQueueContent } from "../utils/statusUtils";
+import { extractQueueContent, extractTerminalQueueContent } from "../utils/statusUtils";
 import { WorkflowTelemetryEvent } from "../types/workflow";
 
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
@@ -15,6 +15,7 @@ interface QueueState {
 
   loadItems: () => Promise<void>;
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
+  appendAgentTerminalOutput: (sessionId: string, data: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (sessionId: string, agentName: string) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
@@ -58,6 +59,35 @@ export const useQueueStore = create<QueueState>((set, get) => ({
           [sessionId]: ((s._agentBuffers[sessionId] ?? "") + text).slice(-SUMMARY_MAX_CHARS),
         },
       }));
+    }
+  },
+
+  appendAgentTerminalOutput(sessionId, data) {
+    const text = extractTerminalQueueContent(data);
+    if (!text) return;
+    const now = Date.now();
+    set((s) => ({
+      items: s.items.map((item) =>
+        item.type === "agent_completed" &&
+        item.agent_session_id === sessionId &&
+        item.summary === "Completed" &&
+        now - item.timestamp < DEDUP_WINDOW_MS
+          ? { ...item, summary: text.slice(-SUMMARY_MAX_CHARS) }
+          : item,
+      ),
+      _agentBuffers: {
+        ...s._agentBuffers,
+        [sessionId]: text.slice(-SUMMARY_MAX_CHARS),
+      },
+    }));
+    const nextItems = get().items;
+    if (nextItems.some((item) =>
+      item.type === "agent_completed" &&
+      item.agent_session_id === sessionId &&
+      item.summary === text.slice(-SUMMARY_MAX_CHARS) &&
+      now - item.timestamp < DEDUP_WINDOW_MS
+    )) {
+      persist(nextItems);
     }
   },
 

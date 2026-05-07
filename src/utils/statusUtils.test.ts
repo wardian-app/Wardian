@@ -5,6 +5,7 @@ import {
   deriveCurrentThought,
   classifyJsonEvent,
   extractQueueContent,
+  extractTerminalQueueContent,
   getStatusColorClass,
   getStatusLabel,
 } from "./statusUtils";
@@ -493,5 +494,16 @@ describe("extractQueueContent", () => {
   it("returns empty result for unknown event type", () => {
     expect(extractQueueContent({ type: "unknown_event" }))
       .toEqual({ isToolCall: false });
+  });
+});
+
+describe("extractTerminalQueueContent", () => {
+  it("extracts readable text from ANSI terminal output", () => {
+    const chunk = "\u001b[?25l\u001b[38;2;26;26;26m\u001b[48;2;255;255;255m\u001b[10;6HTest received.\u001b[15;6H\u001b[?25h";
+    expect(extractTerminalQueueContent(chunk)).toBe("Test received.");
+  });
+
+  it("ignores control-only terminal output", () => {
+    expect(extractTerminalQueueContent("\u001b[?2026h\u001b[?2026l\u001b[H")).toBeUndefined();
   });
 });
