@@ -323,3 +323,68 @@ export function getStatusColorClass(effectiveStatus: string): string {
   }
   return "bg-wardian-off flex-shrink-0";
 }
+
+export function extractQueueContent(data: Record<string, unknown>): {
+  text?: string;
+  isToolCall: boolean;
+} {
+  // Claude: assistant message — may carry text, tool_use, or both
+  if (data.type === "assistant") {
+    const msg = data.message as Record<string, unknown> | undefined;
+    const content = msg?.content as Array<Record<string, unknown>> | undefined;
+    const textBlock = content?.find((c) => c.type === "text");
+    const hasToolUse = content?.some((c) => c.type === "tool_use") ?? false;
+    if (textBlock?.text) {
+      return { text: textBlock.text as string, isToolCall: hasToolUse };
+    }
+    if (hasToolUse) return { isToolCall: true };
+  }
+
+  // Claude: system permission request = tool call boundary
+  if (data.type === "system" && (data.subtype as string | undefined) === "permission_request") {
+    return { isToolCall: true };
+  }
+
+  // Claude: result event carries the final agent output
+  if (data.type === "result") {
+    const result = data.result as string | undefined;
+    if (result) return { text: result, isToolCall: false };
+  }
+
+  // Gemini: text part
+  if (data.type === "text") {
+    const part = data.part as Record<string, unknown> | undefined;
+    const text = part?.text as string | undefined;
+    if (text) return { text, isToolCall: false };
+  }
+
+  // Gemini: tool_use
+  if (data.type === "tool_use") {
+    return { isToolCall: true };
+  }
+
+  // Codex: completed item
+  if (data.type === "item.completed") {
+    const item = data.item as Record<string, unknown> | undefined;
+    const itemType = item?.type as string | undefined;
+    if (itemType === "agent_message") {
+      return { text: (item?.text as string) || "", isToolCall: false };
+    }
+    if (itemType === "exec_command") return { isToolCall: true };
+  }
+
+  // Codex: nested event_msg
+  if (data.type === "event_msg") {
+    const payload = data.payload as Record<string, unknown> | undefined;
+    const payloadType = payload?.type as string | undefined;
+    if (payloadType === "agent_message") {
+      const text = (payload?.message as string) || (payload?.text as string) || "";
+      if (text) return { text, isToolCall: false };
+    }
+    if (payloadType === "exec_command" || payloadType === "exec_started") {
+      return { isToolCall: true };
+    }
+  }
+
+  return { isToolCall: false };
+}

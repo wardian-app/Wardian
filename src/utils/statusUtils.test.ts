@@ -4,6 +4,7 @@ import {
   cleanThought,
   deriveCurrentThought,
   classifyJsonEvent,
+  extractQueueContent,
   getStatusColorClass,
   getStatusLabel,
 } from "./statusUtils";
@@ -414,5 +415,83 @@ describe("getStatusLabel", () => {
 
   it("maps unknown values to Pending", () => {
     expect(getStatusLabel("Something Else")).toBe("Pending");
+  });
+});
+
+describe("extractQueueContent", () => {
+  it("returns text from Claude assistant event with text block", () => {
+    const data = {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    };
+    expect(extractQueueContent(data)).toEqual({ text: "Hello world", isToolCall: false });
+  });
+
+  it("returns isToolCall for Claude assistant event with only tool_use block", () => {
+    const data = {
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Bash" }] },
+    };
+    expect(extractQueueContent(data)).toEqual({ isToolCall: true });
+  });
+
+  it("returns text AND isToolCall for Claude assistant event with both text and tool_use", () => {
+    const data = {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Let me run that." },
+          { type: "tool_use", name: "Bash" },
+        ],
+      },
+    };
+    const result = extractQueueContent(data);
+    expect(result.text).toBe("Let me run that.");
+    expect(result.isToolCall).toBe(true);
+  });
+
+  it("returns isToolCall for Claude system permission_request", () => {
+    expect(extractQueueContent({ type: "system", subtype: "permission_request" }))
+      .toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Gemini text event", () => {
+    expect(extractQueueContent({ type: "text", part: { text: "Gemini response" } }))
+      .toEqual({ text: "Gemini response", isToolCall: false });
+  });
+
+  it("returns isToolCall for Gemini tool_use event", () => {
+    expect(extractQueueContent({ type: "tool_use", part: { tool: "bash" } }))
+      .toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Codex item.completed agent_message", () => {
+    expect(extractQueueContent({ type: "item.completed", item: { type: "agent_message", text: "Done!" } }))
+      .toEqual({ text: "Done!", isToolCall: false });
+  });
+
+  it("returns isToolCall for Codex item.completed exec_command", () => {
+    expect(extractQueueContent({ type: "item.completed", item: { type: "exec_command", command: "ls" } }))
+      .toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Codex event_msg agent_message", () => {
+    const data = { type: "event_msg", payload: { type: "agent_message", message: "Codex says hi" } };
+    expect(extractQueueContent(data)).toEqual({ text: "Codex says hi", isToolCall: false });
+  });
+
+  it("returns isToolCall for Codex event_msg exec_command", () => {
+    const data = { type: "event_msg", payload: { type: "exec_command", command: "ls" } };
+    expect(extractQueueContent(data)).toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Claude result event", () => {
+    expect(extractQueueContent({ type: "result", result: "Final answer" }))
+      .toEqual({ text: "Final answer", isToolCall: false });
+  });
+
+  it("returns empty result for unknown event type", () => {
+    expect(extractQueueContent({ type: "unknown_event" }))
+      .toEqual({ isToolCall: false });
   });
 });

@@ -87,6 +87,24 @@ export interface AgentStatusUpdate {
     current_status: string;
 }
 
+export interface QueueItem {
+    id: string;
+    type: "agent_completed" | "workflow_completed";
+    timestamp: number;
+    read: boolean;
+    // agent fields
+    agent_session_id?: string;
+    agent_name?: string;
+    // workflow fields
+    workflow_id?: string;
+    workflow_run_id?: string;
+    workflow_name?: string;
+    status?: "completed" | "failed";
+    error?: string;
+    // shared
+    summary?: string;
+}
+
 export interface GridLayout {
     column_tracks: number[]; // Relative weights (e.g. [1, 1] for 50/50)
     row_height: number;      // Fixed height for all rows in pixels
