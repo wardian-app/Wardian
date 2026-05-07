@@ -56,7 +56,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
       if (selectedAgentIds.size > 0) {
         await submitInputToAgents(selectedAgentIds, flattenedPrompt);
       } else {
-        if (await confirm("No agents selected. This will broadcast the prompt to ALL agents. Are you sure?")) {
+        if (await confirm("No agents selected. This will broadcast the prompt to all agents. Are you sure?")) {
           const agents = await invoke<AgentConfig[]>("list_agents");
           await submitInputToAgents(
             agents.map((agent) => agent.session_id),
@@ -83,7 +83,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   const handleBroadcastSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedAgentIds.size === 0) {
-      if (!await confirm("No agents selected. This will broadcast to ALL agents. Are you sure?")) {
+      if (!await confirm("No agents selected. This will broadcast to all agents. Are you sure?")) {
         return;
       }
     }

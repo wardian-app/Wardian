@@ -199,7 +199,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
         <div className="p-6 border-b border-wardian-border flex items-center justify-between">
           <div className="flex flex-col">
             <h3 className="text-xl font-bold text-[var(--color-wardian-text)] tracking-tight">{workflow.name}</h3>
-            <span className="text-[10px] font-bold text-muted-neutral uppercase tracking-widest">
+            <span className="text-[11px] font-bold text-muted-neutral tracking-wide">
               Configure {subtitleParts.join(' & ')}
             </span>
           </div>
@@ -217,7 +217,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
             <div className="space-y-3">
               <div className="flex items-center gap-2 mb-1">
                 <svg className="w-3.5 h-3.5 text-[var(--color-wardian-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                <span className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.15em]">Schedule</span>
+                <span className="text-[12px] font-bold text-[var(--color-wardian-accent)] tracking-wide">Schedule</span>
               </div>
               <ScheduleEditor
                 value={scheduleConfig}
@@ -236,12 +236,12 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
             <div className="space-y-3">
               <div className="flex items-center gap-2 mb-1">
                 <svg className="w-3.5 h-3.5 text-[var(--color-wardian-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                <span className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.15em]">Agent Assignments</span>
+                <span className="text-[12px] font-bold text-[var(--color-wardian-accent)] tracking-wide">Agent assignments</span>
               </div>
               {roles.map(({ role, nodeName }) => (
                 <div key={role} className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between">
-                    <label className="text-[10px] font-bold text-muted-neutral uppercase tracking-wider">{nodeName}</label>
+                    <label className="text-[11px] font-bold text-muted-neutral tracking-wide">{nodeName}</label>
                     <span className="text-[8px] font-mono text-muted-neutral/50 bg-white/5 px-1.5 py-0.5 rounded border border-white/5">{role}</span>
                   </div>
                   <select
@@ -249,7 +249,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
                     onChange={(e) => handleRoleChange(role, e.target.value)}
                     className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-xl px-3 py-2 text-[11px] text-[var(--color-wardian-text)] outline-none focus:border-[var(--color-wardian-accent)]/50 transition-colors cursor-pointer"
                   >
-                    <option value="">-- Select Agent --</option>
+                    <option value="">Select agent</option>
                     {agents.map((a) => (
                       <option key={a.session_id} value={a.session_id}>
                         {a.session_name || a.session_id}
@@ -272,7 +272,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
               {(hasRoles || hasSchedule) && (
                 <div className="flex items-center gap-2 mb-1">
                   <svg className="w-3.5 h-3.5 text-[var(--color-wardian-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-                  <span className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.15em]">Input Parameters</span>
+                  <span className="text-[12px] font-bold text-[var(--color-wardian-accent)] tracking-wide">Input parameters</span>
                 </div>
               )}
               {Object.entries(properties).map(([key, prop]: [string, any]) => {
@@ -281,7 +281,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
                 <div key={key} className="flex flex-col gap-2">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1">
-                      <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] uppercase tracking-[0.2em]">{prop.title || key}</label>
+                      <label className="text-[11px] font-bold text-[var(--color-wardian-accent)] tracking-wide">{prop.title || key}</label>
                       {isRequired && <span className="text-[11px] text-[var(--color-wardian-error)] font-bold">*</span>}
                     </div>
                     <div className="flex items-center gap-1.5 opacity-60">
@@ -314,7 +314,7 @@ export const RunPayloadModal: React.FC<RunPayloadModalProps> = ({
           </button>
           <button
             onClick={handleSubmit}
-            className="px-8 py-2 bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] rounded-xl text-[10px] font-bold uppercase tracking-widest hover:scale-105 active:scale-95 transition-all cursor-pointer"
+            className="px-8 py-2 bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] rounded-xl text-xs font-bold tracking-wide hover:scale-105 active:scale-95 transition-all cursor-pointer"
           >
             {hasSchedule ? 'Schedule Workflow' : 'Run Workflow'}
           </button>

@@ -108,6 +108,18 @@ describe('SettingsPanel', () => {
     expect(await screen.findByText('Shell settings updated.')).toBeInTheDocument();
   });
 
+  it('shows the Gemini patch success message after running the patch', async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel />);
+
+    await user.click(await screen.findByText('Run Patch Now'));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('run_gemini_patch');
+    });
+    expect(await screen.findByText('Gemini CLI patch applied successfully.')).toBeInTheDocument();
+  });
+
   it('shows the auto-selected shell when default shell is auto', async () => {
     mockInvoke.mockImplementation(async (command, args) => {
       switch (command) {

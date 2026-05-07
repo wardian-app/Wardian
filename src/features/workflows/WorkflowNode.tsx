@@ -69,11 +69,11 @@ function describeScheduleConfig(config: any): string {
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
-  'TRIGGER': 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
-  'EXECUTION': 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
-  'FLOW CONTROL': 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
-  'PERSISTENCE': 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
-  'COMMUNICATION': 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
+  'Trigger': 'border-[var(--color-workflow-agent)] bg-[color-mix(in_srgb,var(--color-workflow-agent),transparent_95%)]',
+  'Execution': 'border-[var(--color-workflow-command)] bg-[color-mix(in_srgb,var(--color-workflow-command),transparent_95%)]',
+  'Flow control': 'border-[var(--color-workflow-logic)] bg-[color-mix(in_srgb,var(--color-workflow-logic),transparent_95%)]',
+  'Persistence': 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
+  'Communication': 'border-[var(--color-workflow-comm)] bg-[color-mix(in_srgb,var(--color-workflow-comm),transparent_95%)]',
 };
 
 const STATUS_COLORS: Record<NodeStatus, string> = {
@@ -90,8 +90,8 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
   
   // Lookup block definition by type and name to get category
   const blockDef = BLOCK_LIBRARY.find(b => b.type === type && (data.blockName ? b.name === data.blockName : true));
-  const category = blockDef?.category || 'EXECUTION';
-  const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS['EXECUTION'];
+  const category = blockDef?.category || 'Execution';
+  const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS['Execution'];
   const statusColorClass = STATUS_COLORS[status];
   
   const { 
@@ -214,7 +214,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
                 const summary = describeScheduleConfig(data.config);
                 return (
                   <div key={field.name} className="flex flex-col gap-1 p-2 mt-1 bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_95%)] rounded border border-[var(--color-wardian-accent)]/10">
-                    <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-accent)] font-bold tracking-wide">{field.label}</span>
+                    <span className="text-[9px] font-mono text-[var(--color-wardian-accent)] font-bold tracking-wide">{field.label}</span>
                     <span className="text-[10px] text-[var(--color-wardian-text)] font-medium opacity-90 truncate">{summary}</span>
                   </div>
                 );
@@ -231,7 +231,7 @@ export const WorkflowNode = memo(({ id, data, selected }: NodeProps<Node<{ label
               if (field.name === 'agent_id') {
                 return (
                   <div key={field.name} className="flex flex-col gap-1">
-                    <span className="text-[8px] font-mono uppercase text-[var(--color-wardian-text-muted)]">{field.label}</span>
+                    <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)]">{field.label}</span>
                     <select
                       className="nodrag nowheel p-1.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-bg),black_10%)] border border-[var(--color-wardian-border)] text-xs text-[var(--color-wardian-text)] w-full outline-none focus:border-[var(--color-wardian-accent)] cursor-pointer"
                       value={val}

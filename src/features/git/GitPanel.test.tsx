@@ -118,6 +118,8 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     expect(await screen.findByText("main")).toBeInTheDocument();
+    expect(screen.getByText("Staged changes")).toBeInTheDocument();
+    expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.getByText("changed.ts")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();
     expect(screen.getByText("Initial commit")).toBeInTheDocument();

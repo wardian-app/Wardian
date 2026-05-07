@@ -112,7 +112,7 @@ describe('WorkflowSidebar', () => {
     renderWithProvider(<WorkflowSidebar />);
 
     fireEvent.click(screen.getByTitle('Stop All (Panic)'));
-    await waitFor(() => expect(screen.getByText(/STOP ALL/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Stop all active runs/)).toBeInTheDocument());
     fireEvent.click(screen.getByText('Confirm'));
     await waitFor(() => expect(mockStopAllTriggers).toHaveBeenCalled());
     await waitFor(() => expect(mockFetchWorkflows).toHaveBeenCalled());

@@ -1,5 +1,6 @@
 use crate::errors::CliError;
 use serde_json::{Map, Value};
+use wardian_core::control::WorkflowSummary;
 use wardian_core::identity::{AgentIdentity, StatusSource};
 
 const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "workspace", "status"];
@@ -177,6 +178,66 @@ fn render_pretty(values: &Map<String, Value>) -> String {
         ));
     }
     out
+}
+
+pub fn render_workflow_list(
+    workflows: &[WorkflowSummary],
+    pretty: bool,
+) -> Result<String, CliError> {
+    let summaries: Vec<_> = workflows
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "name": w.name,
+                "node_count": w.node_count,
+            })
+        })
+        .collect();
+
+    if pretty {
+        let mut out = String::new();
+        for s in &summaries {
+            out.push_str(&format!(
+                "{:<36}  {}\n",
+                s["id"].as_str().unwrap_or(""),
+                s["name"].as_str().unwrap_or("")
+            ));
+        }
+        return Ok(out);
+    }
+
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({"schema": 1, "workflows": summaries}))
+            .map_err(json_error)?
+    ))
+}
+
+pub fn render_workflow_show(
+    workflow: &wardian_core::models::WorkflowDefinition,
+    pretty: bool,
+) -> Result<String, CliError> {
+    if pretty {
+        return Ok(format!(
+            "{:<16}  {}\n{:<16}  {}\n{:<16}  {} nodes\n",
+            "id",
+            workflow.id,
+            "name",
+            workflow.name,
+            "nodes",
+            workflow.nodes.len(),
+        ));
+    }
+
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": 1,
+            "workflow": workflow,
+        }))
+        .map_err(json_error)?
+    ))
 }
 
 fn json_error(error: serde_json::Error) -> CliError {

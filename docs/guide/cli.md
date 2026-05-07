@@ -41,7 +41,31 @@ wardian agent <name-or-uuid>
 wardian agent show [name-or-uuid]
 wardian agent list --scope workspace
 wardian agent list --scope all
+wardian agent kill <name-or-uuid>
+wardian agent pause <name-or-uuid>
+wardian agent resume <name-or-uuid>
+wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace D:/Development/Wardian
+wardian agent clone <name-or-uuid> --name coder-a2
+wardian agent wait reviewer-a1 --until idle --timeout 10m
+wardian workflow list
+wardian workflow show <id-or-name>
+wardian workflow run <id>
+wardian workflow stop <run-instance-id>
+wardian send "review this" --to coder-a1
+wardian send "review this" --to reviewer-a1 --wait-until idle --timeout 10m
+wardian send "status?" --to class:Coder
+wardian send "stand down" --to all
 ```
+
+Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, `workflow run`, `workflow stop`, and `send`.
+
+`workflow list` and `workflow show` try the running app first, then read workflow JSON files from disk when the app is unavailable.
+
+`agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
+
+`agent wait <target> --until <status>` blocks inside the CLI process until a single agent name or UUID reaches a normalized status such as `idle`, `processing`, `action_required`, `off`, or `error`. Use `--timeout` with `ms`, `s`, or `m` units.
+
+`send` writes a newline-terminated message into the target agent PTY. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. `--wait-until <status>` is available for single-agent targets and waits after delivery; when the target already has the requested status, Wardian waits for it to leave that status and return before reporting success. `--thread` is reserved but not implemented yet; when the app is running, using it returns `not_supported`.
 
 List filters:
 
@@ -69,6 +93,7 @@ Default JSON is indented for terminal readability. It includes `schema: 1` and a
 | 3 | `WARDIAN_SESSION_ID` is not set for self lookup |
 | 4 | Wardian state database is unavailable |
 | 5 | Lookup matched multiple agents |
+| 6 | Desktop app is not running for a live control command |
 
 Errors are written to stderr as JSON:
 

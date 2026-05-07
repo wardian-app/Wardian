@@ -284,7 +284,7 @@ export function UserTerminalPanel({
         onPointerUp={handlePointerUp}
       />
       <div className="h-9 px-3 flex items-center gap-2 border-b border-wardian-border bg-[var(--color-wardian-sidebar-secondary)]/30">
-        <h2 className="text-xs font-bold text-primary uppercase tracking-[0.08em]">Terminal</h2>
+        <h2 className="text-xs font-bold text-primary tracking-tight">Terminal</h2>
         {statusMessage && (
           <span className="text-xs text-muted truncate" title={statusMessage}>
             {statusMessage}

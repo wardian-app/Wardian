@@ -9,6 +9,7 @@ pub enum ExitCode {
     NotInSession = 3,
     DbUnavailable = 4,
     Ambiguous = 5,
+    AppNotRunning = 6,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,10 +86,30 @@ impl CliError {
         }
     }
 
+    pub fn app_not_running() -> Self {
+        Self {
+            exit_code: ExitCode::AppNotRunning,
+            code: "app_not_running",
+            message: "Wardian is not running. Start the app to use this command.".to_string(),
+            hint: Some("Launch Wardian, then retry.".to_string()),
+            details: None,
+        }
+    }
+
     pub fn generic(message: impl Into<String>) -> Self {
         Self {
             exit_code: ExitCode::Generic,
             code: "generic",
+            message: message.into(),
+            hint: None,
+            details: None,
+        }
+    }
+
+    pub fn backend(exit_code: ExitCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            exit_code,
+            code,
             message: message.into(),
             hint: None,
             details: None,

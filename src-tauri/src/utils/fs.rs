@@ -134,7 +134,7 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
         if !agent_path.exists() {
             let _ = std::fs::create_dir_all(&agent_path);
         }
-        // Ensure Claude can discover skills from agent's .agents/skills/
+        // Expose canonical agent skills through provider-specific discovery shims.
         ensure_claude_skills_link(&agent_path);
 
         if common_path.exists() {
@@ -643,8 +643,9 @@ fn project_file(source: &std::path::Path, target: &std::path::Path) -> Result<()
 }
 
 /// Ensures `.claude/skills` is a symlink (or junction on Windows) pointing to
-/// `.agents/skills` within the given base directory. This lets Claude Code
-/// natively discover skills from the provider-agnostic canonical location.
+/// `.agents/skills` within the given base directory. `.agents/skills` remains
+/// the provider-agnostic canonical location; this is only a compatibility shim
+/// for providers that require their own discovery path.
 /// No-ops if the link already exists and points to the right target.
 pub fn ensure_claude_skills_link(base_dir: &std::path::Path) {
     let canonical = base_dir.join(".agents").join("skills");

@@ -61,7 +61,7 @@ export const AssignPromptModal: React.FC<AssignPromptModalProps> = ({ prompt, is
                 
                 <div className="p-5 flex flex-col gap-4">
                     <div className="flex flex-col gap-2">
-                        <label htmlFor={agentSelectId} className="text-xs font-bold text-muted uppercase tracking-widest">Select Agent</label>
+                        <label htmlFor={agentSelectId} className="text-xs font-bold text-muted tracking-wide">Select agent</label>
                         <select 
                             id={agentSelectId}
                             value={selectedTargetId}

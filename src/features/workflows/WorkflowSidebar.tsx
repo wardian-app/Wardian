@@ -156,7 +156,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
   [availableWorkflows]);
 
   const handleStopAll = async () => {
-    if (await confirm('STOP ALL: Immediately terminate all active runs and triggers?')) {
+    if (await confirm('Stop all active runs and triggers?')) {
       await stopAllTriggers();
       fetchWorkflows();
     }

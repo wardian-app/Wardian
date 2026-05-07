@@ -53,6 +53,20 @@ You can also target a specific file:
 npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
 ```
 
+For manual validation, run the same native harness in visible watch mode:
+
+```bash
+npm run test:e2e:native:watch -- e2e-native/tests/cli-shared-state-native.test.mjs
+```
+
+Watch mode reuses the current native binary, prints named test steps, pauses briefly between watch steps, and keeps the WebView open until you press Enter. Set `WARDIAN_E2E_STEP_DELAY_MS` to change the pause length, or set `WARDIAN_E2E_WATCH_KEEP_OPEN=0` to close the window automatically.
+
+If the WebView shows a `localhost:1420` connection failure, the fast/watch runner is using a binary that expects the Vite dev server. Either start `npm run vite` or rebuild the native debug app first:
+
+```bash
+npm run tauri -- build --debug --no-bundle
+```
+
 Use this layer when validating:
 
 - terminal scrollback or renderer behavior
@@ -68,7 +82,7 @@ The CLI shared-state smoke can be run directly:
 npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mjs
 ```
 
-It starts the native app with an isolated `WARDIAN_HOME`, creates a mock agent through Tauri IPC, then runs the local `wardian-cli` binary against the same home and asserts the CLI can read the app-created agent through the live control endpoint. The CLI still falls back to `state.db` when the desktop app is not running.
+It starts the native app with an isolated `WARDIAN_HOME`, creates agents through both Tauri IPC and live CLI control, then runs the local `wardian-cli` binary against the same home. The smoke asserts live app state is readable, explicit `agent spawn --provider --class` works, `send --wait-until` can drive a mock action-required turn to idle, and lifecycle commands affect the running app. The CLI still falls back to `state.db` when the desktop app is not running.
 
 ## Real Providers
 

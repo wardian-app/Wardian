@@ -33,6 +33,7 @@ describe('ClassManagerPanel', () => {
     expect(screen.getByText('Available Classes')).toBeInTheDocument();
     expect(screen.getByText('Coder')).toBeInTheDocument();
     expect(screen.getByText('CustomAgent')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reset all default prompts' })).toBeInTheDocument();
   });
 
   it('renders the Default badge only for default classes', () => {

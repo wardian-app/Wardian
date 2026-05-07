@@ -107,7 +107,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     try {
       await invoke<string>("run_gemini_patch");
       setPatchStatus("success");
-      setPatchMessage("Gemini CLI Patch Applied Successfully.");
+      setPatchMessage("Gemini CLI patch applied successfully.");
       setTimeout(() => {
         setPatchStatus("idle");
         setPatchMessage("");
