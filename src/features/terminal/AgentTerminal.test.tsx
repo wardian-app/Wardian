@@ -1,4 +1,4 @@
-import { render, waitFor, cleanup, act, screen } from "@testing-library/react";
+import { render, waitFor, cleanup, act, screen, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -208,6 +208,26 @@ describe("AgentTerminal scrollback", () => {
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "codex-text",
       input: "abc",
+    });
+  });
+
+  it("captures terminal host Tab keydown and forwards a tab byte", async () => {
+    render(<AgentTerminal sessionId="codex-tab" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const host = screen.getByTestId("agent-terminal-host");
+    host.focus();
+    mockInvoke.mockClear();
+
+    const prevented = !fireEvent.keyDown(host, { key: "Tab", code: "Tab" });
+
+    expect(prevented).toBe(true);
+    expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-tab",
+      input: "\t",
     });
   });
 

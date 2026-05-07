@@ -695,6 +695,15 @@ export const AgentTerminal = memo(function AgentTerminal({
     xtermRef.current?.focus();
   }, []);
 
+  const handleTerminalKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+
+    event.preventDefault();
+    queueAgentInput(sessionId, "\t");
+  }, [sessionId]);
+
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
       return;
@@ -838,6 +847,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         data-testid="agent-terminal-host"
         tabIndex={-1}
         onFocusCapture={onTerminalFocus}
+        onKeyDownCapture={handleTerminalKeyDown}
         onClick={focusTerminal}
         className={`w-full h-full overflow-hidden ${
           provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
