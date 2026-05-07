@@ -5,8 +5,8 @@ use std::{
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, ControlRequest, WorkflowListResponse, WorkflowResponse,
-    WorkflowSummary,
+    AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, SendMessageResponse,
+    WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
@@ -14,7 +14,7 @@ use wardian_core::models::WorkflowDefinition;
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
 const CONTROL_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ControlOperation {
     AgentList,
     AgentKill,
@@ -27,12 +27,18 @@ enum ControlOperation {
     WorkflowRun,
     WorkflowStop,
     SendMessage,
+    AgentWatch {
+        requested: Duration,
+        target: String,
+        until: String,
+    },
 }
 
 #[derive(Debug)]
 pub struct ControlEndpointError {
     code: String,
     message: String,
+    details: Option<serde_json::Value>,
 }
 
 impl ControlEndpointError {
@@ -40,11 +46,28 @@ impl ControlEndpointError {
         Self {
             code: code.into(),
             message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn with_details(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details: Some(details),
         }
     }
 
     pub fn code(&self) -> &str {
         &self.code
+    }
+
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        self.details.as_ref()
     }
 }
 
@@ -84,6 +107,35 @@ impl fmt::Display for WaitTimeoutError {
 }
 
 impl std::error::Error for WaitTimeoutError {}
+
+#[derive(Debug)]
+pub struct WatchTimeoutError {
+    target: String,
+    until: String,
+    last_status: String,
+}
+
+impl WatchTimeoutError {
+    pub fn new(target: &str, until: &str, last_status: &str) -> Self {
+        Self {
+            target: target.to_string(),
+            until: until.to_string(),
+            last_status: last_status.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for WatchTimeoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "timed out watching {} for {}; last status: {}",
+            self.target, self.until, self.last_status
+        )
+    }
+}
+
+impl std::error::Error for WatchTimeoutError {}
 
 #[derive(Debug)]
 pub struct WaitTargetNotFoundError {
@@ -243,9 +295,13 @@ pub fn workflow_stop(run_instance_id: &str) -> io::Result<()> {
     .map(|_| ())
 }
 
-pub fn send_message(target: &str, message: &str, thread: Option<&str>) -> io::Result<()> {
+pub fn send_message(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+) -> io::Result<SendMessageResponse> {
     let runtime = build_runtime()?;
-    timeout_block(
+    let value = timeout_block(
         &runtime,
         ControlOperation::SendMessage,
         send_request(ControlRequest::SendMessage {
@@ -253,24 +309,103 @@ pub fn send_message(target: &str, message: &str, thread: Option<&str>) -> io::Re
             message: message.to_string(),
             thread: thread.map(str::to_string),
         }),
-    )
-    .map(|_| ())
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
-pub fn send_message_and_wait(
+pub fn wait_agent_until(target: &str, until: &str, timeout: Duration) -> io::Result<AgentIdentity> {
+    wait_agent_until_after_snapshot(target, until, timeout, None)
+}
+
+pub fn agent_watch(
+    target: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    include: Vec<String>,
+    tail_bytes: Option<usize>,
+    follow: bool,
+    timeout: Duration,
+) -> io::Result<AgentWatchResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentWatch {
+            requested: timeout,
+            target: target.to_string(),
+            until: until.unwrap_or("snapshot").to_string(),
+        },
+        send_request(ControlRequest::AgentWatch {
+            target: target.to_string(),
+            since: since.map(str::to_string),
+            until: until.map(str::to_string),
+            include,
+            tail_bytes,
+            follow,
+            timeout_ms: Some(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn wait_agent_until_next(
+    target: &str,
+    until: &str,
+    timeout: Duration,
+) -> io::Result<AgentWatchResponse> {
+    let initial = agent_watch(
+        target,
+        None,
+        None,
+        vec!["status".to_string()],
+        Some(4096),
+        false,
+        Duration::from_secs(5),
+    )?;
+    agent_watch(
+        target,
+        Some(&initial.cursor),
+        Some(&format!("status:{until}")),
+        vec!["status".to_string()],
+        Some(4096),
+        false,
+        timeout,
+    )
+}
+
+pub fn send_message_and_watch(
     target: &str,
     message: &str,
     thread: Option<&str>,
     until: &str,
     timeout: Duration,
-) -> io::Result<AgentIdentity> {
-    let initial = wait_target_snapshot(target)?;
+) -> io::Result<AgentWatchResponse> {
+    let initial = agent_watch(
+        target,
+        None,
+        None,
+        vec![
+            "status".to_string(),
+            "output".to_string(),
+            "delivery".to_string(),
+        ],
+        Some(4096),
+        false,
+        Duration::from_secs(5),
+    )?;
     send_message(target, message, thread)?;
-    wait_agent_until_after_snapshot(target, until, timeout, Some(initial))
-}
-
-pub fn wait_agent_until(target: &str, until: &str, timeout: Duration) -> io::Result<AgentIdentity> {
-    wait_agent_until_after_snapshot(target, until, timeout, None)
+    agent_watch(
+        target,
+        Some(&initial.cursor),
+        Some(&format!("status:{until}")),
+        vec![
+            "status".to_string(),
+            "output".to_string(),
+            "delivery".to_string(),
+        ],
+        Some(4096),
+        false,
+        timeout,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -290,17 +425,23 @@ fn timeout_block(
     operation: ControlOperation,
     fut: impl std::future::Future<Output = io::Result<serde_json::Value>>,
 ) -> io::Result<serde_json::Value> {
-    let timeout = operation_timeout(operation);
+    let timeout = operation_timeout(&operation);
     match runtime.block_on(async { tokio::time::timeout(timeout, fut).await }) {
         Ok(result) => result,
-        Err(_) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Wardian control endpoint timed out",
-        )),
+        Err(_) => match operation {
+            ControlOperation::AgentWatch { target, until, .. } => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                WatchTimeoutError::new(&target, &until, "unknown"),
+            )),
+            _ => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Wardian control endpoint timed out",
+            )),
+        },
     }
 }
 
-fn operation_timeout(operation: ControlOperation) -> Duration {
+fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
         ControlOperation::AgentList
         | ControlOperation::WorkflowList
@@ -313,7 +454,12 @@ fn operation_timeout(operation: ControlOperation) -> Duration {
         | ControlOperation::AgentClone
         | ControlOperation::WorkflowRun
         | ControlOperation::WorkflowStop => CONTROL_MUTATION_TIMEOUT,
+        ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
     }
+}
+
+fn watch_timeout_for(requested: Duration) -> Duration {
+    requested + Duration::from_secs(5)
 }
 
 fn wait_agent_until_after_snapshot(
@@ -463,7 +609,11 @@ where
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown error");
-        return Err(io::Error::other(ControlEndpointError::new(code, msg)));
+        let endpoint_error = err.get("details").cloned().map_or_else(
+            || ControlEndpointError::new(code, msg),
+            |details| ControlEndpointError::with_details(code, msg, details),
+        );
+        return Err(io::Error::other(endpoint_error));
     }
 
     Ok(value)
@@ -475,16 +625,29 @@ mod tests {
 
     #[test]
     fn spawn_and_clone_use_longer_control_timeout() {
-        assert!(operation_timeout(ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
-        assert!(operation_timeout(ControlOperation::AgentClone) > CONTROL_TIMEOUT);
+        assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
+        assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
     }
 
     #[test]
     fn agent_list_keeps_short_control_timeout() {
         assert_eq!(
-            operation_timeout(ControlOperation::AgentList),
+            operation_timeout(&ControlOperation::AgentList),
             CONTROL_TIMEOUT
         );
+    }
+
+    #[test]
+    fn agent_watch_operation_timeout_includes_requested_timeout_plus_slack() {
+        let requested = Duration::from_secs(30);
+        let actual = operation_timeout(&ControlOperation::AgentWatch {
+            requested,
+            target: "Wardian-Codex".to_string(),
+            until: "output:OK".to_string(),
+        });
+
+        assert!(actual > requested);
+        assert!(actual < requested + Duration::from_secs(10));
     }
 
     #[test]
@@ -550,5 +713,40 @@ mod tests {
             .get_ref()
             .and_then(|inner| inner.downcast_ref::<WaitTargetNotFoundError>())
             .is_some());
+    }
+
+    #[test]
+    fn exchange_json_preserves_backend_error_details() {
+        let runtime = build_runtime().unwrap();
+        runtime.block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(4096);
+            tokio::spawn(async move {
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut server);
+            reader.read_line(&mut line).await.unwrap();
+            let stream = reader.get_mut();
+            stream
+                .write_all(
+                    br#"{"schema":1,"error":{"code":"request_failed","message":"message delivery failed","details":{"delivery":[{"uuid":"agent-2","name":"CoderTwo","provider":"claude","runtime_state":"restored_without_sender","delivery_state":"failed","error":{"code":"no_input_channel","message":"missing sender"}}]}}}"#,
+                )
+                .await
+                .unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            });
+
+            let error = exchange_json(&mut client, ControlRequest::AgentList)
+                .await
+                .unwrap_err();
+            let endpoint_error = error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<ControlEndpointError>())
+                .unwrap();
+
+            assert_eq!(endpoint_error.code(), "request_failed");
+            assert_eq!(
+                endpoint_error.details().unwrap()["delivery"][0]["runtime_state"],
+                "restored_without_sender"
+            );
+        });
     }
 }

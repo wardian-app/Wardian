@@ -1484,6 +1484,12 @@ mod tests {
             query_count: Arc::new(Mutex::new(0)),
             init_timestamp: Arc::new(Mutex::new(None)),
             current_status: Arc::new(Mutex::new("Idle".to_string())),
+            last_status_at: Arc::new(Mutex::new(None)),
+            watch_state: Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+                "test-agent".to_string(),
+                4096,
+                262_144,
+            ))),
             terminal_title: Arc::new(Mutex::new(String::new())),
             last_output_at: Arc::new(Mutex::new(None)),
             log_path: Arc::new(Mutex::new(None)),

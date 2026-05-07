@@ -87,6 +87,8 @@ wardian agent pause reviewer-a1
 wardian agent resume reviewer-a1
 wardian agent kill reviewer-a1
 wardian agent wait reviewer-a1 --until idle --timeout 10m
+wardian agent wait reviewer-a1 --until idle --next --timeout 10m
+wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output --timeout 10m
 ```
 
 `agent spawn` requires both `--provider` and `--class`; do not rely on implicit
@@ -96,7 +98,13 @@ you need.
 
 `agent wait <target> --until <status>` blocks until a single agent name or UUID
 reaches a normalized status such as `idle`, `processing`, `action_required`,
-`off`, or `error`. Use `--timeout` with `ms`, `s`, or `m` units.
+`off`, or `error`. Plain `wait` returns immediately when the agent is already
+in the requested status. Use `--next` to wait for a newer matching observation.
+Use `--timeout` with `ms`, `s`, or `m` units.
+
+`agent watch <target>` returns status, retained output, events, delivery
+details, and a cursor. Use `--until output:<token>` when you need the response
+text itself. `--follow` is reserved and currently returns `not_supported`.
 
 ## Sending Messages
 
@@ -114,6 +122,10 @@ wardian send "review this patch" --to reviewer-a1 --wait-until idle --timeout 10
 Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. Use
 `--wait-until` only with a single-agent target; broadcasts are for messages that
 should not block the current command.
+
+Successful sends include `delivery[]`. Failed delivery emits JSON on stderr with
+`details.delivery[]`, including `runtime_state`, `delivery_state`, and any input
+channel error.
 
 `--thread` is reserved for grouped conversations. Until threading is implemented
 end-to-end, the running app rejects it with `not_supported` instead of silently
@@ -154,7 +166,10 @@ one terminal:
 ```bash
 wardian agent list --scope all --fields name,class,provider,workspace,status
 wardian agent spawn --provider codex --class Reviewer --name review-cli-surface --workspace D:/Development/Wardian
-wardian send --stdin --to review-cli-surface --wait-until idle --timeout 10m
+@"
+Review this patch. End with REVIEW_DONE.
+"@ | wardian send --stdin --to review-cli-surface
+wardian agent watch review-cli-surface --until output:REVIEW_DONE --timeout 10m --include status,output
 wardian agent kill review-cli-surface
 ```
 

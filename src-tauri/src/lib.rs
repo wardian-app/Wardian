@@ -197,6 +197,16 @@ pub fn run() {
                                         current_status: std::sync::Arc::new(std::sync::Mutex::new(
                                             "Headless".to_string(),
                                         )),
+                                        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(
+                                            None,
+                                        )),
+                                        watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                                            crate::state::AgentWatchState::new(
+                                                config.session_id.clone(),
+                                                4096,
+                                                262_144,
+                                            ),
+                                        )),
                                         terminal_title: std::sync::Arc::new(std::sync::Mutex::new(
                                             String::new(),
                                         )),
@@ -249,6 +259,7 @@ pub fn run() {
             commands::agent::rename_agent,
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
+            commands::debug::debug_remove_agent_input_sender,
             commands::terminal::send_input_to_agent,
             commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,

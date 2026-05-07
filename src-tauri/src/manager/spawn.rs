@@ -1,6 +1,6 @@
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::ProviderFactory;
-use crate::state::{ActiveAgent, AppState};
+use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -61,6 +61,7 @@ pub async fn spawn_agent(
 
     if config.is_off {
         let _ = wardian_core::db::update_agent_status(&config.session_id, "Off", None);
+        let session_id = config.session_id.clone();
 
         return Ok(ActiveAgent {
             config: std::sync::Arc::new(std::sync::Mutex::new(config)),
@@ -73,6 +74,10 @@ pub async fn spawn_agent(
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
             init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(Some(born_to_save))),
             current_status: std::sync::Arc::new(std::sync::Mutex::new("Off".to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(AgentWatchState::new(
+                session_id, 4096, 262_144,
+            ))),
             terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
             log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -253,6 +258,12 @@ pub async fn spawn_agent(
     let init_timestamp_clone = init_timestamp.clone();
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string()));
     let current_status_clone = current_status.clone();
+    let watch_state = std::sync::Arc::new(std::sync::Mutex::new(AgentWatchState::new(
+        config.session_id.clone(),
+        4096,
+        262_144,
+    )));
+    let watch_state_clone = watch_state.clone();
     let terminal_title = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let terminal_title_clone = terminal_title.clone();
     let last_output_at = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -311,6 +322,9 @@ pub async fn spawn_agent(
                         opencode_chunks_logged += 1;
                     }
                     had_pty_output = true;
+                    if let Ok(mut watch_state) = watch_state_clone.lock() {
+                        watch_state.push_output(&buf[0..n]);
+                    }
                     log_terminal_trace_bytes(
                         &sid_for_pty,
                         &provider_name_for_pty,
@@ -945,6 +959,8 @@ pub async fn spawn_agent(
         query_count,
         init_timestamp,
         current_status,
+        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        watch_state,
         terminal_title,
         last_output_at,
         log_path,

@@ -350,6 +350,20 @@ fn malformed_args_emit_json_error_and_exit_one() {
 }
 
 #[test]
+fn watch_follow_without_app_parses_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args(["agent", "watch", "coder-a1", "--follow"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+}
+
+#[test]
 fn list_accepts_output_fields_after_subcommand() {
     let home = seed_home();
     let output = Command::new(bin())

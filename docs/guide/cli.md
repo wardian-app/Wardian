@@ -47,6 +47,8 @@ wardian agent resume <name-or-uuid>
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace D:/Development/Wardian
 wardian agent clone <name-or-uuid> --name coder-a2
 wardian agent wait reviewer-a1 --until idle --timeout 10m
+wardian agent wait reviewer-a1 --until idle --next --timeout 10m
+wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output,delivery --timeout 10m
 wardian workflow list
 wardian workflow show <id-or-name>
 wardian workflow run <id>
@@ -63,9 +65,13 @@ Mutating commands use Wardian's local control endpoint and require the desktop a
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
 
-`agent wait <target> --until <status>` blocks inside the CLI process until a single agent name or UUID reaches a normalized status such as `idle`, `processing`, `action_required`, `off`, or `error`. Use `--timeout` with `ms`, `s`, or `m` units.
+`agent wait <target> --until <status>` blocks inside the CLI process until a single agent name or UUID reaches a normalized status such as `idle`, `processing`, `action_required`, `off`, or `error`. Plain `wait` returns immediately when the target is already in the requested status. Add `--next` to wait for a newer matching observation. Use `--timeout` with `ms`, `s`, or `m` units.
 
-`send` writes a newline-terminated message into the target agent PTY. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. `--wait-until <status>` is available for single-agent targets and waits after delivery; when the target already has the requested status, Wardian waits for it to leave that status and return before reporting success. `--thread` is reserved but not implemented yet; when the app is running, using it returns `not_supported`.
+`agent watch <target>` returns a live snapshot with agent status, retained output, recent events, delivery details, and a cursor. Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
+
+`send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. `--wait-until <status>` is available for single-agent targets and waits from a pre-send watch cursor for a newer matching status observation. `--thread` is reserved but not implemented yet; when the app is running, using it returns `not_supported`.
+
+Successful `send` responses include `delivery[]`. Failed or partial delivery returns a nonzero exit with JSON on stderr and `details.delivery[]`, including `runtime_state`, `delivery_state`, and provider-specific input errors.
 
 List filters:
 
