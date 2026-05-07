@@ -1,4 +1,5 @@
 use crate::identity::AgentIdentity;
+use crate::models::WorkflowDefinition;
 use serde::{Deserialize, Serialize};
 pub const CONTROL_SCHEMA: u8 = 1;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -8,15 +9,40 @@ const FNV_PRIME: u64 = 0x100000001b3;
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ControlRequest {
     AgentList,
-    AgentKill { target: String },
-    AgentPause { target: String },
-    AgentResume { target: String },
-    AgentSpawn { class: String, name: Option<String>, workspace: Option<String> },
-    AgentClone { target: String, name: Option<String> },
+    AgentKill {
+        target: String,
+    },
+    AgentPause {
+        target: String,
+    },
+    AgentResume {
+        target: String,
+    },
+    AgentSpawn {
+        provider: String,
+        class: String,
+        name: Option<String>,
+        workspace: Option<String>,
+    },
+    AgentClone {
+        target: String,
+        name: Option<String>,
+    },
     WorkflowList,
-    WorkflowRun { id: String },
-    WorkflowStop { run_instance_id: String },
-    SendMessage { target: String, message: String, thread: Option<String> },
+    WorkflowShow {
+        target: String,
+    },
+    WorkflowRun {
+        id: String,
+    },
+    WorkflowStop {
+        run_instance_id: String,
+    },
+    SendMessage {
+        target: String,
+        message: String,
+        thread: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +118,21 @@ impl WorkflowListResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowResponse {
+    pub schema: u8,
+    pub workflow: WorkflowDefinition,
+}
+
+impl WorkflowResponse {
+    pub fn new(workflow: WorkflowDefinition) -> Self {
+        Self {
+            schema: CONTROL_SCHEMA,
+            workflow,
+        }
+    }
+}
+
 pub fn endpoint_key() -> Option<String> {
     let home = crate::paths::wardian_home()?;
     let mut hash = FNV_OFFSET_BASIS;
@@ -132,10 +173,27 @@ mod tests {
 
     #[test]
     fn agent_kill_request_serializes_with_target() {
-        let req = ControlRequest::AgentKill { target: "coder-a1".to_string() };
+        let req = ControlRequest::AgentKill {
+            target: "coder-a1".to_string(),
+        };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"agent_kill""#));
         assert!(json.contains(r#""target":"coder-a1""#));
+    }
+
+    #[test]
+    fn agent_spawn_request_serializes_provider_and_class() {
+        let req = ControlRequest::AgentSpawn {
+            provider: "codex".to_string(),
+            class: "Reviewer".to_string(),
+            name: Some("CLI-Codex-Review".to_string()),
+            workspace: Some("D:/Development/Wardian".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+
+        assert!(json.contains(r#""command":"agent_spawn""#));
+        assert!(json.contains(r#""provider":"codex""#));
+        assert!(json.contains(r#""class":"Reviewer""#));
     }
 
     #[test]
@@ -168,5 +226,46 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         let back: WorkflowSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.node_count, 3);
+    }
+
+    #[test]
+    fn workflow_show_request_serializes_with_target() {
+        let req = ControlRequest::WorkflowShow {
+            target: "wf-1".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"workflow_show""#));
+        assert!(json.contains(r#""target":"wf-1""#));
+    }
+
+    #[test]
+    fn workflow_response_serializes_full_definition() {
+        let workflow = crate::models::WorkflowDefinition {
+            id: "wf-1".to_string(),
+            name: "Daily Review".to_string(),
+            settings: crate::models::WorkflowSettings {
+                max_iterations: 10,
+                on_limit_reached: "stop".to_string(),
+            },
+            nodes: vec![crate::models::WorkflowNode {
+                id: "n1".to_string(),
+                r#type: "agent".to_string(),
+                name: Some("Coder".to_string()),
+                config: serde_json::json!({"agent_class": "Coder"}),
+                parameter_schema: None,
+                dependencies: None,
+                position: None,
+            }],
+            role_mappings: std::collections::HashMap::from([(
+                "primary_coder".to_string(),
+                "uuid-1".to_string(),
+            )]),
+        };
+
+        let json = serde_json::to_string(&WorkflowResponse::new(workflow)).unwrap();
+
+        assert!(json.contains(r#""workflow""#));
+        assert!(json.contains(r#""nodes""#));
+        assert!(json.contains(r#""role_mappings""#));
     }
 }

@@ -29,7 +29,7 @@ pub fn init_agent_classes(app: &AppHandle) {
         let _ = std::fs::create_dir_all(app_dir.join("common/desk"));
         let _ = std::fs::create_dir_all(app_dir.join("common/lineages"));
 
-        // Ensure Claude can discover skills from the canonical .agents/skills/ location
+        // Keep `.agents/skills` canonical while exposing provider-specific discovery shims.
         ensure_claude_skills_link(&app_dir.join("common"));
         init_bundled_common_skills(app, &app_dir);
 
@@ -83,10 +83,10 @@ pub fn init_agent_classes(app: &AppHandle) {
                 let _ = std::fs::write(agents_md_path, content);
             }
 
-            // 2. Symlink .claude/skills/ → .agents/skills/ for Claude discovery
+            // 2. Expose canonical skills through provider-specific discovery shims.
             ensure_claude_skills_link(&role_dir);
 
-            // 3. Create provider stub files for providers that do not read AGENTS.md directly
+            // 3. Create thin compatibility stubs that point providers back to AGENTS.md.
             for stub_name in &["GEMINI.md", "CLAUDE.md"] {
                 let stub_path = role_dir.join(stub_name);
                 if !stub_path.exists() {

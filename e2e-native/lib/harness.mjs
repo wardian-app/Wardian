@@ -3,12 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
+import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { Builder, By, Capabilities, until } from "selenium-webdriver";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
+const DEFAULT_WATCH_STEP_DELAY_MS = 750;
 
 function existingPath(candidates) {
   for (const candidate of candidates) {
@@ -145,7 +147,29 @@ function resolveIsolatedHome() {
   return process.env.WARDIAN_HOME || path.join(os.tmpdir(), "wardian-e2e-native-home");
 }
 
+function readBooleanEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    return false;
+  }
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function readPositiveIntegerEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function compactText(value, maxLength = 1200) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
 export async function createNativeHarness() {
+  const watchMode = readBooleanEnv("WARDIAN_E2E_WATCH");
   return {
     repoRoot,
     appPath: resolveAppPath(),
@@ -153,6 +177,10 @@ export async function createNativeHarness() {
     tauriDriverPath: resolveTauriDriverPath(),
     nativeDriverPath: resolveNativeDriverPath(),
     platform: process.platform,
+    watchMode,
+    watchStepDelayMs: watchMode
+      ? readPositiveIntegerEnv("WARDIAN_E2E_STEP_DELAY_MS", DEFAULT_WATCH_STEP_DELAY_MS)
+      : 0,
   };
 }
 
@@ -221,6 +249,21 @@ export function prepareIsolatedHome(harness) {
     throw lastError;
   }
   fs.mkdirSync(harness.isolatedHome, { recursive: true });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function watchStep(harness, label) {
+  if (!harness.watchMode) {
+    return;
+  }
+
+  console.log(`[native-watch] ${label}`);
+  if (harness.watchStepDelayMs > 0) {
+    await sleep(harness.watchStepDelayMs);
+  }
 }
 
 function waitForPort({ port, host = "127.0.0.1", timeoutMs = 15000, processRef, logs }) {
@@ -314,6 +357,22 @@ export async function startNativeSession(harness) {
       driver,
       tauriDriver,
       async close() {
+        if (
+          harness.watchMode &&
+          process.env.WARDIAN_E2E_WATCH_KEEP_OPEN !== "0" &&
+          process.stdin.isTTY
+        ) {
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
+          try {
+            await rl.question("[native-watch] Press Enter to close the Wardian test window...");
+          } finally {
+            rl.close();
+          }
+        }
+
         try {
           await driver.quit();
         } finally {
@@ -330,11 +389,66 @@ export async function startNativeSession(harness) {
   }
 }
 
+export function formatAppShellTimeoutMessage({
+  timeoutMs,
+  currentUrl = "",
+  title = "",
+  bodyText = "",
+}) {
+  const details = [
+    `Timed out after ${timeoutMs}ms waiting for [data-testid="app-shell"].`,
+    `url: ${currentUrl || "<unknown>"}`,
+    `title: ${title || "<unknown>"}`,
+  ];
+
+  const lowerUrl = currentUrl.toLowerCase();
+  const lowerBody = bodyText.toLowerCase();
+  if (
+    lowerUrl.includes("localhost:1420") ||
+    lowerBody.includes("localhost refused to connect") ||
+    lowerBody.includes("this site can't be reached") ||
+    lowerBody.includes("this site can’t be reached")
+  ) {
+    details.push(
+      "The native WebView appears to be loading the Vite dev server, but the dev server is not reachable.",
+      "Start it with `npm run vite`, or rebuild the debug app with `npm run tauri -- build --debug --no-bundle` before using the fast native runner.",
+    );
+  }
+
+  const compactBody = compactText(bodyText);
+  if (compactBody) {
+    details.push(`body: ${compactBody}`);
+  }
+
+  return details.join("\n");
+}
+
+async function readAppShellDiagnostics(driver) {
+  try {
+    return await driver.executeScript(() => ({
+      currentUrl: window.location.href,
+      title: document.title,
+      bodyText: document.body?.innerText || "",
+    }));
+  } catch (error) {
+    return {
+      currentUrl: "",
+      title: "",
+      bodyText: `Unable to read WebView diagnostics: ${String(error)}`,
+    };
+  }
+}
+
 export async function waitForAppShell(driver, timeoutMs = 15000) {
-  const shell = await driver.wait(
-    until.elementLocated(By.css('[data-testid="app-shell"]')),
-    timeoutMs,
-  );
-  await driver.wait(until.elementIsVisible(shell), timeoutMs);
-  return shell;
+  try {
+    const shell = await driver.wait(
+      until.elementLocated(By.css('[data-testid="app-shell"]')),
+      timeoutMs,
+    );
+    await driver.wait(until.elementIsVisible(shell), timeoutMs);
+    return shell;
+  } catch (error) {
+    const diagnostics = await readAppShellDiagnostics(driver);
+    throw new Error(`${formatAppShellTimeoutMessage({ timeoutMs, ...diagnostics })}\n${error}`);
+  }
 }

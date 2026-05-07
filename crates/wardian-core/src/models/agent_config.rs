@@ -101,7 +101,7 @@ pub struct AgentClassDefinition {
     pub description: String,
     #[serde(default)]
     pub is_default: bool,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "gemini_md")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_skills: Option<Vec<String>>,

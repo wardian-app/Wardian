@@ -24,7 +24,7 @@ impl ProviderFactory {
             "opencode" => Ok(Arc::new(OpenCodeProvider::new())),
             "mock" => Ok(Arc::new(MockProvider::new())),
             other => Err(format!(
-                "Unknown provider '{}'. Supported providers: gemini, claude, codex, opencode",
+                "Unknown provider '{}'. Supported providers: gemini, claude, codex, opencode, mock",
                 other
             )),
         }

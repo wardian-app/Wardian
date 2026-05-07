@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_filename_is_gemini_md() {
+    fn instruction_filename_is_provider_specific_stub() {
         let p = make_provider();
         assert_eq!(p.get_instruction_filename(), "GEMINI.md");
     }

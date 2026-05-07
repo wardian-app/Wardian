@@ -21,11 +21,11 @@
     },
     {
         "name":  "Orchestrator",
-        "description":  "Meta-agent responsible for delegating tasks and managing multi-agent workflows."
+        "description":  "Meta-agent responsible for coordinating Wardian agents through the CLI and aggressively delegating multi-agent work."
     },
     {
         "name":  "Evolver",
-        "description":  "Iteratively analyzes and optimizes existing systems, workflows, or codebases."
+        "description":  "Iteratively analyzes Wardian agent failures and improves shared prompts, skills, workflows, and system resources."
     },
     {
         "name":  "Researcher",

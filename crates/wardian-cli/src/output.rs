@@ -1,5 +1,6 @@
 use crate::errors::CliError;
 use serde_json::{Map, Value};
+use wardian_core::control::WorkflowSummary;
 use wardian_core::identity::{AgentIdentity, StatusSource};
 
 const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "workspace", "status"];
@@ -180,7 +181,7 @@ fn render_pretty(values: &Map<String, Value>) -> String {
 }
 
 pub fn render_workflow_list(
-    workflows: &[wardian_core::models::WorkflowDefinition],
+    workflows: &[WorkflowSummary],
     pretty: bool,
 ) -> Result<String, CliError> {
     let summaries: Vec<_> = workflows
@@ -189,7 +190,7 @@ pub fn render_workflow_list(
             serde_json::json!({
                 "id": w.id,
                 "name": w.name,
-                "node_count": w.nodes.len(),
+                "node_count": w.node_count,
             })
         })
         .collect();
@@ -233,15 +234,7 @@ pub fn render_workflow_show(
         "{}\n",
         serde_json::to_string_pretty(&serde_json::json!({
             "schema": 1,
-            "workflow": {
-                "id": workflow.id,
-                "name": workflow.name,
-                "node_count": workflow.nodes.len(),
-                "settings": {
-                    "max_iterations": workflow.settings.max_iterations,
-                    "on_limit_reached": workflow.settings.on_limit_reached,
-                },
-            }
+            "workflow": workflow,
         }))
         .map_err(json_error)?
     ))

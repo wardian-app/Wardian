@@ -1,9 +1,10 @@
 use crate::state::AppState;
+use std::fmt;
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, ControlRequest, OkResponse, WorkflowListResponse,
-    WorkflowSummary,
+    WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -85,14 +86,7 @@ where
             stream.flush().await?;
         }
         Err(error) => {
-            let payload = serde_json::json!({
-                "schema": wardian_core::control::CONTROL_SCHEMA,
-                "error": {
-                    "code": "request_failed",
-                    "message": error.to_string(),
-                }
-            })
-            .to_string();
+            let payload = error_payload(&error)?;
             stream.write_all(payload.as_bytes()).await?;
             stream.write_all(b"\n").await?;
             stream.flush().await?;
@@ -102,10 +96,9 @@ where
     Ok(())
 }
 
-async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io::Error> {
-    let req = serde_json::from_str::<ControlRequest>(line).map_err(|e| {
-        std::io::Error::other(format!("bad_request: {e}"))
-    })?;
+async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, ControlError> {
+    let req = serde_json::from_str::<ControlRequest>(line)
+        .map_err(|e| ControlError::bad_request(format!("malformed control request JSON: {e}")))?;
 
     match req {
         ControlRequest::AgentList => {
@@ -114,49 +107,62 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io
         }
 
         ControlRequest::AgentKill { target } => {
-            let uuid = resolve_target_uuid(app, &target).await
-                .ok_or_else(|| std::io::Error::other(format!("agent not found: {target}")))?;
+            let uuid = resolve_target_uuid(app, &target)
+                .await
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             handle_agent_kill(app, uuid).await?;
             ok_json(&OkResponse::new())
         }
 
         ControlRequest::AgentPause { target } => {
-            let uuid = resolve_target_uuid(app, &target).await
-                .ok_or_else(|| std::io::Error::other(format!("agent not found: {target}")))?;
+            let uuid = resolve_target_uuid(app, &target)
+                .await
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             handle_agent_pause(app, &uuid).await?;
             ok_json(&OkResponse::new())
         }
 
         ControlRequest::AgentResume { target } => {
-            let uuid = resolve_target_uuid(app, &target).await
-                .ok_or_else(|| std::io::Error::other(format!("agent not found: {target}")))?;
+            let uuid = resolve_target_uuid(app, &target)
+                .await
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             crate::commands::agent::resume_agent(uuid, app.state::<AppState>(), app.clone())
                 .await
-                .map_err(std::io::Error::other)?;
+                .map_err(ControlError::request_failed)?;
             ok_json(&OkResponse::new())
         }
 
-        ControlRequest::AgentSpawn { class, name, workspace } => {
+        ControlRequest::AgentSpawn {
+            provider,
+            class,
+            name,
+            workspace,
+        } => {
             use crate::commands::agent::{spawn_agent, SpawnAgentRequest};
+            let config_override = wardian_core::models::AgentConfig {
+                provider,
+                ..Default::default()
+            };
             let req = SpawnAgentRequest {
                 session_name: name.unwrap_or_default(),
                 agent_class: class,
                 folder: workspace.unwrap_or_default(),
                 resume_session: None,
                 is_off: None,
-                config_override: None,
+                config_override: Some(config_override),
             };
             let config = spawn_agent(req, app.state::<AppState>(), app.clone())
                 .await
-                .map_err(std::io::Error::other)?;
+                .map_err(ControlError::request_failed)?;
             let identity = agent_config_to_identity(&config, app).await;
             ok_json(&AgentResponse::new(identity))
         }
 
         ControlRequest::AgentClone { target, name } => {
             use crate::commands::agent::{clone_agent, CloneAgentMode, CloneAgentRequest};
-            let uuid = resolve_target_uuid(app, &target).await
-                .ok_or_else(|| std::io::Error::other(format!("agent not found: {target}")))?;
+            let uuid = resolve_target_uuid(app, &target)
+                .await
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             let req = CloneAgentRequest {
                 source_session_id: uuid,
                 mode: CloneAgentMode::Fresh,
@@ -168,7 +174,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io
             };
             let config = clone_agent(req, app.state::<AppState>(), app.clone())
                 .await
-                .map_err(std::io::Error::other)?;
+                .map_err(ControlError::request_failed)?;
             let identity = agent_config_to_identity(&config, app).await;
             ok_json(&AgentResponse::new(identity))
         }
@@ -186,10 +192,19 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io
             ok_json(&WorkflowListResponse::new(summaries))
         }
 
+        ControlRequest::WorkflowShow { target } => {
+            let workflow = crate::workflow_engine::list_workflows()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|w| w.id == target || w.name == target)
+                .ok_or_else(|| ControlError::not_found(format!("workflow not found: {target}")))?;
+            ok_json(&WorkflowResponse::new(workflow))
+        }
+
         ControlRequest::WorkflowRun { id } => {
             crate::workflow_engine::run_workflow(app.clone(), id, None)
                 .await
-                .map_err(std::io::Error::other)?;
+                .map_err(ControlError::request_failed)?;
             ok_json(&OkResponse::new())
         }
 
@@ -198,10 +213,15 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io
             ok_json(&OkResponse::new())
         }
 
-        ControlRequest::SendMessage { target, message, thread: _ } => {
+        ControlRequest::SendMessage {
+            target,
+            message,
+            thread,
+        } => {
+            let bytes = send_message_bytes(&message, thread.as_deref())?;
             let session_ids = resolve_send_targets(app, &target).await;
             if session_ids.is_empty() {
-                return Err(std::io::Error::other(format!(
+                return Err(ControlError::not_found(format!(
                     "no agents matched target: {target}"
                 )));
             }
@@ -209,12 +229,31 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io
             let senders = state
                 .input_senders
                 .read()
-                .map_err(|_| std::io::Error::other("input_senders lock poisoned"))?;
-            let bytes = format!("{message}\n").into_bytes();
+                .map_err(|_| ControlError::request_failed("input_senders lock poisoned"))?;
+            let mut delivered = 0usize;
+            let mut failures = Vec::new();
             for session_id in &session_ids {
-                if let Some(tx) = senders.get(session_id) {
-                    let _ = tx.try_send(bytes.clone());
+                match senders.get(session_id) {
+                    Some(tx) => match tx.try_send(bytes.clone()) {
+                        Ok(()) => delivered += 1,
+                        Err(error) => failures.push(format!("{session_id}: {error}")),
+                    },
+                    None => failures.push(format!("{session_id}: no input channel")),
                 }
+            }
+            if delivered == 0 {
+                return Err(ControlError::request_failed(format!(
+                    "message was not delivered to any matched agents: {}",
+                    failures.join("; ")
+                )));
+            }
+            if !failures.is_empty() {
+                return Err(ControlError::request_failed(format!(
+                    "message delivery failed for {} of {} matched agents: {}",
+                    failures.len(),
+                    session_ids.len(),
+                    failures.join("; ")
+                )));
             }
             ok_json(&OkResponse::new())
         }
@@ -227,40 +266,16 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, std::io
 
 async fn handle_agent_kill(app: &AppHandle, session_id: String) -> std::io::Result<()> {
     let state = app.state::<AppState>();
-    let mut agents = state.agents.lock().await;
-    let mut order = state.agent_order.lock().await;
-
-    if let Some(mut agent) = agents.remove(&session_id) {
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
-        order.retain(|id| id != &session_id);
-        crate::manager::save_state(app, &agents, &order);
-        crate::manager::terminate_active_agent_process(&mut agent);
-        let _ = wardian_core::db::delete_agent(&session_id);
-        if let Some(home) = crate::utils::fs::get_wardian_home() {
-            let agent_dir = home.join("agents").join(&session_id);
-            if agent_dir.exists() {
-                let _ = std::fs::remove_dir_all(&agent_dir);
-            }
-        }
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "agent not found: {session_id}"
-        )))
-    }
+    crate::commands::agent::kill_agent(session_id, state, app.clone())
+        .await
+        .map_err(std::io::Error::other)
 }
 
 async fn handle_agent_pause(app: &AppHandle, session_id: &str) -> std::io::Result<()> {
     let state = app.state::<AppState>();
-    crate::commands::agent::pause_agent(
-        session_id.to_string(),
-        state,
-        app.clone(),
-    )
-    .await
-    .map_err(std::io::Error::other)
+    crate::commands::agent::pause_agent(session_id.to_string(), state, app.clone())
+        .await
+        .map_err(std::io::Error::other)
 }
 
 async fn resolve_target_uuid(app: &AppHandle, target: &str) -> Option<String> {
@@ -341,8 +356,82 @@ async fn agent_config_to_identity(
 // Serialization helpers
 // ---------------------------------------------------------------------------
 
-fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, std::io::Error> {
-    serde_json::to_string(value).map_err(|e| std::io::Error::other(e.to_string()))
+fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ControlError> {
+    serde_json::to_string(value).map_err(ControlError::request_failed)
+}
+
+fn error_payload(error: &ControlError) -> Result<String, std::io::Error> {
+    serde_json::to_string(&serde_json::json!({
+        "schema": wardian_core::control::CONTROL_SCHEMA,
+        "error": {
+            "code": error.code(),
+            "message": error.to_string(),
+        }
+    }))
+    .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+fn send_message_bytes(message: &str, thread: Option<&str>) -> Result<Vec<u8>, ControlError> {
+    if thread.is_some() {
+        return Err(ControlError::not_supported(
+            "--thread is not supported by the Wardian control endpoint yet",
+        ));
+    }
+    Ok(format!("{message}\r").into_bytes())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlError {
+    code: &'static str,
+    message: String,
+}
+
+impl ControlError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            code: "bad_request",
+            message: message.into(),
+        }
+    }
+
+    fn not_supported(message: impl Into<String>) -> Self {
+        Self {
+            code: "not_supported",
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    fn request_failed(message: impl ToString) -> Self {
+        Self {
+            code: "request_failed",
+            message: message.to_string(),
+        }
+    }
+
+    fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for ControlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ControlError {}
+
+impl From<std::io::Error> for ControlError {
+    fn from(error: std::io::Error) -> Self {
+        Self::request_failed(error)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,8 +440,8 @@ fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, std::io::Error> {
 
 async fn live_agent_snapshots(app: &AppHandle) -> Vec<AgentIdentity> {
     let state = app.state::<AppState>();
-    let order = state.agent_order.lock().await.clone();
     let agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await.clone();
     let mut snapshots = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -400,5 +489,46 @@ fn snapshot_agent(agent: &crate::state::ActiveAgent) -> AgentIdentity {
         workspace: (!config.folder.trim().is_empty()).then_some(config.folder),
         last_status_at: None,
         status_source: StatusSource::Live,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_errors_emit_bad_request_code() {
+        let error = ControlError::bad_request("expected value");
+        let payload = error_payload(&error).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["error"]["code"], "bad_request");
+        assert_eq!(value["schema"], wardian_core::control::CONTROL_SCHEMA);
+    }
+
+    #[test]
+    fn send_message_rejects_thread_until_supported() {
+        let error = send_message_bytes("hello", Some("review")).unwrap_err();
+
+        assert_eq!(error.code(), "not_supported");
+        assert!(error.to_string().contains("--thread is not supported"));
+    }
+
+    #[test]
+    fn send_message_submits_with_terminal_enter() {
+        assert_eq!(send_message_bytes("hello", None).unwrap(), b"hello\r");
+    }
+
+    #[test]
+    fn not_found_errors_emit_not_found_code() {
+        let error = ControlError::not_found("agent not found: ghost");
+        let payload = error_payload(&error).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["error"]["code"], "not_found");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ghost"));
     }
 }

@@ -283,32 +283,27 @@ fn persisted_resume_session_for_provider(
 }
 
 fn provider_uses_generated_session_id(provider_name: &str) -> bool {
-    matches!(provider_name, "claude" | "codex")
+    matches!(provider_name, "claude" | "codex" | "mock")
 }
 
 fn provider_needs_obtain_session_id_on_clear(provider_name: &str) -> bool {
     matches!(provider_name, "gemini")
 }
 
-fn restore_runtime_state_after_resume(
+fn restore_runtime_state_snapshot_after_resume(
     new_active: &mut crate::state::ActiveAgent,
-    old_active: &crate::state::ActiveAgent,
+    query_count: usize,
+    init_timestamp: Option<String>,
+    log_path: Option<std::path::PathBuf>,
 ) {
-    if let (Ok(old_count), Ok(mut new_count)) =
-        (old_active.query_count.lock(), new_active.query_count.lock())
-    {
-        *new_count = *old_count;
+    if let Ok(mut new_count) = new_active.query_count.lock() {
+        *new_count = query_count;
     }
-    if let (Ok(old_ts), Ok(mut new_ts)) = (
-        old_active.init_timestamp.lock(),
-        new_active.init_timestamp.lock(),
-    ) {
-        *new_ts = old_ts.clone();
+    if let Ok(mut new_ts) = new_active.init_timestamp.lock() {
+        *new_ts = init_timestamp;
     }
-    if let (Ok(old_path), Ok(mut new_path)) =
-        (old_active.log_path.lock(), new_active.log_path.lock())
-    {
-        *new_path = old_path.clone();
+    if let Ok(mut new_path) = new_active.log_path.lock() {
+        *new_path = log_path;
     }
 }
 
@@ -958,6 +953,7 @@ pub async fn kill_agent(
 
         // Phase 2: Remove from SQLite
         let _ = wardian_core::db::delete_agent(&session_id);
+        let _ = app.emit("agents-updated", ());
 
         // Cleanup: remove the agent's private directory
         if let Some(home) = crate::utils::fs::get_wardian_home() {
@@ -1039,6 +1035,14 @@ pub async fn pause_agent(
             senders.remove(&session_id);
         }
         manager::save_state(&app, &agents, &order);
+        let _ = app.emit("agents-updated", ());
+        let _ = app.emit(
+            "agent-status-updated",
+            serde_json::json!({
+                "session_id": session_id,
+                "current_status": "Off",
+            }),
+        );
         Ok(())
     } else {
         Err(format!("Agent {} not found", session_id))
@@ -1055,52 +1059,63 @@ pub async fn resume_agent(
         "[WARDIAN] resume_agent called for session: {}",
         session_id
     ));
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
+    let (mut config, born, query_count, log_path) = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(&session_id)
+            .ok_or_else(|| format!("Agent {} not found", session_id))?;
+        let config = agent.config.lock().unwrap().clone();
+        let born = agent.init_timestamp.lock().unwrap().clone();
+        let query_count = agent.query_count.lock().map(|count| *count).unwrap_or(0);
+        let log_path = agent.log_path.lock().ok().and_then(|path| path.clone());
+        (config, born, query_count, log_path)
+    };
 
-    if let Some(agent) = agents.get_mut(&session_id) {
-        let (mut config, born) = {
-            let config_lock = agent.config.lock().unwrap();
-            (
-                config_lock.clone(),
-                agent.init_timestamp.lock().unwrap().clone(),
-            )
-        };
-        prepare_resume_config(&mut config)?;
-        let mut new_active = manager::spawn_agent(app.clone(), config, true, born).await?;
-        restore_runtime_state_after_resume(&mut new_active, agent);
+    prepare_resume_config(&mut config)?;
+    let mut new_active =
+        manager::spawn_agent(app.clone(), config.clone(), true, born.clone()).await?;
+    restore_runtime_state_snapshot_after_resume(&mut new_active, query_count, born, log_path);
 
-        {
-            let mut new_config = new_active.config.lock().unwrap();
-            let mut old_config = agent.config.lock().unwrap();
-            if old_config.provider == "claude" {
-                if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take()
-                {
-                    new_config.resume_session = Some(fresh_provider_session_id);
-                }
-            }
-            *old_config = new_config.clone();
-        }
-
-        // Register new input sender
-        if let Some(ref tx) = new_active.stdin_tx {
-            if let Ok(mut senders) = state.input_senders.write() {
-                senders.insert(session_id.clone(), tx.clone());
+    {
+        let mut new_config = new_active.config.lock().unwrap();
+        if config.provider == "claude" {
+            if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
+                new_config.resume_session = Some(fresh_provider_session_id);
             }
         }
-
-        // Terminate the old agent's process tree before replacing it.
-        manager::terminate_active_agent_process(agent);
-
-        // Preserve the updated config on the new agent, then swap the entire struct.
-        // The old ActiveAgent is dropped here; its Drop impl is a no-op because
-        // terminate_active_agent_process already cleared process_id and child_process.
-        let _ = std::mem::replace(agent, new_active);
-        manager::save_state(&app, &agents, &order);
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
     }
+
+    let stdin_tx = new_active.stdin_tx.clone();
+    let mut old_agent = {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        let Some(old_agent) = agents.remove(&session_id) else {
+            manager::terminate_active_agent_process(&mut new_active);
+            return Err(format!("Agent {} not found", session_id));
+        };
+        agents.insert(session_id.clone(), new_active);
+        manager::save_state(&app, &agents, &order);
+        old_agent
+    };
+
+    if let Ok(mut senders) = state.input_senders.write() {
+        if let Some(tx) = stdin_tx {
+            senders.insert(session_id.clone(), tx);
+        } else {
+            senders.remove(&session_id);
+        }
+    }
+
+    let _ = app.emit("agents-updated", ());
+    let _ = app.emit(
+        "agent-status-updated",
+        serde_json::json!({
+            "session_id": session_id,
+            "current_status": "Idle",
+        }),
+    );
+    manager::terminate_active_agent_process(&mut old_agent);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1398,7 +1413,7 @@ mod tests {
         persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         reserve_spawn_session_name, resolve_requested_spawn_session_name,
-        restore_runtime_state_after_resume, AgentOrderPlacement,
+        restore_runtime_state_snapshot_after_resume, AgentOrderPlacement,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -1816,6 +1831,11 @@ mod tests {
     }
 
     #[test]
+    fn mock_uses_generated_session_id() {
+        assert!(provider_uses_generated_session_id("mock"));
+    }
+
+    #[test]
     fn gemini_needs_obtain_session_id_on_clear() {
         assert!(provider_needs_obtain_session_id_on_clear("gemini"));
         assert!(!provider_needs_obtain_session_id_on_clear("claude"));
@@ -1824,15 +1844,14 @@ mod tests {
     }
 
     #[test]
-    fn resume_restores_query_count_and_log_path() {
-        let old_active = make_test_agent();
-        *old_active.query_count.lock().unwrap() = 3;
-        *old_active.init_timestamp.lock().unwrap() = Some("2026-04-12T17:00:00.000Z".to_string());
-        *old_active.log_path.lock().unwrap() =
-            Some(std::path::PathBuf::from("C:/tmp/session.json"));
-
+    fn resume_snapshot_restores_query_count_and_log_path() {
         let mut new_active = make_test_agent();
-        restore_runtime_state_after_resume(&mut new_active, &old_active);
+        restore_runtime_state_snapshot_after_resume(
+            &mut new_active,
+            3,
+            Some("2026-04-12T17:00:00.000Z".to_string()),
+            Some(std::path::PathBuf::from("C:/tmp/session.json")),
+        );
 
         assert_eq!(*new_active.query_count.lock().unwrap(), 3);
         assert_eq!(

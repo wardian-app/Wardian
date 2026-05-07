@@ -1,9 +1,10 @@
 mod args;
+mod disk;
 mod errors;
 mod live;
 mod output;
 
-use std::io::Read as _;
+use std::{io::Read as _, time::Duration};
 
 use args::{AgentArgs, AgentCommand, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand};
 use clap::Parser;
@@ -74,12 +75,26 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
         Some(AgentCommand::Kill { target }) => handle_agent_kill(target),
         Some(AgentCommand::Pause { target }) => handle_agent_pause(target),
         Some(AgentCommand::Resume { target }) => handle_agent_resume(target),
-        Some(AgentCommand::Spawn { class, name, workspace }) => {
-            handle_agent_spawn(class, name.as_deref(), workspace.as_deref(), &args)
-        }
+        Some(AgentCommand::Spawn {
+            provider,
+            class,
+            name,
+            workspace,
+        }) => handle_agent_spawn(
+            provider,
+            class,
+            name.as_deref(),
+            workspace.as_deref(),
+            &args,
+        ),
         Some(AgentCommand::Clone { target, name }) => {
             handle_agent_clone(target, name.as_deref(), &args)
         }
+        Some(AgentCommand::Wait {
+            target,
+            until,
+            timeout,
+        }) => handle_agent_wait(target, until, timeout, &args),
     }
 }
 
@@ -111,12 +126,13 @@ fn handle_agent_resume(target: &str) -> Result<String, CliError> {
 }
 
 fn handle_agent_spawn(
+    provider: &str,
     class: &str,
     name: Option<&str>,
     workspace: Option<&str>,
     args: &AgentArgs,
 ) -> Result<String, CliError> {
-    let agent = live::agent_spawn(class, name, workspace).map_err(control_error)?;
+    let agent = live::agent_spawn(provider, class, name, workspace).map_err(control_error)?;
     render_show(&agent, &render_options(args))
 }
 
@@ -129,6 +145,17 @@ fn handle_agent_clone(
     render_show(&agent, &render_options(args))
 }
 
+fn handle_agent_wait(
+    target: &str,
+    until: &str,
+    timeout: &str,
+    args: &AgentArgs,
+) -> Result<String, CliError> {
+    let timeout = parse_timeout(timeout)?;
+    let agent = live::wait_agent_until(target, until, timeout).map_err(control_error)?;
+    render_show(&agent, &render_options(args))
+}
+
 // ---------------------------------------------------------------------------
 // wardian workflow
 // ---------------------------------------------------------------------------
@@ -136,17 +163,30 @@ fn handle_agent_clone(
 fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
     match args.command {
         WorkflowCommand::List => {
-            let workflows = live::list_workflows_from_disk()
-                .map_err(|e| CliError::generic(e.to_string()))?;
+            let workflows = match live::workflow_list() {
+                Ok(workflows) => workflows,
+                Err(error) if is_control_endpoint_unavailable(&error) => {
+                    let workflows = disk::list_workflows_from_disk()
+                        .map_err(|e| CliError::generic(e.to_string()))?;
+                    disk::workflow_summaries(&workflows)
+                }
+                Err(error) => return Err(control_error(error)),
+            };
             output::render_workflow_list(&workflows, args.pretty)
         }
         WorkflowCommand::Show { target } => {
-            let workflows = live::list_workflows_from_disk()
-                .map_err(|e| CliError::generic(e.to_string()))?;
-            let wf = workflows
-                .into_iter()
-                .find(|w| w.id == target || w.name == target)
-                .ok_or_else(|| CliError::not_found(&target))?;
+            let wf = match live::workflow_show(&target) {
+                Ok(workflow) => workflow,
+                Err(error) if is_control_endpoint_unavailable(&error) => {
+                    let workflows = disk::list_workflows_from_disk()
+                        .map_err(|e| CliError::generic(e.to_string()))?;
+                    workflows
+                        .into_iter()
+                        .find(|w| w.id == target || w.name == target)
+                        .ok_or_else(|| CliError::not_found(&target))?
+                }
+                Err(error) => return Err(control_error(error)),
+            };
             output::render_workflow_show(&wf, args.pretty)
         }
         WorkflowCommand::Run { target } => {
@@ -188,14 +228,25 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
             .ok_or_else(|| CliError::generic("Provide a message, --stdin, or --file".to_string()))?
     };
 
-    live::send_message(&args.to, &message, args.thread.as_deref()).map_err(control_error)?;
+    let waited_agent = if let Some(until) = args.wait_until.as_deref() {
+        let timeout = parse_timeout(&args.timeout)?;
+        Some(
+            live::send_message_and_wait(&args.to, &message, args.thread.as_deref(), until, timeout)
+                .map_err(control_error)?,
+        )
+    } else {
+        live::send_message(&args.to, &message, args.thread.as_deref()).map_err(control_error)?;
+        None
+    };
+
+    let mut response = serde_json::json!({"schema":1,"ok":true,"target":args.to});
+    if let Some(agent) = waited_agent {
+        response["status"] = serde_json::Value::String(agent.status);
+    }
 
     Ok(format!(
         "{}\n",
-        serde_json::to_string_pretty(
-            &serde_json::json!({"schema":1,"ok":true,"target":args.to})
-        )
-        .unwrap()
+        serde_json::to_string_pretty(&response).unwrap()
     ))
 }
 
@@ -204,16 +255,72 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
 // ---------------------------------------------------------------------------
 
 fn control_error(e: std::io::Error) -> CliError {
-    if matches!(
-        e.kind(),
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::TimedOut
-    ) {
+    if let Some(wait_timeout) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<live::WaitTimeoutError>())
+    {
+        CliError::backend(ExitCode::Generic, "wait_timeout", wait_timeout.to_string())
+    } else if let Some(wait_not_found) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<live::WaitTargetNotFoundError>())
+    {
+        CliError::backend(ExitCode::NotFound, "not_found", wait_not_found.to_string())
+    } else if is_control_endpoint_unavailable(&e) {
         CliError::app_not_running()
+    } else if let Some(endpoint_error) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<live::ControlEndpointError>())
+    {
+        match endpoint_error.code() {
+            "not_supported" => CliError::backend(
+                ExitCode::Generic,
+                "not_supported",
+                endpoint_error.to_string(),
+            ),
+            "not_found" => {
+                CliError::backend(ExitCode::NotFound, "not_found", endpoint_error.to_string())
+            }
+            _ => CliError::generic(endpoint_error.to_string()),
+        }
     } else {
         CliError::generic(e.to_string())
     }
+}
+
+fn parse_timeout(value: &str) -> Result<Duration, CliError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::generic("timeout must not be empty"));
+    }
+
+    let (number, multiplier) = if let Some(number) = trimmed.strip_suffix("ms") {
+        (number, Duration::from_millis(1))
+    } else if let Some(number) = trimmed.strip_suffix('s') {
+        (number, Duration::from_secs(1))
+    } else if let Some(number) = trimmed.strip_suffix('m') {
+        (number, Duration::from_secs(60))
+    } else {
+        (trimmed, Duration::from_secs(1))
+    };
+
+    let count = number
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| CliError::generic(format!("invalid timeout: {value}")))?;
+    let count = u32::try_from(count)
+        .map_err(|_| CliError::generic(format!("timeout is too large: {value}")))?;
+    multiplier
+        .checked_mul(count)
+        .ok_or_else(|| CliError::generic(format!("timeout is too large: {value}")))
+}
+
+fn is_control_endpoint_unavailable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::TimedOut
+    )
 }
 
 fn handle_show(target: Option<&str>, args: &AgentArgs) -> Result<String, CliError> {
@@ -364,5 +471,82 @@ fn identity_error(error: identity::IdentityError) -> CliError {
         identity::IdentityError::NotInSession => CliError::not_in_session(),
         identity::IdentityError::NotFound(requested) => CliError::not_found(&requested),
         identity::IdentityError::Db(error) => CliError::db_unavailable(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_error_preserves_backend_not_supported_code() {
+        let error = std::io::Error::other(live::ControlEndpointError::new(
+            "not_supported",
+            "--thread is not supported",
+        ));
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "not_supported");
+        assert_eq!(cli_error.code_i32(), 1);
+        assert!(cli_error.message.contains("--thread is not supported"));
+    }
+
+    #[test]
+    fn control_error_preserves_backend_not_found_exit_code() {
+        let error = std::io::Error::other(live::ControlEndpointError::new(
+            "not_found",
+            "agent not found: ghost",
+        ));
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "not_found");
+        assert_eq!(cli_error.code_i32(), 2);
+        assert!(cli_error.message.contains("ghost"));
+    }
+
+    #[test]
+    fn control_error_does_not_treat_wait_timeout_as_app_not_running() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            live::WaitTimeoutError::new("reviewer-a1", "idle", "processing"),
+        );
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "wait_timeout");
+        assert_eq!(cli_error.code_i32(), 1);
+        assert!(cli_error.message.contains("reviewer-a1"));
+    }
+
+    #[test]
+    fn control_error_does_not_treat_wait_target_miss_as_app_not_running() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            live::WaitTargetNotFoundError::new("ghost"),
+        );
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "not_found");
+        assert_eq!(cli_error.code_i32(), 2);
+        assert!(cli_error.message.contains("ghost"));
+    }
+
+    #[test]
+    fn parses_timeout_units() {
+        assert_eq!(
+            parse_timeout("250ms").unwrap(),
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            parse_timeout("30s").unwrap(),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_timeout("10m").unwrap(),
+            std::time::Duration::from_secs(600)
+        );
     }
 }

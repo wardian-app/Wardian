@@ -234,6 +234,7 @@ export function main(argv = process.argv.slice(2)) {
   console.log("Native E2E prerequisites are prepared.");
   console.log("Recommended next steps:");
   console.log("  npm run test:e2e:native");
+  console.log("  npm run test:e2e:native:watch -- e2e-native/tests/cli-shared-state-native.test.mjs");
   console.log("  WARDIAN_E2E_REAL_OPENCODE=1 npm run test:e2e:native");
 }
 

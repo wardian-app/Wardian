@@ -106,6 +106,16 @@ impl CliError {
         }
     }
 
+    pub fn backend(exit_code: ExitCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            exit_code,
+            code,
+            message: message.into(),
+            hint: None,
+            details: None,
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(&ErrorEnvelope {
             schema: 1,

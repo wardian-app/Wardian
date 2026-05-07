@@ -19,6 +19,19 @@ impl MockProvider {
         MockProvider
     }
 
+    fn existing_script_path(path: std::path::PathBuf) -> Option<String> {
+        if !path.exists() {
+            return None;
+        }
+
+        Some(
+            std::fs::canonicalize(&path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string(),
+        )
+    }
+
     /// Resolves the path to `scripts/mock-agent.cjs`.
     ///
     /// Priority:
@@ -27,8 +40,10 @@ impl MockProvider {
     /// 3. Fallback to repo-relative path (development mode)
     fn resolve_mock_script_path() -> String {
         if let Ok(path) = std::env::var("WARDIAN_MOCK_SCRIPT") {
-            if !path.is_empty() && std::path::Path::new(&path).exists() {
-                return path;
+            if !path.is_empty() {
+                if let Some(path) = Self::existing_script_path(std::path::PathBuf::from(path)) {
+                    return path;
+                }
             }
         }
 
@@ -36,17 +51,34 @@ impl MockProvider {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 // Tauri bundles resources alongside the binary
-                let bundled = exe_dir.join("scripts").join("mock-agent.cjs");
-                if bundled.exists() {
-                    return bundled.to_string_lossy().to_string();
+                if let Some(path) =
+                    Self::existing_script_path(exe_dir.join("scripts").join("mock-agent.cjs"))
+                {
+                    return path;
+                }
+
+                if let Some(path) = Self::existing_script_path(
+                    exe_dir
+                        .join("..")
+                        .join("..")
+                        .join("scripts")
+                        .join("mock-agent.cjs"),
+                ) {
+                    return path;
                 }
             }
         }
 
-        // Development fallback: repo-relative path from src-tauri/
-        let dev_path = std::path::Path::new("../scripts/mock-agent.cjs");
-        if dev_path.exists() {
-            return dev_path.to_string_lossy().to_string();
+        // Development fallback: repo-relative paths from the Tauri app cwd or src-tauri/.
+        for dev_path in [
+            std::path::PathBuf::from("scripts").join("mock-agent.cjs"),
+            std::path::PathBuf::from("..")
+                .join("scripts")
+                .join("mock-agent.cjs"),
+        ] {
+            if let Some(path) = Self::existing_script_path(dev_path) {
+                return path;
+            }
         }
 
         // Ultimate fallback
@@ -162,6 +194,17 @@ mod tests {
         assert!(
             args[0].contains("mock-agent"),
             "First arg should be mock-agent script path, got: {}",
+            args[0]
+        );
+    }
+
+    #[test]
+    fn get_executable_returns_absolute_script_path() {
+        let (_bin, args) = make_provider().get_executable();
+
+        assert!(
+            std::path::Path::new(&args[0]).is_absolute(),
+            "mock script path should survive provider cwd changes, got: {}",
             args[0]
         );
     }

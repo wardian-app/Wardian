@@ -9,6 +9,7 @@ import {
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
+  watchStep,
 } from "../lib/harness.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -17,6 +18,8 @@ const LIVE_SESSION_ID = `e2e-cli-live-${RUN_ID}`;
 const LIVE_SESSION_NAME = `E2E-CLI-LIVE-${RUN_ID}`;
 const OFF_SESSION_ID = `e2e-cli-off-${RUN_ID}`;
 const OFF_SESSION_NAME = `E2E-CLI-OFF-${RUN_ID}`;
+const CONTROL_SESSION_NAME = `E2E-CLI-CONTROL-${RUN_ID}`;
+const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -57,6 +60,58 @@ function runCli(cliPath, harness, args) {
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+async function withMockScenario(scenario, fn) {
+  const previousScenario = process.env.WARDIAN_MOCK_SCENARIO;
+  const previousDelay = process.env.WARDIAN_MOCK_DELAY_MS;
+  process.env.WARDIAN_MOCK_SCENARIO = scenario;
+  process.env.WARDIAN_MOCK_DELAY_MS = "50";
+  try {
+    return await fn();
+  } finally {
+    if (previousScenario === undefined) {
+      delete process.env.WARDIAN_MOCK_SCENARIO;
+    } else {
+      process.env.WARDIAN_MOCK_SCENARIO = previousScenario;
+    }
+    if (previousDelay === undefined) {
+      delete process.env.WARDIAN_MOCK_DELAY_MS;
+    } else {
+      process.env.WARDIAN_MOCK_DELAY_MS = previousDelay;
+    }
+  }
+}
+
+function runCliOk(cliPath, harness, args) {
+  const result = runCli(cliPath, harness, args);
+  assert.equal(
+    result.status,
+    0,
+    `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  return result;
+}
+
+function cliField(cliPath, harness, target, field) {
+  return runCli(cliPath, harness, ["agent", target, "--field", field]);
+}
+
+async function waitForCliField(cliPath, harness, target, field, expected, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  let lastResult = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    lastResult = cliField(cliPath, harness, target, field);
+    if (lastResult.status === 0 && lastResult.stdout.trim() === expected) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  assert.fail(
+    `Timed out waiting for ${target} ${field}=${expected}; last result: ${JSON.stringify(lastResult)}`,
+  );
 }
 
 async function createMockAgent(driver, workspacePath, { sessionId, sessionName, isOff }) {
@@ -210,4 +265,126 @@ test("native app-created off agent is readable through the CLI", { timeout: 1800
   ]);
   assert.equal(statusResult.status, 0, statusResult.stderr);
   assert.equal(statusResult.stdout, "off\n");
+});
+
+test("native CLI control commands operate through the running app", { timeout: 180000 }, async (t) => {
+  await withMockScenario("action_needed", async () => {
+    const harness = await createNativeHarness();
+    assert.ok(harness.appPath);
+
+    try {
+      if (!skipNativeBuild) {
+        ensureNativeAppBuilt(harness);
+      }
+    } catch (error) {
+      t.skip(String(error));
+      return;
+    }
+
+    prepareIsolatedHome(harness);
+
+    const cliPath = buildCli(harness);
+    const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+    let session;
+    try {
+      session = await startNativeSession(harness);
+    } catch (error) {
+      t.skip(String(error));
+      return;
+    }
+
+    t.after(async () => {
+      await session.close();
+    });
+
+    await waitForAppShell(session.driver, 20000);
+    await watchStep(harness, "Wardian app shell is ready");
+    const spawnResult = runCliOk(cliPath, harness, [
+      "agent",
+      "spawn",
+      "--provider",
+      "mock",
+      "--class",
+      "Reviewer",
+      "--name",
+      CONTROL_SESSION_NAME,
+      "--workspace",
+      workspacePath,
+      "--fields",
+      "name,class,provider,status",
+    ]);
+    const source = JSON.parse(spawnResult.stdout).agent;
+    assert.equal(source.name, CONTROL_SESSION_NAME);
+    assert.equal(source.class, "Reviewer");
+    assert.equal(source.provider, "mock");
+    await watchStep(harness, `Spawned ${CONTROL_SESSION_NAME} with mock action_required state through the CLI`);
+    await waitForCliField(
+      cliPath,
+      harness,
+      CONTROL_SESSION_NAME,
+      "status",
+      "action_required",
+    );
+
+    const waitResult = runCliOk(cliPath, harness, [
+      "agent",
+      "wait",
+      CONTROL_SESSION_NAME,
+      "--until",
+      "action_required",
+      "--timeout",
+      "30s",
+      "--field",
+      "status",
+    ]);
+    assert.equal(waitResult.stdout, "action_required\n");
+
+    await watchStep(harness, `Sending approval to ${CONTROL_SESSION_NAME} through the CLI`);
+    const sendResult = runCliOk(cliPath, harness, [
+      "send",
+      "y",
+      "--to",
+      CONTROL_SESSION_NAME,
+      "--wait-until",
+      "idle",
+      "--timeout",
+      "30s",
+    ]);
+    assert.equal(JSON.parse(sendResult.stdout).status, "idle");
+
+    await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
+    const cloneResult = runCliOk(cliPath, harness, [
+      "agent",
+      "clone",
+      CONTROL_SESSION_NAME,
+      "--name",
+      CONTROL_CLONE_NAME,
+    ]);
+    const cloneAgent = JSON.parse(cloneResult.stdout).agent;
+    assert.equal(cloneAgent.name, CONTROL_CLONE_NAME);
+    assert.notEqual(cloneAgent.uuid, source.uuid);
+    await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "action_required");
+
+    await watchStep(harness, `Pausing ${CONTROL_CLONE_NAME} through the CLI`);
+    runCliOk(cliPath, harness, ["agent", "pause", CONTROL_CLONE_NAME]);
+    await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "off");
+
+    await watchStep(harness, `Resuming ${CONTROL_CLONE_NAME} through the CLI`);
+    runCliOk(cliPath, harness, ["agent", "resume", CONTROL_CLONE_NAME]);
+    await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "action_required");
+
+    await watchStep(harness, `Killing ${CONTROL_CLONE_NAME} through the CLI`);
+    runCliOk(cliPath, harness, ["agent", "kill", CONTROL_CLONE_NAME]);
+    const killedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
+    assert.equal(killedShow.status, 2, killedShow.stderr);
+    assert.match(killedShow.stderr, /"code":"not_found"/);
+  });
+});
+
+test.skip("real Codex CLI send submits without leaving residual prompt text", () => {
+  // @real-provider-only
+  // This needs a real Codex TUI session on Windows. The mock provider proves
+  // live control delivery and status waiting, but it cannot prove that Codex's
+  // compose field is cleared after injected PTY input is submitted.
 });
