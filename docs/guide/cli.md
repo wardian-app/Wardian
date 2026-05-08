@@ -44,7 +44,7 @@ wardian agent list --scope all
 wardian agent kill <name-or-uuid>
 wardian agent pause <name-or-uuid>
 wardian agent resume <name-or-uuid>
-wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace D:/Development/Wardian
+wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
 wardian agent clone <name-or-uuid> --name coder-a2
 wardian agent wait reviewer-a1 --until idle --timeout 10m
 wardian agent wait reviewer-a1 --until idle --next --timeout 10m
