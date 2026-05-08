@@ -25,6 +25,12 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
    - [ ] **Git Status**: Run `git status` to ensure only intended files are staged.
    - [ ] **Commit Message**: Use a clear, semantic commit message (e.g., `feat(workflows): implement parallel execution`).
 
+### Cross-Platform Documentation
+- User-facing docs, bundled skills, examples, and agent instructions must be cross-OS and cross-computer by default.
+- Use placeholders such as `<absolute-workspace-path>` instead of local machine paths, drive-letter paths, or user-home paths.
+- When commands differ by shell, show a POSIX `bash`/`sh` form first and a labeled PowerShell form second. Do not make PowerShell-only syntax the default unless the section is explicitly Windows-only.
+- Keep Windows-specific examples only when documenting Windows behavior, and label them as Windows-specific.
+
 ## 🏛️ Architecture & Naming Standards
 
 ### 1. Naming Conventions (Cross-Cutting)
@@ -120,11 +126,23 @@ Use `e2e/fixtures/mockAgent.ts` to set up an isolated `WARDIAN_HOME` and seed a 
 
 Set `WARDIAN_HOME` to redirect all state to an isolated directory:
 ```bash
-WARDIAN_HOME=/tmp/wardian-test npm run tauri dev
+WARDIAN_HOME="$(mktemp -d)" npm run tauri dev
 ```
 This prevents test runs from interfering with production `~/.wardian` state.
 
 When testing the dev app and CLI together, set the same explicit `WARDIAN_HOME` in both terminals. The CLI defaults to production `~/.wardian`, while the dev app may use debug state unless this is set.
+
+macOS/Linux shell:
+```bash
+export WARDIAN_HOME="$PWD/.tmp/wardian-cli-dev"
+npm run dev
+```
+
+Second terminal:
+```bash
+export WARDIAN_HOME="$PWD/.tmp/wardian-cli-dev"
+cargo run -p wardian-cli -- agent list --scope all
+```
 
 PowerShell:
 ```powershell

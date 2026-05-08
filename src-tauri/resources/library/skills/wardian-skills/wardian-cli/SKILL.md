@@ -44,7 +44,7 @@ wardian agent list
 wardian agent list --scope all
 wardian agent list --scope all --status idle
 wardian agent list --scope all --class Coder
-wardian agent list --workspace D:/Development/Wardian
+wardian agent list --workspace <absolute-workspace-path>
 ```
 
 Default list scope is `workspace` when the caller is a Wardian agent with a
@@ -81,7 +81,7 @@ Mutating commands use Wardian's local control endpoint and require the desktop
 app to be running for the same `WARDIAN_HOME`.
 
 ```bash
-wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace D:/Development/Wardian
+wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
 wardian agent clone coder-a1 --name coder-a2
 wardian agent pause reviewer-a1
 wardian agent resume reviewer-a1
@@ -134,6 +134,15 @@ dropping it.
 For substantial prompts, prefer `--stdin` or `--file` so quoting does not damage
 the instruction:
 
+```bash
+cat <<'EOF' | wardian send --stdin --to reviewer-a1 --wait-until idle --timeout 10m
+Review the changes since origin/main.
+Return findings first, then tests run, then any residual risk.
+EOF
+```
+
+On PowerShell, use a here-string instead of a POSIX heredoc:
+
 ```powershell
 @"
 Review the changes since origin/main.
@@ -165,10 +174,10 @@ one terminal:
 
 ```bash
 wardian agent list --scope all --fields name,class,provider,workspace,status
-wardian agent spawn --provider codex --class Reviewer --name review-cli-surface --workspace D:/Development/Wardian
-@"
+wardian agent spawn --provider codex --class Reviewer --name review-cli-surface --workspace <absolute-workspace-path>
+cat <<'EOF' | wardian send --stdin --to review-cli-surface
 Review this patch. End with REVIEW_DONE.
-"@ | wardian send --stdin --to review-cli-surface
+EOF
 wardian agent watch review-cli-surface --until output:REVIEW_DONE --timeout 10m --include status,output
 wardian agent kill review-cli-surface
 ```
@@ -205,6 +214,20 @@ Errors are JSON on stderr. Common cases:
 When testing a dev app and CLI together, set the same `WARDIAN_HOME` in both
 terminals. The live control endpoint is keyed by `WARDIAN_HOME`.
 
+macOS/Linux shell:
+
+```bash
+export WARDIAN_HOME="$PWD/.tmp/wardian-cli-dev"
+npm run dev
+```
+
+Second terminal:
+
+```bash
+export WARDIAN_HOME="$PWD/.tmp/wardian-cli-dev"
+cargo run -p wardian-cli -- agent list --scope all --fields name,status,status_source
+```
+
 PowerShell:
 
 ```powershell
@@ -221,7 +244,12 @@ cargo run -p wardian-cli -- agent list --scope all --fields name,status,status_s
 
 After a release build from this workspace, use repo-root `target` outputs:
 
+```bash
+./target/release/wardian-cli agent list --scope all
+```
+
+On Windows release builds, the binaries use `.exe` names:
+
 ```powershell
-D:\Development\Wardian\target\release\Wardian.exe
-D:\Development\Wardian\target\release\wardian-cli.exe agent list --scope all
+.\target\release\wardian-cli.exe agent list --scope all
 ```

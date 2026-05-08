@@ -92,11 +92,11 @@ Real-provider checks are opt-in. Keep them isolated and only use them when the m
 WARDIAN_E2E_REAL_OPENCODE=1 WARDIAN_E2E_REAL_WORKSPACE=/path/to/workspace npm run test:e2e:native
 ```
 
-On PowerShell:
+On PowerShell, use the same placeholder with a Windows absolute path:
 
 ```powershell
 $env:WARDIAN_E2E_REAL_OPENCODE='1'
-$env:WARDIAN_E2E_REAL_WORKSPACE='D:\Development\Wardian'
+$env:WARDIAN_E2E_REAL_WORKSPACE='<absolute-workspace-path>'
 npm run test:e2e:native
 ```
 
