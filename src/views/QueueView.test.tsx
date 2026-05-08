@@ -70,6 +70,38 @@ describe("QueueView", () => {
     expect(screen.getByText("Processed 42 records.")).toBeInTheDocument();
   });
 
+  it("collapses and expands long queue summaries", () => {
+    useQueueStore.setState({
+      items: [{
+        id: "item-long",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_name: "My Coder",
+        summary: [
+          "First line",
+          "Second line",
+          "Third line",
+          "Fourth line",
+          "Fifth line",
+          "Sixth line",
+        ].join("\n"),
+      }],
+    });
+    render(<QueueView />);
+
+    const summary = screen.getByTestId("queue-item-summary-item-long");
+    expect(summary).toHaveClass("line-clamp-4");
+
+    const toggle = screen.getByRole("button", { name: /show full summary/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    expect(summary).not.toHaveClass("line-clamp-4");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: /collapse summary/i })).toBeInTheDocument();
+  });
+
   it("dismiss button removes item", () => {
     useQueueStore.setState({
       items: [{

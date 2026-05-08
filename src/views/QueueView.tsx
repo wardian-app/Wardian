@@ -1,4 +1,5 @@
-import { X } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useQueueStore } from "../store/useQueueStore";
 import type { QueueItem } from "../types";
 
@@ -31,10 +32,13 @@ function StatusBadge({ status }: { status?: "completed" | "failed" }) {
 function QueueCard({ item }: { item: QueueItem }) {
   const dismissItem = useQueueStore((s) => s.dismissItem);
   const markRead = useQueueStore((s) => s.markRead);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const isAgent = item.type === "agent_completed";
   const title = isAgent ? item.agent_name : item.workflow_name;
   const bodyText = item.status === "failed" && item.error ? item.error : item.summary;
+  const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
+  const summaryId = `queue-item-summary-${item.id}`;
 
   return (
     <div
@@ -57,7 +61,41 @@ function QueueCard({ item }: { item: QueueItem }) {
             <span className="text-[10px] text-muted-neutral ml-auto shrink-0">{relativeTime(item.timestamp)}</span>
           </div>
           {bodyText && (
-            <p className="text-xs text-muted line-clamp-4 whitespace-pre-wrap break-words">{bodyText}</p>
+            <div className="space-y-2">
+              <p
+                id={summaryId}
+                data-testid={summaryId}
+                className={`text-xs text-muted whitespace-pre-wrap break-words ${
+                  isExpandable && !isExpanded
+                    ? "line-clamp-4"
+                    : isExpandable
+                      ? "max-h-80 overflow-y-auto pr-2"
+                      : ""
+                }`}
+              >
+                {bodyText}
+              </p>
+              {isExpandable && (
+                <button
+                  type="button"
+                  aria-controls={summaryId}
+                  aria-expanded={isExpanded}
+                  aria-label={isExpanded ? "Collapse summary" : "Show full summary"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsExpanded((value) => !value);
+                  }}
+                  className="inline-flex items-center gap-1 text-[11px] text-muted-neutral hover:text-bright-neutral transition-colors"
+                >
+                  {isExpanded ? (
+                    <ChevronUp className="w-3 h-3" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="w-3 h-3" aria-hidden="true" />
+                  )}
+                  {isExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
+            </div>
           )}
         </div>
 

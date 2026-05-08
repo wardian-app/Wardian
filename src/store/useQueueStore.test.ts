@@ -131,6 +131,26 @@ describe("useQueueStore - agent completion", () => {
     expect(items[0].read).toBe(false);
   });
 
+  it("keeps the beginning visible when bounding long completion summaries", () => {
+    const longResult = [
+      "useQueueStore.test.ts:293 failed before the fix",
+      "x".repeat(700),
+      "serialize persistence writes",
+    ].join("\n");
+
+    useQueueStore.getState().appendAgentEvent("agent-1", {
+      type: "result",
+      result: longResult,
+    });
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+
+    const summary = useQueueStore.getState().items[0].summary ?? "";
+    expect(summary.length).toBeLessThanOrEqual(500);
+    expect(summary.startsWith("useQueueStore.test.ts:293 failed before the fix")).toBe(true);
+    expect(summary).toContain("...");
+    expect(summary).toContain("serialize persistence writes");
+  });
+
   it("flushAgentCompletion falls back to 'Completed' when buffer is empty", () => {
     useQueueStore.getState().flushAgentCompletion("agent-2", "Agent B");
     expect(useQueueStore.getState().items[0].summary).toBe("Completed");

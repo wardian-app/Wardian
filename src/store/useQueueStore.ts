@@ -35,6 +35,15 @@ function persist(items: QueueItem[]) {
     .then(() => invoke("save_queue_items", { items }).then(() => undefined, () => undefined));
 }
 
+function boundSummary(text: string): string {
+  if (text.length <= SUMMARY_MAX_CHARS) return text;
+  const marker = "\n...\n";
+  const available = SUMMARY_MAX_CHARS - marker.length;
+  const headLength = Math.ceil(available * 0.72);
+  const tailLength = available - headLength;
+  return `${text.slice(0, headLength)}${marker}${text.slice(-tailLength)}`;
+}
+
 export const useQueueStore = create<QueueState>((set, get) => ({
   items: [],
   _agentBuffers: {},
@@ -59,7 +68,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       set((s) => ({
         _agentBuffers: {
           ...s._agentBuffers,
-          [sessionId]: ((s._agentBuffers[sessionId] ?? "") + text).slice(-SUMMARY_MAX_CHARS),
+          [sessionId]: boundSummary((s._agentBuffers[sessionId] ?? "") + text),
         },
       }));
     }
@@ -70,6 +79,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     const text = extractTerminalQueueContent(data);
     if (!text) return;
+    const boundedText = boundSummary(text);
     const now = Date.now();
     set((s) => ({
       items: s.items.map((item) =>
@@ -77,19 +87,19 @@ export const useQueueStore = create<QueueState>((set, get) => ({
         item.agent_session_id === sessionId &&
         item.summary === "Completed" &&
         now - item.timestamp < DEDUP_WINDOW_MS
-          ? { ...item, summary: text.slice(-SUMMARY_MAX_CHARS) }
+          ? { ...item, summary: boundedText }
           : item,
       ),
       _agentBuffers: {
         ...s._agentBuffers,
-        [sessionId]: text.slice(-SUMMARY_MAX_CHARS),
+        [sessionId]: boundedText,
       },
     }));
     const nextItems = get().items;
     if (nextItems.some((item) =>
       item.type === "agent_completed" &&
       item.agent_session_id === sessionId &&
-      item.summary === text.slice(-SUMMARY_MAX_CHARS) &&
+      item.summary === boundedText &&
       now - item.timestamp < DEDUP_WINDOW_MS
     )) {
       persist(nextItems);
@@ -109,7 +119,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     const override = summaryOverride?.trim();
     const raw = override || (_agentBuffers[sessionId] ?? "").trim();
-    const summary = raw || "Completed";
+    const summary = raw ? boundSummary(raw) : "Completed";
     const item: QueueItem = {
       id: crypto.randomUUID(),
       type: "agent_completed",
@@ -139,7 +149,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   addWorkflowCompletion(payload, workflowName) {
     const { workflow_id, run_instance_id, status, error } = payload;
     const trackedOutput = get()._workflowLastOutput[workflow_id];
-    const summary = trackedOutput ? trackedOutput.slice(0, SUMMARY_MAX_CHARS) : undefined;
+    const summary = trackedOutput ? boundSummary(trackedOutput) : undefined;
     const item: QueueItem = {
       id: crypto.randomUUID(),
       type: "workflow_completed",
