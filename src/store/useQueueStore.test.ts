@@ -290,6 +290,49 @@ describe("useQueueStore - item management", () => {
     expect(useQueueStore.getState().items.every((i) => i.read)).toBe(true);
   });
 
+  it("serializes queue persistence so markAllRead cannot be overwritten by an older save", async () => {
+    resetStore();
+    const saves: Array<{
+      items: Array<{ read: boolean }>;
+      resolve: () => void;
+      promise: Promise<void>;
+    }> = [];
+    let persisted: Array<{ read: boolean }> = [];
+
+    mockInvoke.mockImplementation((cmd, args) => {
+      if (cmd !== "save_queue_items") return Promise.resolve([]);
+      const payload = args as { items?: unknown } | undefined;
+      const items = JSON.parse(JSON.stringify(payload?.items ?? [])) as Array<{ read: boolean }>;
+      let resolve!: () => void;
+      const promise = new Promise<void>((res) => {
+        resolve = () => {
+          persisted = items;
+          res();
+        };
+      });
+      saves.push({ items, resolve, promise });
+      return promise;
+    });
+
+    useQueueStore.getState().addWorkflowCompletion(
+      { workflow_id: "wf-1", run_instance_id: "run-1", status: "completed" },
+      "Test",
+    );
+    await vi.waitFor(() => expect(saves).toHaveLength(1));
+
+    useQueueStore.getState().markAllRead();
+    expect(useQueueStore.getState().items.every((i) => i.read)).toBe(true);
+    expect(saves).toHaveLength(1);
+
+    saves[0].resolve();
+    await saves[0].promise;
+    await vi.waitFor(() => expect(saves).toHaveLength(2));
+    saves[1].resolve();
+    await saves[1].promise;
+
+    expect(persisted.every((i) => i.read)).toBe(true);
+  });
+
   it("dismissItem removes the item and persists", () => {
     const id = useQueueStore.getState().items[0].id;
     useQueueStore.getState().dismissItem(id);

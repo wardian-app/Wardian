@@ -7,6 +7,7 @@ import { WorkflowTelemetryEvent } from "../types/workflow";
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
 const SUMMARY_MAX_CHARS = 500;
 const DEDUP_WINDOW_MS = 1_000;
+let persistQueue: Promise<void> = Promise.resolve();
 
 interface QueueState {
   items: QueueItem[];
@@ -29,7 +30,9 @@ interface QueueState {
 }
 
 function persist(items: QueueItem[]) {
-  invoke("save_queue_items", { items }).catch(() => {});
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(() => invoke("save_queue_items", { items }).then(() => undefined, () => undefined));
 }
 
 export const useQueueStore = create<QueueState>((set, get) => ({
