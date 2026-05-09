@@ -20,6 +20,7 @@ const OFF_SESSION_ID = `e2e-cli-off-${RUN_ID}`;
 const OFF_SESSION_NAME = `E2E-CLI-OFF-${RUN_ID}`;
 const CONTROL_SESSION_NAME = `E2E-CLI-CONTROL-${RUN_ID}`;
 const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
+const ASK_SESSION_NAME = `E2E-CLI-ASK-${RUN_ID}`;
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -414,6 +415,101 @@ test("native CLI control commands operate through the running app", { timeout: 1
     assert.equal(delivery.runtime_state, "restored_without_sender");
     assert.equal(delivery.delivery_state, "failed");
     assert.equal(delivery.error.code, "no_input_channel");
+  });
+});
+
+test("native CLI ask returns only output after its pre-send cursor", { timeout: 180000 }, async (t) => {
+  await withMockScenario("interactive_multi_turn", async () => {
+    const harness = await createNativeHarness();
+    assert.ok(harness.appPath);
+
+    try {
+      if (!skipNativeBuild) {
+        ensureNativeAppBuilt(harness);
+      }
+    } catch (error) {
+      t.skip(String(error));
+      return;
+    }
+
+    prepareIsolatedHome(harness);
+
+    const cliPath = buildCli(harness);
+    const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+    let session;
+    try {
+      session = await startNativeSession(harness);
+    } catch (error) {
+      t.skip(String(error));
+      return;
+    }
+
+    t.after(async () => {
+      await session.close();
+    });
+
+    await waitForAppShell(session.driver, 20000);
+    await watchStep(harness, "Wardian app shell is ready for ask smoke");
+
+    runCliOk(cliPath, harness, [
+      "agent",
+      "spawn",
+      "--provider",
+      "mock",
+      "--class",
+      "Reviewer",
+      "--name",
+      ASK_SESSION_NAME,
+      "--workspace",
+      workspacePath,
+    ]);
+    await waitForCliField(cliPath, harness, ASK_SESSION_NAME, "status", "action_required");
+
+    runCliOk(cliPath, harness, [
+      "send",
+      "STALE_BEFORE_ASK",
+      "--to",
+      ASK_SESSION_NAME,
+      "--wait-until",
+      "action_required",
+      "--timeout",
+      "30s",
+    ]);
+
+    const staleWatch = runCliOk(cliPath, harness, [
+      "agent",
+      "watch",
+      ASK_SESSION_NAME,
+      "--until",
+      "output:STALE_BEFORE_ASK",
+      "--include",
+      "status,output,delivery",
+      "--timeout",
+      "30s",
+    ]);
+    assert.match(JSON.parse(staleWatch.stdout).output.text, /STALE_BEFORE_ASK/);
+
+    const askOutput = runCliOk(cliPath, harness, [
+      "ask",
+      ASK_SESSION_NAME,
+      "ASK_AFTER_CURSOR",
+      "--until",
+      "output:ASK_AFTER_CURSOR",
+      "--timeout",
+      "30s",
+      "--tail",
+      "65536",
+    ]);
+
+    const askJson = JSON.parse(askOutput.stdout);
+    assert.equal(askJson.ok, true);
+    assert.equal(askJson.target, ASK_SESSION_NAME);
+    assert.equal(askJson.condition, "output:ASK_AFTER_CURSOR");
+    assert.match(askJson.output.text, /ASK_AFTER_CURSOR/);
+    assert.doesNotMatch(askJson.output.text, /STALE_BEFORE_ASK/);
+    assert.ok(Array.isArray(askJson.delivery));
+    assert.equal(askJson.delivery[0].delivery_state, "submitted");
   });
 });
 

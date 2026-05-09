@@ -1,7 +1,7 @@
 //! Integration test: spawns the mock-agent.cjs script and verifies
 //! that its stdout events parse correctly through MockProvider::parse_output().
 
-use std::io::BufRead;
+use std::io::{BufRead, Read as _, Write as _};
 use std::process::{Command, Stdio};
 
 /// Resolves the mock-agent.cjs script relative to the repo root.
@@ -160,4 +160,38 @@ fn long_output_scenario_emits_many_lines() {
         "Expected at least 4 parsed events, got {}",
         parsed_events
     );
+}
+
+#[test]
+fn interactive_multi_turn_echoes_each_submitted_input() {
+    let script = mock_script_path();
+
+    let mut child = Command::new("node")
+        .arg(&script)
+        .env("WARDIAN_MOCK_SCENARIO", "interactive_multi_turn")
+        .env("WARDIAN_MOCK_DELAY_MS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn mock-agent.cjs");
+
+    {
+        let stdin = child.stdin.as_mut().expect("mock stdin");
+        writeln!(stdin, "STALE_BEFORE_ASK").expect("write first turn");
+        writeln!(stdin, "ASK_AFTER_CURSOR").expect("write second turn");
+    }
+
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("mock stdout")
+        .read_to_string(&mut stdout)
+        .expect("read stdout");
+    let status = child.wait().expect("mock agent exits");
+    assert!(status.success(), "mock agent should exit successfully");
+
+    assert!(stdout.contains("Interactive turn 1: STALE_BEFORE_ASK"));
+    assert!(stdout.contains("Interactive turn 2: ASK_AFTER_CURSOR"));
 }
