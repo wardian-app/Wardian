@@ -113,6 +113,29 @@ fn ask_rejects_thread_before_app_lookup_for_single_target() {
 }
 
 #[test]
+fn ask_rejects_unknown_condition_kind_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "ask",
+            "reviewer-a1",
+            "review this",
+            "--until",
+            "ouptut:REVIEW_DONE",
+        ])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_ne!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+    assert!(stderr.contains("unsupported watch condition"));
+    assert!(stderr.contains("ouptut:REVIEW_DONE"));
+}
+
+#[test]
 fn ask_no_message_no_stdin_exits_one() {
     let home = TempDir::new().unwrap();
     let output = Command::new(bin())

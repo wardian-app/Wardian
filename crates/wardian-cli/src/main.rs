@@ -316,7 +316,7 @@ fn handle_ask(args: AskArgs) -> Result<String, CliError> {
     validate_ask_thread(args.thread.as_deref())?;
     let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
     let timeout = parse_timeout(&args.timeout)?;
-    let condition = normalize_ask_condition(args.until.as_deref().unwrap_or("status:idle"));
+    let condition = normalize_ask_condition(args.until.as_deref().unwrap_or("status:idle"))?;
     let response = live::ask_agent(
         &args.target,
         &message,
@@ -371,15 +371,21 @@ fn validate_ask_thread(thread: Option<&str>) -> Result<(), CliError> {
     Ok(())
 }
 
-fn normalize_ask_condition(until: &str) -> String {
+fn normalize_ask_condition(until: &str) -> Result<String, CliError> {
     if until.starts_with("status:")
         || until.starts_with("output:")
         || until.starts_with("event:")
         || until.starts_with("delivery:")
     {
-        until.to_string()
+        Ok(until.to_string())
+    } else if until.contains(':') {
+        Err(CliError::backend(
+            ExitCode::Generic,
+            "not_supported",
+            &format!("unsupported watch condition: {until}"),
+        ))
     } else {
-        format!("status:{until}")
+        Ok(format!("status:{until}"))
     }
 }
 
@@ -782,6 +788,28 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(json["delivery"][0]["delivery_state"], "submitted");
         assert_eq!(json["output"]["text"], "done");
+    }
+
+    #[test]
+    fn normalize_ask_condition_accepts_known_kinds_and_bare_status() {
+        assert_eq!(normalize_ask_condition("idle").unwrap(), "status:idle");
+        assert_eq!(
+            normalize_ask_condition("output:REVIEW_DONE").unwrap(),
+            "output:REVIEW_DONE"
+        );
+        assert_eq!(
+            normalize_ask_condition("delivery:submitted").unwrap(),
+            "delivery:submitted"
+        );
+    }
+
+    #[test]
+    fn normalize_ask_condition_rejects_unknown_colon_kind() {
+        let error = normalize_ask_condition("ouptut:REVIEW_DONE").unwrap_err();
+
+        assert_eq!(error.code, "not_supported");
+        assert!(error.message.contains("unsupported watch condition"));
+        assert!(error.message.contains("ouptut:REVIEW_DONE"));
     }
 
     #[test]
