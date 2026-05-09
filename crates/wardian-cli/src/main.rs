@@ -6,7 +6,9 @@ mod output;
 
 use std::{io::Read as _, time::Duration};
 
-use args::{AgentArgs, AgentCommand, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand};
+use args::{
+    AgentArgs, AgentCommand, AskArgs, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand,
+};
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
@@ -25,6 +27,7 @@ fn run() -> i32 {
         Command::Agent(args) => handle_agent(args),
         Command::Workflow(args) => handle_workflow(args),
         Command::Send(args) => handle_send(args),
+        Command::Ask(args) => handle_ask_reserved(args),
     };
 
     match result {
@@ -329,6 +332,14 @@ fn validate_single_wait_target(target: &str) -> Result<(), CliError> {
         ));
     }
     Ok(())
+}
+
+fn handle_ask_reserved(_args: AskArgs) -> Result<String, CliError> {
+    Err(CliError::backend(
+        ExitCode::Generic,
+        "not_supported",
+        "wardian ask is reserved until send/watch composition is implemented",
+    ))
 }
 
 fn parse_include(include: Option<&str>) -> Vec<String> {
