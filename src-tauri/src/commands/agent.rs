@@ -674,6 +674,18 @@ fn clone_cleanup_created_profile_dirs(created_profile_dirs: &[std::path::PathBuf
     }
 }
 
+fn clone_refresh_profile_system_include_directories(
+    config: &mut AgentConfig,
+    session_id: &str,
+    should_copy_profile: bool,
+) {
+    if should_copy_profile {
+        config.system_include_directories = Some(
+            crate::utils::fs::resolve_system_include_directories(&config.agent_class, session_id),
+        );
+    }
+}
+
 fn clone_ensure_profile_destination_available(
     wardian_home: &std::path::Path,
     destination_session_id: &str,
@@ -1465,6 +1477,7 @@ pub async fn clone_agent(
             clone_remove_existing_path(&provisional_root);
             created_profile_dirs.retain(|dir| dir != &provisional_root);
         }
+        clone_refresh_profile_system_include_directories(&mut config, &session_id, true);
     }
 
     let registered = register_new_agent(
@@ -1981,16 +1994,17 @@ mod tests {
         clone_copy_agent_profile_files, clone_copy_profile_plan,
         clone_copy_selected_agent_profile_files, clone_copy_selected_agent_skills,
         clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
-        clone_remove_existing_path, clone_sanitize_config, clone_unique_name,
-        clone_validate_selected_agent_skills, clone_validate_selected_profile_files,
-        codex_provider_session_is_new, flatten_clone_file_paths, generated_agent_name,
-        insert_new_agent_order, mark_agent_paused_off, normalize_clone_folder_override,
-        normalize_spawn_folder, persisted_resume_session_for_provider, prepare_clear_config,
-        prepare_resume_config, promote_fresh_provider_session_after_resume,
-        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        reserve_spawn_session_name, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
+        clone_refresh_profile_system_include_directories, clone_remove_existing_path,
+        clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
+        clone_validate_selected_profile_files, codex_provider_session_is_new,
+        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
+        mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
+        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, reserve_spawn_session_name,
+        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
+        sync_resumed_input_sender, AgentOrderPlacement, CloneProfileCopyPlan,
+        CloneProfileSelection,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -2618,6 +2632,36 @@ mod tests {
             std::fs::read_to_string(final_dir.join("AGENTS.md")).expect("final profile"),
             "source profile"
         );
+    }
+
+    #[test]
+    fn clone_custom_discovered_session_refreshes_system_includes_to_final_session_id() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+        let mut config = AgentConfig {
+            agent_class: "Coder".to_string(),
+            system_include_directories: Some(crate::utils::fs::resolve_system_include_directories(
+                "Coder",
+                "provisional-agent",
+            )),
+            ..Default::default()
+        };
+
+        clone_refresh_profile_system_include_directories(
+            &mut config,
+            "real-provider-session",
+            true,
+        );
+
+        let joined = config
+            .system_include_directories
+            .expect("include dirs")
+            .join("|")
+            .replace('\\', "/");
+        assert!(joined.contains("/agents/real-provider-session"));
+        assert!(!joined.contains("/agents/provisional-agent"));
     }
 
     #[test]
