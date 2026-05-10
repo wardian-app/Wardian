@@ -33,10 +33,10 @@ pub use crate::utils::process::{
 };
 pub use crate::utils::shell::build_program_launch;
 
-use crate::state::ActiveAgent;
+use crate::state::{ActiveAgent, AppState};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::models::{AgentConfig, AgentEvent};
 pub(crate) fn session_bootstrap_prompt() -> &'static str {
     "Introduce yourself"
@@ -148,9 +148,33 @@ pub(crate) fn set_agent_status(
     if let Ok(mut status) = current_status.lock() {
         if *status != next_status {
             *status = next_status.to_string();
+            let observed_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
             // Phase 2: Persist status change to SQLite
             let _ = wardian_core::db::update_agent_status(session_id, next_status, None);
+
+            let watch_app = app.clone();
+            let watch_session_id = session_id.to_string();
+            let watch_status = next_status.to_string();
+            tauri::async_runtime::spawn(async move {
+                let state = watch_app.state::<AppState>();
+                let agents = state.agents.lock().await;
+                if let Some(agent) = agents.get(&watch_session_id) {
+                    if let Ok(mut last_status_at) = agent.last_status_at.lock() {
+                        *last_status_at = Some(observed_at.clone());
+                    }
+                    if let Ok(mut watch_state) = agent.watch_state.lock() {
+                        watch_state.push_event(
+                            "status",
+                            serde_json::json!({
+                                "status": wardian_core::identity::normalize_status(&watch_status),
+                                "observed_at": observed_at,
+                            }),
+                        );
+                    }
+                }
+            });
 
             let _ = app.emit(
                 "agent-status-updated",
@@ -733,6 +757,10 @@ mod tests {
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
             init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_status: std::sync::Arc::new(std::sync::Mutex::new(status.to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::state::AgentWatchState::new("test-agent".to_string(), 4096, 262_144),
+            )),
             terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
             log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),

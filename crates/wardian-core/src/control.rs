@@ -43,6 +43,15 @@ pub enum ControlRequest {
         message: String,
         thread: Option<String>,
     },
+    AgentWatch {
+        target: String,
+        since: Option<String>,
+        until: Option<String>,
+        include: Vec<String>,
+        tail_bytes: Option<usize>,
+        follow: bool,
+        timeout_ms: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +88,69 @@ impl Default for OkResponse {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliveryErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliveryDetail {
+    pub uuid: String,
+    pub name: String,
+    pub provider: String,
+    pub runtime_state: String,
+    pub delivery_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DeliveryErrorDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SendMessageResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub delivery: Vec<DeliveryDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WatchEvent {
+    pub cursor: String,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchOutput {
+    pub cursor: String,
+    pub text: String,
+    pub truncated: bool,
+    pub omitted_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchDeliverySnapshot {
+    pub delivery: Vec<DeliveryDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchAgentSnapshot {
+    pub uuid: String,
+    pub name: String,
+    pub provider: String,
+    pub status: String,
+    pub last_status_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentWatchResponse {
+    pub schema: u8,
+    pub agent: WatchAgentSnapshot,
+    pub cursor: String,
+    pub events: Vec<WatchEvent>,
+    pub output: WatchOutput,
+    pub delivery: WatchDeliverySnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +286,63 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"send_message""#));
         assert!(json.contains(r#""target":"all""#));
+    }
+
+    #[test]
+    fn agent_watch_request_serializes_single_target_options() {
+        let req = ControlRequest::AgentWatch {
+            target: "Wardian-Codex".to_string(),
+            since: Some("57244fa9-2b9c-4b45-ba32-6919d2786c29:0000000000000042".to_string()),
+            until: Some("status:idle".to_string()),
+            include: vec!["status".to_string(), "output".to_string()],
+            tail_bytes: Some(4096),
+            follow: false,
+            timeout_ms: Some(30_000),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+
+        assert!(json.contains(r#""command":"agent_watch""#));
+        assert!(json.contains(r#""target":"Wardian-Codex""#));
+        assert!(json.contains(r#""until":"status:idle""#));
+    }
+
+    #[test]
+    fn delivery_detail_splits_runtime_and_delivery_state() {
+        let detail = DeliveryDetail {
+            uuid: "agent-1".to_string(),
+            name: "CoderOne".to_string(),
+            provider: "codex".to_string(),
+            runtime_state: "live_pty_available".to_string(),
+            delivery_state: "submitted".to_string(),
+            error: None,
+        };
+
+        let json = serde_json::to_string(&detail).unwrap();
+
+        assert!(json.contains(r#""runtime_state":"live_pty_available""#));
+        assert!(json.contains(r#""delivery_state":"submitted""#));
+    }
+
+    #[test]
+    fn send_message_response_serializes_delivery_details() {
+        let response = SendMessageResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            delivery: vec![DeliveryDetail {
+                uuid: "agent-1".to_string(),
+                name: "CoderOne".to_string(),
+                provider: "codex".to_string(),
+                runtime_state: "live_pty_available".to_string(),
+                delivery_state: "submitted".to_string(),
+                error: None,
+            }],
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert!(json.contains(r#""ok":true"#));
+        assert!(json.contains(r#""delivery_state":"submitted""#));
     }
 
     #[test]

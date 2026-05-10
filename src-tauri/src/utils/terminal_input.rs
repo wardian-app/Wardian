@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::Sender;
 
-const TERMINAL_SUBMIT_DELAY_MS: u64 = 100;
+const TERMINAL_SUBMIT_DELAY_MS: u64 = 1000;
 const TERMINAL_SUBMIT_KEY: &[u8] = b"\r";
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
@@ -11,47 +11,60 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
         .to_string()
 }
 
-pub async fn submit_prompt_via_sender(
-    tx: &Sender<Vec<u8>>,
-    prompt: &str,
-    provider_name: &str,
-) -> Result<(), String> {
-    for (index, chunk) in terminal_submit_chunks(prompt, provider_name)
-        .into_iter()
-        .enumerate()
-    {
-        if index > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
-        }
+pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
+    let normalized = normalize_prompt_for_terminal_submit(prompt);
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        tx.send(chunk)
+    let submit_key = if provider_name == "codex" {
+        b"\x1b\r".to_vec()
+    } else {
+        TERMINAL_SUBMIT_KEY.to_vec()
+    };
+
+    Ok(vec![normalized.into_bytes(), submit_key])
+}
+
+pub async fn submit_prompt_chunks_via_sender(
+    tx: &Sender<Vec<u8>>,
+    provider_name: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let chunks = provider_submit_chunks(provider_name, prompt)?;
+    if chunks.is_empty() {
+        return Ok(());
+    }
+
+    tx.send(chunks[0].clone())
+        .await
+        .map_err(|e| format!("Failed to send prompt text: {}", e))?;
+
+    // Windows ConPTY can acknowledge large prompt writes before provider TUIs
+    // have finished updating their editor state. Submitting too quickly leaves
+    // Claude/Gemini with text typed but not entered.
+    tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
+
+    if let Some(submit_key) = chunks.get(1) {
+        tx.send(submit_key.clone())
             .await
-            .map_err(|e| format!("Failed to send prompt input: {}", e))?;
+            .map_err(|e| format!("Failed to send prompt submit key: {}", e))?;
     }
 
     Ok(())
 }
 
-pub fn terminal_submit_chunks(prompt: &str, provider_name: &str) -> Vec<Vec<u8>> {
-    let normalized = normalize_prompt_for_terminal_submit(prompt);
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let submit_key = if provider_name == "codex" {
-        b"\x1b\r".as_slice()
-    } else {
-        TERMINAL_SUBMIT_KEY
-    };
-
-    vec![normalized.into_bytes(), submit_key.to_vec()]
+pub async fn submit_prompt_via_sender(
+    tx: &Sender<Vec<u8>>,
+    prompt: &str,
+    provider_name: &str,
+) -> Result<(), String> {
+    submit_prompt_chunks_via_sender(tx, provider_name, prompt).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_prompt_for_terminal_submit, submit_prompt_via_sender, terminal_submit_chunks,
-    };
+    use super::{normalize_prompt_for_terminal_submit, submit_prompt_via_sender};
 
     #[test]
     fn normalize_prompt_flattens_newlines_and_trims() {
@@ -74,13 +87,5 @@ mod tests {
 
         assert_eq!(String::from_utf8(first).expect("utf8"), "hello world");
         assert_eq!(second, b"\r".to_vec());
-    }
-
-    #[test]
-    fn terminal_submit_chunks_uses_codex_escape_enter_submit_key() {
-        assert_eq!(
-            terminal_submit_chunks("hello", "codex"),
-            vec![b"hello".to_vec(), b"\x1b\r".to_vec()]
-        );
     }
 }

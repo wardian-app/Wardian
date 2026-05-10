@@ -116,6 +116,21 @@ impl CliError {
         }
     }
 
+    pub fn backend_with_details(
+        exit_code: ExitCode,
+        code: &'static str,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            exit_code,
+            code,
+            message: message.into(),
+            hint: None,
+            details: Some(Box::new(details)),
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(&ErrorEnvelope {
             schema: 1,
@@ -156,5 +171,29 @@ mod tests {
         let error = CliError::not_found("ghost");
         assert_eq!(error.code_i32(), 2);
         assert!(error.to_json().contains("ghost"));
+    }
+
+    #[test]
+    fn backend_error_can_emit_details() {
+        let error = CliError::backend_with_details(
+            ExitCode::Generic,
+            "request_failed",
+            "message delivery failed",
+            serde_json::json!({
+                "delivery": [{
+                    "uuid": "agent-2",
+                    "runtime_state": "restored_without_sender",
+                    "delivery_state": "failed"
+                }]
+            }),
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
+
+        assert_eq!(value["error"]["code"], "request_failed");
+        assert_eq!(
+            value["error"]["details"]["delivery"][0]["runtime_state"],
+            "restored_without_sender"
+        );
     }
 }

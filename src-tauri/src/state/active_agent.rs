@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wardian_core::models::AgentConfig;
 
+use super::AgentWatchState;
+
 pub struct ActiveAgent {
     pub config: Arc<Mutex<AgentConfig>>,
     pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
@@ -15,6 +17,8 @@ pub struct ActiveAgent {
     pub query_count: Arc<Mutex<usize>>,
     pub init_timestamp: Arc<Mutex<Option<String>>>,
     pub current_status: Arc<Mutex<String>>,
+    pub last_status_at: Arc<Mutex<Option<String>>>,
+    pub watch_state: Arc<Mutex<AgentWatchState>>,
     pub terminal_title: Arc<Mutex<String>>,
     pub last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
     pub log_path: Arc<Mutex<Option<PathBuf>>>,
