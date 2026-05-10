@@ -29,6 +29,8 @@ const descendantFilePaths = (node: CloneFileTreeNode): string[] => {
   return node.children.flatMap(descendantFilePaths);
 };
 
+const testIdSuffix = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "-");
+
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
@@ -170,6 +172,7 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
                 onChange={() => toggleDirectory(node)}
                 className="accent-[var(--color-wardian-accent)]"
                 aria-label={node.path}
+                data-testid={`custom-clone-file-${testIdSuffix(node.path)}`}
               />
               <span>{node.name}</span>
             </label>
@@ -191,6 +194,7 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
           onChange={() => toggleFile(node.path)}
           className="accent-[var(--color-wardian-accent)]"
           aria-label={node.path}
+          data-testid={`custom-clone-file-${testIdSuffix(node.path)}`}
         />
         <span className="font-mono">{node.path}</span>
       </label>
@@ -299,6 +303,7 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
                             onChange={() => toggleSkill(skill)}
                             className="accent-[var(--color-wardian-accent)]"
                             aria-label={`${skill.name} ${skill.source_path ?? ""}`.trim()}
+                            data-testid={`custom-clone-skill-${testIdSuffix(skill.source_path ?? skill.name)}`}
                           />
                           <span>{skill.name}</span>
                           {skill.source_path && <span className="font-mono text-muted-neutral">{skill.source_path}</span>}

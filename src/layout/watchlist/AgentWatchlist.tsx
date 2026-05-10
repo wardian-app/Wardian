@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AgentConfig, AgentTelemetry } from "../../types";
+import type { AgentConfig, AgentTelemetry, CloneMode } from "../../types";
 import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId, AgentTeam, WatchlistDisplayItem, WatchlistEntry } from "./types";
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
 
@@ -74,7 +74,7 @@ interface AgentWatchlistProps {
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
   onClear: (agentId: string) => void;
-  onClone?: (agentId: string, mode: "fresh" | "profile") => void;
+  onClone?: (agentId: string, mode: CloneMode) => void;
   onAddToList: (listId: string, agentId: string) => void;
   onRemoveFromList: (listId: string, agentId: string) => void;
   onAddAgentsToList?: (listId: string, agentIds: string[]) => void;

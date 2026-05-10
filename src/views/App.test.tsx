@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { EventCallback } from "@tauri-apps/api/event";
 import App from "./App";
-import type { AgentConfig, AgentClassDefinition } from "../types";
+import type { AgentConfig, AgentClassDefinition, AgentClonePreview } from "../types";
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useQueueStore } from "../store/useQueueStore";
@@ -123,6 +123,21 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
           }
         }
         return currentAgents[currentAgents.length - 1] ?? null;
+      case "get_agent_clone_preview": {
+        const source = currentAgents.find(a => a.session_id === args?.sourceSessionId);
+        return {
+          source_session_id: args?.sourceSessionId,
+          source_session_name: source?.session_name ?? "Agent",
+          suggested_session_name: `${source?.session_name ?? "Agent"}-copy`,
+          provider: source?.provider ?? "claude",
+          agent_class: source?.agent_class ?? "Coder",
+          folder: source?.folder ?? "C:/project",
+          files: { name: source?.session_id ?? "agent", path: "", kind: "directory", children: [] },
+          default_selected_files: [],
+          skills: [],
+          default_selected_skills: [],
+        } satisfies AgentClonePreview;
+      }
       case "get_agent_metrics":
         return [];
       case "attach_agent_pty":
@@ -760,6 +775,29 @@ describe("Agent Watchlist Sidebar", () => {
           mode: "fresh",
         },
       });
+    });
+  });
+
+  it("opens custom clone modal from the clone submenu", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+
+    const alphaWatchlistRow = await waitFor(() => {
+      const row = screen
+        .getAllByText("Alpha")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Alpha watchlist row not found");
+      return row;
+    });
+
+    fireEvent.contextMenu(alphaWatchlistRow);
+    fireEvent.mouseEnter(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Clone" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Custom Clone" }));
+
+    expect(await screen.findByRole("dialog", { name: "Custom Clone" })).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("get_agent_clone_preview", {
+      sourceSessionId: "agent-1",
     });
   });
 
