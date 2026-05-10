@@ -14,6 +14,108 @@
 
 import { test, expect, type Page } from "@playwright/test";
 
+async function installCustomCloneIpcMock(page: Page) {
+  await page.addInitScript(() => {
+    type Agent = {
+      session_id: string;
+      session_name: string;
+      agent_class: string;
+      folder: string;
+      provider: string;
+      is_off: boolean;
+    };
+
+    const agents: Agent[] = [
+      {
+        session_id: "mock-session-e2e-001",
+        session_name: "E2E Mock Agent",
+        agent_class: "TestClass",
+        folder: "C:/projects/e2e",
+        provider: "mock",
+        is_off: false,
+      },
+    ];
+    const callbacks = new Map<number, unknown>();
+    let callbackId = 1;
+    const tauriWindow = window as Window & {
+      __TAURI_INTERNALS__?: Record<string, unknown>;
+      __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
+    };
+
+    tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => undefined,
+    };
+
+    tauriWindow.__TAURI_INTERNALS__ = {
+      metadata: {
+        currentWindow: { label: "main" },
+        currentWebview: { label: "main" },
+      },
+      transformCallback: (callback: unknown) => {
+        const id = callbackId++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback: (id: number) => {
+        callbacks.delete(id);
+      },
+      convertFileSrc: (filePath: string) => filePath,
+      invoke: async (command: string, args?: Record<string, unknown>) => {
+        if (command === "list_agents") return agents;
+        if (command === "list_agent_classes") {
+          return [{ name: "TestClass", description: "E2E test class", is_default: true }];
+        }
+        if (command === "load_watchlists") return [];
+        if (command === "load_watchlist_prefs") return null;
+        if (command === "load_agent_interactions") return {};
+        if (command === "load_queue_items") return [];
+        if (command === "list_workflows") return [];
+        if (command === "list_scheduled_runs") return [];
+        if (command === "load_workflow_library") return { folders: [], rootWorkflowIds: [] };
+        if (command === "get_library_tree") {
+          return { type: "Folder", path: "", name: "Root", children: [] };
+        }
+        if (command === "list_deployed_skills") return [];
+        if (command === "plugin:event|listen") return callbackId++;
+        if (command === "plugin:event|unlisten") return null;
+        if (command === "sync_provider_theme_settings") return null;
+        if (command === "get_agent_clone_preview") {
+          return {
+            source_session_id: "mock-session-e2e-001",
+            source_session_name: "E2E Mock Agent",
+            suggested_session_name: "E2E Mock Agent-copy",
+            provider: "mock",
+            agent_class: "TestClass",
+            folder: "C:/projects/e2e",
+            files: {
+              name: "mock-session-e2e-001",
+              path: "",
+              kind: "directory",
+              children: [
+                { name: "AGENTS.md", path: "AGENTS.md", kind: "file", children: [] },
+                { name: "notes.md", path: "notes.md", kind: "file", children: [] },
+              ],
+            },
+            default_selected_files: ["AGENTS.md", "notes.md"],
+            skills: [],
+            default_selected_skills: [],
+          };
+        }
+        if (command === "clone_agent") {
+          const request = args?.req as { session_name?: string } | undefined;
+          agents.push({
+            ...agents[0],
+            session_id: "mock-session-e2e-clone",
+            session_name: request?.session_name ?? "E2E Mock Agent-copy",
+          });
+          return agents[agents.length - 1];
+        }
+        return null;
+      },
+    };
+  });
+}
+
 test.describe("Agent Spawn Form", () => {
   test.describe.configure({ mode: "serial" });
 
@@ -69,6 +171,32 @@ test.describe("Agent Spawn Form", () => {
     // No agent rows expected in empty state.
     const cards = page.locator('[data-testid="agent-card"]');
     await expect(cards).toHaveCount(0);
+  });
+});
+
+test.describe("Custom Agent Clone", () => {
+  test("opens the modal, changes file selection, and creates a clone row", async ({ page }) => {
+    await installCustomCloneIpcMock(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+    const watchlist = page.locator('[data-testid="agent-watchlist"]');
+    const sourceRow = watchlist.locator(".watchlist-row", { hasText: "E2E Mock Agent" });
+    await expect(sourceRow).toBeVisible();
+
+    await sourceRow.click({ button: "right" });
+    const menu = page.locator('[data-testid="agent-context-menu"]');
+    await menu.getByRole("button", { name: "Clone" }).hover();
+    await page.getByRole("button", { name: "Custom Clone" }).click();
+
+    const modal = page.locator('[data-testid="custom-clone-modal"]');
+    await expect(modal).toBeVisible();
+    await expect(modal.getByLabel("Clone Name")).toHaveValue("E2E Mock Agent-copy");
+
+    await modal.locator('[data-testid="custom-clone-file-notes-md"]').uncheck();
+    await modal.locator('[data-testid="custom-clone-submit"]').click();
+
+    await expect(watchlist.locator(".watchlist-row", { hasText: "E2E Mock Agent-copy" })).toBeVisible();
   });
 });
 
