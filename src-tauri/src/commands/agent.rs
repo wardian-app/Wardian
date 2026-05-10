@@ -1458,6 +1458,42 @@ pub async fn clone_agent(
 }
 
 #[tauri::command]
+pub async fn get_agent_clone_preview(
+    source_session_id: String,
+    state: State<'_, AppState>,
+) -> Result<AgentClonePreview, String> {
+    let source_session_id = source_session_id.trim().to_string();
+    if source_session_id.is_empty() {
+        return Err("Source agent is required.".to_string());
+    }
+
+    let (source_config, existing_names) = {
+        let agents = state.agents.lock().await;
+        let source = agents
+            .get(&source_session_id)
+            .ok_or_else(|| format!("Agent {} not found", source_session_id))?
+            .config
+            .lock()
+            .unwrap()
+            .clone();
+        let names = agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().session_name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        (source, names)
+    };
+    let wardian_home =
+        crate::utils::fs::get_wardian_home().ok_or_else(|| "Could not find Wardian home".to_string())?;
+
+    build_agent_clone_preview(
+        &wardian_home,
+        &source_session_id,
+        &source_config,
+        &existing_names,
+    )
+}
+
+#[tauri::command]
 pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentConfig>, String> {
     manager::log_debug("[WARDIAN] list_agents called");
     let agents = state.agents.lock().await;
