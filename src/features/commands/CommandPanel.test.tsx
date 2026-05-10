@@ -171,7 +171,7 @@ describe("CommandPanel", () => {
     });
     await user.click(screen.getByTestId("broadcast-submit"));
     expect(onBroadcast).not.toHaveBeenCalled();
-    expect(screen.getByText(/broadcast to all agents/i)).toBeInTheDocument();
+    expect(screen.getByText("No agents selected. This will broadcast to ALL agents. Are you sure?")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onBroadcast).toHaveBeenCalledTimes(1);

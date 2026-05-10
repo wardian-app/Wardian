@@ -13,7 +13,7 @@ test.describe("OpenCode Debug Provider", () => {
       await dialog.dismiss();
     });
 
-    await page.goto("/");
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
     const hasTauriBridge = await page.evaluate(() => {

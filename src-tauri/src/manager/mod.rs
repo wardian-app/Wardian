@@ -19,6 +19,7 @@ pub use headless::{
     HeadlessRunOptions,
 };
 pub use opencode::opencode_extract_created_session_id;
+pub(crate) use opencode::opencode_last_assistant_text;
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 
@@ -184,6 +185,42 @@ pub(crate) fn set_agent_status(
             );
         }
     }
+}
+
+pub(crate) fn emit_agent_status(app: &AppHandle, session_id: &str, current_status: &str) {
+    let _ = wardian_core::db::update_agent_status(session_id, current_status, None);
+
+    let _ = app.emit(
+        "agent-status-updated",
+        serde_json::json!({
+            "session_id": session_id,
+            "current_status": current_status,
+        }),
+    );
+}
+
+pub(crate) fn mark_agent_prompt_started(agent: &crate::state::ActiveAgent) -> bool {
+    let current_status = agent
+        .current_status
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default();
+    if current_status == "Action Needed" || current_status == "Off" {
+        return false;
+    }
+
+    if let Ok(mut count) = agent.query_count.lock() {
+        *count += 1;
+    }
+
+    if let Ok(mut status) = agent.current_status.lock() {
+        if *status != "Processing..." {
+            *status = "Processing...".to_string();
+            return true;
+        }
+    }
+
+    false
 }
 
 pub(crate) fn debug_preview_bytes(bytes: &[u8], limit: usize) -> String {
@@ -706,5 +743,56 @@ mod tests {
                 "claude-session".to_string(),
             ]
         );
+    }
+
+    fn test_active_agent(status: &str) -> crate::state::ActiveAgent {
+        crate::state::ActiveAgent {
+            config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            process_id: None,
+            query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_status: std::sync::Arc::new(std::sync::Mutex::new(status.to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::state::AgentWatchState::new("test-agent".to_string(), 4096, 262_144),
+            )),
+            terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+
+    #[test]
+    fn mark_agent_prompt_started_sets_processing_and_counts_query() {
+        let agent = test_active_agent("Idle");
+
+        assert!(mark_agent_prompt_started(&agent));
+
+        assert_eq!(
+            agent.current_status.lock().unwrap().as_str(),
+            "Processing..."
+        );
+        assert_eq!(*agent.query_count.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn mark_agent_prompt_started_preserves_action_needed() {
+        let agent = test_active_agent("Action Needed");
+
+        assert!(!mark_agent_prompt_started(&agent));
+
+        assert_eq!(
+            agent.current_status.lock().unwrap().as_str(),
+            "Action Needed"
+        );
+        assert_eq!(*agent.query_count.lock().unwrap(), 0);
     }
 }

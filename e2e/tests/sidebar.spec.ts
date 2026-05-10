@@ -1,12 +1,21 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 test.describe("Sidebar Navigation", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   });
 
-  test("sidebar icon rail has navigation buttons", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test("sidebar icon rail has navigation buttons", async () => {
     const rail = page.locator('[data-testid="sidebar-icon-rail"]');
     const buttons = rail.locator("button");
     // Should have at least explorer, workflows, settings tabs
@@ -15,7 +24,7 @@ test.describe("Sidebar Navigation", () => {
     expect(count).toBeGreaterThanOrEqual(3);
   });
 
-  test("clicking sidebar tabs switches content pane", async ({ page }) => {
+  test("clicking sidebar tabs switches content pane", async () => {
     const rail = page.locator('[data-testid="sidebar-icon-rail"]');
     const buttons = rail.locator("button");
     // Click the second tab (workflows)

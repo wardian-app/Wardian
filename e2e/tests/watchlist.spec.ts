@@ -8,19 +8,28 @@
  *      Run via: npm run test:e2e:native
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 test.describe("Watchlist Panel", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   });
 
-  test("watchlist panel is visible by default", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test("watchlist panel is visible by default", async () => {
     await expect(page.locator('[data-testid="agent-watchlist"]')).toBeVisible();
   });
 
-  test("collapse toggle hides the watchlist", async ({ page }) => {
+  test("collapse toggle hides the watchlist", async () => {
     const watchlist = page.locator('[data-testid="agent-watchlist"]');
     await expect(watchlist).toBeVisible();
 
@@ -33,11 +42,12 @@ test.describe("Watchlist Panel", () => {
     await expect(watchlist).toHaveClass(/w-0/);
   });
 
-  test("expand toggle restores the watchlist", async ({ page }) => {
-    // Collapse first.
+  test("expand toggle restores the watchlist", async () => {
     const watchlist = page.locator('[data-testid="agent-watchlist"]');
-    await page.getByTitle("Hide Agent Roster").click();
-    await expect(watchlist).toHaveClass(/w-0/);
+    if (!(await watchlist.evaluate((el) => el.className.includes("w-0")))) {
+      await page.getByTitle("Hide Agent Roster").click();
+      await expect(watchlist).toHaveClass(/w-0/);
+    }
 
     // Expand.
     await page.getByTitle("Show Agent Roster").click();
@@ -45,18 +55,18 @@ test.describe("Watchlist Panel", () => {
     await expect(watchlist).toBeVisible();
   });
 
-  test("search input is visible inside watchlist", async ({ page }) => {
+  test("search input is visible inside watchlist", async () => {
     const searchInput = page.locator('[data-testid="agent-watchlist"] input[placeholder="Search agents..."]');
     await expect(searchInput).toBeVisible();
   });
 
-  test("search input accepts text", async ({ page }) => {
+  test("search input accepts text", async () => {
     const searchInput = page.locator('[data-testid="agent-watchlist"] input[placeholder="Search agents..."]');
     await searchInput.fill("test-query");
     await expect(searchInput).toHaveValue("test-query");
   });
 
-  test("search input can be cleared", async ({ page }) => {
+  test("search input can be cleared", async () => {
     const searchInput = page.locator('[data-testid="agent-watchlist"] input[placeholder="Search agents..."]');
     await searchInput.fill("some-text");
     await searchInput.fill("");

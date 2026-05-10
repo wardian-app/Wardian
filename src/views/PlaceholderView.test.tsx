@@ -3,7 +3,6 @@ import { PlaceholderView } from "./PlaceholderView";
 
 describe("PlaceholderView", () => {
   it.each([
-    ["queue", "Queue", "Advanced human-in-the-loop features coming in Phase 3.", "Phase 3"],
     ["workflow-builder", "Workflow Builder", "Advanced workflow-builder features coming in Phase 3.", "Phase 3"],
     ["graph", "Graph", "Advanced graph features coming in Phase 5.", "Phase 5"],
     ["garden", "Garden", "Advanced garden features coming in Phase 5.", "Phase 5"],

@@ -198,7 +198,8 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
         } => {
             let state = app.state::<AppState>();
             let delivery =
-                deliver_message_to_target(&state, &target, &message, thread.as_deref()).await?;
+                deliver_message_to_target(Some(app), &state, &target, &message, thread.as_deref())
+                    .await?;
             ok_json(&SendMessageResponse {
                 schema: wardian_core::control::CONTROL_SCHEMA,
                 ok: true,
@@ -338,6 +339,7 @@ async fn resolve_send_targets_in_state(state: &AppState, target: &str) -> Vec<St
 }
 
 async fn deliver_message_to_target(
+    app: Option<&AppHandle>,
     state: &AppState,
     target: &str,
     message: &str,
@@ -364,6 +366,7 @@ async fn deliver_message_to_target(
     };
 
     let mut delivered = 0usize;
+    let mut delivered_session_ids = Vec::new();
     let mut failures = Vec::new();
     let mut delivery = Vec::with_capacity(session_ids.len());
     for info in target_infos {
@@ -386,6 +389,7 @@ async fn deliver_message_to_target(
                             delivery_state: "submitted".to_string(),
                             error: None,
                         };
+                        delivered_session_ids.push(detail.uuid.clone());
                         record_delivery_attempt(state, &detail).await;
                         delivery.push(detail);
                     }
@@ -420,6 +424,8 @@ async fn deliver_message_to_target(
             }
         }
     }
+    mark_delivered_agents_prompt_started(app, state, &delivered_session_ids).await;
+
     if delivered == 0 {
         return Err(ControlError::request_failed(format!(
             "message was not delivered to any matched agents: {}",
@@ -437,6 +443,27 @@ async fn deliver_message_to_target(
         .with_details(delivery_details_json(&delivery)));
     }
     Ok(delivery)
+}
+
+async fn mark_delivered_agents_prompt_started(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    session_ids: &[String],
+) {
+    if session_ids.is_empty() {
+        return;
+    }
+
+    let agents = state.agents.lock().await;
+    for session_id in session_ids {
+        if let Some(agent) = agents.get(session_id) {
+            if crate::manager::mark_agent_prompt_started(agent) {
+                if let Some(app) = app {
+                    crate::manager::emit_agent_status(app, session_id, "Processing...");
+                }
+            }
+        }
+    }
 }
 
 async fn handle_agent_watch(
@@ -1191,8 +1218,10 @@ mod tests {
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
             let agents = state.agents.lock().await;
-            let mut config = agents.get("agent-1").unwrap().config.lock().unwrap();
-            config.provider = "codex".to_string();
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            *agent.query_count.lock().unwrap() = 0;
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         state
@@ -1201,19 +1230,28 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(&state, "CoderOne", "hello", None)
+        deliver_message_to_target(None, &state, "CoderOne", "hello", None)
             .await
             .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\x1b\r".to_vec());
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            assert_eq!(
+                agent.current_status.lock().unwrap().as_str(),
+                "Processing..."
+            );
+            assert_eq!(*agent.query_count.lock().unwrap(), 1);
+        }
     }
 
     #[tokio::test]
     async fn message_delivery_reports_missing_target_as_not_found() {
         let state = AppState::new();
 
-        let error = deliver_message_to_target(&state, "ghost", "hello", None)
+        let error = deliver_message_to_target(None, &state, "ghost", "hello", None)
             .await
             .unwrap_err();
 
@@ -1228,7 +1266,7 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
 
-        let error = deliver_message_to_target(&state, "agent-1", "hello", None)
+        let error = deliver_message_to_target(None, &state, "agent-1", "hello", None)
             .await
             .unwrap_err();
 
@@ -1256,7 +1294,7 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        let error = deliver_message_to_target(&state, "class:Coder", "hello", None)
+        let error = deliver_message_to_target(None, &state, "class:Coder", "hello", None)
             .await
             .unwrap_err();
 
@@ -1288,7 +1326,7 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(&state, "CoderOne", "hello", None)
+        deliver_message_to_target(None, &state, "CoderOne", "hello", None)
             .await
             .unwrap();
 

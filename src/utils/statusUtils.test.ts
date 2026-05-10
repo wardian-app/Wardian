@@ -4,6 +4,8 @@ import {
   cleanThought,
   deriveCurrentThought,
   classifyJsonEvent,
+  extractQueueContent,
+  extractTerminalQueueContent,
   getStatusColorClass,
   getStatusLabel,
 } from "./statusUtils";
@@ -414,5 +416,110 @@ describe("getStatusLabel", () => {
 
   it("maps unknown values to Pending", () => {
     expect(getStatusLabel("Something Else")).toBe("Pending");
+  });
+});
+
+describe("extractQueueContent", () => {
+  it("returns text from Claude assistant event with text block", () => {
+    const data = {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    };
+    expect(extractQueueContent(data)).toEqual({ text: "Hello world", isToolCall: false });
+  });
+
+  it("returns isToolCall for Claude assistant event with only tool_use block", () => {
+    const data = {
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Bash" }] },
+    };
+    expect(extractQueueContent(data)).toEqual({ isToolCall: true });
+  });
+
+  it("returns text AND isToolCall for Claude assistant event with both text and tool_use", () => {
+    const data = {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Let me run that." },
+          { type: "tool_use", name: "Bash" },
+        ],
+      },
+    };
+    const result = extractQueueContent(data);
+    expect(result.text).toBe("Let me run that.");
+    expect(result.isToolCall).toBe(true);
+  });
+
+  it("returns isToolCall for Claude system permission_request", () => {
+    expect(extractQueueContent({ type: "system", subtype: "permission_request" }))
+      .toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Gemini text event", () => {
+    expect(extractQueueContent({ type: "text", part: { text: "Gemini response" } }))
+      .toEqual({ text: "Gemini response", isToolCall: false });
+  });
+
+  it("returns isToolCall for Gemini tool_use event", () => {
+    expect(extractQueueContent({ type: "tool_use", part: { tool: "bash" } }))
+      .toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Codex item.completed agent_message", () => {
+    expect(extractQueueContent({ type: "item.completed", item: { type: "agent_message", text: "Done!" } }))
+      .toEqual({ text: "Done!", isToolCall: false });
+  });
+
+  it("returns isToolCall for Codex item.completed exec_command", () => {
+    expect(extractQueueContent({ type: "item.completed", item: { type: "exec_command", command: "ls" } }))
+      .toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Codex event_msg agent_message", () => {
+    const data = { type: "event_msg", payload: { type: "agent_message", message: "Codex says hi" } };
+    expect(extractQueueContent(data)).toEqual({ text: "Codex says hi", isToolCall: false });
+  });
+
+  it("returns isToolCall for Codex event_msg exec_command", () => {
+    const data = { type: "event_msg", payload: { type: "exec_command", command: "ls" } };
+    expect(extractQueueContent(data)).toEqual({ isToolCall: true });
+  });
+
+  it("returns text from Claude result event", () => {
+    expect(extractQueueContent({ type: "result", result: "Final answer" }))
+      .toEqual({ text: "Final answer", isToolCall: false });
+  });
+
+  it("returns empty result for unknown event type", () => {
+    expect(extractQueueContent({ type: "unknown_event" }))
+      .toEqual({ isToolCall: false });
+  });
+});
+
+describe("extractTerminalQueueContent", () => {
+  it("extracts readable text from ANSI terminal output", () => {
+    const chunk = "\u001b[?25l\u001b[38;2;26;26;26m\u001b[48;2;255;255;255m\u001b[10;6HTest received.\u001b[15;6H\u001b[?25h";
+    expect(extractTerminalQueueContent(chunk)).toBe("Test received.");
+  });
+
+  it("ignores OpenCode input placeholders", () => {
+    expect(extractTerminalQueueContent("\u001b[24;2H> Type your message or @path/to/file"))
+      .toBeUndefined();
+  });
+
+  it("ignores OpenCode status and prompt chrome", () => {
+    const chunk = "\u001b[1;1H▣ Build · GPT-5.5 · 1.6s┃ List 50 rows of numbers.┃▣ Build · GPT-5.5 ■⬝⬝⬝⬝⬝⬝⬝esc interrupt";
+    expect(extractTerminalQueueContent(chunk)).toBeUndefined();
+  });
+
+  it("ignores Gemini thinking and overflow hint chrome", () => {
+    expect(extractTerminalQueueContent("⁝ Thinking... (esc to cancel, 8s) press tab twice for more"))
+      .toBeUndefined();
+    expect(extractTerminalQueueContent("press tab twice for more")).toBeUndefined();
+  });
+
+  it("ignores control-only terminal output", () => {
+    expect(extractTerminalQueueContent("\u001b[?2026h\u001b[?2026l\u001b[H")).toBeUndefined();
   });
 });
