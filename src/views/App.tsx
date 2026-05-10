@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
+import type { CloneMode } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -41,6 +42,7 @@ import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 import { RunPayloadModal } from "../features/workflows/RunPayloadModal";
+import { CustomCloneModal } from "../features/agents/CustomCloneModal";
 import {
   buildScheduledRunFromWorkflow,
   normalizeWorkflowForLaunch,
@@ -395,6 +397,7 @@ function AppBody() {
 
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
   const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
+  const [customCloneSourceId, setCustomCloneSourceId] = useState<string | null>(null);
   const wasDraggingRef = useRef(false);
 
   const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
@@ -808,7 +811,12 @@ function AppBody() {
     }
   };
 
-  const onClone = async (id: string, mode: "fresh" | "profile") => {
+  const onClone = async (id: string, mode: CloneMode) => {
+    if (mode === "custom") {
+      setCustomCloneSourceId(id);
+      return;
+    }
+
     try {
       await invoke("clone_agent", {
         req: {
@@ -1030,6 +1038,16 @@ function AppBody() {
               onCancel={() => setSidebarPendingWorkflowLaunch(null)}
             />
           )}
+          <CustomCloneModal
+            sourceSessionId={customCloneSourceId ?? ""}
+            agentClasses={agentClasses}
+            isOpen={Boolean(customCloneSourceId)}
+            onClose={() => setCustomCloneSourceId(null)}
+            onCloned={() => {
+              setCustomCloneSourceId(null);
+              fetchAgents();
+            }}
+          />
           {userTerminalOpen && (
             <UserTerminalPanel
               theme={theme}

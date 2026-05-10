@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import type { AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { getListsContainingAgent, getListsNotContainingAgent } from "../layout/watchlist/watchlistUtils";
+import type { CloneMode } from "../types";
 
 type MaybePromise = void | Promise<void>;
 
@@ -20,7 +21,7 @@ export interface AgentContextMenuProps {
   onPause: (agentId: string) => MaybePromise;
   onRestart: (agentId: string) => MaybePromise;
   onClear: (agentId: string) => MaybePromise;
-  onClone?: (agentId: string, mode: "fresh" | "profile") => MaybePromise;
+  onClone?: (agentId: string, mode: CloneMode) => MaybePromise;
   onAddToList: (listId: string, agentId: string) => MaybePromise;
   onRemoveFromList: (listId: string, agentId: string) => MaybePromise;
   onAddAgentsToList?: (listId: string, agentIds: string[]) => MaybePromise;
@@ -155,6 +156,15 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
                 }}
               >
                 Profile Clone
+              </button>
+              <button
+                className="context-menu-item"
+                onClick={async () => {
+                  await onClone?.(agentId, "custom");
+                  onClose();
+                }}
+              >
+                Custom Clone
               </button>
             </div>
           )}

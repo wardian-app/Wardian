@@ -1,6 +1,6 @@
 # Spec 035: Custom Agent Clone
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-10
 - **Decider:** User
 

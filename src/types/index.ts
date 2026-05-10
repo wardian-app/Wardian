@@ -169,3 +169,30 @@ export interface DeployedSkillRef {
     name: string;
     source_path?: string | null;
 }
+
+export type CloneMode = "fresh" | "profile" | "custom";
+
+export interface CloneFileTreeNode {
+    name: string;
+    path: string;
+    kind: "file" | "directory";
+    children: CloneFileTreeNode[];
+}
+
+export interface CloneProfileSelection {
+    files: string[];
+    skills: DeployedSkillRef[];
+}
+
+export interface AgentClonePreview {
+    source_session_id: string;
+    source_session_name: string;
+    suggested_session_name: string;
+    provider: string;
+    agent_class: string;
+    folder: string;
+    files: CloneFileTreeNode;
+    default_selected_files: string[];
+    skills: DeployedSkillRef[];
+    default_selected_skills: DeployedSkillRef[];
+}
