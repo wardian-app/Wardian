@@ -302,27 +302,8 @@ fn clone_collect_eligible_file_tree(
     source_session_id: &str,
 ) -> Result<CloneFileTreeNode, String> {
     let source_root = wardian_home.join("agents").join(source_session_id);
-    let mut children = Vec::new();
-
-    for entry in std::fs::read_dir(&source_root).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == ".agents" {
-            continue;
-        }
-        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if metadata.is_file() {
-            children.push(CloneFileTreeNode {
-                name: name.clone(),
-                path: name,
-                kind: CloneFileTreeNodeKind::File,
-                children: Vec::new(),
-            });
-        }
-    }
-
-    children.sort_by(|a, b| a.name.cmp(&b.name));
+    let canonical_root = source_root.canonicalize().map_err(|e| e.to_string())?;
+    let children = clone_collect_eligible_file_children(&source_root, &canonical_root, "")?;
 
     Ok(CloneFileTreeNode {
         name: source_session_id.to_string(),
@@ -330,6 +311,92 @@ fn clone_collect_eligible_file_tree(
         kind: CloneFileTreeNodeKind::Directory,
         children,
     })
+}
+
+fn clone_collect_eligible_file_children(
+    directory: &std::path::Path,
+    canonical_root: &std::path::Path,
+    rel_dir: &str,
+) -> Result<Vec<CloneFileTreeNode>, String> {
+    let mut children = Vec::new();
+
+    for entry in std::fs::read_dir(directory).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel_path = if rel_dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_dir}/{name}")
+        };
+        if clone_path_is_generated_or_runtime(&rel_path) {
+            continue;
+        }
+
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if clone_path_is_link_or_reparse(&metadata) || std::fs::read_link(&path).is_ok() {
+            continue;
+        }
+        let canonical_path = match path.canonicalize() {
+            Ok(canonical_path) => canonical_path,
+            Err(_) => continue,
+        };
+        if !canonical_path.starts_with(canonical_root) {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            let nested = clone_collect_eligible_file_children(&path, canonical_root, &rel_path)?;
+            if !nested.is_empty() {
+                children.push(CloneFileTreeNode {
+                    name,
+                    path: rel_path,
+                    kind: CloneFileTreeNodeKind::Directory,
+                    children: nested,
+                });
+            }
+        } else if metadata.is_file() {
+            children.push(CloneFileTreeNode {
+                name,
+                path: rel_path,
+                kind: CloneFileTreeNodeKind::File,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    children.sort_by(|a, b| {
+        let kind_order = |kind: CloneFileTreeNodeKind| match kind {
+            CloneFileTreeNodeKind::Directory => 0,
+            CloneFileTreeNodeKind::File => 1,
+        };
+        kind_order(a.kind)
+            .cmp(&kind_order(b.kind))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(children)
+}
+
+fn clone_path_is_generated_or_runtime(rel_path: &str) -> bool {
+    let normalized = rel_path.replace('\\', "/");
+    let first = normalized.split('/').next().unwrap_or_default();
+    matches!(first, "habitat" | ".codex" | ".claude" | ".gemini" | ".opencode")
+        || normalized == ".agents/skills"
+        || normalized.starts_with(".agents/skills/")
+}
+
+#[cfg(windows)]
+fn clone_path_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn clone_path_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn flatten_clone_file_paths(root: &CloneFileTreeNode) -> Vec<String> {
@@ -1581,15 +1648,15 @@ pub async fn reorder_agents(
 mod tests {
     use super::{
         agent_status_update_payload, build_agent_clone_preview, capture_opencode_pause_resume_session,
-        capture_resume_runtime_snapshot, clone_copy_agent_profile_files,
-        clone_ensure_profile_destination_available, clone_sanitize_config, clone_unique_name,
-        codex_provider_session_is_new, generated_agent_name, insert_new_agent_order,
+        capture_resume_runtime_snapshot, clone_collect_eligible_file_tree,
+        clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
+        clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
+        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         mark_agent_paused_off, normalize_spawn_folder, persisted_resume_session_for_provider,
         prepare_clear_config, prepare_resume_config, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         reserve_spawn_session_name, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        AgentOrderPlacement,
+        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender, AgentOrderPlacement,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -1728,6 +1795,65 @@ mod tests {
         };
         assert_eq!(preview.skills, vec![expected.clone()]);
         assert_eq!(preview.default_selected_skills, vec![expected]);
+    }
+
+    #[test]
+    fn clone_preview_excludes_runtime_generated_and_skill_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source_root = home.join("agents").join("source-agent");
+        std::fs::create_dir_all(source_root.join("nested")).expect("nested");
+        std::fs::create_dir_all(source_root.join("habitat")).expect("habitat");
+        std::fs::create_dir_all(source_root.join(".agents").join("skills").join("planner"))
+            .expect("skills");
+        std::fs::create_dir_all(source_root.join(".codex")).expect("codex");
+        std::fs::write(source_root.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(source_root.join("nested").join("keep.md"), "keep").expect("keep");
+        std::fs::write(source_root.join("habitat").join("AGENTS.md"), "generated")
+            .expect("generated");
+        std::fs::write(
+            source_root
+                .join(".agents")
+                .join("skills")
+                .join("planner")
+                .join("SKILL.md"),
+            "skill",
+        )
+        .expect("skill");
+        std::fs::write(source_root.join(".codex").join("history.jsonl"), "{}").expect("history");
+
+        let files = clone_collect_eligible_file_tree(home, "source-agent").expect("files");
+        let paths = flatten_clone_file_paths(&files);
+
+        assert!(paths.contains(&"AGENTS.md".to_string()));
+        assert!(paths.contains(&"nested/keep.md".to_string()));
+        assert!(!paths.iter().any(|path| path.starts_with("habitat/")));
+        assert!(!paths
+            .iter()
+            .any(|path| path.starts_with(".agents/skills/")));
+        assert!(!paths.iter().any(|path| path.starts_with(".codex/")));
+    }
+
+    #[test]
+    fn clone_preview_omits_directory_links() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source_root = home.join("agents").join("source-agent");
+        let external = home.join("external");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        std::fs::create_dir_all(&external).expect("external");
+        std::fs::write(source_root.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(external.join("secret.md"), "secret").expect("secret");
+
+        let linked = source_root.join("linked");
+        if create_directory_link(&external, &linked).is_err() {
+            return;
+        }
+
+        let files = clone_collect_eligible_file_tree(home, "source-agent").expect("files");
+        let paths = flatten_clone_file_paths(&files);
+
+        assert!(!paths.iter().any(|path| path.starts_with("linked/")));
     }
 
     #[test]
