@@ -37,6 +37,10 @@ The **Agent Watchlist** is your persistent high-fidelity roster for monitoring a
 - **Thought Stream**: A real-time glimpse into the agent's internal monologue and current task progress.
 - **Watchlists**: Organize agents into logical groups (e.g., "Dev Team", "Security Audit") for easier oversight.
 
+### Agent Cloning
+
+Use the single-agent roster context menu to create Fresh, Profile, or Custom clones. Clicking **Clone** directly starts a Fresh Clone immediately. The **Fresh Clone** submenu option keeps visible setup and starts a clean provider session. **Profile Clone** also keeps agent-local profile files and instance skills. **Custom Clone** opens a modal where you can change the clone name, provider engine, agent class, workspace path, and choose which eligible agent-local files and instance skills to keep.
+
 ## 🖱️ Interaction Patterns
 
 ### "Physical-First" Navigation
