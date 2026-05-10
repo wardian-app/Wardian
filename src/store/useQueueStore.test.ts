@@ -359,4 +359,20 @@ describe("useQueueStore - item management", () => {
     expect(useQueueStore.getState().items).toHaveLength(0);
     expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.anything());
   });
+
+  it("clearRead removes only read items and persists", () => {
+    useQueueStore.getState().markAllRead();
+    useQueueStore.getState().addWorkflowCompletion(
+      { workflow_id: "wf-unread", run_instance_id: "run-unread", status: "completed" },
+      "Unread",
+    );
+
+    useQueueStore.getState().clearRead();
+
+    const { items } = useQueueStore.getState();
+    expect(items).toHaveLength(1);
+    expect(items[0].workflow_name).toBe("Unread");
+    expect(items[0].read).toBe(false);
+    expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.anything());
+  });
 });

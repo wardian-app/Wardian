@@ -27,6 +27,7 @@ interface QueueState {
   dismissItem: (id: string) => void;
   markRead: (id: string) => void;
   markAllRead: () => void;
+  clearRead: () => void;
 }
 
 function persist(items: QueueItem[]) {
@@ -192,6 +193,14 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   markAllRead() {
     set((s) => {
       const next = s.items.map((i) => ({ ...i, read: true }));
+      persist(next);
+      return { items: next };
+    });
+  },
+
+  clearRead() {
+    set((s) => {
+      const next = s.items.filter((i) => !i.read);
       persist(next);
       return { items: next };
     });

@@ -83,7 +83,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   const handleBroadcastSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedAgentIds.size === 0) {
-      if (!await confirm("No agents selected. This will broadcast to all agents. Are you sure?")) {
+      if (!await confirm("No agents selected. This will broadcast to ALL agents. Are you sure?")) {
         return;
       }
     }

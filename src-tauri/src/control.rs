@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::utils::terminal_input::submit_prompt_via_sender;
 use std::fmt;
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -192,7 +193,8 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             thread,
         } => {
             let state = app.state::<AppState>();
-            deliver_message_to_target(&state, &target, &message, thread.as_deref()).await?;
+            deliver_message_to_target(Some(app), &state, &target, &message, thread.as_deref())
+                .await?;
             ok_json(&OkResponse::new())
         }
     }
@@ -318,34 +320,69 @@ async fn resolve_send_targets_in_state(state: &AppState, target: &str) -> Vec<St
 }
 
 async fn deliver_message_to_target(
+    app: Option<&AppHandle>,
     state: &AppState,
     target: &str,
     message: &str,
     thread: Option<&str>,
 ) -> Result<(), ControlError> {
-    let bytes = send_message_bytes(message, thread)?;
+    validate_send_thread(thread)?;
     let session_ids = resolve_send_targets_in_state(state, target).await;
     if session_ids.is_empty() {
         return Err(ControlError::not_found(format!(
             "no agents matched target: {target}"
         )));
     }
-    let senders = state
-        .input_senders
-        .read()
-        .map_err(|_| ControlError::request_failed("input_senders lock poisoned"))?;
-    let mut delivered = 0usize;
-    let mut failures = Vec::new();
-    for session_id in &session_ids {
-        match senders.get(session_id) {
-            Some(tx) => match tx.try_send(bytes.clone()) {
-                Ok(()) => delivered += 1,
-                Err(error) => failures.push(format!("{session_id}: {error}")),
-            },
-            None => failures.push(format!("{session_id}: no input channel")),
+    let (delivery_targets, mut failures) = {
+        let agents = state.agents.lock().await;
+        let senders = state
+            .input_senders
+            .read()
+            .map_err(|_| ControlError::request_failed("input_senders lock poisoned"))?;
+        let mut delivery_targets = Vec::new();
+        let mut failures = Vec::new();
+        for session_id in &session_ids {
+            let provider = agents
+                .get(session_id)
+                .and_then(|agent| agent.config.lock().ok().map(|config| config.provider.clone()))
+                .unwrap_or_default();
+            match senders.get(session_id).cloned() {
+                Some(tx) => delivery_targets.push((session_id.clone(), provider, tx)),
+                None => failures.push(format!("{session_id}: no input channel")),
+            }
+        }
+        (delivery_targets, failures)
+    };
+
+    let mut delivered_session_ids = Vec::new();
+    for (session_id, provider, tx) in delivery_targets {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            submit_prompt_via_sender(&tx, message, &provider),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(())) => delivered_session_ids.push(session_id),
+            Ok(Err(error)) => failures.push(format!("{session_id}: {error}")),
+            Err(_) => failures.push(format!("{session_id}: input delivery timed out")),
         }
     }
-    if delivered == 0 {
+
+    if !delivered_session_ids.is_empty() {
+        let agents = state.agents.lock().await;
+        for session_id in &delivered_session_ids {
+            if let Some(agent) = agents.get(session_id) {
+                if crate::manager::mark_agent_prompt_started(agent) {
+                    if let Some(app) = app {
+                        crate::manager::emit_agent_status(app, session_id, "Processing...");
+                    }
+                }
+            }
+        }
+    }
+
+    if delivered_session_ids.is_empty() {
         return Err(ControlError::request_failed(format!(
             "message was not delivered to any matched agents: {}",
             failures.join("; ")
@@ -405,13 +442,13 @@ fn error_payload(error: &ControlError) -> Result<String, std::io::Error> {
     .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-fn send_message_bytes(message: &str, thread: Option<&str>) -> Result<Vec<u8>, ControlError> {
+fn validate_send_thread(thread: Option<&str>) -> Result<(), ControlError> {
     if thread.is_some() {
         return Err(ControlError::not_supported(
             "--thread is not supported by the Wardian control endpoint yet",
         ));
     }
-    Ok(format!("{message}\r").into_bytes())
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,12 +571,21 @@ mod tests {
     use wardian_core::models::{AgentConfig, WorkflowDefinition, WorkflowNode, WorkflowSettings};
 
     fn test_agent(session_id: &str, session_name: &str, agent_class: &str) -> ActiveAgent {
+        test_agent_with_provider(session_id, session_name, agent_class, "mock")
+    }
+
+    fn test_agent_with_provider(
+        session_id: &str,
+        session_name: &str,
+        agent_class: &str,
+        provider: &str,
+    ) -> ActiveAgent {
         ActiveAgent {
             config: Arc::new(Mutex::new(AgentConfig {
                 session_id: session_id.to_string(),
                 session_name: session_name.to_string(),
                 agent_class: agent_class.to_string(),
-                provider: "mock".to_string(),
+                provider: provider.to_string(),
                 folder: "D:/work".to_string(),
                 ..Default::default()
             })),
@@ -573,6 +619,19 @@ mod tests {
         );
     }
 
+    async fn insert_test_agent_with_provider(
+        state: &AppState,
+        session_id: &str,
+        session_name: &str,
+        agent_class: &str,
+        provider: &str,
+    ) {
+        state.agents.lock().await.insert(
+            session_id.to_string(),
+            test_agent_with_provider(session_id, session_name, agent_class, provider),
+        );
+    }
+
     fn sample_workflow(id: &str, name: &str, nodes: Vec<WorkflowNode>) -> WorkflowDefinition {
         WorkflowDefinition {
             id: id.to_string(),
@@ -598,15 +657,15 @@ mod tests {
 
     #[test]
     fn send_message_rejects_thread_until_supported() {
-        let error = send_message_bytes("hello", Some("review")).unwrap_err();
+        let error = validate_send_thread(Some("review")).unwrap_err();
 
         assert_eq!(error.code(), "not_supported");
         assert!(error.to_string().contains("--thread is not supported"));
     }
 
     #[test]
-    fn send_message_submits_with_terminal_enter() {
-        assert_eq!(send_message_bytes("hello", None).unwrap(), b"hello\r");
+    fn send_message_accepts_unthreaded_delivery() {
+        validate_send_thread(None).unwrap();
     }
 
     #[test]
@@ -728,25 +787,66 @@ mod tests {
     async fn message_delivery_writes_terminal_bytes_to_matched_agent() {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").expect("agent");
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            *agent.query_count.lock().unwrap() = 0;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         state
             .input_senders
             .write()
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(&state, "CoderOne", "hello", None)
+        deliver_message_to_target(None, &state, "CoderOne", "hello", None)
             .await
             .unwrap();
 
-        assert_eq!(rx.try_recv().unwrap(), b"hello\r");
+        assert_eq!(rx.try_recv().unwrap(), b"hello");
+        assert_eq!(rx.try_recv().unwrap(), b"\r");
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").expect("agent");
+            assert_eq!(
+                agent.current_status.lock().unwrap().as_str(),
+                "Processing..."
+            );
+            assert_eq!(*agent.query_count.lock().unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn message_delivery_uses_provider_specific_submit_sequence_for_codex() {
+        let state = AppState::new();
+        insert_test_agent_with_provider(&state, "agent-1", "CoderOne", "Coder", "codex").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").expect("agent");
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            *agent.query_count.lock().unwrap() = 0;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        deliver_message_to_target(None, &state, "CoderOne", "hello", None)
+            .await
+            .unwrap();
+
+        assert_eq!(rx.try_recv().unwrap(), b"hello");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b\r");
     }
 
     #[tokio::test]
     async fn message_delivery_reports_missing_target_as_not_found() {
         let state = AppState::new();
 
-        let error = deliver_message_to_target(&state, "ghost", "hello", None)
+        let error = deliver_message_to_target(None, &state, "ghost", "hello", None)
             .await
             .unwrap_err();
 
@@ -761,7 +861,7 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
 
-        let error = deliver_message_to_target(&state, "agent-1", "hello", None)
+        let error = deliver_message_to_target(None, &state, "agent-1", "hello", None)
             .await
             .unwrap_err();
 
@@ -774,18 +874,19 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         insert_test_agent(&state, "agent-2", "CoderTwo", "Coder").await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         state
             .input_senders
             .write()
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        let error = deliver_message_to_target(&state, "class:Coder", "hello", None)
+        let error = deliver_message_to_target(None, &state, "class:Coder", "hello", None)
             .await
             .unwrap_err();
 
-        assert_eq!(rx.try_recv().unwrap(), b"hello\r");
+        assert_eq!(rx.try_recv().unwrap(), b"hello");
+        assert_eq!(rx.try_recv().unwrap(), b"\r");
         assert_eq!(error.code(), "request_failed");
         assert!(error
             .to_string()

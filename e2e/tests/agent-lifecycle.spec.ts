@@ -12,29 +12,38 @@
  * See e2e/fixtures/mockAgent.ts for the unlock path.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 test.describe("Agent Spawn Form", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.locator('[data-testid="spawn-agent-name"]').waitFor();
   });
 
-  test("spawn form renders all required fields", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test("spawn form renders all required fields", async () => {
     await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-workspace-path"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-provider"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-submit"]')).toBeVisible();
   });
 
-  test("submit button is present when name is filled", async ({ page }) => {
+  test("submit button is present when name is filled", async () => {
     await page.locator('[data-testid="spawn-agent-name"]').fill("test-agent");
     await expect(page.locator('[data-testid="spawn-submit"]')).toBeVisible();
   });
 
-  test("provider dropdown has expected options", async ({ page }) => {
+  test("provider dropdown has expected options", async () => {
     const select = page.locator('[data-testid="spawn-provider"]');
     await expect(select).toBeVisible();
     const options = await select.locator("option").allTextContents();
@@ -42,19 +51,19 @@ test.describe("Agent Spawn Form", () => {
     expect(options.length).toBeGreaterThanOrEqual(3);
   });
 
-  test("workspace path field accepts input", async ({ page }) => {
+  test("workspace path field accepts input", async () => {
     const input = page.locator('[data-testid="spawn-workspace-path"]');
     await input.fill("C:/projects/test");
     await expect(input).toHaveValue("C:/projects/test");
   });
 
-  test("grid is empty before any agent is spawned", async ({ page }) => {
+  test("grid is empty before any agent is spawned", async () => {
     await page.getByRole("button", { name: "Grid" }).click();
     const cards = page.locator('[data-testid="agent-card"]');
     await expect(cards).toHaveCount(0);
   });
 
-  test("watchlist is empty before any agent is spawned", async ({ page }) => {
+  test("watchlist is empty before any agent is spawned", async () => {
     const watchlist = page.locator('[data-testid="agent-watchlist"]');
     await expect(watchlist).toBeVisible();
     // No agent rows expected in empty state.
