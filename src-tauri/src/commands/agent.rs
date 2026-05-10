@@ -82,6 +82,12 @@ pub struct CloneProfileSelection {
     pub skills: Vec<DeployedSkillRef>,
 }
 
+enum CloneProfileCopyPlan<'a> {
+    None,
+    Profile,
+    Custom(&'a CloneProfileSelection),
+}
+
 fn clone_unique_name(
     source_name: &str,
     existing_names: &std::collections::HashSet<String>,
@@ -605,6 +611,40 @@ fn clone_copy_selected_agent_skills(
     Ok(())
 }
 
+fn clone_copy_profile_plan(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+    destination_session_id: &str,
+    plan: CloneProfileCopyPlan<'_>,
+) -> Result<(), String> {
+    match plan {
+        CloneProfileCopyPlan::None => Ok(()),
+        CloneProfileCopyPlan::Profile => {
+            clone_copy_agent_profile_files(wardian_home, source_session_id, destination_session_id)
+        }
+        CloneProfileCopyPlan::Custom(selection) => {
+            clone_copy_selected_agent_profile_files(
+                wardian_home,
+                source_session_id,
+                destination_session_id,
+                &selection.files,
+            )?;
+            clone_copy_selected_agent_skills(
+                wardian_home,
+                source_session_id,
+                destination_session_id,
+                &selection.skills,
+            )
+        }
+    }
+}
+
+fn clone_cleanup_created_profile_dirs(created_profile_dirs: &[std::path::PathBuf]) {
+    for profile_dir in created_profile_dirs.iter().rev() {
+        clone_remove_existing_path(profile_dir);
+    }
+}
+
 fn clone_ensure_profile_destination_available(
     wardian_home: &std::path::Path,
     destination_session_id: &str,
@@ -907,6 +947,13 @@ fn normalize_spawn_folder(folder: &str) -> Result<String, String> {
 
     crate::utils::fs::validate_workspace_path(std::path::Path::new(folder))
         .map(|path| normalize_workspace_record_path(&path))
+}
+
+fn normalize_clone_folder_override(folder: Option<String>) -> Result<Option<String>, String> {
+    folder
+        .as_deref()
+        .map(normalize_spawn_folder)
+        .transpose()
 }
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
@@ -1248,17 +1295,26 @@ pub async fn clone_agent(
         source_session_id, req.mode
     ));
 
+    let folder_override = normalize_clone_folder_override(req.folder)?;
+    let profile_selection = req.profile_selection;
+    let profile_copy_plan = match profile_selection.as_ref() {
+        Some(selection) => CloneProfileCopyPlan::Custom(selection),
+        None if req.mode == CloneAgentMode::Profile => CloneProfileCopyPlan::Profile,
+        None => CloneProfileCopyPlan::None,
+    };
+    let should_copy_profile = !matches!(profile_copy_plan, CloneProfileCopyPlan::None);
+
     let mut config = clone_sanitize_config(
         &source_config,
         session_name,
         req.provider,
-        req.folder,
+        folder_override,
         req.agent_class,
         req.start.unwrap_or(true),
     );
     let provider_name = config.provider.clone();
     let mut actual_resume = None;
-    let profile_home = if req.mode == CloneAgentMode::Profile {
+    let profile_home = if should_copy_profile {
         Some(
             crate::utils::fs::get_wardian_home()
                 .ok_or_else(|| "Could not find Wardian home".to_string())?,
@@ -1269,13 +1325,26 @@ pub async fn clone_agent(
     let provisional_profile_session_id = (profile_home.is_some()
         && !provider_uses_generated_session_id(&provider_name))
     .then(|| uuid::Uuid::new_v4().to_string());
+    let mut created_profile_dirs = Vec::new();
 
     let session_id = if provider_uses_generated_session_id(&provider_name) {
         let generated_session_id = uuid::Uuid::new_v4().to_string();
         config.session_id = generated_session_id.clone();
         if let Some(home) = profile_home.as_ref() {
             clone_ensure_profile_destination_available(home, &generated_session_id, None)?;
-            clone_copy_agent_profile_files(home, &source_session_id, &generated_session_id)?;
+            created_profile_dirs.push(home.join("agents").join(&generated_session_id));
+            if let Err(error) = clone_copy_profile_plan(
+                home,
+                &source_session_id,
+                &generated_session_id,
+                match profile_selection.as_ref() {
+                    Some(selection) => CloneProfileCopyPlan::Custom(selection),
+                    None => CloneProfileCopyPlan::Profile,
+                },
+            ) {
+                clone_cleanup_created_profile_dirs(&created_profile_dirs);
+                return Err(error);
+            }
         }
         generated_session_id
     } else {
@@ -1285,7 +1354,19 @@ pub async fn clone_agent(
         ) {
             config.session_id = provisional_session_id.clone();
             clone_ensure_profile_destination_available(home, provisional_session_id, None)?;
-            clone_copy_agent_profile_files(home, &source_session_id, provisional_session_id)?;
+            created_profile_dirs.push(home.join("agents").join(provisional_session_id));
+            if let Err(error) = clone_copy_profile_plan(
+                home,
+                &source_session_id,
+                provisional_session_id,
+                match profile_selection.as_ref() {
+                    Some(selection) => CloneProfileCopyPlan::Custom(selection),
+                    None => CloneProfileCopyPlan::Profile,
+                },
+            ) {
+                clone_cleanup_created_profile_dirs(&created_profile_dirs);
+                return Err(error);
+            }
             config.system_include_directories =
                 Some(crate::utils::fs::resolve_system_include_directories(
                     &config.agent_class,
@@ -1295,7 +1376,10 @@ pub async fn clone_agent(
         let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
         let real_sid = manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
             .await
-            .map_err(|e| format!("Failed to initialize the provider session: {}", e))?;
+            .map_err(|e| {
+                clone_cleanup_created_profile_dirs(&created_profile_dirs);
+                format!("Failed to initialize the provider session: {}", e)
+            })?;
         manager::log_debug(&format!(
             "[WARDIAN] Intercepted stream-json clone session ID for {}: {}",
             provider_name, real_sid
@@ -1308,12 +1392,7 @@ pub async fn clone_agent(
     config.resume_session = actual_resume.clone();
 
     if !is_session_id_available(&state, &session_id).await {
-        if let Some(home) = profile_home.as_ref() {
-            if let Some(provisional_session_id) = provisional_profile_session_id.as_deref() {
-                let provisional_root = home.join("agents").join(provisional_session_id);
-                clone_remove_existing_path(&provisional_root);
-            }
-        }
+        clone_cleanup_created_profile_dirs(&created_profile_dirs);
         return Err(format!(
             "An agent with session ID '{}' already exists.",
             session_id
@@ -1331,18 +1410,38 @@ pub async fn clone_agent(
             home,
             &session_id,
             allowed_existing_profile_session_id,
-        )?;
-        clone_copy_agent_profile_files(home, &source_session_id, &session_id)?;
+        )
+        .inspect_err(|_| clone_cleanup_created_profile_dirs(&created_profile_dirs))?;
+        let final_profile_dir = home.join("agents").join(&session_id);
+        if !created_profile_dirs
+            .iter()
+            .any(|existing| existing == &final_profile_dir)
+        {
+            created_profile_dirs.push(final_profile_dir);
+        }
+        if let Err(error) = clone_copy_profile_plan(
+            home,
+            &source_session_id,
+            &session_id,
+            match profile_selection.as_ref() {
+                Some(selection) => CloneProfileCopyPlan::Custom(selection),
+                None => CloneProfileCopyPlan::Profile,
+            },
+        ) {
+            clone_cleanup_created_profile_dirs(&created_profile_dirs);
+            return Err(error);
+        }
         if let Some(provisional_session_id) = provisional_profile_session_id
             .as_deref()
             .filter(|id| *id != session_id)
         {
             let provisional_root = home.join("agents").join(provisional_session_id);
             clone_remove_existing_path(&provisional_root);
+            created_profile_dirs.retain(|dir| dir != &provisional_root);
         }
     }
 
-    register_new_agent(
+    let registered = register_new_agent(
         config,
         actual_resume,
         &state,
@@ -1351,7 +1450,11 @@ pub async fn clone_agent(
         None,
         AgentOrderPlacement::After(&source_session_id),
     )
-    .await
+    .await;
+    if registered.is_err() {
+        clone_cleanup_created_profile_dirs(&created_profile_dirs);
+    }
+    registered
 }
 
 #[tauri::command]
@@ -1813,16 +1916,17 @@ mod tests {
         agent_status_update_payload, build_agent_clone_preview, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_collect_eligible_file_tree,
         clone_copy_agent_profile_files, clone_copy_selected_agent_profile_files,
-        clone_copy_selected_agent_skills, clone_ensure_profile_destination_available,
-        clone_match_selected_agent_skills, clone_sanitize_config, clone_unique_name,
-        clone_validate_selected_agent_skills, clone_validate_selected_profile_files,
-        codex_provider_session_is_new, flatten_clone_file_paths, generated_agent_name,
-        insert_new_agent_order, mark_agent_paused_off, normalize_spawn_folder,
+        clone_copy_profile_plan, clone_copy_selected_agent_skills,
+        clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
+        clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
+        clone_validate_selected_profile_files, codex_provider_session_is_new,
+        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
+        mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
         persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
         promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, AgentOrderPlacement,
+        sync_resumed_input_sender, AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -2280,6 +2384,57 @@ mod tests {
     }
 
     #[test]
+    fn clone_profile_copy_plan_custom_copies_selected_files_and_skills() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+        let source = temp.path().join("agents").join("source-agent");
+        std::fs::create_dir_all(source.join("nested")).expect("nested");
+        std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(source.join("notes.md"), "notes").expect("notes");
+        std::fs::write(source.join("nested").join("keep.md"), "keep").expect("keep");
+        let legacy = source.join(".agents/skills/legacy");
+        std::fs::create_dir_all(&legacy).expect("legacy");
+        std::fs::write(legacy.join("SKILL.md"), "legacy").expect("legacy skill");
+
+        let selection = CloneProfileSelection {
+            files: vec!["nested/keep.md".to_string()],
+            skills: vec![DeployedSkillRef {
+                name: "legacy".to_string(),
+                source_path: None,
+            }],
+        };
+
+        clone_copy_profile_plan(
+            temp.path(),
+            "source-agent",
+            "dest-agent",
+            CloneProfileCopyPlan::Custom(&selection),
+        )
+        .expect("copy custom profile");
+
+        let dest = temp.path().join("agents").join("dest-agent");
+        assert!(dest.join("nested/keep.md").is_file());
+        assert!(!dest.join("AGENTS.md").exists());
+        assert!(dest.join(".agents/skills/legacy/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn clone_folder_override_uses_spawn_workspace_validation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let valid = normalize_clone_folder_override(Some(temp.path().to_string_lossy().to_string()))
+            .expect("valid folder")
+            .expect("folder override");
+        assert_eq!(valid, normalize_spawn_folder(&temp.path().to_string_lossy()).unwrap());
+
+        let missing = temp.path().join("missing");
+        let err = normalize_clone_folder_override(Some(missing.to_string_lossy().to_string()))
+            .expect_err("missing workspace should fail");
+        assert!(err.contains("Path does not exist or is invalid"));
+    }
+
+    #[test]
     fn fresh_spawn_order_inserts_new_agent_at_top() {
         let mut order = vec!["alpha".to_string(), "beta".to_string()];
 
@@ -2434,6 +2589,7 @@ mod tests {
             git_worktree: Some(true),
             fresh_provider_session_id: Some("fresh-provider-session".to_string()),
             codex_cleared_provider_sessions: vec!["old-provider-session".to_string()],
+            opencode_port: Some(41313),
             is_off: true,
             custom_args: Some("--verbose".to_string()),
             ..Default::default()
@@ -2453,6 +2609,7 @@ mod tests {
         assert_eq!(clone.resume_session, None);
         assert_eq!(clone.fresh_provider_session_id, None);
         assert!(clone.codex_cleared_provider_sessions.is_empty());
+        assert_eq!(clone.opencode_port, None);
         assert!(!clone.is_off);
     }
 
