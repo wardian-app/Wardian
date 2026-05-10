@@ -370,7 +370,10 @@ pub async fn open_library_folder(
     Ok(())
 }
 
-fn get_target_skills_dir(target_type: &str, target_id: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn get_target_skills_dir(
+    target_type: &str,
+    target_id: &str,
+) -> Result<std::path::PathBuf, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let base = match target_type {
         "agent" => home.join("agents").join(target_id),
@@ -463,7 +466,7 @@ where
     }
 }
 
-fn deploy_skill_from_library(
+pub(crate) fn deploy_skill_from_library(
     source_path: &str,
     target_type: &str,
     target_id: &str,
@@ -602,7 +605,7 @@ fn source_path_for_deployed_skill(
     None
 }
 
-fn list_deployed_skill_refs_for_target(
+pub(crate) fn list_deployed_skill_refs_for_target(
     target_type: &str,
     target_id: &str,
 ) -> Result<Vec<DeployedSkillRef>, String> {

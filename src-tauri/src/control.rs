@@ -251,6 +251,7 @@ fn build_clone_agent_request(
         folder: None,
         agent_class: None,
         start: Some(true),
+        profile_selection: None,
     }
 }
 
@@ -1138,6 +1139,7 @@ mod tests {
         assert_eq!(req.folder, None);
         assert_eq!(req.agent_class, None);
         assert_eq!(req.start, Some(true));
+        assert!(req.profile_selection.is_none());
     }
 
     #[test]

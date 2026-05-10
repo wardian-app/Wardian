@@ -3,6 +3,7 @@ use crate::state::AppState;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
+    DeployedSkillRef,
 };
 
 #[derive(serde::Deserialize)]
@@ -33,6 +34,52 @@ pub struct CloneAgentRequest {
     pub folder: Option<String>,
     pub agent_class: Option<String>,
     pub start: Option<bool>,
+    pub profile_selection: Option<CloneProfileSelection>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CloneFileTreeNode {
+    pub name: String,
+    pub path: String,
+    pub kind: CloneFileTreeNodeKind,
+    pub children: Vec<CloneFileTreeNode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneFileTreeNodeKind {
+    File,
+    Directory,
+}
+
+impl CloneFileTreeNode {
+    #[cfg(test)]
+    fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentClonePreview {
+    pub source_session_id: String,
+    pub source_session_name: String,
+    pub suggested_session_name: String,
+    pub provider: String,
+    pub agent_class: String,
+    pub folder: String,
+    pub files: CloneFileTreeNode,
+    pub default_selected_files: Vec<String>,
+    pub skills: Vec<DeployedSkillRef>,
+    pub default_selected_skills: Vec<DeployedSkillRef>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CloneProfileSelection {
+    pub files: Vec<String>,
+    pub skills: Vec<DeployedSkillRef>,
 }
 
 fn clone_unique_name(
@@ -248,6 +295,84 @@ fn clone_copy_agent_profile_files(
         &source_root.join(".agents").join("skills"),
         &destination_root.join(".agents").join("skills"),
     )
+}
+
+fn clone_collect_eligible_file_tree(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+) -> Result<CloneFileTreeNode, String> {
+    let source_root = wardian_home.join("agents").join(source_session_id);
+    let mut children = Vec::new();
+
+    for entry in std::fs::read_dir(&source_root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".agents" {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.is_file() {
+            children.push(CloneFileTreeNode {
+                name: name.clone(),
+                path: name,
+                kind: CloneFileTreeNodeKind::File,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    children.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(CloneFileTreeNode {
+        name: source_session_id.to_string(),
+        path: String::new(),
+        kind: CloneFileTreeNodeKind::Directory,
+        children,
+    })
+}
+
+fn flatten_clone_file_paths(root: &CloneFileTreeNode) -> Vec<String> {
+    fn walk(node: &CloneFileTreeNode, output: &mut Vec<String>) {
+        if node.kind == CloneFileTreeNodeKind::File {
+            output.push(node.path.clone());
+        }
+        for child in &node.children {
+            walk(child, output);
+        }
+    }
+
+    let mut paths = Vec::new();
+    walk(root, &mut paths);
+    paths
+}
+
+fn build_agent_clone_preview(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+    source_config: &AgentConfig,
+    existing_names: &std::collections::HashSet<String>,
+) -> Result<AgentClonePreview, String> {
+    let files = clone_collect_eligible_file_tree(wardian_home, source_session_id)?;
+    let default_selected_files = flatten_clone_file_paths(&files)
+        .into_iter()
+        .filter(|path| path == "AGENTS.md")
+        .collect::<Vec<_>>();
+    let skills =
+        crate::commands::library::list_deployed_skill_refs_for_target("agent", source_session_id)?;
+
+    Ok(AgentClonePreview {
+        source_session_id: source_session_id.to_string(),
+        source_session_name: source_config.session_name.clone(),
+        suggested_session_name: clone_unique_name(&source_config.session_name, existing_names),
+        provider: source_config.provider.clone(),
+        agent_class: source_config.agent_class.clone(),
+        folder: source_config.folder.clone(),
+        files,
+        default_selected_files,
+        default_selected_skills: skills.clone(),
+        skills,
+    })
 }
 
 fn clone_ensure_profile_destination_available(
@@ -1455,7 +1580,7 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, capture_opencode_pause_resume_session,
+        agent_status_update_payload, build_agent_clone_preview, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_copy_agent_profile_files,
         clone_ensure_profile_destination_available, clone_sanitize_config, clone_unique_name,
         codex_provider_session_is_new, generated_agent_name, insert_new_agent_order,
@@ -1470,7 +1595,15 @@ mod tests {
     use crate::utils::fs::create_directory_link;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
-    use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
+    use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, DeployedSkillRef};
+
+    struct WardianHomeGuard;
+
+    impl Drop for WardianHomeGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("WARDIAN_HOME") };
+        }
+    }
 
     fn make_test_agent() -> ActiveAgent {
         ActiveAgent {
@@ -1513,6 +1646,88 @@ mod tests {
 
     fn clone_name_set(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn clone_preview_defaults_to_profile_selection() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source_root = home.join("agents").join("source-agent");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        std::fs::write(source_root.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(source_root.join("notes.md"), "notes").expect("notes");
+
+        let existing_names = HashSet::new();
+        let preview = build_agent_clone_preview(
+            home,
+            "source-agent",
+            &AgentConfig {
+                session_id: "source-agent".to_string(),
+                session_name: "Alpha".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: "D:/Development/Wardian".to_string(),
+                provider: "codex".to_string(),
+                ..Default::default()
+            },
+            &existing_names,
+        )
+        .expect("preview");
+
+        assert_eq!(preview.suggested_session_name, "Alpha-copy");
+        assert_eq!(preview.default_selected_files, vec!["AGENTS.md".to_string()]);
+        assert!(preview
+            .files
+            .children
+            .iter()
+            .any(|node| node.path() == "notes.md"));
+    }
+
+    #[test]
+    fn clone_preview_includes_agent_specific_skills_as_default_selected() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+
+        let source_root = temp.path().join("agents").join("source-agent");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        std::fs::write(source_root.join("AGENTS.md"), "# Agent\n").expect("agents");
+        let library_skill = temp
+            .path()
+            .join("library")
+            .join("skills")
+            .join("group-a")
+            .join("planner");
+        std::fs::create_dir_all(&library_skill).expect("library skill");
+        std::fs::write(library_skill.join("SKILL.md"), "planner").expect("skill");
+        crate::commands::library::deploy_skill_from_library(
+            "group-a/planner",
+            "agent",
+            "source-agent",
+        )
+        .expect("deploy");
+
+        let preview = build_agent_clone_preview(
+            temp.path(),
+            "source-agent",
+            &AgentConfig {
+                session_id: "source-agent".to_string(),
+                session_name: "Alpha".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: "D:/Development/Wardian".to_string(),
+                provider: "codex".to_string(),
+                ..Default::default()
+            },
+            &HashSet::new(),
+        )
+        .expect("preview");
+
+        let expected = DeployedSkillRef {
+            name: "planner".to_string(),
+            source_path: Some("group-a/planner".to_string()),
+        };
+        assert_eq!(preview.skills, vec![expected.clone()]);
+        assert_eq!(preview.default_selected_skills, vec![expected]);
     }
 
     #[test]
