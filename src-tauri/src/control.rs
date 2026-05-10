@@ -1267,10 +1267,14 @@ mod tests {
             .to_string()
             .contains("message delivery failed for 1 of 2 matched agents"));
         assert!(error.to_string().contains("agent-2: no input channel"));
-        assert_eq!(
-            error.details().unwrap()["delivery"][1]["delivery_state"],
-            "failed"
-        );
+        let details = error.details().unwrap()["delivery"]
+            .as_array()
+            .expect("delivery details");
+        let failed = details
+            .iter()
+            .find(|detail| detail["uuid"] == "agent-2")
+            .expect("failed agent detail");
+        assert_eq!(failed["delivery_state"], "failed");
     }
 
     #[tokio::test]

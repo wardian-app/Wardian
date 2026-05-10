@@ -6,7 +6,9 @@ mod output;
 
 use std::{io::Read as _, time::Duration};
 
-use args::{AgentArgs, AgentCommand, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand};
+use args::{
+    AgentArgs, AgentCommand, AskArgs, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand,
+};
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
@@ -25,6 +27,7 @@ fn run() -> i32 {
         Command::Agent(args) => handle_agent(args),
         Command::Workflow(args) => handle_workflow(args),
         Command::Send(args) => handle_send(args),
+        Command::Ask(args) => handle_ask(args),
     };
 
     match result {
@@ -270,22 +273,10 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
 // ---------------------------------------------------------------------------
 
 fn handle_send(args: SendArgs) -> Result<String, CliError> {
-    let message = if args.stdin {
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| CliError::generic(e.to_string()))?;
-        buf
-    } else if let Some(path) = &args.file {
-        std::fs::read_to_string(path).map_err(|e| CliError::generic(e.to_string()))?
-    } else {
-        args.message
-            .clone()
-            .ok_or_else(|| CliError::generic("Provide a message, --stdin, or --file".to_string()))?
-    };
+    let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
 
     let response = if let Some(until) = args.wait_until.as_deref() {
-        validate_single_wait_target(&args.to)?;
+        validate_single_agent_target(&args.to, "send --wait-until")?;
         let timeout = parse_timeout(&args.timeout)?;
         let watch = live::send_message_and_watch(
             &args.to,
@@ -320,15 +311,104 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
     ))
 }
 
-fn validate_single_wait_target(target: &str) -> Result<(), CliError> {
+fn handle_ask(args: AskArgs) -> Result<String, CliError> {
+    validate_single_agent_target(&args.target, "ask")?;
+    validate_ask_thread(args.thread.as_deref())?;
+    let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
+    let timeout = parse_timeout(&args.timeout)?;
+    let condition = normalize_ask_condition(args.until.as_deref().unwrap_or("status:idle"))?;
+    let response = live::ask_agent(
+        &args.target,
+        &message,
+        args.thread.as_deref(),
+        &condition,
+        Some(args.tail),
+        timeout,
+    )
+    .map_err(control_error)?;
+    render_ask_response(&args.target, &condition, response)
+}
+
+fn read_message_input(
+    message: Option<&str>,
+    stdin: bool,
+    file: Option<&str>,
+) -> Result<String, CliError> {
+    if stdin {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| CliError::generic(e.to_string()))?;
+        Ok(buf)
+    } else if let Some(path) = file {
+        std::fs::read_to_string(path).map_err(|e| CliError::generic(e.to_string()))
+    } else {
+        message
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| CliError::generic("Provide a message, --stdin, or --file".to_string()))
+    }
+}
+
+fn validate_single_agent_target(target: &str, command_name: &str) -> Result<(), CliError> {
     if target == "all" || target.starts_with("class:") {
         return Err(CliError::backend(
             ExitCode::Generic,
             "not_supported",
-            "send --wait-until requires a single agent name or uuid",
+            format!("{command_name} requires a single agent name or uuid"),
         ));
     }
     Ok(())
+}
+
+fn validate_ask_thread(thread: Option<&str>) -> Result<(), CliError> {
+    if thread.is_some() {
+        return Err(CliError::backend(
+            ExitCode::Generic,
+            "not_supported",
+            "--thread is not supported by wardian ask yet",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_ask_condition(until: &str) -> Result<String, CliError> {
+    if until.starts_with("status:")
+        || until.starts_with("output:")
+        || until.starts_with("event:")
+        || until.starts_with("delivery:")
+    {
+        Ok(until.to_string())
+    } else if until.contains(':') {
+        Err(CliError::backend(
+            ExitCode::Generic,
+            "not_supported",
+            format!("unsupported watch condition: {until}"),
+        ))
+    } else {
+        Ok(format!("status:{until}"))
+    }
+}
+
+fn render_ask_response(
+    target: &str,
+    condition: &str,
+    ask: live::AskAgentResponse,
+) -> Result<String, CliError> {
+    let watch = ask.watch;
+    let response = serde_json::json!({
+        "schema": 1,
+        "ok": true,
+        "target": target,
+        "condition": condition,
+        "agent": watch.agent,
+        "cursor": watch.cursor,
+        "delivery": ask.delivery,
+        "output": watch.output,
+        "events": watch.events,
+    });
+    serde_json::to_string_pretty(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
 }
 
 fn parse_include(include: Option<&str>) -> Vec<String> {
@@ -668,6 +748,68 @@ mod tests {
         assert_eq!(cli_error.code, "not_found");
         assert_eq!(cli_error.code_i32(), 2);
         assert!(cli_error.message.contains("ghost"));
+    }
+
+    #[test]
+    fn render_ask_response_uses_send_delivery() {
+        let ask = live::AskAgentResponse {
+            delivery: vec![wardian_core::control::DeliveryDetail {
+                uuid: "agent-1".to_string(),
+                name: "reviewer-a1".to_string(),
+                provider: "mock".to_string(),
+                runtime_state: "live_pty_available".to_string(),
+                delivery_state: "submitted".to_string(),
+                error: None,
+            }],
+            watch: wardian_core::control::AgentWatchResponse {
+                schema: 1,
+                agent: wardian_core::control::WatchAgentSnapshot {
+                    uuid: "agent-1".to_string(),
+                    name: "reviewer-a1".to_string(),
+                    provider: "mock".to_string(),
+                    status: "idle".to_string(),
+                    last_status_at: None,
+                },
+                cursor: "agent-1:2".to_string(),
+                events: Vec::new(),
+                output: wardian_core::control::WatchOutput {
+                    cursor: "agent-1:2".to_string(),
+                    text: "done".to_string(),
+                    truncated: false,
+                    omitted_bytes: 0,
+                },
+                delivery: wardian_core::control::WatchDeliverySnapshot {
+                    delivery: Vec::new(),
+                },
+            },
+        };
+
+        let rendered = render_ask_response("reviewer-a1", "status:idle", ask).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["delivery"][0]["delivery_state"], "submitted");
+        assert_eq!(json["output"]["text"], "done");
+    }
+
+    #[test]
+    fn normalize_ask_condition_accepts_known_kinds_and_bare_status() {
+        assert_eq!(normalize_ask_condition("idle").unwrap(), "status:idle");
+        assert_eq!(
+            normalize_ask_condition("output:REVIEW_DONE").unwrap(),
+            "output:REVIEW_DONE"
+        );
+        assert_eq!(
+            normalize_ask_condition("delivery:submitted").unwrap(),
+            "delivery:submitted"
+        );
+    }
+
+    #[test]
+    fn normalize_ask_condition_rejects_unknown_colon_kind() {
+        let error = normalize_ask_condition("ouptut:REVIEW_DONE").unwrap_err();
+
+        assert_eq!(error.code, "not_supported");
+        assert!(error.message.contains("unsupported watch condition"));
+        assert!(error.message.contains("ouptut:REVIEW_DONE"));
     }
 
     #[test]

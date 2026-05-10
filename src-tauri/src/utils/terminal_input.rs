@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::Sender;
 
-const TERMINAL_SUBMIT_DELAY_MS: u64 = 100;
+const TERMINAL_SUBMIT_DELAY_MS: u64 = 1000;
 const TERMINAL_SUBMIT_KEY: &[u8] = b"\r";
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
@@ -40,6 +40,9 @@ pub async fn submit_prompt_chunks_via_sender(
         .await
         .map_err(|e| format!("Failed to send prompt text: {}", e))?;
 
+    // Windows ConPTY can acknowledge large prompt writes before provider TUIs
+    // have finished updating their editor state. Submitting too quickly leaves
+    // Claude/Gemini with text typed but not entered.
     tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
 
     if let Some(submit_key) = chunks.get(1) {

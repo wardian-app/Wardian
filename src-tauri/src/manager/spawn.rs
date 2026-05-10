@@ -19,6 +19,7 @@ use super::{
     extract_terminal_titles, finalize_interactive_spawn_args, interactive_provider_args,
     interactive_provider_cwd, interactive_provider_launch, set_agent_status,
 };
+use crate::providers::gemini::gemini_status_from_title;
 
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
@@ -425,6 +426,15 @@ pub async fn spawn_agent(
                         }
                         if provider_name_for_pty == "opencode" {
                             if let Some(next_status) = opencode_status_from_title(&title) {
+                                set_agent_status(
+                                    &pty_emit_app,
+                                    &sid_for_pty,
+                                    &current_status_clone,
+                                    next_status,
+                                );
+                            }
+                        } else if provider_name_for_pty == "gemini" {
+                            if let Some(next_status) = gemini_status_from_title(&title) {
                                 set_agent_status(
                                     &pty_emit_app,
                                     &sid_for_pty,

@@ -16,6 +16,19 @@ impl GeminiProvider {
     }
 }
 
+pub fn gemini_status_from_title(title: &str) -> Option<&'static str> {
+    if title.contains("Ready") {
+        Some("Idle")
+    } else if title.contains("Working")
+        || title.contains("Thinking")
+        || title.contains("Confirming System Parameters")
+    {
+        Some("Processing...")
+    } else {
+        None
+    }
+}
+
 impl AgentProvider for GeminiProvider {
     fn name(&self) -> &str {
         "Gemini"
@@ -513,5 +526,22 @@ mod tests {
         let line = r#"{"content":"no type field"}"#;
         let event = p.parse_output(line);
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn title_status_maps_interactive_gemini_titles() {
+        assert_eq!(
+            gemini_status_from_title("◇  Ready (Wardian-codex-worktree)"),
+            Some("Idle")
+        );
+        assert_eq!(
+            gemini_status_from_title("✦  Working… (Wardian-codex-worktree)"),
+            Some("Processing...")
+        );
+        assert_eq!(
+            gemini_status_from_title("✦  Confirming System Parameters (Wardian-codex-worktree)"),
+            Some("Processing...")
+        );
+        assert_eq!(gemini_status_from_title("Gemini"), None);
     }
 }

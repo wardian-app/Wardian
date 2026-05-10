@@ -89,6 +89,7 @@ wardian agent kill reviewer-a1
 wardian agent wait reviewer-a1 --until idle --timeout 10m
 wardian agent wait reviewer-a1 --until idle --next --timeout 10m
 wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output --timeout 10m
+wardian ask reviewer-a1 --stdin --until output:REVIEW_DONE --timeout 10m
 ```
 
 `agent spawn` requires both `--provider` and `--class`; do not rely on implicit
@@ -105,6 +106,21 @@ Use `--timeout` with `ms`, `s`, or `m` units.
 `agent watch <target>` returns status, retained output, events, delivery
 details, and a cursor. Use `--until output:<token>` when you need the response
 text itself. `--follow` is reserved and currently returns `not_supported`.
+
+Use `wardian ask` for one-off peer tasks where you need both delivery evidence
+and the target's response output:
+
+```bash
+cat <<'EOF' | wardian ask reviewer-a1 --stdin --until output:REVIEW_DONE --timeout 10m
+Review this patch. End with REVIEW_DONE.
+EOF
+```
+
+`ask` accepts one agent name or UUID, captures a pre-send watch cursor, sends
+the prompt, then returns output observed after that cursor. Its default
+completion condition is `status:idle`; use `output:<token>` for deterministic
+automation. Broadcasts, class selectors, and `--thread` are not supported by
+`ask` in this slice.
 
 ## Sending Messages
 
@@ -175,10 +191,9 @@ one terminal:
 ```bash
 wardian agent list --scope all --fields name,class,provider,workspace,status
 wardian agent spawn --provider codex --class Reviewer --name review-cli-surface --workspace <absolute-workspace-path>
-cat <<'EOF' | wardian send --stdin --to review-cli-surface
+cat <<'EOF' | wardian ask review-cli-surface --stdin --until output:REVIEW_DONE --timeout 10m
 Review this patch. End with REVIEW_DONE.
 EOF
-wardian agent watch review-cli-surface --until output:REVIEW_DONE --timeout 10m --include status,output
 wardian agent kill review-cli-surface
 ```
 

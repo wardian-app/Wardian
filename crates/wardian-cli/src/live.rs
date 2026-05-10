@@ -5,8 +5,8 @@ use std::{
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, SendMessageResponse,
-    WorkflowListResponse, WorkflowResponse, WorkflowSummary,
+    AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, DeliveryDetail,
+    SendMessageResponse, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
@@ -157,6 +157,11 @@ impl fmt::Display for WaitTargetNotFoundError {
 }
 
 impl std::error::Error for WaitTargetNotFoundError {}
+
+pub struct AskAgentResponse {
+    pub delivery: Vec<DeliveryDetail>,
+    pub watch: AgentWatchResponse,
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -379,6 +384,36 @@ pub fn send_message_and_watch(
     until: &str,
     timeout: Duration,
 ) -> io::Result<AgentWatchResponse> {
+    let response = send_message_and_watch_condition(
+        target,
+        message,
+        thread,
+        &format!("status:{until}"),
+        Some(4096),
+        timeout,
+    )?;
+    Ok(response.watch)
+}
+
+pub fn ask_agent(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    condition: &str,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+) -> io::Result<AskAgentResponse> {
+    send_message_and_watch_condition(target, message, thread, condition, tail_bytes, timeout)
+}
+
+pub fn send_message_and_watch_condition(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    condition: &str,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+) -> io::Result<AskAgentResponse> {
     let initial = agent_watch(
         target,
         None,
@@ -388,24 +423,28 @@ pub fn send_message_and_watch(
             "output".to_string(),
             "delivery".to_string(),
         ],
-        Some(4096),
+        tail_bytes.or(Some(4096)),
         false,
         Duration::from_secs(5),
     )?;
-    send_message(target, message, thread)?;
-    agent_watch(
+    let sent = send_message(target, message, thread)?;
+    let watch = agent_watch(
         target,
         Some(&initial.cursor),
-        Some(&format!("status:{until}")),
+        Some(condition),
         vec![
             "status".to_string(),
             "output".to_string(),
             "delivery".to_string(),
         ],
-        Some(4096),
+        tail_bytes,
         false,
         timeout,
-    )
+    )?;
+    Ok(AskAgentResponse {
+        delivery: sent.delivery,
+        watch,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -445,15 +484,15 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
         ControlOperation::AgentList
         | ControlOperation::WorkflowList
-        | ControlOperation::WorkflowShow
-        | ControlOperation::SendMessage => CONTROL_TIMEOUT,
+        | ControlOperation::WorkflowShow => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentSpawn
         | ControlOperation::AgentClone
         | ControlOperation::WorkflowRun
-        | ControlOperation::WorkflowStop => CONTROL_MUTATION_TIMEOUT,
+        | ControlOperation::WorkflowStop
+        | ControlOperation::SendMessage => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
     }
 }
@@ -627,6 +666,14 @@ mod tests {
     fn spawn_and_clone_use_longer_control_timeout() {
         assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
         assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn send_message_uses_mutation_timeout() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::SendMessage),
+            CONTROL_MUTATION_TIMEOUT
+        );
     }
 
     #[test]
