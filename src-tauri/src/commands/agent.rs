@@ -386,9 +386,25 @@ fn clone_collect_eligible_file_children(
 fn clone_path_is_generated_or_runtime(rel_path: &str) -> bool {
     let normalized = rel_path.replace('\\', "/");
     let first = normalized.split('/').next().unwrap_or_default();
-    matches!(first, "habitat" | ".codex" | ".claude" | ".gemini" | ".opencode")
-        || normalized == ".agents/skills"
+    let lower = normalized.to_ascii_lowercase();
+    matches!(
+        first,
+        "habitat"
+            | ".codex"
+            | ".claude"
+            | ".gemini"
+            | ".opencode"
+            | "codex"
+            | "claude"
+            | "gemini"
+            | "opencode"
+            | "logs"
+            | "telemetry"
+            | "provider-bootstrap"
+    ) || normalized == ".agents/skills"
         || normalized.starts_with(".agents/skills/")
+        || lower.ends_with(".jsonl")
+        || lower.ends_with(".log")
 }
 
 #[cfg(windows)]
@@ -431,8 +447,10 @@ fn build_agent_clone_preview(
         .into_iter()
         .filter(|path| path == "AGENTS.md")
         .collect::<Vec<_>>();
-    let skills =
-        crate::commands::library::list_deployed_skill_refs_for_target("agent", source_session_id)?;
+    let skills = crate::commands::library::list_deployed_skill_refs_for_target_strict(
+        "agent",
+        source_session_id,
+    )?;
 
     Ok(AgentClonePreview {
         source_session_id: source_session_id.to_string(),
@@ -455,7 +473,18 @@ fn clone_normalize_selected_profile_file(path: &str) -> Result<String, String> {
     }
     let candidate = std::path::Path::new(&normalized);
     if candidate.is_absolute() {
-        return Err(format!("Selected clone file path is absolute: {normalized}"));
+        return Err(format!(
+            "Selected clone file path is absolute: {normalized}"
+        ));
+    }
+    if normalized.len() >= 3
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[2] == b'/'
+    {
+        return Err(format!(
+            "Selected clone file path is absolute: {normalized}"
+        ));
     }
     for component in candidate.components() {
         if matches!(
@@ -497,9 +526,7 @@ fn clone_validate_selected_profile_files(
     for selected_file in selected_files {
         let normalized = clone_normalize_selected_profile_file(selected_file)?;
         if !allowlist.contains(&normalized) {
-            return Err(format!(
-                "Selected clone file is not eligible: {normalized}"
-            ));
+            return Err(format!("Selected clone file is not eligible: {normalized}"));
         }
         let source_path = clone_join_normalized_relative_path(&source_root, &normalized);
         let metadata = std::fs::symlink_metadata(&source_path).map_err(|e| e.to_string())?;
@@ -570,8 +597,10 @@ fn clone_validate_selected_agent_skills(
     source_session_id: &str,
     selected_skills: &[DeployedSkillRef],
 ) -> Result<Vec<DeployedSkillRef>, String> {
-    let deployed_skills =
-        crate::commands::library::list_deployed_skill_refs_for_target("agent", source_session_id)?;
+    let deployed_skills = crate::commands::library::list_deployed_skill_refs_for_target_strict(
+        "agent",
+        source_session_id,
+    )?;
     clone_match_selected_agent_skills(&deployed_skills, selected_skills)
 }
 
@@ -950,10 +979,7 @@ fn normalize_spawn_folder(folder: &str) -> Result<String, String> {
 }
 
 fn normalize_clone_folder_override(folder: Option<String>) -> Result<Option<String>, String> {
-    folder
-        .as_deref()
-        .map(normalize_spawn_folder)
-        .transpose()
+    folder.as_deref().map(normalize_spawn_folder).transpose()
 }
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
@@ -1482,8 +1508,8 @@ pub async fn get_agent_clone_preview(
             .collect::<std::collections::HashSet<_>>();
         (source, names)
     };
-    let wardian_home =
-        crate::utils::fs::get_wardian_home().ok_or_else(|| "Could not find Wardian home".to_string())?;
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not find Wardian home".to_string())?;
 
     build_agent_clone_preview(
         &wardian_home,
@@ -1949,20 +1975,22 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, build_agent_clone_preview, capture_opencode_pause_resume_session,
-        capture_resume_runtime_snapshot, clone_collect_eligible_file_tree,
-        clone_copy_agent_profile_files, clone_copy_selected_agent_profile_files,
-        clone_copy_profile_plan, clone_copy_selected_agent_skills,
+        agent_status_update_payload, build_agent_clone_preview,
+        capture_opencode_pause_resume_session, capture_resume_runtime_snapshot,
+        clone_cleanup_created_profile_dirs, clone_collect_eligible_file_tree,
+        clone_copy_agent_profile_files, clone_copy_profile_plan,
+        clone_copy_selected_agent_profile_files, clone_copy_selected_agent_skills,
         clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
-        clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
-        clone_validate_selected_profile_files, codex_provider_session_is_new,
-        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
-        mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
-        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, reserve_spawn_session_name,
-        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
+        clone_remove_existing_path, clone_sanitize_config, clone_unique_name,
+        clone_validate_selected_agent_skills, clone_validate_selected_profile_files,
+        codex_provider_session_is_new, flatten_clone_file_paths, generated_agent_name,
+        insert_new_agent_order, mark_agent_paused_off, normalize_clone_folder_override,
+        normalize_spawn_folder, persisted_resume_session_for_provider, prepare_clear_config,
+        prepare_resume_config, promote_fresh_provider_session_after_resume,
+        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
+        reserve_spawn_session_name, resolve_requested_spawn_session_name,
+        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
+        AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -2047,7 +2075,10 @@ mod tests {
         .expect("preview");
 
         assert_eq!(preview.suggested_session_name, "Alpha-copy");
-        assert_eq!(preview.default_selected_files, vec!["AGENTS.md".to_string()]);
+        assert_eq!(
+            preview.default_selected_files,
+            vec!["AGENTS.md".to_string()]
+        );
         assert!(preview
             .files
             .children
@@ -2110,6 +2141,8 @@ mod tests {
         let source_root = home.join("agents").join("source-agent");
         std::fs::create_dir_all(source_root.join("nested")).expect("nested");
         std::fs::create_dir_all(source_root.join("habitat")).expect("habitat");
+        std::fs::create_dir_all(source_root.join("claude")).expect("claude");
+        std::fs::create_dir_all(source_root.join("logs")).expect("logs");
         std::fs::create_dir_all(source_root.join(".agents").join("skills").join("planner"))
             .expect("skills");
         std::fs::create_dir_all(source_root.join(".codex")).expect("codex");
@@ -2127,6 +2160,13 @@ mod tests {
         )
         .expect("skill");
         std::fs::write(source_root.join(".codex").join("history.jsonl"), "{}").expect("history");
+        std::fs::write(
+            source_root.join("claude").join("permission-requests.jsonl"),
+            "{}\n",
+        )
+        .expect("permission log");
+        std::fs::write(source_root.join("logs").join("agent.log"), "log").expect("log");
+        std::fs::write(source_root.join("transcript.jsonl"), "{}").expect("transcript");
 
         let files = clone_collect_eligible_file_tree(home, "source-agent").expect("files");
         let paths = flatten_clone_file_paths(&files);
@@ -2134,10 +2174,33 @@ mod tests {
         assert!(paths.contains(&"AGENTS.md".to_string()));
         assert!(paths.contains(&"nested/keep.md".to_string()));
         assert!(!paths.iter().any(|path| path.starts_with("habitat/")));
-        assert!(!paths
-            .iter()
-            .any(|path| path.starts_with(".agents/skills/")));
+        assert!(!paths.iter().any(|path| path.starts_with(".agents/skills/")));
         assert!(!paths.iter().any(|path| path.starts_with(".codex/")));
+        assert!(!paths.iter().any(|path| path.starts_with("claude/")));
+        assert!(!paths.iter().any(|path| path.starts_with("logs/")));
+        assert!(!paths.iter().any(|path| path.ends_with(".jsonl")));
+        assert!(!paths.iter().any(|path| path.ends_with(".log")));
+    }
+
+    #[test]
+    fn clone_selected_profile_file_rejects_runtime_artifacts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        std::fs::create_dir_all(source.join("claude")).expect("claude");
+        std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(
+            source.join("claude").join("permission-requests.jsonl"),
+            "{}\n",
+        )
+        .expect("permission log");
+
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["claude/permission-requests.jsonl".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
@@ -2315,6 +2378,43 @@ mod tests {
     }
 
     #[test]
+    fn clone_custom_profile_copy_preserves_unmarked_legacy_skill_with_same_named_library_skill() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+
+        let library = temp.path().join("library/skills/group-a/planner");
+        std::fs::create_dir_all(&library).expect("library skill");
+        std::fs::write(library.join("SKILL.md"), "library planner").expect("library skill file");
+        let legacy = temp
+            .path()
+            .join("agents/source-agent/.agents/skills/planner");
+        std::fs::create_dir_all(&legacy).expect("legacy skill");
+        std::fs::write(legacy.join("SKILL.md"), "customized planner").expect("legacy skill file");
+
+        clone_copy_selected_agent_skills(
+            temp.path(),
+            "source-agent",
+            "dest-agent",
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: None,
+            }],
+        )
+        .expect("copy legacy skill");
+
+        assert_eq!(
+            std::fs::read_to_string(
+                temp.path()
+                    .join("agents/dest-agent/.agents/skills/planner/SKILL.md")
+            )
+            .expect("legacy copied"),
+            "customized planner"
+        );
+    }
+
+    #[test]
     fn clone_custom_skill_selection_matches_duplicate_names_by_source_path() {
         let matched = clone_match_selected_agent_skills(
             &[
@@ -2404,8 +2504,7 @@ mod tests {
             .join("agents/source-agent/.agents/skills/planner");
         std::fs::create_dir_all(&deployed).expect("deployed skill");
         std::fs::write(deployed.join("SKILL.md"), "stale").expect("skill");
-        std::fs::write(deployed.join(".wardian-skill-source"), "group-a/planner")
-            .expect("marker");
+        std::fs::write(deployed.join(".wardian-skill-source"), "group-a/planner").expect("marker");
 
         let err = clone_validate_selected_agent_skills(
             "source-agent",
@@ -2457,12 +2556,81 @@ mod tests {
     }
 
     #[test]
+    fn clone_cleanup_created_profile_dirs_removes_only_tracked_clone_dirs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let provisional = home.join("agents").join("provisional-agent");
+        let final_dir = home.join("agents").join("final-agent");
+        let unrelated = home.join("agents").join("unrelated-agent");
+        std::fs::create_dir_all(&provisional).expect("provisional");
+        std::fs::create_dir_all(&final_dir).expect("final");
+        std::fs::create_dir_all(&unrelated).expect("unrelated");
+        std::fs::write(provisional.join("AGENTS.md"), "provisional").expect("provisional file");
+        std::fs::write(final_dir.join("AGENTS.md"), "final").expect("final file");
+        std::fs::write(unrelated.join("AGENTS.md"), "unrelated").expect("unrelated file");
+
+        clone_cleanup_created_profile_dirs(&[provisional.clone(), final_dir.clone()]);
+
+        assert!(!provisional.exists());
+        assert!(!final_dir.exists());
+        assert!(unrelated.join("AGENTS.md").is_file());
+    }
+
+    #[test]
+    fn clone_custom_discovered_session_final_profile_is_copied_from_source_not_provisional() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        let provisional = home.join("agents").join("provisional-agent");
+        let final_dir = home.join("agents").join("real-provider-session");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("AGENTS.md"), "source profile").expect("source profile");
+
+        let selection = CloneProfileSelection {
+            files: vec!["AGENTS.md".to_string()],
+            skills: Vec::new(),
+        };
+
+        clone_copy_profile_plan(
+            home,
+            "source-agent",
+            "provisional-agent",
+            CloneProfileCopyPlan::Custom(&selection),
+        )
+        .expect("copy provisional");
+        std::fs::write(
+            provisional.join("AGENTS.md"),
+            "provider mutated provisional",
+        )
+        .expect("mutate provisional");
+
+        clone_copy_profile_plan(
+            home,
+            "source-agent",
+            "real-provider-session",
+            CloneProfileCopyPlan::Custom(&selection),
+        )
+        .expect("copy final");
+        clone_remove_existing_path(&provisional);
+
+        assert!(!provisional.exists());
+        assert_eq!(
+            std::fs::read_to_string(final_dir.join("AGENTS.md")).expect("final profile"),
+            "source profile"
+        );
+    }
+
+    #[test]
     fn clone_folder_override_uses_spawn_workspace_validation() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let valid = normalize_clone_folder_override(Some(temp.path().to_string_lossy().to_string()))
-            .expect("valid folder")
-            .expect("folder override");
-        assert_eq!(valid, normalize_spawn_folder(&temp.path().to_string_lossy()).unwrap());
+        let valid =
+            normalize_clone_folder_override(Some(temp.path().to_string_lossy().to_string()))
+                .expect("valid folder")
+                .expect("folder override");
+        assert_eq!(
+            valid,
+            normalize_spawn_folder(&temp.path().to_string_lossy()).unwrap()
+        );
 
         let missing = temp.path().join("missing");
         let err = normalize_clone_folder_override(Some(missing.to_string_lossy().to_string()))
