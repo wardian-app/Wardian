@@ -537,6 +537,74 @@ fn clone_copy_selected_agent_profile_files(
     Ok(())
 }
 
+fn clone_match_selected_agent_skills(
+    deployed_skills: &[DeployedSkillRef],
+    selected_skills: &[DeployedSkillRef],
+) -> Result<Vec<DeployedSkillRef>, String> {
+    let mut matched = Vec::with_capacity(selected_skills.len());
+    for selected_skill in selected_skills {
+        let deployed = deployed_skills
+            .iter()
+            .find(|deployed| {
+                deployed.name == selected_skill.name
+                    && deployed.source_path == selected_skill.source_path
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Selected skill '{}' is not deployed on the source agent.",
+                    selected_skill.name
+                )
+            })?;
+        matched.push(deployed.clone());
+    }
+    Ok(matched)
+}
+
+fn clone_validate_selected_agent_skills(
+    source_session_id: &str,
+    selected_skills: &[DeployedSkillRef],
+) -> Result<Vec<DeployedSkillRef>, String> {
+    let deployed_skills =
+        crate::commands::library::list_deployed_skill_refs_for_target("agent", source_session_id)?;
+    clone_match_selected_agent_skills(&deployed_skills, selected_skills)
+}
+
+fn clone_copy_selected_agent_skills(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+    destination_session_id: &str,
+    selected_skills: &[DeployedSkillRef],
+) -> Result<(), String> {
+    let selected_skills = clone_validate_selected_agent_skills(source_session_id, selected_skills)?;
+
+    for selected_skill in selected_skills {
+        if let Some(source_path) = selected_skill.source_path {
+            crate::commands::library::deploy_skill_from_library(
+                &source_path,
+                "agent",
+                destination_session_id,
+            )?;
+        } else {
+            clone_copy_directory_recursive(
+                &wardian_home
+                    .join("agents")
+                    .join(source_session_id)
+                    .join(".agents")
+                    .join("skills")
+                    .join(&selected_skill.name),
+                &wardian_home
+                    .join("agents")
+                    .join(destination_session_id)
+                    .join(".agents")
+                    .join("skills")
+                    .join(&selected_skill.name),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 fn clone_ensure_profile_destination_available(
     wardian_home: &std::path::Path,
     destination_session_id: &str,
@@ -1745,14 +1813,16 @@ mod tests {
         agent_status_update_payload, build_agent_clone_preview, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_collect_eligible_file_tree,
         clone_copy_agent_profile_files, clone_copy_selected_agent_profile_files,
-        clone_ensure_profile_destination_available, clone_sanitize_config, clone_unique_name,
-        clone_validate_selected_profile_files, codex_provider_session_is_new,
-        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
-        mark_agent_paused_off, normalize_spawn_folder, persisted_resume_session_for_provider,
-        prepare_clear_config, prepare_resume_config, promote_fresh_provider_session_after_resume,
-        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        reserve_spawn_session_name, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender, AgentOrderPlacement,
+        clone_copy_selected_agent_skills, clone_ensure_profile_destination_available,
+        clone_match_selected_agent_skills, clone_sanitize_config, clone_unique_name,
+        clone_validate_selected_agent_skills, clone_validate_selected_profile_files,
+        codex_provider_session_is_new, flatten_clone_file_paths, generated_agent_name,
+        insert_new_agent_order, mark_agent_paused_off, normalize_spawn_folder,
+        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, reserve_spawn_session_name,
+        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
+        sync_resumed_input_sender, AgentOrderPlacement,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -2020,6 +2090,193 @@ mod tests {
             &["linked/secret.md".to_string()]
         )
         .is_err());
+    }
+
+    #[test]
+    fn clone_custom_profile_copy_recreates_only_selected_skills() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+
+        let library_skill = temp
+            .path()
+            .join("library")
+            .join("skills")
+            .join("group-a")
+            .join("planner");
+        std::fs::create_dir_all(&library_skill).expect("library skill");
+        std::fs::write(library_skill.join("SKILL.md"), "planner").expect("skill");
+        crate::commands::library::deploy_skill_from_library(
+            "group-a/planner",
+            "agent",
+            "source-agent",
+        )
+        .expect("deploy selected");
+
+        let ignored_skill = temp.path().join("library").join("skills").join("ignored");
+        std::fs::create_dir_all(&ignored_skill).expect("ignored");
+        std::fs::write(ignored_skill.join("SKILL.md"), "ignored").expect("ignored skill");
+        crate::commands::library::deploy_skill_from_library("ignored", "agent", "source-agent")
+            .expect("deploy ignored");
+
+        clone_copy_selected_agent_skills(
+            temp.path(),
+            "source-agent",
+            "dest-agent",
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: Some("group-a/planner".to_string()),
+            }],
+        )
+        .expect("copy selected skills");
+
+        assert!(temp
+            .path()
+            .join("agents/dest-agent/.agents/skills/planner/SKILL.md")
+            .is_file());
+        assert!(!temp
+            .path()
+            .join("agents/dest-agent/.agents/skills/ignored")
+            .exists());
+    }
+
+    #[test]
+    fn clone_custom_profile_copy_supports_legacy_copied_skills() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+        let legacy = temp
+            .path()
+            .join("agents/source-agent/.agents/skills/legacy");
+        std::fs::create_dir_all(&legacy).expect("legacy skill");
+        std::fs::write(legacy.join("SKILL.md"), "legacy").expect("legacy skill file");
+
+        clone_copy_selected_agent_skills(
+            temp.path(),
+            "source-agent",
+            "dest-agent",
+            &[DeployedSkillRef {
+                name: "legacy".to_string(),
+                source_path: None,
+            }],
+        )
+        .expect("copy legacy skill");
+
+        assert_eq!(
+            std::fs::read_to_string(
+                temp.path()
+                    .join("agents/dest-agent/.agents/skills/legacy/SKILL.md")
+            )
+            .expect("legacy copied"),
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn clone_custom_skill_selection_matches_duplicate_names_by_source_path() {
+        let matched = clone_match_selected_agent_skills(
+            &[
+                DeployedSkillRef {
+                    name: "planner".to_string(),
+                    source_path: Some("group-a/planner".to_string()),
+                },
+                DeployedSkillRef {
+                    name: "planner".to_string(),
+                    source_path: Some("group-b/planner".to_string()),
+                },
+                DeployedSkillRef {
+                    name: "planner".to_string(),
+                    source_path: None,
+                },
+            ],
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: Some("group-b/planner".to_string()),
+            }],
+        )
+        .expect("match duplicate");
+
+        assert_eq!(
+            matched,
+            vec![DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: Some("group-b/planner".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn clone_custom_skill_selection_rejects_mismatched_duplicate_refs() {
+        let err = clone_match_selected_agent_skills(
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: Some("group-a/planner".to_string()),
+            }],
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: Some("group-b/planner".to_string()),
+            }],
+        )
+        .expect_err("mismatched source_path must fail");
+
+        assert!(err.contains("not deployed"));
+    }
+
+    #[test]
+    fn clone_custom_skill_selection_none_source_path_matches_only_legacy_ref() {
+        let matched = clone_match_selected_agent_skills(
+            &[
+                DeployedSkillRef {
+                    name: "planner".to_string(),
+                    source_path: Some("group-a/planner".to_string()),
+                },
+                DeployedSkillRef {
+                    name: "planner".to_string(),
+                    source_path: None,
+                },
+            ],
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: None,
+            }],
+        )
+        .expect("match legacy");
+
+        assert_eq!(
+            matched,
+            vec![DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn clone_custom_skill_selection_rejects_missing_source_backed_library_skill() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _guard = WardianHomeGuard;
+        let deployed = temp
+            .path()
+            .join("agents/source-agent/.agents/skills/planner");
+        std::fs::create_dir_all(&deployed).expect("deployed skill");
+        std::fs::write(deployed.join("SKILL.md"), "stale").expect("skill");
+        std::fs::write(deployed.join(".wardian-skill-source"), "group-a/planner")
+            .expect("marker");
+
+        let err = clone_validate_selected_agent_skills(
+            "source-agent",
+            &[DeployedSkillRef {
+                name: "planner".to_string(),
+                source_path: Some("group-a/planner".to_string()),
+            }],
+        )
+        .expect_err("missing library source fails");
+
+        assert!(err.contains("not deployed") || err.contains("Skill source not found"));
     }
 
     #[test]
