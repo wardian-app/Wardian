@@ -484,15 +484,15 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
         ControlOperation::AgentList
         | ControlOperation::WorkflowList
-        | ControlOperation::WorkflowShow
-        | ControlOperation::SendMessage => CONTROL_TIMEOUT,
+        | ControlOperation::WorkflowShow => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentSpawn
         | ControlOperation::AgentClone
         | ControlOperation::WorkflowRun
-        | ControlOperation::WorkflowStop => CONTROL_MUTATION_TIMEOUT,
+        | ControlOperation::WorkflowStop
+        | ControlOperation::SendMessage => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
     }
 }
@@ -666,6 +666,14 @@ mod tests {
     fn spawn_and_clone_use_longer_control_timeout() {
         assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
         assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn send_message_uses_mutation_timeout() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::SendMessage),
+            CONTROL_MUTATION_TIMEOUT
+        );
     }
 
     #[test]

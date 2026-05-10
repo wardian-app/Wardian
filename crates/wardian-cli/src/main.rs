@@ -354,7 +354,7 @@ fn validate_single_agent_target(target: &str, command_name: &str) -> Result<(), 
         return Err(CliError::backend(
             ExitCode::Generic,
             "not_supported",
-            &format!("{command_name} requires a single agent name or uuid"),
+            format!("{command_name} requires a single agent name or uuid"),
         ));
     }
     Ok(())
@@ -382,7 +382,7 @@ fn normalize_ask_condition(until: &str) -> Result<String, CliError> {
         Err(CliError::backend(
             ExitCode::Generic,
             "not_supported",
-            &format!("unsupported watch condition: {until}"),
+            format!("unsupported watch condition: {until}"),
         ))
     } else {
         Ok(format!("status:{until}"))
