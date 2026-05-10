@@ -442,6 +442,101 @@ fn build_agent_clone_preview(
     })
 }
 
+fn clone_normalize_selected_profile_file(path: &str) -> Result<String, String> {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return Err("Selected clone file path cannot be empty.".to_string());
+    }
+    let candidate = std::path::Path::new(&normalized);
+    if candidate.is_absolute() {
+        return Err(format!("Selected clone file path is absolute: {normalized}"));
+    }
+    for component in candidate.components() {
+        if matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
+            return Err(format!("Selected clone file path is invalid: {normalized}"));
+        }
+    }
+    Ok(normalized)
+}
+
+fn clone_join_normalized_relative_path(
+    root: &std::path::Path,
+    normalized: &str,
+) -> std::path::PathBuf {
+    normalized
+        .split('/')
+        .fold(root.to_path_buf(), |path, segment| path.join(segment))
+}
+
+fn clone_validate_selected_profile_files(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+    selected_files: &[String],
+) -> Result<Vec<String>, String> {
+    let source_root = wardian_home.join("agents").join(source_session_id);
+    let canonical_root = source_root.canonicalize().map_err(|e| e.to_string())?;
+    let allowlist = flatten_clone_file_paths(&clone_collect_eligible_file_tree(
+        wardian_home,
+        source_session_id,
+    )?)
+    .into_iter()
+    .collect::<std::collections::HashSet<_>>();
+    let mut validated = Vec::with_capacity(selected_files.len());
+
+    for selected_file in selected_files {
+        let normalized = clone_normalize_selected_profile_file(selected_file)?;
+        if !allowlist.contains(&normalized) {
+            return Err(format!(
+                "Selected clone file is not eligible: {normalized}"
+            ));
+        }
+        let source_path = clone_join_normalized_relative_path(&source_root, &normalized);
+        let metadata = std::fs::symlink_metadata(&source_path).map_err(|e| e.to_string())?;
+        if clone_path_is_link_or_reparse(&metadata) || std::fs::read_link(&source_path).is_ok() {
+            return Err(format!("Selected clone file is a link: {normalized}"));
+        }
+        if !metadata.is_file() {
+            return Err(format!("Selected clone path is not a file: {normalized}"));
+        }
+        let canonical = source_path.canonicalize().map_err(|e| e.to_string())?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(format!(
+                "Selected clone file escapes the source agent: {normalized}"
+            ));
+        }
+        validated.push(normalized);
+    }
+
+    Ok(validated)
+}
+
+fn clone_copy_selected_agent_profile_files(
+    wardian_home: &std::path::Path,
+    source_session_id: &str,
+    destination_session_id: &str,
+    selected_files: &[String],
+) -> Result<(), String> {
+    let selected_files =
+        clone_validate_selected_profile_files(wardian_home, source_session_id, selected_files)?;
+    let source_root = wardian_home.join("agents").join(source_session_id);
+    let destination_root = wardian_home.join("agents").join(destination_session_id);
+    std::fs::create_dir_all(&destination_root).map_err(|e| e.to_string())?;
+
+    for selected_file in selected_files {
+        clone_copy_file(
+            &clone_join_normalized_relative_path(&source_root, &selected_file),
+            &clone_join_normalized_relative_path(&destination_root, &selected_file),
+        )?;
+    }
+
+    Ok(())
+}
+
 fn clone_ensure_profile_destination_available(
     wardian_home: &std::path::Path,
     destination_session_id: &str,
@@ -1649,8 +1744,9 @@ mod tests {
     use super::{
         agent_status_update_payload, build_agent_clone_preview, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_collect_eligible_file_tree,
-        clone_copy_agent_profile_files, clone_ensure_profile_destination_available,
-        clone_sanitize_config, clone_unique_name, codex_provider_session_is_new,
+        clone_copy_agent_profile_files, clone_copy_selected_agent_profile_files,
+        clone_ensure_profile_destination_available, clone_sanitize_config, clone_unique_name,
+        clone_validate_selected_profile_files, codex_provider_session_is_new,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         mark_agent_paused_off, normalize_spawn_folder, persisted_resume_session_for_provider,
         prepare_clear_config, prepare_resume_config, promote_fresh_provider_session_after_resume,
@@ -1854,6 +1950,76 @@ mod tests {
         let paths = flatten_clone_file_paths(&files);
 
         assert!(!paths.iter().any(|path| path.starts_with("linked/")));
+    }
+
+    #[test]
+    fn clone_custom_profile_copy_copies_only_selected_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        let dest = home.join("agents").join("dest-agent");
+        std::fs::create_dir_all(source.join("nested")).expect("nested");
+        std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(source.join("notes.md"), "notes").expect("notes");
+        std::fs::write(source.join("nested").join("keep.md"), "keep").expect("keep");
+
+        clone_copy_selected_agent_profile_files(
+            home,
+            "source-agent",
+            "dest-agent",
+            &["AGENTS.md".to_string(), "nested/keep.md".to_string()],
+        )
+        .expect("copy selected");
+
+        assert!(dest.join("AGENTS.md").is_file());
+        assert!(dest.join("nested").join("keep.md").is_file());
+        assert!(!dest.join("notes.md").exists());
+    }
+
+    #[test]
+    fn clone_selected_profile_file_rejects_traversal_and_absolute_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
+
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["../secret.md".to_string()]
+        )
+        .is_err());
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["C:/secret.md".to_string()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn clone_selected_profile_file_rejects_links_and_escaped_canonical_targets() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let source = home.join("agents").join("source-agent");
+        let external = home.join("external");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::create_dir_all(&external).expect("external");
+        std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
+        std::fs::write(external.join("secret.md"), "secret").expect("secret");
+
+        let linked = source.join("linked");
+        if create_directory_link(&external, &linked).is_err() {
+            return;
+        }
+
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["linked/secret.md".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
