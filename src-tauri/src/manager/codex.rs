@@ -65,13 +65,8 @@ pub(crate) fn codex_session_file_path(
     codex_session_file_path_in(&global_home, session_id)
 }
 
-pub(crate) fn codex_log_lookup_session_id<'a>(
-    wardian_session_id: &'a str,
-    resume_session: Option<&'a str>,
-) -> &'a str {
-    resume_session
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(wardian_session_id)
+pub(crate) fn codex_log_lookup_session_id(resume_session: Option<&str>) -> Option<&str> {
+    resume_session.filter(|value| !value.trim().is_empty())
 }
 
 pub(crate) fn codex_provider_session_is_excluded(candidate: &str, excluded: &[String]) -> bool {
@@ -309,20 +304,15 @@ mod tests {
     #[test]
     fn codex_log_lookup_prefers_provider_thread_id_when_available() {
         assert_eq!(
-            codex_log_lookup_session_id(
-                "22ff532b-007a-44c9-a4b4-9b7c0f546274",
-                Some("codex-thread-123")
-            ),
-            "codex-thread-123"
+            codex_log_lookup_session_id(Some("codex-thread-123")),
+            Some("codex-thread-123")
         );
-        assert_eq!(
-            codex_log_lookup_session_id("22ff532b-007a-44c9-a4b4-9b7c0f546274", Some("   ")),
-            "22ff532b-007a-44c9-a4b4-9b7c0f546274"
-        );
-        assert_eq!(
-            codex_log_lookup_session_id("22ff532b-007a-44c9-a4b4-9b7c0f546274", None),
-            "22ff532b-007a-44c9-a4b4-9b7c0f546274"
-        );
+    }
+
+    #[test]
+    fn codex_log_lookup_waits_until_provider_thread_id_is_known() {
+        assert_eq!(codex_log_lookup_session_id(Some("   ")), None,);
+        assert_eq!(codex_log_lookup_session_id(None), None);
     }
 
     #[test]

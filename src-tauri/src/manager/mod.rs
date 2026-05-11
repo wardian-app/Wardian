@@ -4,6 +4,8 @@ pub(crate) mod codex;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod spawn;
+#[cfg(test)]
+mod spawn_tests;
 pub(crate) mod telemetry;
 
 // ── Re-exports for backward compatibility ───────────────────────────

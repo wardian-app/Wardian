@@ -219,14 +219,14 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             .map(|home| home.join("agents").join(&snap.session_id))
                             .filter(|path| path.exists())
                             .map(|path| path.to_string_lossy().to_string());
-                        let codex_session_id = codex_log_lookup_session_id(
-                            &snap.session_id,
-                            snap.resume_session.as_deref(),
-                        );
-                        if let Some(path) =
-                            codex_session_file_path(codex_session_id, agent_home.as_deref())
+                        if let Some(codex_session_id) =
+                            codex_log_lookup_session_id(snap.resume_session.as_deref())
                         {
-                            *log_path_lock = Some(path);
+                            if let Some(path) =
+                                codex_session_file_path(codex_session_id, agent_home.as_deref())
+                            {
+                                *log_path_lock = Some(path);
+                            }
                         }
                     }
                     "claude" => {
