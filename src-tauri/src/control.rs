@@ -373,13 +373,18 @@ async fn deliver_message_to_target(
     for info in target_infos {
         match senders.get(&info.uuid).and_then(Clone::clone) {
             Some(tx) => {
-                match crate::utils::terminal_input::submit_prompt_chunks_via_sender(
-                    &tx,
-                    &info.provider,
-                    message,
-                )
-                .await
-                {
+                let result = match wait_for_terminal_ready_for_control_send(state, &info).await {
+                    Ok(()) => {
+                        crate::utils::terminal_input::submit_prompt_chunks_via_sender(
+                            &tx,
+                            &info.provider,
+                            message,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
                     Ok(()) => {
                         delivered += 1;
                         let detail = DeliveryDetail {
@@ -444,6 +449,94 @@ async fn deliver_message_to_target(
         .with_details(delivery_details_json(&delivery)));
     }
     Ok(delivery)
+}
+
+async fn wait_for_terminal_ready_for_control_send(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+) -> Result<(), String> {
+    if info.provider == "opencode" {
+        wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await
+    } else if info.provider == "codex" {
+        wait_for_terminal_output(state, &info.uuid, 15_000, codex_output_has_ready_prompt).await
+    } else {
+        Ok(())
+    }
+}
+
+async fn wait_for_opencode_terminal_ready(
+    state: &AppState,
+    session_id: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
+        let (title, status) = {
+            let agents = state.agents.lock().await;
+            let agent = agents
+                .get(session_id)
+                .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
+            let title = agent
+                .terminal_title
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            let status = agent
+                .current_status
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            (title, status)
+        };
+        let title = title.trim();
+        if wardian_core::identity::normalize_status(&status) == "idle"
+            && (title == "OpenCode" || title.starts_with("OC | "))
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "Timed out waiting for {} OpenCode terminal to become ready",
+        session_id
+    ))
+}
+
+async fn wait_for_terminal_output(
+    state: &AppState,
+    session_id: &str,
+    timeout_ms: u64,
+    is_ready: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
+        let watch_state = {
+            let agents = state.agents.lock().await;
+            agents
+                .get(session_id)
+                .ok_or_else(|| format!("Agent {} not found or is off", session_id))?
+                .watch_state
+                .clone()
+        };
+        let output = watch_state
+            .lock()
+            .map_err(|_| format!("Agent {} watch state lock poisoned", session_id))?
+            .snapshot_since(None, None)
+            .map(|snapshot| snapshot.output.text)
+            .unwrap_or_default();
+        if is_ready(&output) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "Timed out waiting for {} terminal output to become ready",
+        session_id
+    ))
+}
+
+fn codex_output_has_ready_prompt(output: &str) -> bool {
+    output.contains("\n›") || output.contains("\r\n›")
 }
 
 async fn mark_delivered_agents_prompt_started(
@@ -1053,7 +1146,7 @@ mod tests {
             crate::utils::terminal_input::provider_submit_chunks("codex", "hello\nworld").unwrap();
 
         assert_eq!(chunks[0], b"hello world".to_vec());
-        assert_eq!(chunks[1], b"\x1b\r".to_vec());
+        assert_eq!(chunks[1], b"\r".to_vec());
     }
 
     #[test]
@@ -1065,6 +1158,85 @@ mod tests {
 
         assert_eq!(gemini, vec![b"hello".to_vec(), b"\r".to_vec()]);
         assert_eq!(claude, vec![b"hello".to_vec(), b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn codex_ready_prompt_detects_visible_compose_prompt() {
+        assert!(codex_output_has_ready_prompt(
+            "\r\n› Write tests for @filename"
+        ));
+        assert!(codex_output_has_ready_prompt(
+            "\r\n›\u{1b}[22m Write tests for @filename"
+        ));
+        assert!(!codex_output_has_ready_prompt("Booting MCP server"));
+    }
+
+    #[tokio::test]
+    async fn opencode_control_send_waits_for_open_code_title() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "opencode".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
+        }
+        let info = delivery_target_infos(&state, &["agent-1".to_string()])
+            .await
+            .unwrap()
+            .remove(0);
+
+        wait_for_terminal_ready_for_control_send(&state, &info)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn opencode_control_send_accepts_idle_oc_title() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "opencode".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            *agent.terminal_title.lock().unwrap() = "OC | Self-introduction".to_string();
+        }
+        let info = delivery_target_infos(&state, &["agent-1".to_string()])
+            .await
+            .unwrap()
+            .remove(0);
+
+        wait_for_terminal_ready_for_control_send(&state, &info)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "opencode".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        deliver_message_to_target(None, &state, "OpenCodeOne", "hello", None)
+            .await
+            .unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
     }
 
     #[test]
@@ -1224,6 +1396,11 @@ mod tests {
             agent.config.lock().unwrap().provider = "codex".to_string();
             *agent.current_status.lock().unwrap() = "Idle".to_string();
             *agent.query_count.lock().unwrap() = 0;
+            agent
+                .watch_state
+                .lock()
+                .unwrap()
+                .push_output(b"\r\n\x1b[1m\r\n\xe2\x80\xba\x1b[22m Write tests for @filename");
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         state
@@ -1237,7 +1414,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\x1b\r".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
         {
             let agents = state.agents.lock().await;
             let agent = agents.get("agent-1").unwrap();
