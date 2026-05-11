@@ -101,14 +101,11 @@ Current model:
   - `cap_sid`
   - `history.jsonl`
   - `session_index.jsonl`
-  - `state_5.sqlite`
-  - `state_5.sqlite-shm`
-  - `state_5.sqlite-wal`
-  - `logs_2.sqlite`
-  - `logs_2.sqlite-shm`
-  - `logs_2.sqlite-wal`
-- Codex runtime directories such as `sessions`, `log`, cache, sandbox, and temp
-  directories remain per-agent.
+- Codex SQLite databases such as `state_5.sqlite*` and `logs_2.sqlite*` remain
+  per-agent because SQLite journal/WAL files are path-sensitive and are not safe
+  to hardlink across independent `CODEX_HOME` directories.
+- Codex runtime directories such as `sessions`, `log`, cache, sandbox, temp, and
+  generated database files remain per-agent.
 - Codex system skills remain under `CODEX_HOME/skills/.system`
 - Wardian-assigned skills are projected into `CODEX_HOME/skills/<skill-name>`
 
