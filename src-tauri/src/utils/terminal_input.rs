@@ -11,19 +11,13 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
         .to_string()
 }
 
-pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
+pub fn provider_submit_chunks(_provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
 
-    let submit_key = if provider_name == "codex" {
-        b"\x1b\r".to_vec()
-    } else {
-        TERMINAL_SUBMIT_KEY.to_vec()
-    };
-
-    Ok(vec![normalized.into_bytes(), submit_key])
+    Ok(vec![normalized.into_bytes(), TERMINAL_SUBMIT_KEY.to_vec()])
 }
 
 pub async fn submit_prompt_chunks_via_sender(

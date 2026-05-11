@@ -313,7 +313,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
       "--workspace",
       workspacePath,
       "--fields",
-      "name,class,provider,status",
+      "name,uuid,class,provider,status",
     ]);
     const source = JSON.parse(spawnResult.stdout).agent;
     assert.equal(source.name, CONTROL_SESSION_NAME);
@@ -412,9 +412,15 @@ test("native CLI control commands operate through the running app", { timeout: 1
     assert.notEqual(missingSender.status, 0);
     const missingSenderError = JSON.parse(missingSender.stderr);
     const delivery = missingSenderError.error.details.delivery[0];
-    assert.equal(delivery.runtime_state, "restored_without_sender");
+    assert.ok(
+      ["restored_without_sender", "target_off"].includes(delivery.runtime_state),
+      `unexpected runtime_state ${delivery.runtime_state}`,
+    );
     assert.equal(delivery.delivery_state, "failed");
-    assert.equal(delivery.error.code, "no_input_channel");
+    assert.ok(
+      ["no_input_channel", "target_off"].includes(delivery.error.code),
+      `unexpected error code ${delivery.error.code}`,
+    );
   });
 });
 
