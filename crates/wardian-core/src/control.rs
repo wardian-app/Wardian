@@ -42,6 +42,8 @@ pub enum ControlRequest {
         target: String,
         message: String,
         thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<MessageOrigin>,
     },
     AgentWatch {
         target: String,
@@ -52,6 +54,12 @@ pub enum ControlRequest {
         follow: bool,
         timeout_ms: Option<u64>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageOrigin {
+    WardianAgent { session_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,10 +290,46 @@ mod tests {
             target: "all".to_string(),
             message: "hello".to_string(),
             thread: None,
+            origin: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"send_message""#));
         assert!(json.contains(r#""target":"all""#));
+        assert!(!json.contains(r#""origin""#));
+    }
+
+    #[test]
+    fn send_message_request_serializes_agent_origin() {
+        let req = ControlRequest::SendMessage {
+            target: "CoderOne".to_string(),
+            message: "hello".to_string(),
+            thread: None,
+            origin: Some(MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+
+        assert!(json.contains(r#""origin""#));
+        assert!(json.contains(r#""kind":"wardian_agent""#));
+        assert!(json.contains(r#""session_id":"source-1""#));
+    }
+
+    #[test]
+    fn send_message_request_accepts_missing_origin() {
+        let json = r#"{"command":"send_message","target":"all","message":"hello","thread":null}"#;
+        let req: ControlRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            req,
+            ControlRequest::SendMessage {
+                target: "all".to_string(),
+                message: "hello".to_string(),
+                thread: None,
+                origin: None,
+            }
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, DeliveryDetail,
-    SendMessageResponse, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
+    MessageOrigin, SendMessageResponse, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
@@ -313,6 +313,7 @@ pub fn send_message(
             target: target.to_string(),
             message: message.to_string(),
             thread: thread.map(str::to_string),
+            origin: current_message_origin(),
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
@@ -501,6 +502,14 @@ fn watch_timeout_for(requested: Duration) -> Duration {
     requested + Duration::from_secs(5)
 }
 
+fn current_message_origin() -> Option<MessageOrigin> {
+    std::env::var("WARDIAN_SESSION_ID")
+        .ok()
+        .map(|session_id| session_id.trim().to_string())
+        .filter(|session_id| !session_id.is_empty())
+        .map(|session_id| MessageOrigin::WardianAgent { session_id })
+}
+
 fn wait_agent_until_after_snapshot(
     target: &str,
     until: &str,
@@ -661,6 +670,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use wardian_core::control::MessageOrigin;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn spawn_and_clone_use_longer_control_timeout() {
@@ -674,6 +690,31 @@ mod tests {
             operation_timeout(&ControlOperation::SendMessage),
             CONTROL_MUTATION_TIMEOUT
         );
+    }
+
+    #[test]
+    fn current_message_origin_uses_wardian_session_id() {
+        let _guard = env_lock();
+        std::env::set_var("WARDIAN_SESSION_ID", "source-1");
+
+        assert_eq!(
+            current_message_origin(),
+            Some(MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string()
+            })
+        );
+
+        std::env::remove_var("WARDIAN_SESSION_ID");
+    }
+
+    #[test]
+    fn current_message_origin_ignores_blank_session_id() {
+        let _guard = env_lock();
+        std::env::set_var("WARDIAN_SESSION_ID", "   ");
+
+        assert_eq!(current_message_origin(), None);
+
+        std::env::remove_var("WARDIAN_SESSION_ID");
     }
 
     #[test]

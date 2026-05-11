@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, DeliveryDetail,
-    DeliveryErrorDetail, OkResponse, SendMessageResponse, WatchAgentSnapshot,
+    DeliveryErrorDetail, MessageOrigin, OkResponse, SendMessageResponse, WatchAgentSnapshot,
     WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
@@ -195,11 +195,18 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             target,
             message,
             thread,
+            origin,
         } => {
             let state = app.state::<AppState>();
-            let delivery =
-                deliver_message_to_target(Some(app), &state, &target, &message, thread.as_deref())
-                    .await?;
+            let delivery = deliver_message_to_target(
+                Some(app),
+                &state,
+                &target,
+                &message,
+                thread.as_deref(),
+                origin.as_ref(),
+            )
+            .await?;
             ok_json(&SendMessageResponse {
                 schema: wardian_core::control::CONTROL_SCHEMA,
                 ok: true,
@@ -345,6 +352,7 @@ async fn deliver_message_to_target(
     target: &str,
     message: &str,
     thread: Option<&str>,
+    origin: Option<&MessageOrigin>,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
     validate_send_message_thread(thread)?;
     let session_ids = resolve_send_targets_in_state(state, target).await;
@@ -366,6 +374,7 @@ async fn deliver_message_to_target(
             .collect::<std::collections::HashMap<_, _>>()
     };
 
+    let message = message_with_origin(state, message, origin).await;
     let mut delivered = 0usize;
     let mut delivered_session_ids = Vec::new();
     let mut failures = Vec::new();
@@ -378,7 +387,7 @@ async fn deliver_message_to_target(
                         crate::utils::terminal_input::submit_prompt_chunks_via_sender(
                             &tx,
                             &info.provider,
-                            message,
+                            &message,
                         )
                         .await
                     }
@@ -449,6 +458,32 @@ async fn deliver_message_to_target(
         .with_details(delivery_details_json(&delivery)));
     }
     Ok(delivery)
+}
+
+async fn message_with_origin(
+    state: &AppState,
+    message: &str,
+    origin: Option<&MessageOrigin>,
+) -> String {
+    let Some(MessageOrigin::WardianAgent { session_id }) = origin else {
+        return message.to_string();
+    };
+
+    match resolve_agent_name_in_state(state, session_id).await {
+        Some(name) => format!("From {name}: {message}"),
+        None => format!("From Wardian agent {session_id}: {message}"),
+    }
+}
+
+async fn resolve_agent_name_in_state(state: &AppState, session_id: &str) -> Option<String> {
+    let agents = state.agents.lock().await;
+    agents.get(session_id).and_then(|agent| {
+        agent
+            .config
+            .lock()
+            .map(|config| config.session_name.clone())
+            .ok()
+    })
 }
 
 async fn wait_for_terminal_ready_for_control_send(
@@ -1231,7 +1266,7 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(None, &state, "OpenCodeOne", "hello", None)
+        deliver_message_to_target(None, &state, "OpenCodeOne", "hello", None, None)
             .await
             .unwrap();
 
@@ -1409,7 +1444,7 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(None, &state, "CoderOne", "hello", None)
+        deliver_message_to_target(None, &state, "CoderOne", "hello", None, None)
             .await
             .unwrap();
 
@@ -1427,10 +1462,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_delivery_prefixes_agent_origin_with_sender_name() {
+        let state = AppState::new();
+        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "check this",
+            None,
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            b"From PlannerOne: check this".to_vec()
+        );
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+    }
+
+    #[tokio::test]
     async fn message_delivery_reports_missing_target_as_not_found() {
         let state = AppState::new();
 
-        let error = deliver_message_to_target(None, &state, "ghost", "hello", None)
+        let error = deliver_message_to_target(None, &state, "ghost", "hello", None, None)
             .await
             .unwrap_err();
 
@@ -1445,7 +1512,7 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
 
-        let error = deliver_message_to_target(None, &state, "agent-1", "hello", None)
+        let error = deliver_message_to_target(None, &state, "agent-1", "hello", None, None)
             .await
             .unwrap_err();
 
@@ -1473,7 +1540,7 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        let error = deliver_message_to_target(None, &state, "class:Coder", "hello", None)
+        let error = deliver_message_to_target(None, &state, "class:Coder", "hello", None, None)
             .await
             .unwrap_err();
 
@@ -1505,7 +1572,7 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(None, &state, "CoderOne", "hello", None)
+        deliver_message_to_target(None, &state, "CoderOne", "hello", None, None)
             .await
             .unwrap();
 
