@@ -95,10 +95,20 @@ Codex does not treat `--add-dir` as a skill-discovery mechanism. Wardian therefo
 
 Current model:
 
-- shared Codex files copied into each agent home:
+- shared Codex files projected into each agent home:
   - `auth.json`
   - `config.toml`
   - `cap_sid`
+  - `history.jsonl`
+  - `session_index.jsonl`
+  - `state_5.sqlite`
+  - `state_5.sqlite-shm`
+  - `state_5.sqlite-wal`
+  - `logs_2.sqlite`
+  - `logs_2.sqlite-shm`
+  - `logs_2.sqlite-wal`
+- Codex runtime directories such as `sessions`, `log`, cache, sandbox, and temp
+  directories remain per-agent.
 - Codex system skills remain under `CODEX_HOME/skills/.system`
 - Wardian-assigned skills are projected into `CODEX_HOME/skills/<skill-name>`
 
