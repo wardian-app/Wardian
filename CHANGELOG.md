@@ -4,6 +4,36 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.5](https://github.com/tangemicioglu/Wardian/compare/v0.3.4...v0.3.5) (2026-05-12)
+
+
+### Features
+
+* **agent:** add custom clone flow ([#220](https://github.com/tangemicioglu/Wardian/issues/220)) ([3589c2d](https://github.com/tangemicioglu/Wardian/commit/3589c2d760d916811b6928f3c5117f915f659d05))
+* **cli:** add ask command for one-turn agent queries ([#215](https://github.com/tangemicioglu/Wardian/issues/215)) ([55cd1e8](https://github.com/tangemicioglu/Wardian/commit/55cd1e8a576c7cdcbe35bf88447a1d591b9ceccc))
+* **cli:** add worktree and watchlist parity slice ([#242](https://github.com/tangemicioglu/Wardian/issues/242)) ([daa6e18](https://github.com/tangemicioglu/Wardian/commit/daa6e18eb5decf60b12a21a500b6dca6479578e2))
+* **worktrees:** support shared agent worktrees ([#223](https://github.com/tangemicioglu/Wardian/issues/223)) ([263f5b9](https://github.com/tangemicioglu/Wardian/commit/263f5b991132444c35f7bbd506445c9b0645f2a0))
+
+
+### Bug Fixes
+
+* **agent-status:** gate live status transitions ([#236](https://github.com/tangemicioglu/Wardian/issues/236)) ([6aad196](https://github.com/tangemicioglu/Wardian/commit/6aad1965d9c992b48b517030b9ee0ae6f6e5baed))
+* **agents:** keep cloned agents in source team ([#225](https://github.com/tangemicioglu/Wardian/issues/225)) ([9b19b77](https://github.com/tangemicioglu/Wardian/commit/9b19b77d443ebf158713a1a97c9aec4d625191e5))
+* **codex:** share Windows sandbox support ([#238](https://github.com/tangemicioglu/Wardian/issues/238)) ([5bd6e80](https://github.com/tangemicioglu/Wardian/commit/5bd6e80a006d61bece9711990d980c30d7491dc3))
+* **control:** stabilize provider agent communication ([#222](https://github.com/tangemicioglu/Wardian/issues/222)) ([032faf4](https://github.com/tangemicioglu/Wardian/commit/032faf4a9c2202be661a79780457d6fb3030fd3b))
+* **queue:** prevent overflow cards from shrinking ([#227](https://github.com/tangemicioglu/Wardian/issues/227)) ([9946f11](https://github.com/tangemicioglu/Wardian/commit/9946f11ea519b823281b2496b10cf647f74dd728))
+* **release:** publish unified installers ([#206](https://github.com/tangemicioglu/Wardian/issues/206)) ([2c297ef](https://github.com/tangemicioglu/Wardian/commit/2c297efda9848447e9dbf04d270b2eba4d7b3f35))
+* **watchlist:** preserve Claude last queried on launch ([#247](https://github.com/tangemicioglu/Wardian/issues/247)) ([f327e22](https://github.com/tangemicioglu/Wardian/commit/f327e22be017a566539ae47ef8172297b834461b))
+* **workflows:** detect live agent turn completion ([#230](https://github.com/tangemicioglu/Wardian/issues/230)) ([4231116](https://github.com/tangemicioglu/Wardian/commit/423111633cd26607fe6288c8eaa77e4fed8a2cbc))
+
+
+### Documentation
+
+* add core feature screenshots ([#233](https://github.com/tangemicioglu/Wardian/issues/233)) ([a5450f2](https://github.com/tangemicioglu/Wardian/commit/a5450f21bc1c9411cd0cd9786b56fd23f1d05795))
+* highlight CLI, Queue, and workflows ([#249](https://github.com/tangemicioglu/Wardian/issues/249)) ([bd6f98e](https://github.com/tangemicioglu/Wardian/commit/bd6f98e9492b945e375073c44acde4a7613c0d51))
+* **research:** add roadmap reference maps ([#240](https://github.com/tangemicioglu/Wardian/issues/240)) ([042326c](https://github.com/tangemicioglu/Wardian/commit/042326c38388c21cc4fd46dac052f1e0e5eacfa0))
+* specify custom agent clone ([86d9f60](https://github.com/tangemicioglu/Wardian/commit/86d9f60e3d8865b0f1790b4ae065a092281084b8))
+
 ## [0.3.4](https://github.com/tangemicioglu/Wardian/compare/v0.3.3...v0.3.4) (2026-05-04)
 
 
