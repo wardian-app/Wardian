@@ -1,5 +1,10 @@
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 pub struct ClaudePermissionHookPaths {
     pub settings_arg: String,
@@ -382,6 +387,8 @@ pub(crate) fn sync_codex_agent_home(
         }
     }
 
+    sync_codex_windows_sandbox_support(real_codex_home, projected_home)?;
+
     let projected_skills = projected_home.join("skills");
     std::fs::create_dir_all(&projected_skills).map_err(|e| e.to_string())?;
 
@@ -406,6 +413,85 @@ pub(crate) fn sync_codex_agent_home(
 }
 
 const CODEX_SHARED_HOME_FILES: &[&str] = &["auth.json", "config.toml", "cap_sid"];
+
+#[cfg(windows)]
+const CODEX_WINDOWS_SHARED_SANDBOX_DIRS: &[&str] = &[".sandbox-secrets", ".sandbox-bin"];
+
+#[cfg(windows)]
+const CODEX_WINDOWS_SANDBOX_SETUP_FILES: &[&str] = &["setup_marker.json"];
+
+pub(crate) fn sync_codex_windows_sandbox_support(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        for shared_name in CODEX_WINDOWS_SHARED_SANDBOX_DIRS {
+            let source = real_codex_home.join(shared_name);
+            if source.is_dir() {
+                project_directory_link(&source, &projected_home.join(shared_name))?;
+            }
+        }
+
+        let real_sandbox = real_codex_home.join(".sandbox");
+        if real_sandbox.is_dir() {
+            let projected_sandbox = projected_home.join(".sandbox");
+            std::fs::create_dir_all(&projected_sandbox).map_err(|e| e.to_string())?;
+            for file_name in CODEX_WINDOWS_SANDBOX_SETUP_FILES {
+                let source = real_sandbox.join(file_name);
+                if source.is_file() {
+                    project_file(&source, &projected_sandbox.join(file_name))?;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (real_codex_home, projected_home);
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn project_directory_link(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    if projected_link_matches_target(target, source) {
+        return Ok(());
+    }
+
+    remove_projected_path(target)?;
+    create_directory_link(source, target)
+}
+
+#[cfg(windows)]
+fn remove_projected_path(path: &std::path::Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        if metadata.is_dir() {
+            return std::fs::remove_dir(path)
+                .or_else(|_| std::fs::remove_file(path))
+                .map_err(|e| e.to_string());
+        }
+        return std::fs::remove_file(path)
+            .or_else(|_| std::fs::remove_dir(path))
+            .map_err(|e| e.to_string());
+    }
+
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
 
 const CODEX_LEGACY_GLOBAL_HARDLINK_GROUPS: &[(&str, &[&str], bool)] = &[
     ("history.jsonl", &[], true),
@@ -883,6 +969,117 @@ mod tests {
         assert!(!projected_home.join("logs_2.sqlite-wal").exists());
         assert!(!projected_home.join("sandbox.log").exists());
         assert!(!projected_home.join("sessions").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_home_projection_shares_windows_sandbox_support_without_runtime_logs() {
+        let root = unique_temp_dir("codex-home-windows-sandbox-support");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+        let wardian_skills = root.join("wardian-skills");
+        let stale_secrets_target = root.join("stale-secrets-target");
+
+        std::fs::create_dir_all(real_home.join(".sandbox-secrets")).expect("create real secrets");
+        std::fs::create_dir_all(real_home.join(".sandbox-bin")).expect("create real helpers");
+        std::fs::create_dir_all(real_home.join(".sandbox")).expect("create real sandbox");
+        std::fs::create_dir_all(projected_home.join(".sandbox")).expect("create local sandbox");
+        std::fs::create_dir_all(&wardian_skills).expect("create wardian skills");
+        std::fs::create_dir_all(&stale_secrets_target).expect("create stale secrets target");
+
+        std::fs::write(
+            real_home
+                .join(".sandbox-secrets")
+                .join("sandbox_users.json"),
+            "real secrets",
+        )
+        .expect("write real secrets");
+        std::fs::write(
+            real_home
+                .join(".sandbox-bin")
+                .join("codex-command-runner.exe"),
+            "runner",
+        )
+        .expect("write helper");
+        std::fs::write(
+            real_home.join(".sandbox").join("setup_marker.json"),
+            "real setup marker",
+        )
+        .expect("write marker");
+        std::fs::write(real_home.join(".sandbox").join("sandbox.log"), "real log")
+            .expect("write real log");
+        std::fs::write(
+            real_home.join(".sandbox").join("setup_error.json"),
+            "real setup error",
+        )
+        .expect("write real setup error");
+        std::fs::write(
+            projected_home.join(".sandbox").join("sandbox.log"),
+            "agent log",
+        )
+        .expect("write projected log");
+        std::fs::write(
+            projected_home.join(".sandbox").join("setup_error.json"),
+            "agent setup error",
+        )
+        .expect("write projected setup error");
+        std::fs::write(stale_secrets_target.join("sentinel.txt"), "do not delete")
+            .expect("write stale target sentinel");
+        create_directory_link(
+            &stale_secrets_target,
+            &projected_home.join(".sandbox-secrets"),
+        )
+        .expect("create stale projected secrets link");
+
+        sync_codex_agent_home(&real_home, &projected_home, &wardian_skills)
+            .expect("sync codex agent home");
+
+        assert!(projected_link_matches_target(
+            &projected_home.join(".sandbox-secrets"),
+            &real_home.join(".sandbox-secrets")
+        ));
+        assert!(projected_link_matches_target(
+            &projected_home.join(".sandbox-bin"),
+            &real_home.join(".sandbox-bin")
+        ));
+        assert!(
+            !projected_link_matches_target(
+                &projected_home.join(".sandbox"),
+                &real_home.join(".sandbox")
+            ),
+            "the sandbox runtime directory must stay per-agent"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                projected_home
+                    .join(".sandbox-secrets")
+                    .join("sandbox_users.json")
+            )
+            .expect("read projected secrets"),
+            "real secrets"
+        );
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join(".sandbox").join("setup_marker.json"))
+                .expect("read projected marker"),
+            "real setup marker"
+        );
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join(".sandbox").join("sandbox.log"))
+                .expect("read projected log"),
+            "agent log"
+        );
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join(".sandbox").join("setup_error.json"))
+                .expect("read projected setup error"),
+            "agent setup error"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stale_secrets_target.join("sentinel.txt"))
+                .expect("stale target should not be deleted when replacing junction"),
+            "do not delete"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -30,7 +30,9 @@ We will add Codex as a first-class provider in the Rust backend and expose it in
 
 ### 3. Codex Native Projection
 - Codex receives a projected `CODEX_HOME` inside the habitat rather than reading Wardian context directly from `--add-dir`.
-- The projected Codex home preserves native Codex state by mirroring the user’s real `~/.codex` home for auth, config, sessions, and logs.
+- The projected Codex home preserves only shared native Codex profile files from the user's real Codex home: `auth.json`, `config.toml`, and `cap_sid`.
+- Per-session Codex state remains local to the Wardian agent home, including `history.jsonl`, `session_index.jsonl`, `sessions/**`, provider logs, and SQLite state.
+- On Windows, Codex elevated sandbox support is projected narrowly: `.sandbox-secrets` and `.sandbox-bin` are shared, and `.sandbox/setup_marker.json` is copied. The `.sandbox` runtime directory itself remains local so sandbox logs and setup errors are not merged across agents.
 - The projected `skills/` directory overlays Wardian’s merged skill set on top of the user’s existing Codex skills and system skills.
 
 ### 4. Telemetry
