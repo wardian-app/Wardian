@@ -28,6 +28,18 @@ pub enum ControlRequest {
         target: String,
         name: Option<String>,
     },
+    AgentWorktreeList,
+    AgentWorktreeEnable {
+        target: String,
+        name: Option<String>,
+    },
+    AgentWorktreeJoin {
+        target: String,
+        worktree: String,
+    },
+    AgentWorktreeDisable {
+        target: String,
+    },
     WorkflowList,
     WorkflowShow {
         target: String,
@@ -174,6 +186,49 @@ impl AgentResponse {
             agent,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentWorktreeSummary {
+    pub id: String,
+    pub name: String,
+    pub source_folder: String,
+    pub worktree_folder: String,
+    pub member_agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentWorktreeListResponse {
+    pub schema: u8,
+    pub worktrees: Vec<AgentWorktreeSummary>,
+}
+
+impl AgentWorktreeListResponse {
+    pub fn new(worktrees: Vec<AgentWorktreeSummary>) -> Self {
+        Self {
+            schema: CONTROL_SCHEMA,
+            worktrees,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentWorktreeMutationResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub action: String,
+    pub agent: AgentIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<AgentWorktreeSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_worktree: Option<AgentWorktreeSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    pub cleared_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -349,6 +404,77 @@ mod tests {
         assert!(json.contains(r#""command":"agent_watch""#));
         assert!(json.contains(r#""target":"Wardian-Codex""#));
         assert!(json.contains(r#""until":"status:idle""#));
+    }
+
+    #[test]
+    fn agent_worktree_requests_serialize() {
+        let list = serde_json::to_string(&ControlRequest::AgentWorktreeList).unwrap();
+        assert!(list.contains(r#""command":"agent_worktree_list""#));
+
+        let enable = serde_json::to_string(&ControlRequest::AgentWorktreeEnable {
+            target: "coder-a1".to_string(),
+            name: Some("review fixes".to_string()),
+        })
+        .unwrap();
+        assert!(enable.contains(r#""command":"agent_worktree_enable""#));
+        assert!(enable.contains(r#""target":"coder-a1""#));
+        assert!(enable.contains(r#""name":"review fixes""#));
+
+        let join = serde_json::to_string(&ControlRequest::AgentWorktreeJoin {
+            target: "coder-a1".to_string(),
+            worktree: "D:/repo/worktrees/review".to_string(),
+        })
+        .unwrap();
+        assert!(join.contains(r#""command":"agent_worktree_join""#));
+        assert!(join.contains(r#""worktree":"D:/repo/worktrees/review""#));
+
+        let disable = serde_json::to_string(&ControlRequest::AgentWorktreeDisable {
+            target: "coder-a1".to_string(),
+        })
+        .unwrap();
+        assert!(disable.contains(r#""command":"agent_worktree_disable""#));
+    }
+
+    #[test]
+    fn agent_worktree_response_serializes_automation_fields() {
+        let response = AgentWorktreeMutationResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            action: "enable".to_string(),
+            agent: AgentResponse::new(AgentIdentity {
+                name: "coder-a1".to_string(),
+                uuid: "uuid-1".to_string(),
+                class: "Coder".to_string(),
+                provider: "codex".to_string(),
+                status: "processing".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: Some("D:/repo/worktrees/review".to_string()),
+                last_status_at: None,
+                status_source: crate::identity::StatusSource::Live,
+            })
+            .agent,
+            worktree: Some(AgentWorktreeSummary {
+                id: "D:/repo/worktrees/review".to_string(),
+                name: "review".to_string(),
+                source_folder: "D:/repo".to_string(),
+                worktree_folder: "D:/repo/worktrees/review".to_string(),
+                member_agent_ids: vec!["uuid-1".to_string()],
+            }),
+            previous_worktree: None,
+            previous_workspace: Some("D:/repo".to_string()),
+            current_workspace: Some("D:/repo/worktrees/review".to_string()),
+            branch_name: Some("wardian/review".to_string()),
+            cleared_session: true,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert!(json.contains(r#""schema":1"#));
+        assert!(json.contains(r#""action":"enable""#));
+        assert!(json.contains(r#""source_folder":"D:/repo""#));
+        assert!(json.contains(r#""member_agent_ids":["uuid-1"]"#));
+        assert!(json.contains(r#""cleared_session":true"#));
     }
 
     #[test]

@@ -46,9 +46,17 @@ wardian agent pause <name-or-uuid>
 wardian agent resume <name-or-uuid>
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
 wardian agent clone <name-or-uuid> --name coder-a2
+wardian agent worktree list
+wardian agent worktree enable <name-or-uuid> --name review-fixes
+wardian agent worktree join <name-or-uuid> --worktree <absolute-worktree-path-or-id>
+wardian agent worktree disable <name-or-uuid>
 wardian agent wait reviewer-a1 --until idle --timeout 10m
 wardian agent wait reviewer-a1 --until idle --next --timeout 10m
 wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output,delivery --timeout 10m
+wardian team list
+wardian team show <team-name-or-id>
+wardian watchlist list
+wardian watchlist show <watchlist-name-or-id>
 wardian workflow list
 wardian workflow show <id-or-name>
 wardian workflow run <id>
@@ -60,11 +68,15 @@ wardian send "status?" --to class:Coder
 wardian send "stand down" --to all
 ```
 
-Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, `workflow run`, `workflow stop`, and `send`.
+Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, `workflow run`, `workflow stop`, and `send`.
 
 `workflow list` and `workflow show` try the running app first, then read workflow JSON files from disk when the app is unavailable.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
+
+`agent worktree list` returns the worktrees currently managed by Wardian with source folder, worktree folder, display name, and member agent IDs. `agent worktree enable`, `join`, and `disable` are live-control commands. They reuse the same backend logic as the Source Control panel and force a fresh agent session after changing the runtime workspace. `disable` removes the assignment only; it does not delete the physical worktree folder.
+
+`team list/show` and `watchlist list/show` read the existing watchlist state file. They accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Team mutation and `send --to team:<name>` are not implemented yet.
 
 `agent wait <target> --until <status>` blocks inside the CLI process until a single agent name or UUID reaches a normalized status such as `idle`, `processing`, `action_required`, `off`, or `error`. Plain `wait` returns immediately when the target is already in the requested status. Add `--next` to wait for a newer matching observation. Use `--timeout` with `ms`, `s`, or `m` units.
 

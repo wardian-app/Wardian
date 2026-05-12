@@ -35,6 +35,17 @@ Click any column header to sort by that column. Clicking again cycles through as
 ### Persistence
 Column visibility and sort state are saved to `~/.wardian/watchlists/prefs.json` and restored on next launch.
 
+The CLI can inspect persisted watchlist and team state without starting the desktop app:
+
+```bash
+wardian team list
+wardian team show <team-name-or-id>
+wardian watchlist list
+wardian watchlist show <watchlist-name-or-id>
+```
+
+These commands read the same `watchlists/index.json` file as the GUI and accept both the current v2 state shape with global teams and legacy flat watchlist arrays. They are read-only; team mutation and team send targeting are planned as separate CLI slices.
+
 ## 🗂️ Organizing with Watchlists
 As your swarm grows, a single list becomes difficult to manage. Wardian allows you to group agents into custom **Watchlists**.
 

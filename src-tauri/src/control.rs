@@ -7,7 +7,8 @@ use std::{
 use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, DeliveryDetail,
+    AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
+    AgentWorktreeMutationResponse, AgentWorktreeSummary, ControlRequest, DeliveryDetail,
     DeliveryErrorDetail, MessageOrigin, OkResponse, SendMessageResponse, WatchAgentSnapshot,
     WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
@@ -165,6 +166,24 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             ok_json(&AgentResponse::new(identity))
         }
 
+        ControlRequest::AgentWorktreeList => {
+            let state = app.state::<AppState>();
+            let worktrees = list_agent_worktree_summaries(state).await?;
+            ok_json(&AgentWorktreeListResponse::new(worktrees))
+        }
+
+        ControlRequest::AgentWorktreeEnable { target, name } => {
+            handle_agent_worktree_enable(app, &target, name).await
+        }
+
+        ControlRequest::AgentWorktreeJoin { target, worktree } => {
+            handle_agent_worktree_join(app, &target, &worktree).await
+        }
+
+        ControlRequest::AgentWorktreeDisable { target } => {
+            handle_agent_worktree_disable(app, &target).await
+        }
+
         ControlRequest::WorkflowList => {
             let workflows = crate::workflow_engine::list_workflows().unwrap_or_default();
             ok_json(&WorkflowListResponse::new(workflow_summaries(&workflows)))
@@ -273,6 +292,221 @@ fn workflow_summaries(
             node_count: w.nodes.len(),
         })
         .collect()
+}
+
+async fn list_agent_worktree_summaries(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AgentWorktreeSummary>, ControlError> {
+    crate::commands::agent::list_agent_worktrees(state)
+        .await
+        .map(|worktrees| worktrees.into_iter().map(core_worktree_summary).collect())
+        .map_err(ControlError::request_failed)
+}
+
+fn core_worktree_summary(
+    summary: crate::commands::agent::AgentWorktreeSummary,
+) -> AgentWorktreeSummary {
+    AgentWorktreeSummary {
+        id: summary.id,
+        name: summary.name,
+        source_folder: summary.source_folder,
+        worktree_folder: summary.worktree_folder,
+        member_agent_ids: summary.member_agent_ids,
+    }
+}
+
+fn worktree_for_member(
+    worktrees: &[AgentWorktreeSummary],
+    session_id: &str,
+) -> Option<AgentWorktreeSummary> {
+    worktrees
+        .iter()
+        .find(|worktree| {
+            worktree
+                .member_agent_ids
+                .iter()
+                .any(|member_id| member_id == session_id)
+        })
+        .cloned()
+}
+
+fn worktree_by_folder(
+    worktrees: &[AgentWorktreeSummary],
+    folder: &str,
+) -> Option<AgentWorktreeSummary> {
+    let normalized = folder.trim().replace('\\', "/");
+    worktrees
+        .iter()
+        .find(|worktree| worktree.worktree_folder == normalized || worktree.id == normalized)
+        .cloned()
+}
+
+async fn handle_agent_worktree_enable(
+    app: &AppHandle,
+    target: &str,
+    name: Option<String>,
+) -> Result<String, ControlError> {
+    let uuid = resolve_target_uuid(app, target)
+        .await
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
+    let previous_workspace = agent_workspace(app, &uuid).await;
+    let branch_name = agent_worktree_branch_name(app, &uuid, name.as_deref()).await?;
+
+    let state = app.state::<AppState>();
+    crate::commands::agent::enable_agent_worktree(uuid.clone(), name, state, app.clone())
+        .await
+        .map_err(ControlError::request_failed)?;
+    clear_agent_after_worktree_move(app, &uuid).await?;
+
+    let worktrees = list_agent_worktree_summaries(app.state::<AppState>()).await?;
+    let worktree = worktree_for_member(&worktrees, &uuid);
+    let agent = live_agent_identity(app, &uuid).await?;
+    let response = AgentWorktreeMutationResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        ok: true,
+        action: "enable".to_string(),
+        previous_workspace,
+        current_workspace: agent.workspace.clone(),
+        agent,
+        worktree,
+        previous_worktree: None,
+        branch_name: Some(branch_name),
+        cleared_session: true,
+    };
+    ok_json(&response)
+}
+
+async fn handle_agent_worktree_join(
+    app: &AppHandle,
+    target: &str,
+    worktree: &str,
+) -> Result<String, ControlError> {
+    let uuid = resolve_target_uuid(app, target)
+        .await
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
+    let previous_workspace = agent_workspace(app, &uuid).await;
+    let state = app.state::<AppState>();
+    let before = list_agent_worktree_summaries(app.state::<AppState>()).await?;
+    let target_worktree = worktree_by_folder(&before, worktree).ok_or_else(|| {
+        ControlError::coded(
+            "not_managed_worktree",
+            format!("worktree is not managed by Wardian: {worktree}"),
+        )
+    })?;
+
+    crate::commands::agent::assign_agent_worktree(
+        uuid.clone(),
+        target_worktree.worktree_folder.clone(),
+        state,
+        app.clone(),
+    )
+    .await
+    .map_err(ControlError::request_failed)?;
+    clear_agent_after_worktree_move(app, &uuid).await?;
+
+    let worktrees = list_agent_worktree_summaries(app.state::<AppState>()).await?;
+    let agent = live_agent_identity(app, &uuid).await?;
+    let response = AgentWorktreeMutationResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        ok: true,
+        action: "join".to_string(),
+        previous_workspace,
+        current_workspace: agent.workspace.clone(),
+        agent,
+        worktree: worktree_for_member(&worktrees, &uuid).or(Some(target_worktree)),
+        previous_worktree: None,
+        branch_name: None,
+        cleared_session: true,
+    };
+    ok_json(&response)
+}
+
+async fn handle_agent_worktree_disable(
+    app: &AppHandle,
+    target: &str,
+) -> Result<String, ControlError> {
+    let uuid = resolve_target_uuid(app, target)
+        .await
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
+    let previous_workspace = agent_workspace(app, &uuid).await;
+    let before = list_agent_worktree_summaries(app.state::<AppState>()).await?;
+    let previous_worktree = worktree_for_member(&before, &uuid);
+
+    let state = app.state::<AppState>();
+    crate::commands::agent::disable_agent_worktree(uuid.clone(), state, app.clone())
+        .await
+        .map_err(ControlError::request_failed)?;
+    clear_agent_after_worktree_move(app, &uuid).await?;
+
+    let agent = live_agent_identity(app, &uuid).await?;
+    let response = AgentWorktreeMutationResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        ok: true,
+        action: "disable".to_string(),
+        previous_workspace,
+        current_workspace: agent.workspace.clone(),
+        agent,
+        worktree: None,
+        previous_worktree,
+        branch_name: None,
+        cleared_session: true,
+    };
+    ok_json(&response)
+}
+
+async fn clear_agent_after_worktree_move(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<(), ControlError> {
+    crate::commands::agent::clear_agent_session(
+        session_id.to_string(),
+        app.state::<AppState>(),
+        app.clone(),
+    )
+    .await
+    .map_err(ControlError::request_failed)
+}
+
+async fn agent_worktree_branch_name(
+    app: &AppHandle,
+    session_id: &str,
+    requested_name: Option<&str>,
+) -> Result<String, ControlError> {
+    let state = app.state::<AppState>();
+    let agents = state.agents.lock().await;
+    let agent = agents
+        .get(session_id)
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {session_id}")))?;
+    let config = agent
+        .config
+        .lock()
+        .map_err(|_| ControlError::request_failed("agent config lock poisoned"))?;
+    let source = requested_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&config.session_name);
+    Ok(crate::commands::agent::resolve_agent_worktree_branch_name(
+        source,
+    ))
+}
+
+async fn agent_workspace(app: &AppHandle, session_id: &str) -> Option<String> {
+    let state = app.state::<AppState>();
+    let agents = state.agents.lock().await;
+    let agent = agents.get(session_id)?;
+    let config = agent.config.lock().ok()?;
+    (!config.folder.trim().is_empty()).then(|| config.folder.clone())
+}
+
+async fn live_agent_identity(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<AgentIdentity, ControlError> {
+    live_agent_snapshots(app)
+        .await
+        .into_iter()
+        .find(|agent| agent.uuid == session_id)
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {session_id}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,6 +1627,41 @@ mod tests {
         assert_eq!(summaries[1].node_count, 0);
     }
 
+    #[test]
+    fn worktree_by_folder_matches_normalized_folder_or_id() {
+        let worktrees = vec![AgentWorktreeSummary {
+            id: "C:/repo/worktrees/review".to_string(),
+            name: "review".to_string(),
+            source_folder: "C:/repo".to_string(),
+            worktree_folder: "C:/repo/worktrees/review".to_string(),
+            member_agent_ids: vec!["agent-1".to_string()],
+        }];
+
+        let matched = worktree_by_folder(&worktrees, "C:\\repo\\worktrees\\review").unwrap();
+
+        assert_eq!(matched.id, "C:/repo/worktrees/review");
+    }
+
+    #[test]
+    fn worktree_for_member_returns_member_summary() {
+        let worktrees = vec![AgentWorktreeSummary {
+            id: "C:/repo/worktrees/review".to_string(),
+            name: "review".to_string(),
+            source_folder: "C:/repo".to_string(),
+            worktree_folder: "C:/repo/worktrees/review".to_string(),
+            member_agent_ids: vec!["agent-1".to_string(), "agent-2".to_string()],
+        }];
+
+        assert_eq!(
+            worktree_for_member(&worktrees, "agent-2")
+                .unwrap()
+                .name
+                .as_str(),
+            "review"
+        );
+        assert!(worktree_for_member(&worktrees, "missing").is_none());
+    }
+
     #[tokio::test]
     async fn target_resolution_matches_uuid_or_session_name() {
         let state = AppState::new();
@@ -1573,10 +1842,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            rx.recv().await.unwrap(),
-            b"From PlannerOne: yes".to_vec()
-        );
+        assert_eq!(rx.recv().await.unwrap(), b"From PlannerOne: yes".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
     }
 

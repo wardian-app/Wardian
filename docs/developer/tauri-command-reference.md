@@ -32,6 +32,8 @@ This page documents the current command surface registered in `src-tauri/src/lib
 Worktree commands update agent config only. UI callers that move an agent between the source checkout and a worktree must follow the config command with `clear_agent_session` so the provider starts fresh in the new workspace instead of resuming across a cwd change.
 `enable_agent_worktree` accepts an optional `worktree_name`; when present, Wardian uses it for the `wardian/<slug>` branch and the per-agent `worktrees/<slug>` folder.
 
+The live control protocol exposes CLI wrappers for the same worktree operations: `agent_worktree_list`, `agent_worktree_enable`, `agent_worktree_join`, and `agent_worktree_disable`. Unlike the raw Tauri worktree commands, the control mutation handlers call `clear_agent_session` after moving an agent workspace so CLI behavior matches the GUI flow.
+
 ## Terminal (`commands/terminal.rs`)
 
 - `send_input_to_agent`
@@ -55,6 +57,8 @@ Worktree commands update agent config only. UI callers that move an agent betwee
 
 - `load_watchlists`
 - `save_watchlists`
+
+The CLI read-only `team` and `watchlist` commands read `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays but do not use a separate persistence format.
 
 ## Filesystem and Explorer (`commands/fs.rs`)
 

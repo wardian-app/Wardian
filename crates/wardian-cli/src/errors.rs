@@ -54,11 +54,21 @@ impl CliError {
     }
 
     pub fn not_found(requested: &str) -> Self {
+        Self::not_found_entity("Agent", requested)
+    }
+
+    pub fn not_found_entity(entity: &'static str, requested: &str) -> Self {
         Self {
             exit_code: ExitCode::NotFound,
             code: "not_found",
-            message: format!("Agent was not found: {requested}"),
-            hint: Some("Run `wardian agent list --scope all` to inspect known agents.".to_string()),
+            message: format!("{entity} was not found: {requested}"),
+            hint: Some(match entity {
+                "Team" => "Run `wardian team list` to inspect known teams.".to_string(),
+                "Watchlist" => {
+                    "Run `wardian watchlist list` to inspect known watchlists.".to_string()
+                }
+                _ => "Run `wardian agent list --scope all` to inspect known agents.".to_string(),
+            }),
             details: Some(Box::new(serde_json::json!({ "requested": requested }))),
         }
     }
