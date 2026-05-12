@@ -1,3 +1,4 @@
+use crate::utils::CodexRuntimePolicy;
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::AgentConfig;
 
@@ -78,25 +79,31 @@ impl CodexProvider {
             }
         }
 
-        if let Some(sandbox_mode) = config
-            .codex_sandbox_mode
-            .as_ref()
-            .filter(|mode| !mode.trim().is_empty())
-            .cloned()
-        {
-            args.push("--sandbox".into());
-            args.push(sandbox_mode);
-        }
-
-        if let Some(ref approval_policy) = config.codex_approval_policy {
-            if !approval_policy.trim().is_empty() {
-                args.push("--ask-for-approval".into());
-                args.push(approval_policy.clone());
+        let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+        let effective_policy = effective_codex_runtime_policy(config, &runtime_policy);
+        if effective_policy.full_auto {
+            #[cfg(target_os = "windows")]
+            {
+                // Codex can still inherit `[windows].sandbox = "elevated"` from
+                // config.toml, which launches a UAC setup helper during tool
+                // execution even when the session is otherwise in YOLO mode.
+                // `unelevated` is Codex's non-admin Windows sandbox backend;
+                // the top-level bypass flag still requests unsandboxed tools,
+                // and this prevents a fallback path from using UAC.
+                args.push("-c".into());
+                args.push(r#"windows.sandbox="unelevated""#.into());
             }
-        }
+            args.push("--dangerously-bypass-approvals-and-sandbox".into());
+        } else {
+            if !effective_policy.sandbox_mode.trim().is_empty() {
+                args.push("--sandbox".into());
+                args.push(effective_policy.sandbox_mode);
+            }
 
-        if config.codex_full_auto.unwrap_or(false) {
-            args.push("--full-auto".into());
+            if !effective_policy.approval_policy.trim().is_empty() {
+                args.push("--ask-for-approval".into());
+                args.push(effective_policy.approval_policy);
+            }
         }
 
         if config.codex_search.unwrap_or(false) {
@@ -137,6 +144,40 @@ impl CodexProvider {
             args.push("--add-dir".into());
             args.push(dir);
         }
+    }
+}
+
+fn effective_codex_runtime_policy(
+    config: &AgentConfig,
+    global_policy: &CodexRuntimePolicy,
+) -> CodexRuntimePolicy {
+    let explicit_sandbox = config
+        .codex_sandbox_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let explicit_approval = config
+        .codex_approval_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let explicit_policy = explicit_sandbox.is_some() || explicit_approval.is_some();
+    let full_auto = config.codex_full_auto.unwrap_or({
+        if explicit_policy {
+            false
+        } else {
+            global_policy.full_auto
+        }
+    });
+
+    CodexRuntimePolicy {
+        sandbox_mode: explicit_sandbox
+            .unwrap_or(global_policy.sandbox_mode.as_str())
+            .to_string(),
+        approval_policy: explicit_approval
+            .unwrap_or(global_policy.approval_policy.as_str())
+            .to_string(),
+        full_auto,
     }
 }
 
@@ -377,7 +418,72 @@ mod tests {
 
         let args = p.get_spawn_args(&config, false);
 
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!args.contains(&"--sandbox".to_string()));
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
+        assert!(!args.contains(&"--full-auto".to_string()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn full_auto_disables_windows_elevated_sandbox_backend() {
+        let p = make_provider();
+        let config = AgentConfig::default();
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == r#"windows.sandbox="unelevated""#));
+    }
+
+    #[test]
+    fn explicit_codex_sandbox_policy_disables_global_full_auto_default() {
+        let policy = CodexRuntimePolicy::default();
+        let config = AgentConfig {
+            codex_sandbox_mode: Some("workspace-write".into()),
+            codex_approval_policy: Some("on-request".into()),
+            codex_full_auto: Some(false),
+            ..Default::default()
+        };
+
+        let effective = effective_codex_runtime_policy(&config, &policy);
+
+        assert!(!effective.full_auto);
+        assert_eq!(effective.sandbox_mode, "workspace-write");
+        assert_eq!(effective.approval_policy, "on-request");
+    }
+
+    #[test]
+    fn explicit_codex_full_auto_uses_bypass_even_with_policy_values() {
+        let p = make_provider();
+        let config = AgentConfig {
+            codex_full_auto: Some(true),
+            codex_sandbox_mode: Some("workspace-write".into()),
+            codex_approval_policy: Some("on-request".into()),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(!args.contains(&"--sandbox".to_string()));
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
+    }
+
+    #[test]
+    fn explicit_codex_full_auto_false_disables_global_full_auto_default() {
+        let policy = CodexRuntimePolicy::default();
+        let config = AgentConfig {
+            codex_full_auto: Some(false),
+            ..Default::default()
+        };
+
+        let effective = effective_codex_runtime_policy(&config, &policy);
+
+        assert!(!effective.full_auto);
+        assert_eq!(effective.sandbox_mode, "danger-full-access");
+        assert_eq!(effective.approval_policy, "never");
     }
 
     #[test]

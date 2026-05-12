@@ -45,6 +45,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     custom_executable,
     custom_args,
     agent_session_persistence,
+    codex_runtime_policy,
     available_shells,
     shell_settings_loaded,
     shells_loaded,
@@ -52,10 +53,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     setCustomExecutable,
     setCustomArgs,
     setAgentSessionPersistence,
+    setCodexSandboxMode,
+    setCodexApprovalPolicy,
+    setCodexFullAuto,
     loadShellSettings,
     loadAvailableShells,
     saveShellSettings,
-    saveAgentSessionPersistence,
   } = useSettingsStore();
   const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "success" | "error">("idle");
   const [patchMessage, setPatchMessage] = useState("");
@@ -139,7 +142,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     setAgentRuntimeStatus("saving");
     setAgentRuntimeMessage("");
     try {
-      await saveAgentSessionPersistence();
+      await saveShellSettings();
       setAgentRuntimeStatus("success");
       setAgentRuntimeMessage("Agent runtime updated.");
       setTimeout(() => {
@@ -236,12 +239,73 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
               onChange={(e) => setAgentSessionPersistence(e.target.value as 'fresh' | 'resume')}
               className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
             >
-              <option value="resume">Resume provider session</option>
-              <option value="fresh">Start fresh on resume</option>
+              <option value="resume">Resume sessions</option>
+              <option value="fresh">Start fresh</option>
             </select>
             <p className="text-[10px] text-muted-neutral leading-relaxed">
               Applies when regular visible agents are resumed from Off. Workflow agent nodes use their own run mode.
             </p>
+
+            <div className="border-t border-wardian-border pt-3 mt-1 flex flex-col gap-3">
+              <div>
+                <h4 className="text-[10px] font-bold text-muted-neutral tracking-wide">Codex Runtime Defaults</h4>
+                <p className="text-[10px] text-muted-neutral leading-relaxed mt-1">
+                  Used when Codex agents do not set explicit advanced sandbox or approval overrides.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3">
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-bold text-primary" htmlFor="codex-sandbox-mode">
+                    Codex sandbox
+                  </label>
+                  <select
+                    id="codex-sandbox-mode"
+                    value={codex_runtime_policy.sandbox_mode}
+                    onChange={(e) => setCodexSandboxMode(e.target.value as typeof codex_runtime_policy.sandbox_mode)}
+                    className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                  >
+                    <option value="danger-full-access">Full access</option>
+                    <option value="workspace-write">Workspace write</option>
+                    <option value="read-only">Read only</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-bold text-primary" htmlFor="codex-approval-policy">
+                    Codex approval
+                  </label>
+                  <select
+                    id="codex-approval-policy"
+                    value={codex_runtime_policy.approval_policy}
+                    onChange={(e) => setCodexApprovalPolicy(e.target.value as typeof codex_runtime_policy.approval_policy)}
+                    className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                  >
+                    <option value="never">Never</option>
+                    <option value="on-request">On request</option>
+                    <option value="on-failure">On failure</option>
+                    <option value="untrusted">Untrusted</option>
+                  </select>
+                </div>
+              </div>
+
+              <label className="text-sm font-bold text-primary flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  aria-label="Autonomous full access, no prompts"
+                  checked={codex_runtime_policy.full_auto}
+                  onChange={(e) => setCodexFullAuto(e.target.checked)}
+                  className="w-4 h-4 mt-0.5 rounded border-wardian-border text-[var(--color-wardian-accent)] focus:ring-[var(--color-wardian-accent)] bg-wardian-input-bg"
+                />
+                <span className="flex flex-col gap-1">
+                  <span>Autonomous full access, no prompts</span>
+                  <span className="text-[10px] font-normal text-muted-neutral leading-relaxed">
+                    Wardian maps this friendly default to the current Codex autonomous execution mode.
+                  </span>
+                </span>
+              </label>
+            </div>
+
             <div className="flex justify-end">
               <button
                 type="button"

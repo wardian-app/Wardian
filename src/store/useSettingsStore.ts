@@ -1,7 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { ShellOption, ShellSettings } from '../types/settings';
+import type {
+  CodexApprovalPolicy,
+  CodexRuntimePolicy,
+  CodexSandboxMode,
+  ShellOption,
+  ShellSettings,
+} from '../types/settings';
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
 export const MAX_TERMINAL_FONT_SIZE = 20;
@@ -50,6 +56,33 @@ export function effectiveTerminalFontFamily(value: string | null | undefined) {
   return trimmed || defaultTerminalFontFamily();
 }
 
+const CODEX_SANDBOX_MODES: CodexSandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'];
+const CODEX_APPROVAL_POLICIES: CodexApprovalPolicy[] = ['untrusted', 'on-failure', 'on-request', 'never'];
+
+export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
+  sandbox_mode: 'danger-full-access',
+  approval_policy: 'never',
+  full_auto: true,
+};
+
+export function normalizeCodexRuntimePolicy(
+  policy: Partial<CodexRuntimePolicy> | null | undefined,
+): CodexRuntimePolicy {
+  const sandboxMode = policy?.sandbox_mode;
+  const approvalPolicy = policy?.approval_policy;
+  return {
+    sandbox_mode: CODEX_SANDBOX_MODES.includes(sandboxMode as CodexSandboxMode)
+      ? sandboxMode as CodexSandboxMode
+      : DEFAULT_CODEX_RUNTIME_POLICY.sandbox_mode,
+    approval_policy: CODEX_APPROVAL_POLICIES.includes(approvalPolicy as CodexApprovalPolicy)
+      ? approvalPolicy as CodexApprovalPolicy
+      : DEFAULT_CODEX_RUNTIME_POLICY.approval_policy,
+    full_auto: typeof policy?.full_auto === 'boolean'
+      ? policy.full_auto
+      : DEFAULT_CODEX_RUNTIME_POLICY.full_auto,
+  };
+}
+
 interface SettingsState {
   theme: 'dark' | 'light' | 'system';
   autoPatchGemini: boolean;
@@ -59,6 +92,7 @@ interface SettingsState {
   custom_executable: string;
   custom_args: string;
   agent_session_persistence: 'fresh' | 'resume';
+  codex_runtime_policy: CodexRuntimePolicy;
   available_shells: ShellOption[];
   shell_settings_loaded: boolean;
   shells_loaded: boolean;
@@ -70,6 +104,9 @@ interface SettingsState {
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
   setAgentSessionPersistence: (value: 'fresh' | 'resume') => void;
+  setCodexSandboxMode: (value: CodexSandboxMode) => void;
+  setCodexApprovalPolicy: (value: CodexApprovalPolicy) => void;
+  setCodexFullAuto: (value: boolean) => void;
   loadShellSettings: () => Promise<void>;
   loadAvailableShells: () => Promise<void>;
   saveShellSettings: () => Promise<void>;
@@ -81,6 +118,7 @@ const DEFAULT_SHELL_SETTINGS: ShellSettings = {
   custom_executable: null,
   custom_args: null,
   agent_session_persistence: 'resume',
+  codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
 };
 
 export const useSettingsStore = create<SettingsState>()(
@@ -94,6 +132,7 @@ export const useSettingsStore = create<SettingsState>()(
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
       agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
+      codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
       available_shells: [],
       shell_settings_loaded: false,
       shells_loaded: false,
@@ -107,6 +146,15 @@ export const useSettingsStore = create<SettingsState>()(
       setCustomExecutable: (custom_executable) => set({ custom_executable }),
       setCustomArgs: (custom_args) => set({ custom_args }),
       setAgentSessionPersistence: (agent_session_persistence) => set({ agent_session_persistence }),
+      setCodexSandboxMode: (sandbox_mode) => set((state) => ({
+        codex_runtime_policy: { ...state.codex_runtime_policy, sandbox_mode },
+      })),
+      setCodexApprovalPolicy: (approval_policy) => set((state) => ({
+        codex_runtime_policy: { ...state.codex_runtime_policy, approval_policy },
+      })),
+      setCodexFullAuto: (full_auto) => set((state) => ({
+        codex_runtime_policy: { ...state.codex_runtime_policy, full_auto },
+      })),
       loadShellSettings: async () => {
         try {
           const settings = await invoke<ShellSettings>('load_shell_settings');
@@ -115,6 +163,7 @@ export const useSettingsStore = create<SettingsState>()(
             custom_executable: settings.custom_executable ?? '',
             custom_args: settings.custom_args ?? '',
             agent_session_persistence: settings.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
+            codex_runtime_policy: normalizeCodexRuntimePolicy(settings.codex_runtime_policy),
             shell_settings_loaded: true,
           });
         } catch (error) {
@@ -124,6 +173,7 @@ export const useSettingsStore = create<SettingsState>()(
             custom_executable: '',
             custom_args: '',
             agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
+            codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
             shell_settings_loaded: true,
           });
         }
@@ -143,6 +193,7 @@ export const useSettingsStore = create<SettingsState>()(
           custom_executable: get().custom_executable.trim() || null,
           custom_args: get().custom_args.trim() || null,
           agent_session_persistence: get().agent_session_persistence,
+          codex_runtime_policy: normalizeCodexRuntimePolicy(get().codex_runtime_policy),
         };
         const saved = await invoke<ShellSettings>('save_shell_settings', { settings });
         set({
@@ -150,6 +201,7 @@ export const useSettingsStore = create<SettingsState>()(
           custom_executable: saved.custom_executable ?? '',
           custom_args: saved.custom_args ?? '',
           agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
+          codex_runtime_policy: normalizeCodexRuntimePolicy(saved.codex_runtime_policy ?? settings.codex_runtime_policy),
           shell_settings_loaded: true,
         });
       },
@@ -162,6 +214,7 @@ export const useSettingsStore = create<SettingsState>()(
           custom_executable: saved.custom_executable ?? '',
           custom_args: saved.custom_args ?? '',
           agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
+          codex_runtime_policy: normalizeCodexRuntimePolicy(saved.codex_runtime_policy ?? get().codex_runtime_policy),
           shell_settings_loaded: true,
         });
       },
