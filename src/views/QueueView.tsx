@@ -74,7 +74,7 @@ function QueueCard({ item }: { item: QueueItem }) {
 
   return (
     <div
-      className={`group relative overflow-hidden rounded-lg border transition-colors cursor-pointer ${
+      className={`group relative shrink-0 overflow-hidden rounded-lg border transition-colors cursor-pointer ${
         item.read
           ? "border-wardian-border bg-wardian-card-bg-muted"
           : "border-[var(--color-wardian-accent)]/30 bg-wardian-card-bg"
@@ -181,7 +181,7 @@ export function QueueView() {
           <p className="text-sm text-muted-neutral">No completions yet.</p>
         </div>
       ) : (
-        <div className="flex flex-col gap-3 overflow-y-auto">
+        <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto pr-1">
           {items.map((item) => (
             <QueueCard key={item.id} item={item} />
           ))}

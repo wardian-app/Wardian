@@ -19,7 +19,7 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
    - [ ] Document strategic decisions in a new **Spec** in `docs/specs/`.
    - [ ] Update related guides in `docs/guide/` or `docs/developer/`.
    - [ ] Ensure public APIs/complex logic have appropriate JSDoc or Rust docstrings.
-   - [ ] **UI changes**: If visual behavior changed, capture feature-specific local screenshots that demonstrate the changed interaction/state and embed the useful ones in the PR description.
+   - [ ] **Frontend/UI changes**: If frontend behavior or visual behavior changed, capture feature-specific screenshots that demonstrate the changed interaction/state and embed at least one representative image directly in the PR description using markdown image syntax or an `<img>` tag. A local path alone does not satisfy the requirement.
 3. **Safety & Integrity**:
    - [ ] **Secrets Check**: Verify no API keys, credentials, or `.env` files are being committed.
    - [ ] **Git Status**: Run `git status` to ensure only intended files are staged.
@@ -112,7 +112,13 @@ If a browser E2E test **requires** a higher layer to be meaningful, wrap it in `
 
 ### Screenshot Documentation
 
-Screenshots are local, feature-specific evidence rather than a generic CI artifact. For UI changes, use Playwright or the running app to capture only the interaction/state changed by the PR, write images under `e2e/screenshots/<feature>/<timestamp>/`, and embed the representative images in the PR description. Do not add empty-window or app-tour screenshots that do not explain the change.
+Screenshots are feature-specific PR evidence rather than generic CI artifacts. For frontend changes, use Playwright or the running app to capture only the interaction/state changed by the PR, write images under `e2e/screenshots/<feature>/<timestamp>/`, upload or attach at least one representative image, and embed it in the PR description. Do not add empty-window or app-tour screenshots that do not explain the change.
+
+The PR workflow runs `npm run check:frontend-screenshot` and fails frontend PRs without an embedded HTTPS image in the PR body. A local-only path such as `e2e/screenshots/<feature>/<timestamp>/<name>.png` is not enough. Use the GitHub web attachment flow or another approved GitHub-hosted image URL, then embed it with markdown:
+
+```markdown
+![feature-state](https://github.com/<owner>/<repo>/.../<screenshot>.png)
+```
 
 ### Mock Provider
 

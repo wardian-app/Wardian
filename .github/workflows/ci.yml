@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -36,6 +38,11 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm ci
+      - name: Require frontend screenshot evidence
+        if: github.event_name == 'pull_request'
+        run: npm run check:frontend-screenshot -- origin/${{ github.base_ref }} HEAD
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
       - name: Lint (TypeScript)
         run: npm run lint
       - name: Unit Tests
