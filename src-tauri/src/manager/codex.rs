@@ -340,7 +340,18 @@ pub(crate) fn migrate_codex_bootstrap_home(
         let target = final_home.join(&name);
         let name_str = name.to_string_lossy();
 
-        if matches!(name_str.as_ref(), "auth.json" | "config.toml" | "cap_sid") {
+        if matches!(
+            name_str.as_ref(),
+            "auth.json"
+                | "config.toml"
+                | "cap_sid"
+                | "state_5.sqlite"
+                | "state_5.sqlite-shm"
+                | "state_5.sqlite-wal"
+                | "logs_2.sqlite"
+                | "logs_2.sqlite-shm"
+                | "logs_2.sqlite-wal"
+        ) {
             continue;
         }
 
@@ -578,6 +589,8 @@ mod tests {
 
         std::fs::create_dir_all(&bootstrap_home).expect("create bootstrap home");
         std::fs::write(bootstrap_home.join("config.toml"), "config").expect("write config");
+        std::fs::write(bootstrap_home.join("state_5.sqlite"), "state").expect("write state");
+        std::fs::write(bootstrap_home.join("logs_2.sqlite"), "logs").expect("write logs");
         std::fs::create_dir_all(bootstrap_home.join("sessions")).expect("create sessions dir");
         std::fs::write(
             bootstrap_home.join("sessions").join("session.jsonl"),
@@ -589,6 +602,10 @@ mod tests {
 
         assert!(bootstrap_home.exists());
         assert!(bootstrap_home.join("config.toml").exists());
+        assert!(bootstrap_home.join("state_5.sqlite").exists());
+        assert!(bootstrap_home.join("logs_2.sqlite").exists());
+        assert!(!final_home.join("state_5.sqlite").exists());
+        assert!(!final_home.join("logs_2.sqlite").exists());
         assert!(final_home.join("sessions").join("session.jsonl").exists());
     }
 

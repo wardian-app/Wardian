@@ -17,9 +17,12 @@
  *   long_output   — init → user → 200 lines of text → model_response → turn_completed
  *   headless      — single JSON response object, then exit
  *   multi_turn    — init → [user → generating → model_response → turn_completed] × 3
+ *   interactive_multi_turn — init → action_required → stdin-driven responses × 2
  */
 
 "use strict";
+
+const readline = require("node:readline");
 
 const scenario = process.env.WARDIAN_MOCK_SCENARIO || "basic";
 const delay = parseInt(process.env.WARDIAN_MOCK_DELAY_MS || "100", 10);
@@ -165,6 +168,32 @@ async function runMultiTurn() {
   }
 }
 
+async function runInteractiveMultiTurn() {
+  emit(events.init());
+  await sleep(delay);
+
+  const lines = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+  const iterator = lines[Symbol.asyncIterator]();
+
+  try {
+    for (let turn = 1; turn <= 2; turn++) {
+      emit(events.actionRequired(`Interactive turn ${turn}: waiting for input`));
+      const next = await iterator.next();
+      const input = next.done ? "" : String(next.value).trim();
+      await sleep(delay);
+      emit(events.modelResponse(`Interactive turn ${turn}: ${input}`));
+      await sleep(delay);
+      emit(events.turnCompleted());
+      await sleep(delay);
+    }
+  } finally {
+    lines.close();
+  }
+}
+
 async function main() {
   // Headless mode: --print flag overrides scenario
   if (isPrint) {
@@ -180,6 +209,7 @@ async function main() {
     long_output: runLongOutput,
     headless: runHeadless,
     multi_turn: runMultiTurn,
+    interactive_multi_turn: runInteractiveMultiTurn,
   };
 
   const runner = scenarios[scenario];

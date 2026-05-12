@@ -1,12 +1,21 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 test.describe("Critical browser flows", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   });
 
-  test("command broadcast asks for confirmation when no agents are selected", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test("command broadcast asks for confirmation when no agents are selected", async () => {
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await expect(page.locator('[data-testid="command-panel"]')).toBeVisible();
 
@@ -17,7 +26,7 @@ test.describe("Critical browser flows", () => {
     const dialog = page.locator("#confirm-dialog-panel");
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText(
-      "No agents selected. This will broadcast to all agents. Are you sure?",
+      "No agents selected. This will broadcast to ALL agents. Are you sure?",
     );
 
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -25,7 +34,7 @@ test.describe("Critical browser flows", () => {
     await expect(textarea).toHaveValue("status check");
   });
 
-  test("workflow builder can add a manual trigger block from the library", async ({ page }) => {
+  test("workflow builder can add a manual trigger block from the library", async () => {
     await page
       .locator(".titlebar-center")
       .getByRole("button", { name: "Workflows" })

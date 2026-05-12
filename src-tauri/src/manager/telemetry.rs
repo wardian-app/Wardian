@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use crate::utils::fs::get_wardian_home;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 use wardian_core::models::{AgentTelemetry, AppTelemetry};
 
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
@@ -21,6 +22,46 @@ fn normalize_cpu_usage(raw_cpu_usage: f32, logical_cpu_count: usize) -> f32 {
 
 fn bytes_to_mib(bytes: u64) -> f64 {
     bytes as f64 / 1_048_576.0
+}
+
+struct AgentSnapshot {
+    session_id: String,
+    provider: String,
+    folder: String,
+    resume_session: Option<String>,
+    process_id: Option<u32>,
+    query_count: Arc<Mutex<usize>>,
+    init_timestamp: Arc<Mutex<Option<String>>>,
+    current_status: Arc<Mutex<String>>,
+    last_status_at: Arc<Mutex<Option<String>>>,
+    watch_state: Arc<Mutex<crate::state::AgentWatchState>>,
+    last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
+    log_path: Arc<Mutex<Option<std::path::PathBuf>>>,
+    log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
+}
+
+fn set_snapshot_status(snap: &AgentSnapshot, next_status: &str) {
+    let mut status = snap.current_status.lock().unwrap();
+    if *status == next_status {
+        return;
+    }
+    *status = next_status.to_string();
+    drop(status);
+
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let _ = wardian_core::db::update_agent_status(&snap.session_id, next_status, None);
+    if let Ok(mut last_status_at) = snap.last_status_at.lock() {
+        *last_status_at = Some(observed_at.clone());
+    }
+    if let Ok(mut watch_state) = snap.watch_state.lock() {
+        watch_state.push_event(
+            "status",
+            serde_json::json!({
+                "status": wardian_core::identity::normalize_status(next_status),
+                "observed_at": observed_at,
+            }),
+        );
+    }
 }
 
 fn collect_descendant_pids(
@@ -73,20 +114,6 @@ fn collect_app_process_pids(
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
-    struct AgentSnapshot {
-        session_id: String,
-        provider: String,
-        folder: String,
-        resume_session: Option<String>,
-        process_id: Option<u32>,
-        query_count: std::sync::Arc<std::sync::Mutex<usize>>,
-        init_timestamp: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-        current_status: std::sync::Arc<std::sync::Mutex<String>>,
-        last_output_at: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
-        log_path: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
-        log_last_modified: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
-    }
-
     let snapshots: Vec<AgentSnapshot> = {
         let agents = state.agents.lock().await;
         agents
@@ -102,6 +129,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     query_count: agent.query_count.clone(),
                     init_timestamp: agent.init_timestamp.clone(),
                     current_status: agent.current_status.clone(),
+                    last_status_at: agent.last_status_at.clone(),
+                    watch_state: agent.watch_state.clone(),
                     last_output_at: agent.last_output_at.clone(),
                     log_path: agent.log_path.clone(),
                     log_last_modified: agent.log_last_modified.clone(),
@@ -345,7 +374,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 }
 
                                 if let Some(status) = codex_status_from_log(&lines) {
-                                    *snap.current_status.lock().unwrap() = status;
+                                    set_snapshot_status(snap, &status);
                                 }
                             }
                             "claude" => {
@@ -389,7 +418,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     && !current_status_snap.starts_with("Action Needed")
                                 {
                                     if let Some(status) = claude_status_from_log(&lines) {
-                                        *snap.current_status.lock().unwrap() = status;
+                                        set_snapshot_status(snap, &status);
                                     }
                                 }
                             }
@@ -402,7 +431,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     &mut i_ts,
                                     &mut status,
                                 );
-                                *snap.current_status.lock().unwrap() = status;
+                                set_snapshot_status(snap, &status);
                             }
                             _ => {
                                 // Gemini logs are a single JSON object with a messages array
@@ -427,13 +456,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                                     last_msg.get("role").and_then(|v| v.as_str())
                                                 });
                                             if msg_type == Some("user") {
-                                                *snap.current_status.lock().unwrap() =
-                                                    "Processing...".to_string();
+                                                set_snapshot_status(snap, "Processing...");
                                             } else if msg_type == Some("gemini")
                                                 || msg_type == Some("assistant")
                                             {
-                                                *snap.current_status.lock().unwrap() =
-                                                    "Idle".to_string();
+                                                set_snapshot_status(snap, "Idle");
                                             }
                                         }
                                     }
@@ -462,14 +489,14 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     last_output_at,
                     std::time::SystemTime::now(),
                 ) {
-                    *snap.current_status.lock().unwrap() = "Idle".to_string();
+                    set_snapshot_status(snap, "Idle");
                 }
             }
 
             // If the process has terminated, force status to "Off" so the UI
             // doesn't stay stuck on "Processing..." or "Action Needed".
             if !process_alive && snap.process_id.is_some() {
-                *snap.current_status.lock().unwrap() = "Off".to_string();
+                set_snapshot_status(snap, "Off");
             }
 
             results.push(AgentTelemetry {
@@ -557,7 +584,31 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
 
 #[cfg(test)]
 mod tests {
+    use super::AgentSnapshot;
     use std::collections::{BTreeSet, HashMap};
+    use std::sync::{Arc, Mutex};
+
+    fn test_snapshot(status: &str) -> AgentSnapshot {
+        AgentSnapshot {
+            session_id: "agent-1".to_string(),
+            provider: "opencode".to_string(),
+            folder: "D:/work".to_string(),
+            resume_session: None,
+            process_id: Some(1234),
+            query_count: Arc::new(Mutex::new(0)),
+            init_timestamp: Arc::new(Mutex::new(None)),
+            current_status: Arc::new(Mutex::new(status.to_string())),
+            last_status_at: Arc::new(Mutex::new(None)),
+            watch_state: Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+                "agent-1".to_string(),
+                16,
+                1024,
+            ))),
+            last_output_at: Arc::new(Mutex::new(None)),
+            log_path: Arc::new(Mutex::new(None)),
+            log_last_modified: Arc::new(Mutex::new(None)),
+        }
+    }
 
     #[test]
     fn normalizes_process_tree_cpu_to_whole_machine_capacity() {
@@ -599,5 +650,40 @@ mod tests {
         let app_pids = super::collect_app_process_pids(1, &[3, 7, 8], &children_map);
 
         assert_eq!(app_pids, BTreeSet::from([1_u32, 2, 6]));
+    }
+
+    #[test]
+    fn telemetry_status_change_records_watch_status_event() {
+        let snap = test_snapshot("Processing...");
+
+        super::set_snapshot_status(&snap, "Idle");
+
+        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
+        assert!(snap.last_status_at.lock().unwrap().is_some());
+        let snapshot = snap
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, None)
+            .unwrap();
+        assert!(snapshot.events.iter().any(|event| {
+            event.kind == "status"
+                && event.payload.get("status").and_then(|value| value.as_str()) == Some("idle")
+        }));
+    }
+
+    #[test]
+    fn telemetry_status_noop_does_not_emit_duplicate_watch_event() {
+        let snap = test_snapshot("Idle");
+
+        super::set_snapshot_status(&snap, "Idle");
+
+        let snapshot = snap
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, None)
+            .unwrap();
+        assert!(snapshot.events.is_empty());
     }
 }

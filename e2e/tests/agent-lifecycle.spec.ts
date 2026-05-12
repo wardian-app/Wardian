@@ -12,29 +12,140 @@
  * See e2e/fixtures/mockAgent.ts for the unlock path.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+
+async function installCustomCloneIpcMock(page: Page) {
+  await page.addInitScript(() => {
+    type Agent = {
+      session_id: string;
+      session_name: string;
+      agent_class: string;
+      folder: string;
+      provider: string;
+      is_off: boolean;
+    };
+
+    const agents: Agent[] = [
+      {
+        session_id: "mock-session-e2e-001",
+        session_name: "E2E Mock Agent",
+        agent_class: "TestClass",
+        folder: "C:/projects/e2e",
+        provider: "mock",
+        is_off: false,
+      },
+    ];
+    const callbacks = new Map<number, unknown>();
+    let callbackId = 1;
+    const tauriWindow = window as Window & {
+      __TAURI_INTERNALS__?: Record<string, unknown>;
+      __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
+    };
+
+    tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => undefined,
+    };
+
+    tauriWindow.__TAURI_INTERNALS__ = {
+      metadata: {
+        currentWindow: { label: "main" },
+        currentWebview: { label: "main" },
+      },
+      transformCallback: (callback: unknown) => {
+        const id = callbackId++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback: (id: number) => {
+        callbacks.delete(id);
+      },
+      convertFileSrc: (filePath: string) => filePath,
+      invoke: async (command: string, args?: Record<string, unknown>) => {
+        if (command === "list_agents") return agents;
+        if (command === "list_agent_classes") {
+          return [{ name: "TestClass", description: "E2E test class", is_default: true }];
+        }
+        if (command === "load_watchlists") return [];
+        if (command === "load_watchlist_prefs") return null;
+        if (command === "load_agent_interactions") return {};
+        if (command === "load_queue_items") return [];
+        if (command === "list_workflows") return [];
+        if (command === "list_scheduled_runs") return [];
+        if (command === "load_workflow_library") return { folders: [], rootWorkflowIds: [] };
+        if (command === "get_library_tree") {
+          return { type: "Folder", path: "", name: "Root", children: [] };
+        }
+        if (command === "list_deployed_skills") return [];
+        if (command === "plugin:event|listen") return callbackId++;
+        if (command === "plugin:event|unlisten") return null;
+        if (command === "sync_provider_theme_settings") return null;
+        if (command === "get_agent_clone_preview") {
+          return {
+            source_session_id: "mock-session-e2e-001",
+            source_session_name: "E2E Mock Agent",
+            suggested_session_name: "E2E Mock Agent-copy",
+            provider: "mock",
+            agent_class: "TestClass",
+            folder: "C:/projects/e2e",
+            files: {
+              name: "mock-session-e2e-001",
+              path: "",
+              kind: "directory",
+              children: [
+                { name: "AGENTS.md", path: "AGENTS.md", kind: "file", children: [] },
+                { name: "notes.md", path: "notes.md", kind: "file", children: [] },
+              ],
+            },
+            default_selected_files: ["AGENTS.md", "notes.md"],
+            skills: [],
+            default_selected_skills: [],
+          };
+        }
+        if (command === "clone_agent") {
+          const request = args?.req as { session_name?: string } | undefined;
+          agents.push({
+            ...agents[0],
+            session_id: "mock-session-e2e-clone",
+            session_name: request?.session_name ?? "E2E Mock Agent-copy",
+          });
+          return agents[agents.length - 1];
+        }
+        return null;
+      },
+    };
+  });
+}
 
 test.describe("Agent Spawn Form", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.locator('[data-testid="spawn-agent-name"]').waitFor();
   });
 
-  test("spawn form renders all required fields", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test("spawn form renders all required fields", async () => {
     await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-workspace-path"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-provider"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-submit"]')).toBeVisible();
   });
 
-  test("submit button is present when name is filled", async ({ page }) => {
+  test("submit button is present when name is filled", async () => {
     await page.locator('[data-testid="spawn-agent-name"]').fill("test-agent");
     await expect(page.locator('[data-testid="spawn-submit"]')).toBeVisible();
   });
 
-  test("provider dropdown has expected options", async ({ page }) => {
+  test("provider dropdown has expected options", async () => {
     const select = page.locator('[data-testid="spawn-provider"]');
     await expect(select).toBeVisible();
     const options = await select.locator("option").allTextContents();
@@ -42,24 +153,50 @@ test.describe("Agent Spawn Form", () => {
     expect(options.length).toBeGreaterThanOrEqual(3);
   });
 
-  test("workspace path field accepts input", async ({ page }) => {
+  test("workspace path field accepts input", async () => {
     const input = page.locator('[data-testid="spawn-workspace-path"]');
     await input.fill("C:/projects/test");
     await expect(input).toHaveValue("C:/projects/test");
   });
 
-  test("grid is empty before any agent is spawned", async ({ page }) => {
+  test("grid is empty before any agent is spawned", async () => {
     await page.getByRole("button", { name: "Grid" }).click();
     const cards = page.locator('[data-testid="agent-card"]');
     await expect(cards).toHaveCount(0);
   });
 
-  test("watchlist is empty before any agent is spawned", async ({ page }) => {
+  test("watchlist is empty before any agent is spawned", async () => {
     const watchlist = page.locator('[data-testid="agent-watchlist"]');
     await expect(watchlist).toBeVisible();
     // No agent rows expected in empty state.
     const cards = page.locator('[data-testid="agent-card"]');
     await expect(cards).toHaveCount(0);
+  });
+});
+
+test.describe("Custom Agent Clone", () => {
+  test("opens the modal, changes file selection, and creates a clone row", async ({ page }) => {
+    await installCustomCloneIpcMock(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+    const watchlist = page.locator('[data-testid="agent-watchlist"]');
+    const sourceRow = watchlist.locator(".watchlist-row", { hasText: "E2E Mock Agent" });
+    await expect(sourceRow).toBeVisible();
+
+    await sourceRow.click({ button: "right" });
+    const menu = page.locator('[data-testid="agent-context-menu"]');
+    await menu.getByRole("button", { name: "Clone" }).hover();
+    await page.getByRole("button", { name: "Custom Clone" }).click();
+
+    const modal = page.locator('[data-testid="custom-clone-modal"]');
+    await expect(modal).toBeVisible();
+    await expect(modal.getByLabel("Clone Name")).toHaveValue("E2E Mock Agent-copy");
+
+    await modal.locator('[data-testid="custom-clone-file-notes-md"]').uncheck();
+    await modal.locator('[data-testid="custom-clone-submit"]').click();
+
+    await expect(watchlist.locator(".watchlist-row", { hasText: "E2E Mock Agent-copy" })).toBeVisible();
   });
 });
 

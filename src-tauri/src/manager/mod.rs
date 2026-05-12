@@ -22,6 +22,7 @@ pub use headless::{
     HeadlessRunOptions,
 };
 pub use opencode::opencode_extract_created_session_id;
+pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use opencode::{opencode_log_dirs, opencode_log_path_in};
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
@@ -36,10 +37,10 @@ pub use crate::utils::process::{
 };
 pub use crate::utils::shell::build_program_launch;
 
-use crate::state::ActiveAgent;
+use crate::state::{ActiveAgent, AppState};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::models::{AgentConfig, AgentEvent};
 pub(crate) fn session_bootstrap_prompt() -> &'static str {
     "Introduce yourself"
@@ -151,9 +152,33 @@ pub(crate) fn set_agent_status(
     if let Ok(mut status) = current_status.lock() {
         if *status != next_status {
             *status = next_status.to_string();
+            let observed_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
             // Phase 2: Persist status change to SQLite
             let _ = wardian_core::db::update_agent_status(session_id, next_status, None);
+
+            let watch_app = app.clone();
+            let watch_session_id = session_id.to_string();
+            let watch_status = next_status.to_string();
+            tauri::async_runtime::spawn(async move {
+                let state = watch_app.state::<AppState>();
+                let agents = state.agents.lock().await;
+                if let Some(agent) = agents.get(&watch_session_id) {
+                    if let Ok(mut last_status_at) = agent.last_status_at.lock() {
+                        *last_status_at = Some(observed_at.clone());
+                    }
+                    if let Ok(mut watch_state) = agent.watch_state.lock() {
+                        watch_state.push_event(
+                            "status",
+                            serde_json::json!({
+                                "status": wardian_core::identity::normalize_status(&watch_status),
+                                "observed_at": observed_at,
+                            }),
+                        );
+                    }
+                }
+            });
 
             let _ = app.emit(
                 "agent-status-updated",
@@ -164,6 +189,42 @@ pub(crate) fn set_agent_status(
             );
         }
     }
+}
+
+pub(crate) fn emit_agent_status(app: &AppHandle, session_id: &str, current_status: &str) {
+    let _ = wardian_core::db::update_agent_status(session_id, current_status, None);
+
+    let _ = app.emit(
+        "agent-status-updated",
+        serde_json::json!({
+            "session_id": session_id,
+            "current_status": current_status,
+        }),
+    );
+}
+
+pub(crate) fn mark_agent_prompt_started(agent: &crate::state::ActiveAgent) -> bool {
+    let current_status = agent
+        .current_status
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default();
+    if current_status == "Action Needed" || current_status == "Off" {
+        return false;
+    }
+
+    if let Ok(mut count) = agent.query_count.lock() {
+        *count += 1;
+    }
+
+    if let Ok(mut status) = agent.current_status.lock() {
+        if *status != "Processing..." {
+            *status = "Processing...".to_string();
+            return true;
+        }
+    }
+
+    false
 }
 
 pub(crate) fn debug_preview_bytes(bytes: &[u8], limit: usize) -> String {
@@ -686,5 +747,56 @@ mod tests {
                 "claude-session".to_string(),
             ]
         );
+    }
+
+    fn test_active_agent(status: &str) -> crate::state::ActiveAgent {
+        crate::state::ActiveAgent {
+            config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            process_id: None,
+            query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_status: std::sync::Arc::new(std::sync::Mutex::new(status.to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::state::AgentWatchState::new("test-agent".to_string(), 4096, 262_144),
+            )),
+            terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+
+    #[test]
+    fn mark_agent_prompt_started_sets_processing_and_counts_query() {
+        let agent = test_active_agent("Idle");
+
+        assert!(mark_agent_prompt_started(&agent));
+
+        assert_eq!(
+            agent.current_status.lock().unwrap().as_str(),
+            "Processing..."
+        );
+        assert_eq!(*agent.query_count.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn mark_agent_prompt_started_preserves_action_needed() {
+        let agent = test_active_agent("Action Needed");
+
+        assert!(!mark_agent_prompt_started(&agent));
+
+        assert_eq!(
+            agent.current_status.lock().unwrap().as_str(),
+            "Action Needed"
+        );
+        assert_eq!(*agent.query_count.lock().unwrap(), 0);
     }
 }

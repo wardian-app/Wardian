@@ -7,6 +7,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { AgentTerminal } from "./AgentTerminal";
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
+import { useQueueStore } from "../../store/useQueueStore";
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -26,6 +27,7 @@ describe("AgentTerminal scrollback", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useSettingsStore.setState({ terminalFontSize: 14, terminalFontFamily: "" });
+    useQueueStore.setState({ items: [], _agentBuffers: {}, _workflowLastOutput: {} });
     rectSpy = vi
       .spyOn(HTMLElement.prototype, "getBoundingClientRect")
       .mockReturnValue({
@@ -159,6 +161,56 @@ describe("AgentTerminal scrollback", () => {
       expect(secondInstance.write).toHaveBeenCalledWith("hello from codex\n", expect.any(Function));
     });
 
+  });
+
+  it("captures readable terminal output for queue summaries", async () => {
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return readCount++ === 0
+            ? "\u001b[10;6HTest received.\u001b[15;6H"
+            : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="opencode-summary" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      expect(useQueueStore.getState()._agentBuffers["opencode-summary"]).toBe("Test received.");
+    });
+  });
+
+  it("does not capture Gemini terminal redraws for queue summaries", async () => {
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return readCount++ === 0
+            ? "⁝ Thinking... (esc to cancel, 8s) press tab twice for more"
+            : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="gemini-summary" provider="gemini" theme="dark" />);
+
+    await waitFor(() => {
+      const instance = getLatestTerminalInstance();
+      expect(instance.write).toHaveBeenCalledWith(
+        "⁝ Thinking... (esc to cancel, 8s) press tab twice for more",
+        expect.any(Function),
+      );
+    });
+
+    expect(useQueueStore.getState()._agentBuffers["gemini-summary"]).toBeUndefined();
   });
 
   it("forwards xterm binary input through the byte-preserving PTY path", async () => {

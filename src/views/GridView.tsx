@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { AgentConfig, AgentTelemetry } from "../types";
+import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
 import type { Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
@@ -39,7 +39,7 @@ interface GridViewProps {
   onPause: (agentId: string) => void;
   onRestart: (agentId: string) => void;
   onClear: (agentId: string) => void;
-  onClone?: (agentId: string, mode: "fresh" | "profile") => void;
+  onClone?: (agentId: string, mode: CloneMode) => void;
   onTerminalFocus?: (agentId: string) => void;
 }
 

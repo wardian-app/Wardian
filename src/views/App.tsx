@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
+import type { CloneMode } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -31,14 +32,17 @@ import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
+import { QueueView } from "./QueueView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
 import { LibraryView } from "./LibraryView";
+import { useQueueStore } from "../store/useQueueStore";
 import { useWorkflowStore } from "../store/useWorkflowStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 import { RunPayloadModal } from "../features/workflows/RunPayloadModal";
+import { CustomCloneModal } from "../features/agents/CustomCloneModal";
 import {
   buildScheduledRunFromWorkflow,
   normalizeWorkflowForLaunch,
@@ -60,6 +64,8 @@ declare global {
   }
 }
 
+const ACTIVE_STATUSES = new Set(["Processing...", "Headless", "Action Needed"]);
+
 function App() {
   return (
     <ErrorBoundary>
@@ -71,6 +77,10 @@ function App() {
 function AppBody() {
   const confirm = useConfirm();
   const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const agentsRef = React.useRef(agents);
+  const agentStatusRef = React.useRef<Record<string, string>>({});
+  const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
+  useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
   const handleWorkflowProgress = useWorkflowStore(s => s.handleProgress);
@@ -82,17 +92,60 @@ function AppBody() {
   const runWorkflowById = useWorkflowStore(s => s.runWorkflowById);
   const createScheduledRun = useWorkflowStore(s => s.createScheduledRun);
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
+  const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
+  const hasAgentBufferedContent = useQueueStore((s) => s.hasAgentBufferedContent);
+  const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
+  const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
+  const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
+  const loadQueueItems = useQueueStore((s) => s.loadItems);
+  const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+    const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
+    if (currentStatus === "Idle" && (wasActive || hasAgentBufferedContent(sessionId))) {
+      if (pendingQueueFlushRef.current.has(sessionId)) return;
+      pendingQueueFlushRef.current.add(sessionId);
+      const agent = agentsRef.current.find((a) => a.session_id === sessionId);
+      const agentName = agent?.session_name ?? sessionId;
+      const finishFlush = (summary?: string | null) => {
+        try {
+          flushAgentCompletion(sessionId, agentName, summary);
+        } finally {
+          pendingQueueFlushRef.current.delete(sessionId);
+        }
+      };
+
+      if (agent?.provider === "opencode" && sessionId.startsWith("ses_")) {
+        invoke<string | null>("load_opencode_last_assistant_text", { sessionId })
+          .then(finishFlush)
+          .catch(() => finishFlush());
+      } else {
+        finishFlush();
+      }
+    }
+  }, [flushAgentCompletion, hasAgentBufferedContent]);
 
   useEffect(() => {
     const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
       handleWorkflowTelemetry(event.payload);
+      trackWorkflowNodeOutput(event.payload);
     });
     const unlistenProgress = listen<any>("workflow-progress", (event) => {
       handleWorkflowProgress(event.payload);
     });
-    const unlistenStatus = listen<any>("workflow-status-updated", (event) => {
+    const unlistenWorkflowStatus = listen<any>("workflow-status-updated", (event) => {
+      const status = event.payload?.status as string | undefined;
+      if (status === "completed" || status === "failed") {
+        const { activeRuns, availableWorkflows } = useWorkflowStore.getState();
+        const instanceId = event.payload.run_instance_id || event.payload.workflow_id;
+        const run = activeRuns.find((r) => r.run_instance_id === instanceId);
+        const workflowName =
+          run?.workflow_name ??
+          availableWorkflows.find((w) => w.id === event.payload.workflow_id)?.name;
+        addWorkflowCompletion(
+          event.payload as { workflow_id: string; run_instance_id?: string; status: "completed" | "failed"; error?: string },
+          workflowName,
+        );
+      }
       handleWorkflowStatusUpdate(event.payload);
-      const status = event.payload?.status;
       if (status === "running" || status === "completed" || status === "failed") {
         loadScheduledRuns();
       }
@@ -105,10 +158,10 @@ function AppBody() {
     return () => { 
       unlistenWorkflow.then(fn => fn()); 
       unlistenProgress.then(fn => fn());
-      unlistenStatus.then(fn => fn());
+      unlistenWorkflowStatus.then(fn => fn());
       unlistenScheduledRuns.then(fn => fn());
     };
-  }, [handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate, loadScheduledRuns]);
+  }, [addWorkflowCompletion, handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate, loadScheduledRuns, trackWorkflowNodeOutput]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -344,6 +397,7 @@ function AppBody() {
 
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
   const [dragOverAgentId, setDragOverAgentId] = useState<string | null>(null);
+  const [customCloneSourceId, setCustomCloneSourceId] = useState<string | null>(null);
   const wasDraggingRef = useRef(false);
 
   const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
@@ -533,10 +587,12 @@ function AppBody() {
     fetchAgentClasses();
     fetchWorkflows();
     loadScheduledRuns();
+    loadQueueItems();
     fetchLibraryTree("prompts");
     fetchLibraryTree("skills");
     const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
       const { session_id, data } = event.payload;
+      appendAgentEvent(session_id, data as Record<string, unknown>);
       const effect = classifyJsonEvent(data as Record<string, unknown>);
       if (effect.type === "progress") {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: effect.thought }));
@@ -549,12 +605,16 @@ function AppBody() {
       unlistenJson.then(fn => fn());
       unlistenUpdate.then(fn => fn());
     };
-  }, [fetchLibraryTree, fetchWorkflows, loadScheduledRuns]);
+  }, [appendAgentEvent, fetchLibraryTree, fetchWorkflows, loadQueueItems, loadScheduledRuns]);
 
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
       const mapping: Record<string, AgentTelemetry> = {};
       for (const m of event.payload) mapping[m.session_id] = m;
+      for (const [sessionId, metric] of Object.entries(mapping)) {
+        maybeFlushAgentQueueCompletion(sessionId, metric.current_status, agentStatusRef.current[sessionId]);
+        agentStatusRef.current[sessionId] = metric.current_status;
+      }
       setTelemetry(prev => {
         const next = { ...prev };
         const interactionUpdates: Record<string, string> = {};
@@ -583,26 +643,31 @@ function AppBody() {
       if (current_status === "Idle" || current_status === "Off" || current_status === "Action Needed") {
         setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
       }
-      setTelemetry(prev => ({
-        ...prev,
-        [session_id]: {
-          session_id,
-          cpu_usage: prev[session_id]?.cpu_usage ?? 0,
-          memory_mb: prev[session_id]?.memory_mb ?? 0,
-          uptime_seconds: prev[session_id]?.uptime_seconds ?? 0,
-          query_count: prev[session_id]?.query_count ?? 0,
-          init_timestamp: prev[session_id]?.init_timestamp ?? null,
-          current_status,
-          log_path: prev[session_id]?.log_path ?? null,
-        },
-      }));
+      const previousStatus = agentStatusRef.current[session_id];
+      maybeFlushAgentQueueCompletion(session_id, current_status, previousStatus);
+      agentStatusRef.current[session_id] = current_status;
+      setTelemetry(prev => {
+        return {
+          ...prev,
+          [session_id]: {
+            session_id,
+            cpu_usage: prev[session_id]?.cpu_usage ?? 0,
+            memory_mb: prev[session_id]?.memory_mb ?? 0,
+            uptime_seconds: prev[session_id]?.uptime_seconds ?? 0,
+            query_count: prev[session_id]?.query_count ?? 0,
+            init_timestamp: prev[session_id]?.init_timestamp ?? null,
+            current_status,
+            log_path: prev[session_id]?.log_path ?? null,
+          },
+        };
+      });
     });
     return () => {
       unlistenMetrics.then(fn => fn());
       unlistenAppMetrics.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
-  }, []);
+  }, [maybeFlushAgentQueueCompletion]);
 
   async function sendCommand(sessionId: string, cmd: string) {
     try {
@@ -746,7 +811,12 @@ function AppBody() {
     }
   };
 
-  const onClone = async (id: string, mode: "fresh" | "profile") => {
+  const onClone = async (id: string, mode: CloneMode) => {
+    if (mode === "custom") {
+      setCustomCloneSourceId(id);
+      return;
+    }
+
     try {
       await invoke("clone_agent", {
         req: {
@@ -879,7 +949,13 @@ function AppBody() {
               <LibraryView selectedAgentIds={selectedAgentIds} />
             )}
 
-            {["queue", "graph", "garden"].map(mode => viewMode === mode && (
+            {viewMode === "queue" && (
+              <div className="flex-1 flex flex-col min-h-0">
+                <QueueView />
+              </div>
+            )}
+
+            {["graph", "garden"].map(mode => viewMode === mode && (
               <div key={mode} className="flex-1 flex flex-col min-h-0">
                 <PlaceholderView viewMode={mode as any} />
               </div>
@@ -962,6 +1038,16 @@ function AppBody() {
               onCancel={() => setSidebarPendingWorkflowLaunch(null)}
             />
           )}
+          <CustomCloneModal
+            sourceSessionId={customCloneSourceId ?? ""}
+            agentClasses={agentClasses}
+            isOpen={Boolean(customCloneSourceId)}
+            onClose={() => setCustomCloneSourceId(null)}
+            onCloned={() => {
+              setCustomCloneSourceId(null);
+              fetchAgents();
+            }}
+          />
           {userTerminalOpen && (
             <UserTerminalPanel
               theme={theme}

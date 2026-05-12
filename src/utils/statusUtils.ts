@@ -323,3 +323,105 @@ export function getStatusColorClass(effectiveStatus: string): string {
   }
   return "bg-wardian-off flex-shrink-0";
 }
+
+export function extractQueueContent(data: Record<string, unknown>): {
+  text?: string;
+  isToolCall: boolean;
+} {
+  // Claude: assistant message — may carry text, tool_use, or both
+  if (data.type === "assistant") {
+    const msg = data.message as Record<string, unknown> | undefined;
+    const content = msg?.content as Array<Record<string, unknown>> | undefined;
+    const textBlock = content?.find((c) => c.type === "text");
+    const hasToolUse = content?.some((c) => c.type === "tool_use") ?? false;
+    if (textBlock?.text) {
+      return { text: textBlock.text as string, isToolCall: hasToolUse };
+    }
+    if (hasToolUse) return { isToolCall: true };
+  }
+
+  // Claude: system permission request = tool call boundary
+  if (data.type === "system" && (data.subtype as string | undefined) === "permission_request") {
+    return { isToolCall: true };
+  }
+
+  // Claude: result event carries the final agent output
+  if (data.type === "result") {
+    const result = data.result as string | undefined;
+    if (result) return { text: result, isToolCall: false };
+  }
+
+  // Gemini: text part
+  if (data.type === "text") {
+    const part = data.part as Record<string, unknown> | undefined;
+    const text = part?.text as string | undefined;
+    if (text) return { text, isToolCall: false };
+  }
+
+  // Gemini: tool_use
+  if (data.type === "tool_use") {
+    return { isToolCall: true };
+  }
+
+  // Codex: completed item
+  if (data.type === "item.completed") {
+    const item = data.item as Record<string, unknown> | undefined;
+    const itemType = item?.type as string | undefined;
+    if (itemType === "agent_message") {
+      return { text: (item?.text as string) || "", isToolCall: false };
+    }
+    if (itemType === "exec_command") return { isToolCall: true };
+  }
+
+  // Codex: nested event_msg
+  if (data.type === "event_msg") {
+    const payload = data.payload as Record<string, unknown> | undefined;
+    const payloadType = payload?.type as string | undefined;
+    if (payloadType === "agent_message") {
+      const text = (payload?.message as string) || (payload?.text as string) || "";
+      if (text) return { text, isToolCall: false };
+    }
+    if (payloadType === "exec_command" || payloadType === "exec_started") {
+      return { isToolCall: true };
+    }
+  }
+
+  return { isToolCall: false };
+}
+
+const TERMINAL_OSC_SEQUENCE = /\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g;
+const TERMINAL_DCS_SEQUENCE = /\u001bP[\s\S]*?\u001b\\/g;
+const TERMINAL_CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const TERMINAL_ESC_SEQUENCE = /\u001b[@-_]/g;
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+function isTerminalQueueChrome(line: string): boolean {
+  const lower = line.toLowerCase();
+  if (lower.includes("type your message") || lower.includes("@path/to/file")) return true;
+  if (lower.includes("esc interrupt")) return true;
+  if (lower.includes("press tab twice for more")) return true;
+  if (lower.includes("thinking...") && lower.includes("esc to cancel")) return true;
+  if (line.includes("▣") && line.includes("GPT-")) return true;
+  if (/^·\s*\d+(?:\.\d+)?s\s+\d+$/.test(line)) return true;
+  return false;
+}
+
+export function extractTerminalQueueContent(data: string): string | undefined {
+  const plain = data
+    .replace(TERMINAL_OSC_SEQUENCE, "")
+    .replace(TERMINAL_DCS_SEQUENCE, "")
+    .replace(TERMINAL_CSI_SEQUENCE, "")
+    .replace(TERMINAL_ESC_SEQUENCE, "")
+    .replace(/\r/g, "\n")
+    .replace(TERMINAL_CONTROL_CHARS, "");
+
+  const candidates = plain
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => /[A-Za-z0-9]/.test(line))
+    .filter((line) => !/^[0-9?;$<>= ]+$/.test(line))
+    .filter((line) => !isTerminalQueueChrome(line));
+
+  return candidates[candidates.length - 1];
+}

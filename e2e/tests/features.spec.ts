@@ -1,56 +1,69 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 test.describe("Wardian Core Feature Tests", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   });
 
-  test("1. App renders with main layout", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test.beforeEach(async () => {
+    await expect(page.locator('[data-testid="app-shell"]')).toBeVisible();
+  });
+
+  test("1. App renders with main layout", async () => {
     await expect(page.locator('[data-testid="app-shell"]')).toBeVisible();
     await expect(page.locator('[data-testid="sidebar-icon-rail"]')).toBeVisible();
     await expect(page.locator('[data-testid="agent-watchlist"]')).toBeVisible();
   });
 
-  test("2. Sidebar navigation - Agent Config tab", async ({ page }) => {
+  test("2. Sidebar navigation - Agent Config tab", async () => {
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
     await expect(page.locator('[data-testid="spawn-submit"]')).toBeVisible();
   });
 
-  test("3. Sidebar navigation - Command tab", async ({ page }) => {
+  test("3. Sidebar navigation - Command tab", async () => {
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="command-panel"]')).toBeVisible();
     await expect(page.locator('[data-testid="broadcast-textarea"]')).toBeVisible();
   });
 
-  test("4. Sidebar navigation - Workflows tab", async ({ page }) => {
+  test("4. Sidebar navigation - Workflows tab", async () => {
     await page.locator('[data-testid="sidebar-tab-workflows"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
   });
 
-  test("5. Sidebar navigation - Settings tab", async ({ page }) => {
+  test("5. Sidebar navigation - Settings tab", async () => {
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="settings-panel"]')).toBeVisible();
   });
 
-  test("6. Sidebar navigation - Classes tab", async ({ page }) => {
+  test("6. Sidebar navigation - Classes tab", async () => {
     await page.locator('[data-testid="sidebar-tab-classes"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="class-manager-panel"]')).toBeVisible();
   });
 
-  test("7. Sidebar navigation - Explorer tab", async ({ page }) => {
+  test("7. Sidebar navigation - Explorer tab", async () => {
     await page.locator('[data-testid="sidebar-tab-explorer"]').click();
     await page.waitForTimeout(500);
     await expect(page.locator('[data-testid="explorer-panel"]')).toBeVisible();
   });
 
-  test("8. Settings - Theme switching", async ({ page }) => {
+  test("8. Settings - Theme switching", async () => {
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.waitForTimeout(500);
     
@@ -64,7 +77,7 @@ test.describe("Wardian Core Feature Tests", () => {
     await page.waitForTimeout(300);
   });
 
-  test("9. Settings - Shell selection", async ({ page }) => {
+  test("9. Settings - Shell selection", async () => {
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.waitForTimeout(500);
     
@@ -75,7 +88,7 @@ test.describe("Wardian Core Feature Tests", () => {
     expect(options).toBeGreaterThan(0);
   });
 
-  test("10. Class Manager - Create class form", async ({ page }) => {
+  test("10. Class Manager - Create class form", async () => {
     await page.locator('[data-testid="sidebar-tab-classes"]').click();
     await page.waitForTimeout(500);
     
@@ -86,7 +99,7 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(page.locator('[data-testid="class-create-button"]')).toBeVisible();
   });
 
-  test("11. Spawn Agent form validation", async ({ page }) => {
+  test("11. Spawn Agent form validation", async () => {
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.waitForTimeout(500);
     
@@ -99,7 +112,7 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(workspaceInput).toHaveValue("C:/temp");
   });
 
-  test("12. Broadcast input functionality", async ({ page }) => {
+  test("12. Broadcast input functionality", async () => {
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
     
@@ -110,17 +123,17 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(page.locator('[data-testid="broadcast-submit"]')).toBeVisible();
   });
 
-  test("13. Empty state - no agent cards", async ({ page }) => {
+  test("13. Empty state - no agent cards", async () => {
     const cards = page.locator('[data-testid="agent-card"]');
     await expect(cards).toHaveCount(0);
   });
 
-  test("14. Grid view container exists", async ({ page }) => {
+  test("14. Grid view container exists", async () => {
     await page.getByRole("button", { name: "Grid" }).click();
     await expect(page.getByText("No Active Instances")).toBeVisible();
   });
 
-  test("15. Watchlist shows empty state message", async ({ page }) => {
+  test("15. Watchlist shows empty state message", async () => {
     // Verify watchlist shows empty state
     const watchlist = page.locator('[data-testid="agent-watchlist"]');
     await expect(watchlist).toBeVisible();

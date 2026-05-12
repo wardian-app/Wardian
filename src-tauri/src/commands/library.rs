@@ -370,7 +370,10 @@ pub async fn open_library_folder(
     Ok(())
 }
 
-fn get_target_skills_dir(target_type: &str, target_id: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn get_target_skills_dir(
+    target_type: &str,
+    target_id: &str,
+) -> Result<std::path::PathBuf, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let base = match target_type {
         "agent" => home.join("agents").join(target_id),
@@ -463,7 +466,7 @@ where
     }
 }
 
-fn deploy_skill_from_library(
+pub(crate) fn deploy_skill_from_library(
     source_path: &str,
     target_type: &str,
     target_id: &str,
@@ -572,6 +575,7 @@ fn source_path_for_deployed_skill(
     deployed_path: &Path,
     deployed_name: &str,
     library_sources: &[(String, String, PathBuf)],
+    infer_same_name_source: bool,
 ) -> Option<String> {
     if let Some(marker_source) = read_deployed_skill_source_marker(deployed_path) {
         if library_sources
@@ -591,6 +595,10 @@ fn source_path_for_deployed_skill(
         }
     }
 
+    if !infer_same_name_source {
+        return None;
+    }
+
     let mut same_name_sources = library_sources
         .iter()
         .filter(|(_, name, _)| name == deployed_name);
@@ -602,9 +610,10 @@ fn source_path_for_deployed_skill(
     None
 }
 
-fn list_deployed_skill_refs_for_target(
+fn list_deployed_skill_refs_for_target_with_options(
     target_type: &str,
     target_id: &str,
+    infer_same_name_source: bool,
 ) -> Result<Vec<DeployedSkillRef>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
@@ -629,7 +638,8 @@ fn list_deployed_skill_refs_for_target(
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
-        let source_path = source_path_for_deployed_skill(&path, &name, &library_sources);
+        let source_path =
+            source_path_for_deployed_skill(&path, &name, &library_sources, infer_same_name_source);
 
         deployed.push(DeployedSkillRef { name, source_path });
     }
@@ -642,6 +652,20 @@ fn list_deployed_skill_refs_for_target(
     });
 
     Ok(deployed)
+}
+
+pub(crate) fn list_deployed_skill_refs_for_target(
+    target_type: &str,
+    target_id: &str,
+) -> Result<Vec<DeployedSkillRef>, String> {
+    list_deployed_skill_refs_for_target_with_options(target_type, target_id, true)
+}
+
+pub(crate) fn list_deployed_skill_refs_for_target_strict(
+    target_type: &str,
+    target_id: &str,
+) -> Result<Vec<DeployedSkillRef>, String> {
+    list_deployed_skill_refs_for_target_with_options(target_type, target_id, false)
 }
 
 fn deployment_matches_source(

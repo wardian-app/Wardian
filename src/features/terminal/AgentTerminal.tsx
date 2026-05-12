@@ -16,6 +16,7 @@ import {
   type TerminalOutputState,
 } from "./terminalCapabilities";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
+import { useQueueStore } from "../../store/useQueueStore";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -448,6 +449,7 @@ async function drainPty(sessionId: string) {
 
         entry.existingScrollbackLines = readParserScrollbackLineSet(entry);
         const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
+        useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
         entry.existingScrollbackLines = undefined;
         entry.parser.write(batchedWrite);
         if (entry.renderer) {

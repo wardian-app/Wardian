@@ -197,6 +197,16 @@ pub fn run() {
                                         current_status: std::sync::Arc::new(std::sync::Mutex::new(
                                             "Headless".to_string(),
                                         )),
+                                        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(
+                                            None,
+                                        )),
+                                        watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                                            crate::state::AgentWatchState::new(
+                                                config.session_id.clone(),
+                                                4096,
+                                                262_144,
+                                            ),
+                                        )),
                                         terminal_title: std::sync::Arc::new(std::sync::Mutex::new(
                                             String::new(),
                                         )),
@@ -240,6 +250,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::agent::spawn_agent,
             commands::agent::clone_agent,
+            commands::agent::get_agent_clone_preview,
             commands::agent::list_agents,
             commands::agent::list_agent_metrics,
             commands::agent::kill_agent,
@@ -253,6 +264,7 @@ pub fn run() {
             commands::agent::list_agent_worktrees,
             commands::agent::assign_agent_worktree,
             commands::agent::disable_agent_worktree,
+            commands::debug::debug_remove_agent_input_sender,
             commands::terminal::send_input_to_agent,
             commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,
@@ -298,6 +310,9 @@ pub fn run() {
             commands::watchlist::save_watchlists,
             commands::watchlist::load_watchlist_prefs,
             commands::watchlist::save_watchlist_prefs,
+            commands::watchlist::load_queue_items,
+            commands::watchlist::save_queue_items,
+            commands::watchlist::load_opencode_last_assistant_text,
             commands::watchlist::load_agent_interactions,
             commands::watchlist::save_agent_interactions,
             commands::workflow::list_workflows,

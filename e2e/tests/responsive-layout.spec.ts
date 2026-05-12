@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('responsive layout', () => {
   test('left sidebar width persists across reload', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/', { waitUntil: "domcontentloaded" });
     // First aside is the fixed-width SidebarIconRail; the resize handle's parent aside is the resizable pane.
     const handle = page.getByTestId('sidebar-resize-handle').first();
     const sidebar = handle.locator('xpath=ancestor::aside[1]');
@@ -25,7 +25,7 @@ test.describe('responsive layout', () => {
   });
 
   test('grid drag past 2/3 enters stacked mode; stack-exit drag restores multi-column', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/', { waitUntil: "domcontentloaded" });
     // Pre-condition: at least 2 mock agents present in fixtures.
     const agentCards = page.locator('[data-testid="agent-card"]');
     test.skip(await agentCards.count() < 2, 'requires at least two visible agent cards');

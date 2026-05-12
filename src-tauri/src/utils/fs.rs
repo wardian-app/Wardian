@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_home_projection_only_seeds_shared_files() {
+    fn codex_home_projection_shares_safe_profile_files() {
         let root = unique_temp_dir("codex-home-shared-files");
         let real_home = root.join("real-codex-home");
         let projected_home = root.join("projected-home");
@@ -864,6 +864,11 @@ mod tests {
         std::fs::write(real_home.join("history.jsonl"), "history").expect("write unrelated file");
         std::fs::write(real_home.join("session_index.jsonl"), "index")
             .expect("write unrelated index");
+        std::fs::write(real_home.join("state_5.sqlite"), "state").expect("write state");
+        std::fs::write(real_home.join("logs_2.sqlite"), "logs").expect("write logs");
+        std::fs::write(real_home.join("logs_2.sqlite-wal"), "logs wal").expect("write logs wal");
+        std::fs::write(real_home.join("sandbox.log"), "sandbox").expect("write runtime file");
+        std::fs::create_dir_all(real_home.join("sessions")).expect("write sessions dir");
 
         sync_codex_agent_home(&real_home, &projected_home, &wardian_skills)
             .expect("sync codex agent home");
@@ -873,6 +878,11 @@ mod tests {
         assert!(projected_home.join("cap_sid").exists());
         assert!(!projected_home.join("history.jsonl").exists());
         assert!(!projected_home.join("session_index.jsonl").exists());
+        assert!(!projected_home.join("state_5.sqlite").exists());
+        assert!(!projected_home.join("logs_2.sqlite").exists());
+        assert!(!projected_home.join("logs_2.sqlite-wal").exists());
+        assert!(!projected_home.join("sandbox.log").exists());
+        assert!(!projected_home.join("sessions").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }

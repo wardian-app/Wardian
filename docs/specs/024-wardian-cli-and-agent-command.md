@@ -135,7 +135,7 @@ The CLI's primary consumer is an agent, not a human. All non-`--pretty` output i
     "uuid": "7f3e…c19d",
     "class": "Coder",
     "provider": "claude-code",
-    "workspace": "D:/Development/Wardian",
+    "workspace": "/path/to/workspace",
     "status": "processing"
   }
 }

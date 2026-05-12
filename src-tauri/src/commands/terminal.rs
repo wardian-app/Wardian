@@ -77,39 +77,16 @@ pub async fn send_input_to_agent(
                         if let Ok(mut status) = agent.current_status.lock() {
                             *status = "Idle".to_string();
                         }
-                        let _ = app.emit(
-                            "agent-status-updated",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "current_status": "Idle",
-                            }),
-                        );
+                        manager::emit_agent_status(&app, &session_id, "Idle");
                     }
                 } else if is_submit {
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
                         let provider = agent.config.lock().unwrap().provider.clone();
-                        if provider == "opencode" || provider == "gemini" {
-                            let current_status = agent
-                                .current_status
-                                .lock()
-                                .map(|status| status.clone())
-                                .unwrap_or_default();
-                            if current_status != "Action Needed" && current_status != "Off" {
-                                if let Ok(mut count) = agent.query_count.lock() {
-                                    *count += 1;
-                                }
-                                if let Ok(mut status) = agent.current_status.lock() {
-                                    *status = "Processing...".to_string();
-                                }
-                                let _ = app.emit(
-                                    "agent-status-updated",
-                                    serde_json::json!({
-                                        "session_id": session_id,
-                                        "current_status": "Processing...",
-                                    }),
-                                );
-                            }
+                        if (provider == "opencode" || provider == "gemini")
+                            && manager::mark_agent_prompt_started(agent)
+                        {
+                            manager::emit_agent_status(&app, &session_id, "Processing...");
                         }
                     }
                 }
@@ -200,22 +177,11 @@ pub async fn submit_prompt_to_agent(
         {
             let agents = state.agents.lock().await;
             if let Some(agent) = agents.get(&session_id) {
-                if let Ok(mut count) = agent.query_count.lock() {
-                    *count += 1;
-                }
-                if let Ok(mut status) = agent.current_status.lock() {
-                    *status = "Processing...".to_string();
+                if manager::mark_agent_prompt_started(agent) {
+                    manager::emit_agent_status(&_app, &session_id, "Processing...");
                 }
             }
         }
-
-        let _ = _app.emit(
-            "agent-status-updated",
-            serde_json::json!({
-                "session_id": session_id,
-                "current_status": "Processing...",
-            }),
-        );
 
         let habitat_cwd = crate::utils::fs::get_wardian_home()
             .map(|home| home.join("agents").join(&session_id).join("habitat"))
@@ -243,13 +209,7 @@ pub async fn submit_prompt_to_agent(
                     }
                 }
 
-                let _ = _app.emit(
-                    "agent-status-updated",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "current_status": "Error",
-                    }),
-                );
+                manager::emit_agent_status(&_app, &session_id, "Error");
 
                 return Err(error);
             }
@@ -298,15 +258,18 @@ pub async fn submit_prompt_to_agent(
             }
         }
 
-        let _ = _app.emit(
-            "agent-status-updated",
-            serde_json::json!({
-                "session_id": session_id,
-                "current_status": "Idle",
-            }),
-        );
+        manager::emit_agent_status(&_app, &session_id, "Idle");
 
         return Ok(());
+    }
+
+    {
+        let agents = state.agents.lock().await;
+        if let Some(agent) = agents.get(&session_id) {
+            if manager::mark_agent_prompt_started(agent) {
+                manager::emit_agent_status(&_app, &session_id, "Processing...");
+            }
+        }
     }
 
     submit_prompt_via_sender(&tx, &prompt, &provider_name).await

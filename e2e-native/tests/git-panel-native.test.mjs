@@ -18,8 +18,8 @@ const RUN_ID = `${process.pid}-${Date.now()}`;
 const SESSION_ID = `e2e-git-${RUN_ID}`;
 const SESSION_NAME = `E2E-Git-${RUN_ID}`;
 
-function normalizePathForAssert(value) {
-  return path.normalize(value);
+function normalizeForWardianRecords(workspacePath) {
+  return workspacePath.split(path.sep).join("/");
 }
 
 function runGit(repoPath, args) {
@@ -146,7 +146,7 @@ test("source control panel renders git files and history for a seeded repo", { t
   await waitForAppShell(driver, 20000);
   await createOffMockAgent(driver, repoPath);
   const rootPath = await invokeTauri(driver, "get_explorer_root", { sessionId: SESSION_ID });
-  assert.equal(normalizePathForAssert(rootPath), normalizePathForAssert(repoPath));
+  assert.equal(rootPath, normalizeForWardianRecords(repoPath));
   const status = await invokeTauri(driver, "git_status", { cwd: rootPath });
   assert.equal(status.branch, "main");
   assert.ok(status.files.some((file) => file.path === "tracked.txt"));

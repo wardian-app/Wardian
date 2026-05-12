@@ -97,6 +97,24 @@ export interface AgentStatusUpdate {
     current_status: string;
 }
 
+export interface QueueItem {
+    id: string;
+    type: "agent_completed" | "workflow_completed";
+    timestamp: number;
+    read: boolean;
+    // agent fields
+    agent_session_id?: string;
+    agent_name?: string;
+    // workflow fields
+    workflow_id?: string;
+    workflow_run_id?: string;
+    workflow_name?: string;
+    status?: "completed" | "failed";
+    error?: string;
+    // shared
+    summary?: string;
+}
+
 export interface GridLayout {
     column_tracks: number[]; // Relative weights (e.g. [1, 1] for 50/50)
     row_height: number;      // Fixed height for all rows in pixels
@@ -160,4 +178,31 @@ export interface LibraryFolder {
 export interface DeployedSkillRef {
     name: string;
     source_path?: string | null;
+}
+
+export type CloneMode = "fresh" | "profile" | "custom";
+
+export interface CloneFileTreeNode {
+    name: string;
+    path: string;
+    kind: "file" | "directory";
+    children: CloneFileTreeNode[];
+}
+
+export interface CloneProfileSelection {
+    files: string[];
+    skills: DeployedSkillRef[];
+}
+
+export interface AgentClonePreview {
+    source_session_id: string;
+    source_session_name: string;
+    suggested_session_name: string;
+    provider: string;
+    agent_class: string;
+    folder: string;
+    files: CloneFileTreeNode;
+    default_selected_files: string[];
+    skills: DeployedSkillRef[];
+    default_selected_skills: DeployedSkillRef[];
 }

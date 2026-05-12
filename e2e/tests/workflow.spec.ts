@@ -8,27 +8,36 @@
  *      Run via: npm run test:e2e:native
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 test.describe("Workflow Builder UI", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+  test.describe.configure({ mode: "serial" });
+
+  let page: Page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
     await page.locator('[data-testid="sidebar-tab-workflows"]').click();
     await page.locator('[data-testid="workflow-sidebar"]').waitFor();
   });
 
-  test("workflow sidebar renders", async ({ page }) => {
+  test.afterAll(async () => {
+    await page.close();
+  });
+
+  test("workflow sidebar renders", async () => {
     await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
   });
 
-  test("switching to workflow builder view renders canvas", async ({ page }) => {
+  test("switching to workflow builder view renders canvas", async () => {
     // The builder canvas is shown when a workflow is open/selected.
     // With empty state the sidebar is visible; builder may not be visible yet.
     await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
   });
 
-  test("workflow builder renders when navigated to directly", async ({ page }) => {
+  test("workflow builder renders when navigated to directly", async () => {
     // If the builder view is accessible via a nav button, verify it loads.
     const builder = page.locator('[data-testid="workflow-builder"]');
     const builderVisible = await builder.isVisible().catch(() => false);
@@ -40,7 +49,7 @@ test.describe("Workflow Builder UI", () => {
     }
   });
 
-  test("add-block button is visible when builder is open", async ({ page }) => {
+  test("add-block button is visible when builder is open", async () => {
     const builder = page.locator('[data-testid="workflow-builder"]');
     const builderVisible = await builder.isVisible().catch(() => false);
     if (builderVisible) {
@@ -50,7 +59,7 @@ test.describe("Workflow Builder UI", () => {
     }
   });
 
-  test("run-workflow button is visible when builder is open", async ({ page }) => {
+  test("run-workflow button is visible when builder is open", async () => {
     const builder = page.locator('[data-testid="workflow-builder"]');
     const builderVisible = await builder.isVisible().catch(() => false);
     if (builderVisible) {

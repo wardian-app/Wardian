@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::Sender;
 
-const TERMINAL_SUBMIT_DELAY_MS: u64 = 100;
+const TERMINAL_SUBMIT_DELAY_MS: u64 = 1000;
 const TERMINAL_SUBMIT_KEY: &[u8] = b"\r";
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
@@ -11,33 +11,49 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
         .to_string()
 }
 
+pub fn provider_submit_chunks(_provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
+    let normalized = normalize_prompt_for_terminal_submit(prompt);
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![normalized.into_bytes(), TERMINAL_SUBMIT_KEY.to_vec()])
+}
+
+pub async fn submit_prompt_chunks_via_sender(
+    tx: &Sender<Vec<u8>>,
+    provider_name: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let chunks = provider_submit_chunks(provider_name, prompt)?;
+    if chunks.is_empty() {
+        return Ok(());
+    }
+
+    tx.send(chunks[0].clone())
+        .await
+        .map_err(|e| format!("Failed to send prompt text: {}", e))?;
+
+    // Windows ConPTY can acknowledge large prompt writes before provider TUIs
+    // have finished updating their editor state. Submitting too quickly leaves
+    // Claude/Gemini with text typed but not entered.
+    tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
+
+    if let Some(submit_key) = chunks.get(1) {
+        tx.send(submit_key.clone())
+            .await
+            .map_err(|e| format!("Failed to send prompt submit key: {}", e))?;
+    }
+
+    Ok(())
+}
+
 pub async fn submit_prompt_via_sender(
     tx: &Sender<Vec<u8>>,
     prompt: &str,
     provider_name: &str,
 ) -> Result<(), String> {
-    let normalized = normalize_prompt_for_terminal_submit(prompt);
-    if normalized.is_empty() {
-        return Ok(());
-    }
-
-    tx.send(normalized.into_bytes())
-        .await
-        .map_err(|e| format!("Failed to send prompt text: {}", e))?;
-
-    tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_SUBMIT_DELAY_MS)).await;
-
-    let submit_key = if provider_name == "codex" {
-        b"\x1b\r".as_slice()
-    } else {
-        TERMINAL_SUBMIT_KEY
-    };
-
-    tx.send(submit_key.to_vec())
-        .await
-        .map_err(|e| format!("Failed to send prompt submit key: {}", e))?;
-
-    Ok(())
+    submit_prompt_chunks_via_sender(tx, provider_name, prompt).await
 }
 
 #[cfg(test)]

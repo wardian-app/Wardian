@@ -176,7 +176,7 @@ describe('AgentWatchlist', () => {
     expect(mockOnClone).toHaveBeenCalledWith('agent-1', 'fresh');
   });
 
-  it('offers fresh and profile clone modes from the clone submenu', async () => {
+  it('offers fresh, profile, and custom clone modes from the clone submenu', async () => {
     render(<AgentWatchlist {...defaultProps} />);
     const agentRow = screen.getByText('Alpha').closest('.watchlist-row');
 
@@ -184,9 +184,21 @@ describe('AgentWatchlist', () => {
     fireEvent.mouseEnter(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clone' }));
 
     expect(screen.getByRole('button', { name: 'Fresh Clone' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Custom Clone' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Profile Clone' }));
 
     expect(mockOnClone).toHaveBeenCalledWith('agent-1', 'profile');
+  });
+
+  it('runs custom clone from the clone submenu', async () => {
+    render(<AgentWatchlist {...defaultProps} />);
+    const agentRow = screen.getByText('Alpha').closest('.watchlist-row');
+
+    fireEvent.contextMenu(agentRow!);
+    fireEvent.mouseEnter(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clone' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Custom Clone' }));
+
+    expect(mockOnClone).toHaveBeenCalledWith('agent-1', 'custom');
   });
 
   it('uses a bulk context menu when right-clicking inside a multi-selection', async () => {

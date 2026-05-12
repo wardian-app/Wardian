@@ -20,6 +20,7 @@ const OFF_SESSION_ID = `e2e-cli-off-${RUN_ID}`;
 const OFF_SESSION_NAME = `E2E-CLI-OFF-${RUN_ID}`;
 const CONTROL_SESSION_NAME = `E2E-CLI-CONTROL-${RUN_ID}`;
 const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
+const ASK_SESSION_NAME = `E2E-CLI-ASK-${RUN_ID}`;
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -312,7 +313,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
       "--workspace",
       workspacePath,
       "--fields",
-      "name,class,provider,status",
+      "name,uuid,class,provider,status",
     ]);
     const source = JSON.parse(spawnResult.stdout).agent;
     assert.equal(source.name, CONTROL_SESSION_NAME);
@@ -353,6 +354,20 @@ test("native CLI control commands operate through the running app", { timeout: 1
     ]);
     assert.equal(JSON.parse(sendResult.stdout).status, "idle");
 
+    const watchResult = runCliOk(cliPath, harness, [
+      "agent",
+      "watch",
+      CONTROL_SESSION_NAME,
+      "--until",
+      "output:Action approved",
+      "--include",
+      "status,output,delivery",
+      "--timeout",
+      "30s",
+    ]);
+    const watched = JSON.parse(watchResult.stdout);
+    assert.match(watched.output.text, /Action approved/);
+
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
     const cloneResult = runCliOk(cliPath, harness, [
       "agent",
@@ -379,6 +394,128 @@ test("native CLI control commands operate through the running app", { timeout: 1
     const killedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
     assert.equal(killedShow.status, 2, killedShow.stderr);
     assert.match(killedShow.stderr, /"code":"not_found"/);
+
+    const removed = await session.driver.executeAsyncScript((sessionId, done) => {
+      window.__TAURI_INTERNALS__.invoke("debug_remove_agent_input_sender", { sessionId }).then(
+        () => done({ ok: true }),
+        (error) => done({ ok: false, error: String(error) }),
+      );
+    }, source.uuid);
+    assert.equal(removed.ok, true, `debug_remove_agent_input_sender failed: ${removed.error}`);
+
+    const missingSender = runCli(cliPath, harness, [
+      "send",
+      "hello",
+      "--to",
+      CONTROL_SESSION_NAME,
+    ]);
+    assert.notEqual(missingSender.status, 0);
+    const missingSenderError = JSON.parse(missingSender.stderr);
+    const delivery = missingSenderError.error.details.delivery[0];
+    assert.ok(
+      ["restored_without_sender", "target_off"].includes(delivery.runtime_state),
+      `unexpected runtime_state ${delivery.runtime_state}`,
+    );
+    assert.equal(delivery.delivery_state, "failed");
+    assert.ok(
+      ["no_input_channel", "target_off"].includes(delivery.error.code),
+      `unexpected error code ${delivery.error.code}`,
+    );
+  });
+});
+
+test("native CLI ask returns only output after its pre-send cursor", { timeout: 180000 }, async (t) => {
+  await withMockScenario("interactive_multi_turn", async () => {
+    const harness = await createNativeHarness();
+    assert.ok(harness.appPath);
+
+    try {
+      if (!skipNativeBuild) {
+        ensureNativeAppBuilt(harness);
+      }
+    } catch (error) {
+      t.skip(String(error));
+      return;
+    }
+
+    prepareIsolatedHome(harness);
+
+    const cliPath = buildCli(harness);
+    const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+    let session;
+    try {
+      session = await startNativeSession(harness);
+    } catch (error) {
+      t.skip(String(error));
+      return;
+    }
+
+    t.after(async () => {
+      await session.close();
+    });
+
+    await waitForAppShell(session.driver, 20000);
+    await watchStep(harness, "Wardian app shell is ready for ask smoke");
+
+    runCliOk(cliPath, harness, [
+      "agent",
+      "spawn",
+      "--provider",
+      "mock",
+      "--class",
+      "Reviewer",
+      "--name",
+      ASK_SESSION_NAME,
+      "--workspace",
+      workspacePath,
+    ]);
+    await waitForCliField(cliPath, harness, ASK_SESSION_NAME, "status", "action_required");
+
+    runCliOk(cliPath, harness, [
+      "send",
+      "STALE_BEFORE_ASK",
+      "--to",
+      ASK_SESSION_NAME,
+      "--wait-until",
+      "action_required",
+      "--timeout",
+      "30s",
+    ]);
+
+    const staleWatch = runCliOk(cliPath, harness, [
+      "agent",
+      "watch",
+      ASK_SESSION_NAME,
+      "--until",
+      "output:STALE_BEFORE_ASK",
+      "--include",
+      "status,output,delivery",
+      "--timeout",
+      "30s",
+    ]);
+    assert.match(JSON.parse(staleWatch.stdout).output.text, /STALE_BEFORE_ASK/);
+
+    const askOutput = runCliOk(cliPath, harness, [
+      "ask",
+      ASK_SESSION_NAME,
+      "ASK_AFTER_CURSOR",
+      "--until",
+      "output:ASK_AFTER_CURSOR",
+      "--timeout",
+      "30s",
+      "--tail",
+      "65536",
+    ]);
+
+    const askJson = JSON.parse(askOutput.stdout);
+    assert.equal(askJson.ok, true);
+    assert.equal(askJson.target, ASK_SESSION_NAME);
+    assert.equal(askJson.condition, "output:ASK_AFTER_CURSOR");
+    assert.match(askJson.output.text, /ASK_AFTER_CURSOR/);
+    assert.doesNotMatch(askJson.output.text, /STALE_BEFORE_ASK/);
+    assert.ok(Array.isArray(askJson.delivery));
+    assert.equal(askJson.delivery[0].delivery_state, "submitted");
   });
 });
 

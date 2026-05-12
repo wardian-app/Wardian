@@ -235,7 +235,7 @@ pub fn build_interactive_shell_launch_with_settings(
 
 fn interactive_shell_args(shell_id: &str) -> Vec<String> {
     match shell_id {
-        "powershell" | "pwsh" => vec!["-NoProfile".to_string()],
+        "powershell" | "pwsh" => Vec::new(),
         "wsl" => vec!["-e".to_string(), "bash".to_string()],
         _ => Vec::new(),
     }
