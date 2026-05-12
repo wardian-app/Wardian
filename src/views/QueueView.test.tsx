@@ -198,4 +198,23 @@ describe("QueueView", () => {
     expect(screen.queryByText("Read Agent")).not.toBeInTheDocument();
     expect(screen.getByText("Unread Workflow")).toBeInTheDocument();
   });
+
+  it("keeps queue cards from shrinking when the list overflows", () => {
+    useQueueStore.setState({
+      items: Array.from({ length: 24 }, (_, index) => ({
+        id: `item-${index}`,
+        type: "agent_completed",
+        timestamp: Date.now() - index,
+        read: false,
+        agent_name: `Agent ${index}`,
+        summary: `Completed task ${index}.`,
+      })),
+    });
+
+    render(<QueueView />);
+
+    const firstCard = screen.getByText("Agent 0").closest(".group");
+    expect(firstCard).toHaveClass("shrink-0");
+    expect(firstCard?.parentElement).toHaveClass("flex-1", "min-h-0", "overflow-y-auto");
+  });
 });
