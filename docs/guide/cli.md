@@ -1,6 +1,6 @@
 # Wardian CLI
 
-Wardian includes a standalone `wardian` command for inspecting known agent sessions from a terminal or from inside an agent process.
+Wardian includes a standalone `wardian` command for agents and automation to inspect, coordinate, and control known agent sessions. Wardian remains GUI/app-first for humans; the CLI is the textual control surface agents use when they need to discover themselves, coordinate peers, or ask the running app to perform live actions for the same `WARDIAN_HOME`.
 
 ## Installation
 
@@ -68,6 +68,39 @@ wardian send "status?" --to class:Coder
 wardian send "stand down" --to all
 ```
 
+## Common Workflows
+
+Inspect the live roster before an agent coordinates work:
+
+```bash
+wardian agent list --scope all --fields name,class,provider,workspace,status,status_source
+```
+
+Hand a bounded review task to a peer and wait for response evidence:
+
+```bash
+wardian ask reviewer-a1 --file review-prompt.md --until output:REVIEW_DONE --timeout 10m
+```
+
+Send a prompt to an existing agent and wait for the next Idle transition:
+
+```bash
+wardian send --file prompt.md --to coder-a1 --wait-until idle --timeout 10m
+```
+
+Watch retained output for a deterministic marker:
+
+```bash
+wardian agent watch coder-a1 --until output:READY_FOR_REVIEW --include status,output,delivery --timeout 10m
+```
+
+Run a saved workflow through the app-owned backend:
+
+```bash
+wardian workflow list
+wardian workflow run workflow-id
+```
+
 Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, `workflow run`, `workflow stop`, and `send`.
 
 `workflow list` and `workflow show` try the running app first, then read workflow JSON files from disk when the app is unavailable.
@@ -100,7 +133,7 @@ Output options:
 - `--field status` returns one bare value plus a newline.
 - `--field status_source` returns `live` or `persisted`.
 - `--verbose` adds `pid`, `started_at`, and `last_status_at`.
-- `--pretty` returns aligned text for humans instead of JSON.
+- `--pretty` returns aligned text for interactive inspection instead of JSON.
 
 Default JSON is indented for terminal readability. It includes `schema: 1` and an `agent` or `agents` payload with `name`, `uuid`, `class`, `provider`, `workspace`, and `status`.
 
