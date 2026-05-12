@@ -603,7 +603,8 @@ mod tests {
 
         let cargo_config =
             std::fs::read_to_string(worktree.join(".cargo").join("config.toml")).unwrap();
-        let expected_target = workspace
+        let expected_target = absolute_existing_path(&workspace)
+            .unwrap()
             .join("target")
             .to_string_lossy()
             .replace('\\', "\\\\");

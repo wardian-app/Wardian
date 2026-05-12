@@ -99,13 +99,24 @@ Current model:
   - `auth.json`
   - `config.toml`
   - `cap_sid`
-  - `history.jsonl`
-  - `session_index.jsonl`
+- Codex session and history files such as `history.jsonl`,
+  `session_index.jsonl`, and `sessions/**` remain per-agent so Wardian can
+  resume and read logs from the agent habitat without merging independent
+  provider threads.
 - Codex SQLite databases such as `state_5.sqlite*` and `logs_2.sqlite*` remain
   per-agent because SQLite journal/WAL files are path-sensitive and are not safe
   to hardlink across independent `CODEX_HOME` directories.
-- Codex runtime directories such as `sessions`, `log`, cache, sandbox, temp, and
+- Codex runtime directories such as `log`, cache, temp, and
   generated database files remain per-agent.
+- On Windows, Codex elevated sandbox support is treated separately from session
+  state:
+  - `.sandbox-secrets` and `.sandbox-bin` are projected from the user's Codex
+    home so every Wardian-created Codex home sees the same elevated sandbox
+    credentials and helpers.
+  - `.sandbox/setup_marker.json` is copied when present so a new projected home
+    can observe completed setup.
+  - `.sandbox` itself is not projected. Runtime files such as `sandbox.log` and
+    `setup_error.json` stay local to the agent or bootstrap home.
 - Codex system skills remain under `CODEX_HOME/skills/.system`
 - Wardian-assigned skills are projected into `CODEX_HOME/skills/<skill-name>`
 
@@ -118,11 +129,12 @@ Codex session IDs are still discovered from provider output, so fresh session cr
 Current sequence:
 
 1. Create a temporary bootstrap `CODEX_HOME` under `.wardian/provider-bootstrap/codex/session-*/.codex`.
-2. Seed it with shared Codex auth/trust files.
+2. Seed it with shared Codex auth/trust files and Windows sandbox support files when present.
 3. Launch Codex with the real workspace as `--cd`.
 4. Parse `thread.started` to get the provider session ID.
 5. Create the final habitat at `.wardian/agents/<provider_session_id>/habitat/.codex`.
-6. Migrate session artifacts from the bootstrap home into the final agent home.
+6. Project any bootstrap-generated Windows sandbox support into the final home.
+7. Migrate session artifacts from the bootstrap home into the final agent home while leaving reusable sandbox support in the bootstrap home.
 
 If Codex starts asking for trust every launch again, first verify that the session was born with the real workspace as `cwd`, not the bootstrap path.
 

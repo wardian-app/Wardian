@@ -1,4 +1,4 @@
-use crate::utils::fs::get_wardian_home;
+use crate::utils::fs::{get_wardian_home, sync_codex_windows_sandbox_support};
 pub(crate) fn codex_bootstrap_workspace_key(workspace_cwd: &std::path::Path) -> String {
     let normalized = workspace_cwd.to_string_lossy().to_ascii_lowercase();
     let mut hash = 0xcbf29ce484222325u64;
@@ -332,6 +332,7 @@ pub(crate) fn migrate_codex_bootstrap_home(
     }
 
     std::fs::create_dir_all(final_home).map_err(|e| e.to_string())?;
+    sync_codex_windows_sandbox_support(bootstrap_home, final_home)?;
 
     let entries = std::fs::read_dir(bootstrap_home).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
@@ -351,6 +352,9 @@ pub(crate) fn migrate_codex_bootstrap_home(
                 | "logs_2.sqlite"
                 | "logs_2.sqlite-shm"
                 | "logs_2.sqlite-wal"
+                | ".sandbox"
+                | ".sandbox-bin"
+                | ".sandbox-secrets"
         ) {
             continue;
         }
@@ -607,6 +611,92 @@ mod tests {
         assert!(!final_home.join("state_5.sqlite").exists());
         assert!(!final_home.join("logs_2.sqlite").exists());
         assert!(final_home.join("sessions").join("session.jsonl").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migrate_codex_bootstrap_home_projects_windows_sandbox_support_without_moving_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_home = temp.path().join("bootstrap").join(".codex");
+        let final_home = temp.path().join("final").join(".codex");
+
+        std::fs::create_dir_all(bootstrap_home.join(".sandbox-secrets"))
+            .expect("create sandbox secrets");
+        std::fs::create_dir_all(bootstrap_home.join(".sandbox-bin")).expect("create sandbox bin");
+        std::fs::create_dir_all(bootstrap_home.join(".sandbox")).expect("create sandbox dir");
+        std::fs::create_dir_all(final_home.join(".sandbox")).expect("create final sandbox dir");
+        std::fs::create_dir_all(bootstrap_home.join("sessions")).expect("create sessions dir");
+        std::fs::write(
+            bootstrap_home
+                .join(".sandbox-secrets")
+                .join("sandbox_users.json"),
+            "secrets",
+        )
+        .expect("write secrets");
+        std::fs::write(
+            bootstrap_home
+                .join(".sandbox-bin")
+                .join("codex-command-runner.exe"),
+            "runner",
+        )
+        .expect("write runner");
+        std::fs::write(
+            bootstrap_home.join(".sandbox").join("setup_marker.json"),
+            "marker",
+        )
+        .expect("write marker");
+        std::fs::write(bootstrap_home.join(".sandbox").join("sandbox.log"), "log")
+            .expect("write log");
+        std::fs::write(final_home.join(".sandbox").join("sandbox.log"), "final log")
+            .expect("write final log");
+        std::fs::write(
+            bootstrap_home
+                .join("sessions")
+                .join("bootstrap-session.jsonl"),
+            "session",
+        )
+        .expect("write session");
+
+        migrate_codex_bootstrap_home(&bootstrap_home, &final_home).expect("migrate bootstrap home");
+
+        assert!(bootstrap_home.join(".sandbox-secrets").exists());
+        assert!(bootstrap_home.join(".sandbox-bin").exists());
+        assert!(bootstrap_home.join(".sandbox").exists());
+        assert_eq!(
+            std::fs::read_to_string(
+                final_home
+                    .join(".sandbox-secrets")
+                    .join("sandbox_users.json")
+            )
+            .expect("read final secrets"),
+            "secrets"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                final_home
+                    .join(".sandbox-bin")
+                    .join("codex-command-runner.exe")
+            )
+            .expect("read final runner"),
+            "runner"
+        );
+        assert_eq!(
+            std::fs::read_to_string(final_home.join(".sandbox").join("setup_marker.json"))
+                .expect("read final marker"),
+            "marker"
+        );
+        assert_eq!(
+            std::fs::read_to_string(final_home.join(".sandbox").join("sandbox.log"))
+                .expect("read final log"),
+            "final log"
+        );
+        assert!(
+            final_home
+                .join("sessions")
+                .join("bootstrap-session.jsonl")
+                .exists(),
+            "session logs must still migrate for resume/log tracking"
+        );
     }
 
     #[test]
