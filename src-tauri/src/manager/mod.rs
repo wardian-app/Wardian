@@ -203,6 +203,15 @@ pub(crate) fn emit_agent_status(app: &AppHandle, session_id: &str, current_statu
     );
 }
 
+pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
+    let _ = app.emit(
+        "agent-turn-completed",
+        serde_json::json!({
+            "session_id": session_id,
+        }),
+    );
+}
+
 pub(crate) fn mark_agent_prompt_started(agent: &crate::state::ActiveAgent) -> bool {
     let current_status = agent
         .current_status
@@ -323,6 +332,7 @@ pub(crate) fn apply_agent_event(
         }
         AgentEvent::TurnCompleted => {
             set_agent_status(app, session_id, current_status, "Idle");
+            emit_agent_turn_completed(app, session_id);
         }
         AgentEvent::ActionRequired { .. } => {
             set_agent_status(app, session_id, current_status, "Action Needed");
@@ -346,6 +356,7 @@ pub(crate) fn apply_agent_status_event(
         }
         AgentEvent::TurnCompleted => {
             set_agent_status(app, session_id, current_status, "Idle");
+            emit_agent_turn_completed(app, session_id);
         }
         AgentEvent::ActionRequired { .. } => {
             set_agent_status(app, session_id, current_status, "Action Needed");

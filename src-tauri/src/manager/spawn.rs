@@ -466,7 +466,15 @@ pub async fn spawn_agent(
                                         "Action Needed",
                                     );
                                 }
-                                AgentEvent::TurnCompleted | AgentEvent::ModelResponse => {
+                                AgentEvent::ModelResponse => {
+                                    set_agent_status(
+                                        &pty_app,
+                                        &sid_for_pty,
+                                        &current_status_clone,
+                                        "Idle",
+                                    );
+                                }
+                                AgentEvent::TurnCompleted => {
                                     set_agent_status(
                                         &pty_app,
                                         &sid_for_pty,
