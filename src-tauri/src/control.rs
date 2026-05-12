@@ -241,7 +241,22 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             tail_bytes,
             follow,
             timeout_ms,
-        } => handle_agent_watch(app, &target, since, until, tail_bytes, follow, timeout_ms).await,
+            output_echo_guard,
+        } => {
+            handle_agent_watch(
+                app,
+                &target,
+                AgentWatchControlOptions {
+                    since,
+                    until,
+                    tail_bytes,
+                    follow,
+                    timeout_ms,
+                    output_echo_guard,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -851,15 +866,15 @@ async fn mark_delivered_agents_prompt_started(
 async fn handle_agent_watch(
     app: &AppHandle,
     target: &str,
-    since: Option<String>,
-    until: Option<String>,
-    tail_bytes: Option<usize>,
-    follow: bool,
-    timeout_ms: Option<u64>,
+    options: AgentWatchControlOptions,
 ) -> Result<String, ControlError> {
-    validate_watch_follow(follow)?;
+    validate_watch_follow(options.follow)?;
     validate_watch_target(target)?;
-    let condition = until.as_deref().map(parse_watch_condition).transpose()?;
+    let condition = options
+        .until
+        .as_deref()
+        .map(parse_watch_condition)
+        .transpose()?;
     let state = app.state::<AppState>();
     let uuid = resolve_target_uuid_in_state(&state, target)
         .await
@@ -868,17 +883,18 @@ async fn handle_agent_watch(
     let snapshot = if let Some(condition) = condition {
         wait_for_watch_condition(
             watch_state,
-            since,
+            options.since,
             condition,
-            Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-            tail_bytes,
+            Duration::from_millis(options.timeout_ms.unwrap_or(30_000)),
+            options.tail_bytes,
+            options.output_echo_guard,
         )
         .await?
     } else {
         watch_state
             .lock()
             .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
-            .snapshot_since(since.as_deref(), tail_bytes)
+            .snapshot_since(options.since.as_deref(), options.tail_bytes)
             .map_err(control_error_from_watch_state)?
     };
     let agent = watch_agent_snapshot(&state, &uuid).await?;
@@ -892,6 +908,15 @@ async fn handle_agent_watch(
         output: snapshot.output,
         delivery,
     })
+}
+
+struct AgentWatchControlOptions {
+    since: Option<String>,
+    until: Option<String>,
+    tail_bytes: Option<usize>,
+    follow: bool,
+    timeout_ms: Option<u64>,
+    output_echo_guard: Option<String>,
 }
 
 fn validate_watch_target(target: &str) -> Result<(), ControlError> {
@@ -943,6 +968,7 @@ async fn wait_for_watch_condition(
     condition: WatchCondition,
     timeout: Duration,
     tail_bytes: Option<usize>,
+    output_echo_guard: Option<String>,
 ) -> Result<crate::state::agent_watch::WatchSnapshot, ControlError> {
     let started = std::time::Instant::now();
     let notify = state
@@ -960,7 +986,11 @@ async fn wait_for_watch_condition(
         };
 
         match snapshot {
-            Ok(snapshot) if watch_condition_matches(&condition, &snapshot) => return Ok(snapshot),
+            Ok(snapshot)
+                if watch_condition_matches(&condition, &snapshot, output_echo_guard.as_deref()) =>
+            {
+                return Ok(snapshot)
+            }
             Ok(_) => {}
             Err(error) if error.code() == "cursor_expired" => {
                 return Err(
@@ -985,6 +1015,7 @@ async fn wait_for_watch_condition(
 fn watch_condition_matches(
     condition: &WatchCondition,
     snapshot: &crate::state::agent_watch::WatchSnapshot,
+    output_echo_guard: Option<&str>,
 ) -> bool {
     match condition {
         WatchCondition::Status(status) => snapshot.events.iter().any(|event| {
@@ -995,7 +1026,14 @@ fn watch_condition_matches(
                     .and_then(|value| value.as_str())
                     .is_some_and(|value| normalize_status(value) == *status)
         }),
-        WatchCondition::OutputContains(token) => snapshot.output.text.contains(token),
+        WatchCondition::OutputContains(token) => {
+            snapshot.output.text.contains(token)
+                && !output_match_is_prompt_echo_only(
+                    token,
+                    &snapshot.output.text,
+                    output_echo_guard,
+                )
+        }
         WatchCondition::EventKind(kind) => snapshot.events.iter().any(|event| &event.kind == kind),
         WatchCondition::DeliveryState(state) => snapshot.events.iter().any(|event| {
             event.kind == "delivery"
@@ -1006,6 +1044,107 @@ fn watch_condition_matches(
                     == Some(state.as_str())
         }),
     }
+}
+
+fn output_match_is_prompt_echo_only(
+    token: &str,
+    output_text: &str,
+    submitted_message: Option<&str>,
+) -> bool {
+    let Some(submitted_message) = submitted_message else {
+        return false;
+    };
+    if token.is_empty() || !submitted_message.contains(token) {
+        return false;
+    }
+    let output_lines = normalized_echo_lines(output_text);
+    if output_lines.is_empty() {
+        return false;
+    }
+    let submitted_joined = normalized_echo_lines(submitted_message).join(" ");
+    if submitted_joined.is_empty() {
+        return false;
+    }
+
+    let mut saw_token = false;
+    for line in output_lines.iter().filter(|line| line.contains(token)) {
+        saw_token = true;
+        if !normalized_line_is_submitted_prompt_echo(line, &submitted_joined, token) {
+            return false;
+        }
+    }
+    saw_token
+}
+
+fn normalized_line_is_submitted_prompt_echo(
+    line: &str,
+    submitted_joined: &str,
+    token: &str,
+) -> bool {
+    prompt_echo_line_candidates(line).iter().any(|candidate| {
+        submitted_joined.contains(candidate.as_str())
+            && !(candidate == token && submitted_joined != token)
+    })
+}
+
+fn prompt_echo_line_candidates(line: &str) -> Vec<String> {
+    let mut candidates = vec![line.to_string(), strip_origin_prefix(line).to_string()];
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Some(content) = json.get("content").and_then(|value| value.as_str()) {
+            let normalized_content = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            candidates.push(normalized_content.clone());
+            candidates.push(strip_origin_prefix(&normalized_content).to_string());
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn strip_origin_prefix(line: &str) -> &str {
+    line.strip_prefix("From ")
+        .and_then(|without_from| without_from.split_once(": ").map(|(_, rest)| rest))
+        .unwrap_or(line)
+}
+
+fn normalized_echo_lines(text: &str) -> Vec<String> {
+    strip_ansi_controls(text)
+        .replace('\r', "\n")
+        .lines()
+        .filter_map(normalized_echo_line)
+        .collect()
+}
+
+fn normalized_echo_line(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_start_matches(is_prompt_prefix_char).trim();
+    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn is_prompt_prefix_char(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '›' | '>' | '$' | '#' | ':' | '|' | '│' | '┃' | '»' | '•' | '·' | '-' | '*'
+        )
+}
+
+fn strip_ansi_controls(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        } else {
+            stripped.push(ch);
+        }
+    }
+    stripped
 }
 
 fn control_error_from_watch_state(
@@ -1983,11 +2122,114 @@ mod tests {
             WatchCondition::OutputContains("WARDIAN_OK".to_string()),
             std::time::Duration::from_secs(1),
             Some(1024),
+            None,
         )
         .await
         .unwrap();
 
         assert!(snapshot.output.text.contains("WARDIAN_OK"));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_ignores_submitted_prompt_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000001".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000001".to_string(),
+                text: "\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Say AUTO_TEST_2_DONE when finished\r\n  gpt-5.5 high · D:\\Development\\Wardian".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(!watch_condition_matches(
+            &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
+            &snapshot,
+            Some("Say AUTO_TEST_2_DONE when finished"),
+        ));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_matches_provider_response_after_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000002".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000002".to_string(),
+                text: "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\nActual response: AUTO_TEST_2_DONE".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
+            &snapshot,
+            Some("Say AUTO_TEST_2_DONE when finished"),
+        ));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_matches_exact_marker_response_after_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000003".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000003".to_string(),
+                text:
+                    "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\n  AUTO_TEST_2_DONE"
+                        .to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
+            &snapshot,
+            Some("Say AUTO_TEST_2_DONE when finished"),
+        ));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_ignores_origin_prefixed_json_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000004".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000004".to_string(),
+                text: "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(!watch_condition_matches(
+            &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
+            &snapshot,
+            Some("AUTO_TEST_2_DONE"),
+        ));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_matches_origin_prefixed_response_after_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000005".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000005".to_string(),
+                text: "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}\r\nActual response after echo: From Wardian agent agent-1: AUTO_TEST_2_DONE".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
+            &snapshot,
+            Some("AUTO_TEST_2_DONE"),
+        ));
     }
 
     #[tokio::test]
@@ -2014,6 +2256,7 @@ mod tests {
             WatchCondition::OutputContains("never".to_string()),
             std::time::Duration::from_secs(1),
             Some(1024),
+            None,
         )
         .await
         .unwrap_err();
