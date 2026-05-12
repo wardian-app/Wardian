@@ -11,8 +11,38 @@ pub struct Cli {
 pub enum Command {
     Agent(AgentArgs),
     Workflow(WorkflowArgs),
+    Team(TeamArgs),
+    Watchlist(WatchlistArgs),
     Send(SendArgs),
     Ask(AskArgs),
+}
+
+// ---------------------------------------------------------------------------
+// wardian team / watchlist
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct TeamArgs {
+    #[command(subcommand)]
+    pub command: TeamCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TeamCommand {
+    List,
+    Show { target: String },
+}
+
+#[derive(Debug, Args)]
+pub struct WatchlistArgs {
+    #[command(subcommand)]
+    pub command: WatchlistCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WatchlistCommand {
+    List,
+    Show { target: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +196,10 @@ pub enum AgentCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    Worktree {
+        #[command(subcommand)]
+        command: AgentWorktreeCommand,
+    },
     Watch {
         target: String,
         #[arg(long)]
@@ -189,6 +223,24 @@ pub enum AgentCommand {
         timeout: String,
         #[arg(long)]
         next: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentWorktreeCommand {
+    List,
+    Enable {
+        target: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Join {
+        target: String,
+        #[arg(long)]
+        worktree: String,
+    },
+    Disable {
+        target: String,
     },
 }
 
@@ -424,6 +476,119 @@ mod tests {
         assert!(matches!(
             args.command,
             Some(AgentCommand::Wait { next: true, .. })
+        ));
+    }
+
+    #[test]
+    fn parses_agent_worktree_list() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "worktree", "list"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Worktree {
+                command: AgentWorktreeCommand::List
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_agent_worktree_enable_with_name() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "worktree",
+            "enable",
+            "coder-a1",
+            "--name",
+            "review fixes",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Worktree {
+                command: AgentWorktreeCommand::Enable { ref target, ref name }
+            }) if target == "coder-a1" && name.as_deref() == Some("review fixes")
+        ));
+    }
+
+    #[test]
+    fn parses_agent_worktree_join() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "worktree",
+            "join",
+            "coder-a1",
+            "--worktree",
+            "D:/Development/Wardian/.worktrees/review",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Worktree {
+                command: AgentWorktreeCommand::Join { ref target, ref worktree }
+            }) if target == "coder-a1" && worktree == "D:/Development/Wardian/.worktrees/review"
+        ));
+    }
+
+    #[test]
+    fn parses_agent_worktree_disable() {
+        let cli =
+            Cli::try_parse_from(["wardian", "agent", "worktree", "disable", "coder-a1"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Worktree {
+                command: AgentWorktreeCommand::Disable { ref target }
+            }) if target == "coder-a1"
+        ));
+    }
+
+    #[test]
+    fn parses_team_list_and_show() {
+        let cli = Cli::try_parse_from(["wardian", "team", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Team(TeamArgs {
+                command: TeamCommand::List
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["wardian", "team", "show", "review"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Team(TeamArgs {
+                command: TeamCommand::Show { ref target }
+            }) if target == "review"
+        ));
+    }
+
+    #[test]
+    fn parses_watchlist_list_and_show() {
+        let cli = Cli::try_parse_from(["wardian", "watchlist", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Watchlist(WatchlistArgs {
+                command: WatchlistCommand::List
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["wardian", "watchlist", "show", "main"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Watchlist(WatchlistArgs {
+                command: WatchlistCommand::Show { ref target }
+            }) if target == "main"
         ));
     }
 

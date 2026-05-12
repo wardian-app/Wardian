@@ -1054,7 +1054,7 @@ fn slugify_worktree_name(name: &str) -> String {
     slug
 }
 
-fn resolve_agent_worktree_branch_name(worktree_name: &str) -> String {
+pub(crate) fn resolve_agent_worktree_branch_name(worktree_name: &str) -> String {
     let slug = slugify_worktree_name(worktree_name);
     format!("wardian/{slug}")
 }

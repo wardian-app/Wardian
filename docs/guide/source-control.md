@@ -63,6 +63,15 @@ Source Control also exposes worktree actions:
 
 When enabled, Wardian creates a named worktree under `<wardian-home>/agents/<session-id>/worktrees/`, creates a matching `wardian/<worktree-name>` branch, shares supported build caches with the source checkout, and moves the agent runtime to that path with a fresh provider session. Joining an existing shared worktree assigns the same worktree path to another agent and also starts that agent fresh in the shared path.
 
+The same agent worktree controls are available from the CLI when the desktop app is running for the same `WARDIAN_HOME`:
+
+```bash
+wardian agent worktree list
+wardian agent worktree enable <agent-name-or-id> --name <worktree-name>
+wardian agent worktree join <agent-name-or-id> --worktree <absolute-worktree-path-or-id>
+wardian agent worktree disable <agent-name-or-id>
+```
+
 ## Safety Notes
 
 - Discard is destructive; Wardian asks for confirmation.

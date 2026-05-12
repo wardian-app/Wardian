@@ -5,7 +5,8 @@ use std::{
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentWatchResponse, ControlRequest, DeliveryDetail,
+    AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
+    AgentWorktreeMutationResponse, AgentWorktreeSummary, ControlRequest, DeliveryDetail,
     MessageOrigin, SendMessageResponse, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
@@ -22,6 +23,10 @@ enum ControlOperation {
     AgentResume,
     AgentSpawn,
     AgentClone,
+    AgentWorktreeList,
+    AgentWorktreeEnable,
+    AgentWorktreeJoin,
+    AgentWorktreeDisable,
     WorkflowList,
     WorkflowShow,
     WorkflowRun,
@@ -250,6 +255,62 @@ pub fn agent_clone(target: &str, name: Option<&str>) -> io::Result<AgentIdentity
     let resp: AgentResponse =
         serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(resp.agent)
+}
+
+pub fn agent_worktree_list() -> io::Result<Vec<AgentWorktreeSummary>> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentWorktreeList,
+        send_request(ControlRequest::AgentWorktreeList),
+    )?;
+    let resp: AgentWorktreeListResponse =
+        serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(resp.worktrees)
+}
+
+pub fn agent_worktree_enable(
+    target: &str,
+    name: Option<&str>,
+) -> io::Result<AgentWorktreeMutationResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentWorktreeEnable,
+        send_request(ControlRequest::AgentWorktreeEnable {
+            target: target.to_string(),
+            name: name.map(str::to_string),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn agent_worktree_join(
+    target: &str,
+    worktree: &str,
+) -> io::Result<AgentWorktreeMutationResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentWorktreeJoin,
+        send_request(ControlRequest::AgentWorktreeJoin {
+            target: target.to_string(),
+            worktree: worktree.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn agent_worktree_disable(target: &str) -> io::Result<AgentWorktreeMutationResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentWorktreeDisable,
+        send_request(ControlRequest::AgentWorktreeDisable {
+            target: target.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
 pub fn workflow_list() -> io::Result<Vec<WorkflowSummary>> {
@@ -491,9 +552,13 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentResume
         | ControlOperation::AgentSpawn
         | ControlOperation::AgentClone
+        | ControlOperation::AgentWorktreeEnable
+        | ControlOperation::AgentWorktreeJoin
+        | ControlOperation::AgentWorktreeDisable
         | ControlOperation::WorkflowRun
         | ControlOperation::WorkflowStop
         | ControlOperation::SendMessage => CONTROL_MUTATION_TIMEOUT,
+        ControlOperation::AgentWorktreeList => CONTROL_TIMEOUT,
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
     }
 }
@@ -682,6 +747,30 @@ mod tests {
     fn spawn_and_clone_use_longer_control_timeout() {
         assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
         assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn worktree_mutations_use_longer_control_timeout() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentWorktreeEnable),
+            CONTROL_MUTATION_TIMEOUT
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentWorktreeJoin),
+            CONTROL_MUTATION_TIMEOUT
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentWorktreeDisable),
+            CONTROL_MUTATION_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn worktree_list_keeps_short_control_timeout() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentWorktreeList),
+            CONTROL_TIMEOUT
+        );
     }
 
     #[test]

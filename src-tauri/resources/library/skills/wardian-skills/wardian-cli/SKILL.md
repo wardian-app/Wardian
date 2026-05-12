@@ -45,6 +45,7 @@ wardian agent list --scope all
 wardian agent list --scope all --status idle
 wardian agent list --scope all --class Coder
 wardian agent list --workspace <absolute-workspace-path>
+wardian agent worktree list
 ```
 
 Default list scope is `workspace` when the caller is a Wardian agent with a
@@ -83,6 +84,9 @@ app to be running for the same `WARDIAN_HOME`.
 ```bash
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
 wardian agent clone coder-a1 --name coder-a2
+wardian agent worktree enable coder-a1 --name review-fixes
+wardian agent worktree join coder-a1 --worktree <absolute-worktree-path-or-id>
+wardian agent worktree disable coder-a1
 wardian agent pause reviewer-a1
 wardian agent resume reviewer-a1
 wardian agent kill reviewer-a1
@@ -106,6 +110,13 @@ Use `--timeout` with `ms`, `s`, or `m` units.
 `agent watch <target>` returns status, retained output, events, delivery
 details, and a cursor. Use `--until output:<token>` when you need the response
 text itself. `--follow` is reserved and currently returns `not_supported`.
+
+`agent worktree` commands require the desktop app for the same `WARDIAN_HOME`.
+They route through Wardian's live control endpoint and reuse the GUI/backend
+worktree logic. `enable`, `join`, and `disable` clear the target agent session
+after moving its workspace so the provider starts fresh in the new location.
+`disable` removes only the assignment; it does not delete the physical worktree
+folder.
 
 Use `wardian ask` for one-off peer tasks where you need both delivery evidence
 and the target's response output:
@@ -182,6 +193,21 @@ workflow JSON files from disk when the app is unavailable. `workflow run` and
 Malformed workflow files may be reported as warnings or omitted depending on
 the CLI version. If `show` cannot find a workflow that exists on disk, inspect
 the workflow JSON for parse errors.
+
+## Teams And Watchlists
+
+```bash
+wardian team list
+wardian team show <team-name-or-id>
+wardian watchlist list
+wardian watchlist show <watchlist-name-or-id>
+```
+
+These commands are read-only and inspect the persisted `watchlists/index.json`
+file. They accept the current v2 watchlist state with global teams and legacy
+flat watchlist arrays. Do not assume `team:<name>` send targeting exists yet;
+use explicit agent names/UUIDs or `class:<ClassName>` until team send targeting
+is implemented.
 
 ## Orchestration Pattern
 

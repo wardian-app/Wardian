@@ -7,7 +7,8 @@ mod output;
 use std::{io::Read as _, time::Duration};
 
 use args::{
-    AgentArgs, AgentCommand, AskArgs, Cli, Command, SendArgs, WorkflowArgs, WorkflowCommand,
+    AgentArgs, AgentCommand, AgentWorktreeCommand, AskArgs, Cli, Command, SendArgs, TeamArgs,
+    TeamCommand, WatchlistArgs, WatchlistCommand, WorkflowArgs, WorkflowCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
@@ -26,6 +27,8 @@ fn run() -> i32 {
     let result = match cli.command {
         Command::Agent(args) => handle_agent(args),
         Command::Workflow(args) => handle_workflow(args),
+        Command::Team(args) => handle_team(args),
+        Command::Watchlist(args) => handle_watchlist(args),
         Command::Send(args) => handle_send(args),
         Command::Ask(args) => handle_ask(args),
     };
@@ -53,6 +56,60 @@ fn handle_parse_error(error: clap::Error) -> i32 {
 
     CliError::generic(error.to_string()).emit();
     ExitCode::Generic as i32
+}
+
+// ---------------------------------------------------------------------------
+// wardian team / watchlist
+// ---------------------------------------------------------------------------
+
+fn handle_team(args: TeamArgs) -> Result<String, CliError> {
+    let state = disk::load_watchlist_state().map_err(|e| CliError::generic(e.to_string()))?;
+    match args.command {
+        TeamCommand::List => serde_json::to_string_pretty(&serde_json::json!({
+            "schema": 1,
+            "teams": state.teams,
+        }))
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string())),
+        TeamCommand::Show { target } => {
+            let team = state
+                .teams
+                .into_iter()
+                .find(|team| team.id == target || team.name == target)
+                .ok_or_else(|| CliError::not_found_entity("Team", &target))?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": 1,
+                "team": team,
+            }))
+            .map(|json| format!("{json}\n"))
+            .map_err(|e| CliError::generic(e.to_string()))
+        }
+    }
+}
+
+fn handle_watchlist(args: WatchlistArgs) -> Result<String, CliError> {
+    let state = disk::load_watchlist_state().map_err(|e| CliError::generic(e.to_string()))?;
+    match args.command {
+        WatchlistCommand::List => serde_json::to_string_pretty(&serde_json::json!({
+            "schema": 1,
+            "watchlists": state.watchlists,
+        }))
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string())),
+        WatchlistCommand::Show { target } => {
+            let watchlist = state
+                .watchlists
+                .into_iter()
+                .find(|watchlist| watchlist.id == target || watchlist.name == target)
+                .ok_or_else(|| CliError::not_found_entity("Watchlist", &target))?;
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": 1,
+                "watchlist": watchlist,
+            }))
+            .map(|json| format!("{json}\n"))
+            .map_err(|e| CliError::generic(e.to_string()))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +150,7 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
         Some(AgentCommand::Clone { target, name }) => {
             handle_agent_clone(target, name.as_deref(), &args)
         }
+        Some(AgentCommand::Worktree { command }) => handle_agent_worktree(command),
         Some(AgentCommand::Watch { follow, .. }) if *follow => Err(CliError::backend(
             ExitCode::Generic,
             "not_supported",
@@ -169,6 +227,47 @@ fn handle_agent_clone(
 ) -> Result<String, CliError> {
     let agent = live::agent_clone(target, name).map_err(control_error)?;
     render_show(&agent, &render_options(args))
+}
+
+fn handle_agent_worktree(command: &AgentWorktreeCommand) -> Result<String, CliError> {
+    match command {
+        AgentWorktreeCommand::List => {
+            let worktrees = live::agent_worktree_list().map_err(control_error)?;
+            render_worktree_list(&worktrees)
+        }
+        AgentWorktreeCommand::Enable { target, name } => {
+            let response =
+                live::agent_worktree_enable(target, name.as_deref()).map_err(control_error)?;
+            render_worktree_mutation_response(&response)
+        }
+        AgentWorktreeCommand::Join { target, worktree } => {
+            let response = live::agent_worktree_join(target, worktree).map_err(control_error)?;
+            render_worktree_mutation_response(&response)
+        }
+        AgentWorktreeCommand::Disable { target } => {
+            let response = live::agent_worktree_disable(target).map_err(control_error)?;
+            render_worktree_mutation_response(&response)
+        }
+    }
+}
+
+fn render_worktree_list(
+    worktrees: &[wardian_core::control::AgentWorktreeSummary],
+) -> Result<String, CliError> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema": 1,
+        "worktrees": worktrees,
+    }))
+    .map(|json| format!("{json}\n"))
+    .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn render_worktree_mutation_response(
+    response: &wardian_core::control::AgentWorktreeMutationResponse,
+) -> Result<String, CliError> {
+    serde_json::to_string_pretty(response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
 }
 
 fn handle_agent_wait(
@@ -468,6 +567,7 @@ fn control_error(e: std::io::Error) -> CliError {
             "not_supported" => backend_error(ExitCode::Generic, "not_supported"),
             "not_found" => backend_error(ExitCode::NotFound, "not_found"),
             "request_failed" => backend_error(ExitCode::Generic, "request_failed"),
+            "not_managed_worktree" => backend_error(ExitCode::Generic, "not_managed_worktree"),
             "watch_timeout" => backend_error(ExitCode::Generic, "watch_timeout"),
             "cursor_expired" => backend_error(ExitCode::Generic, "cursor_expired"),
             "gap_detected" => backend_error(ExitCode::Generic, "gap_detected"),
@@ -788,6 +888,49 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(json["delivery"][0]["delivery_state"], "submitted");
         assert_eq!(json["output"]["text"], "done");
+    }
+
+    #[test]
+    fn render_worktree_mutation_response_keeps_schema_and_worktree_details() {
+        let response = wardian_core::control::AgentWorktreeMutationResponse {
+            schema: 1,
+            ok: true,
+            action: "join".to_string(),
+            agent: wardian_core::identity::AgentIdentity {
+                name: "coder-a1".to_string(),
+                uuid: "agent-1".to_string(),
+                class: "Coder".to_string(),
+                provider: "codex".to_string(),
+                status: "processing".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: Some("D:/repo/worktrees/review".to_string()),
+                last_status_at: None,
+                status_source: wardian_core::identity::StatusSource::Live,
+            },
+            worktree: Some(wardian_core::control::AgentWorktreeSummary {
+                id: "D:/repo/worktrees/review".to_string(),
+                name: "review".to_string(),
+                source_folder: "D:/repo".to_string(),
+                worktree_folder: "D:/repo/worktrees/review".to_string(),
+                member_agent_ids: vec!["agent-1".to_string(), "agent-2".to_string()],
+            }),
+            previous_worktree: None,
+            previous_workspace: Some("D:/repo".to_string()),
+            current_workspace: Some("D:/repo/worktrees/review".to_string()),
+            branch_name: None,
+            cleared_session: true,
+        };
+
+        let rendered = render_worktree_mutation_response(&response).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(json["schema"], 1);
+        assert_eq!(json["action"], "join");
+        assert_eq!(json["agent"]["uuid"], "agent-1");
+        assert_eq!(json["worktree"]["source_folder"], "D:/repo");
+        assert_eq!(json["worktree"]["member_agent_ids"][1], "agent-2");
+        assert_eq!(json["cleared_session"], true);
     }
 
     #[test]
