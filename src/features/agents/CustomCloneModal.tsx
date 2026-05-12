@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentClassDefinition,
   AgentClonePreview,
+  AgentConfig,
   CloneFileTreeNode,
   DeployedSkillRef,
 } from "../../types";
@@ -12,7 +13,7 @@ interface CustomCloneModalProps {
   agentClasses: AgentClassDefinition[];
   isOpen: boolean;
   onClose: () => void;
-  onCloned: () => void;
+  onCloned: (cloned: AgentConfig) => void | Promise<void>;
 }
 
 const providerOptions = [
@@ -133,7 +134,7 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
     setIsSubmitting(true);
     setError(null);
     try {
-      await invoke("clone_agent", {
+      const cloned = await invoke<AgentConfig>("clone_agent", {
         req: {
           source_session_id: preview.source_session_id,
           mode: "profile",
@@ -147,7 +148,7 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
           },
         },
       });
-      onCloned();
+      await onCloned(cloned);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
