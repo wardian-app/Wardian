@@ -65,6 +65,8 @@ pub enum ControlRequest {
         tail_bytes: Option<usize>,
         follow: bool,
         timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_echo_guard: Option<String>,
     },
 }
 
@@ -397,6 +399,7 @@ mod tests {
             tail_bytes: Some(4096),
             follow: false,
             timeout_ms: Some(30_000),
+            output_echo_guard: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -404,6 +407,27 @@ mod tests {
         assert!(json.contains(r#""command":"agent_watch""#));
         assert!(json.contains(r#""target":"Wardian-Codex""#));
         assert!(json.contains(r#""until":"status:idle""#));
+        assert!(!json.contains(r#""output_echo_guard""#));
+    }
+
+    #[test]
+    fn agent_watch_request_can_carry_internal_output_echo_guard() {
+        let req = ControlRequest::AgentWatch {
+            target: "Wardian-Codex".to_string(),
+            since: Some("agent-1:0000000000000001".to_string()),
+            until: Some("output:AUTO_TEST_2_DONE".to_string()),
+            include: vec!["status".to_string(), "output".to_string()],
+            tail_bytes: Some(4096),
+            follow: false,
+            timeout_ms: Some(30_000),
+            output_echo_guard: Some("Say AUTO_TEST_2_DONE".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""output_echo_guard":"Say AUTO_TEST_2_DONE""#));
+        assert_eq!(roundtrip, req);
     }
 
     #[test]

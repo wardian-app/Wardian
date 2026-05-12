@@ -1696,10 +1696,25 @@ pub async fn clone_agent(
         AgentOrderPlacement::After(&source_session_id),
     )
     .await;
-    if registered.is_err() {
-        clone_cleanup_created_profile_dirs(&created_profile_dirs);
+    match registered {
+        Ok(config) => {
+            if let Err(error) = crate::commands::watchlist::preserve_clone_team_placement(
+                &app,
+                &source_session_id,
+                &config.session_id,
+            ) {
+                manager::log_debug(&format!(
+                    "[WARDIAN] Failed to preserve clone team placement for {} cloned from {}: {}",
+                    config.session_id, source_session_id, error
+                ));
+            }
+            Ok(config)
+        }
+        Err(error) => {
+            clone_cleanup_created_profile_dirs(&created_profile_dirs);
+            Err(error)
+        }
     }
-    registered
 }
 
 #[tauri::command]

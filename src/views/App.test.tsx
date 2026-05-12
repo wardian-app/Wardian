@@ -8,6 +8,7 @@ import type { AgentConfig, AgentClassDefinition, AgentClonePreview } from "../ty
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useQueueStore } from "../store/useQueueStore";
+import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -66,6 +67,30 @@ let currentAgents: AgentConfig[] = [];
 let currentWatchlists: unknown = [];
 let currentInteractions: unknown = {};
 let currentQueueItems: unknown = [];
+
+function simulateBackendCloneTeamPlacement(sourceAgentId: string, cloneAgentId: string) {
+  const state = normalizeWatchlistState(currentWatchlists);
+  const sourceTeam = state.teams.find((team) => team.agentIds.includes(sourceAgentId));
+  if (!sourceTeam) return;
+
+  currentWatchlists = {
+    ...state,
+    teams: state.teams
+      .map((team) => {
+        const withoutClone = team.agentIds.filter((id) => id !== cloneAgentId);
+        if (team.id !== sourceTeam.id) return { ...team, agentIds: withoutClone };
+
+        const sourceIndex = withoutClone.indexOf(sourceAgentId);
+        if (sourceIndex === -1) return { ...team, agentIds: withoutClone };
+
+        const agentIds = [...withoutClone];
+        agentIds.splice(sourceIndex + 1, 0, cloneAgentId);
+        return { ...team, agentIds };
+      })
+      .filter((team) => team.agentIds.length > 0),
+  };
+}
+
 function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefinition[] = []) {
   currentAgents = [...agents];
   currentWatchlists = [];
@@ -123,6 +148,7 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
               clone,
               ...currentAgents.slice(sourceIndex + 1),
             ];
+            simulateBackendCloneTeamPlacement(source.session_id, clone.session_id);
             return clone;
           }
         }
@@ -847,7 +873,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("keeps a quick-cloned agent in the source team immediately after the source", async () => {
+  it("reloads backend-owned team placement after quick clone", async () => {
     setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
       version: 2,
       teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
@@ -868,15 +894,13 @@ describe("Agent Watchlist Sidebar", () => {
     fireEvent.click(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Clone" }));
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("save_watchlists", {
-        watchlists: expect.objectContaining({
-          teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-clone", "agent-2"] }],
-        }),
-      });
+      const state = normalizeWatchlistState(currentWatchlists);
+      expect(state.teams[0].agentIds).toEqual(["agent-1", "agent-clone", "agent-2"]);
+      expect(mockInvoke).not.toHaveBeenCalledWith("save_watchlists", expect.anything());
     });
   });
 
-  it("keeps a custom-cloned agent in the source team immediately after the source", async () => {
+  it("reloads backend-owned team placement after custom clone", async () => {
     setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
       version: 2,
       teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
@@ -899,11 +923,9 @@ describe("Agent Watchlist Sidebar", () => {
     fireEvent.click(await screen.findByTestId("custom-clone-submit"));
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("save_watchlists", {
-        watchlists: expect.objectContaining({
-          teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-clone", "agent-2"] }],
-        }),
-      });
+      const state = normalizeWatchlistState(currentWatchlists);
+      expect(state.teams[0].agentIds).toEqual(["agent-1", "agent-clone", "agent-2"]);
+      expect(mockInvoke).not.toHaveBeenCalledWith("save_watchlists", expect.anything());
     });
   });
 

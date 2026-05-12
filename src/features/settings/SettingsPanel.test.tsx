@@ -33,6 +33,11 @@ describe('SettingsPanel', () => {
             custom_executable: null,
             custom_args: null,
             agent_session_persistence: 'resume',
+            codex_runtime_policy: {
+              sandbox_mode: 'workspace-write',
+              approval_policy: 'on-request',
+              full_auto: false,
+            },
           };
         case 'list_available_shells':
           return [
@@ -57,6 +62,11 @@ describe('SettingsPanel', () => {
             custom_executable: null,
             custom_args: null,
             agent_session_persistence: (args as { persistence?: 'fresh' | 'resume' } | undefined)?.persistence ?? 'resume',
+            codex_runtime_policy: {
+              sandbox_mode: 'workspace-write',
+              approval_policy: 'on-request',
+              full_auto: false,
+            },
           };
         case 'run_gemini_patch':
           return 'ok';
@@ -77,6 +87,9 @@ describe('SettingsPanel', () => {
     const select = await screen.findByLabelText('Shell / Interpreter');
     expect(select).toHaveValue('pwsh');
     expect(screen.getByText('C:/Program Files/PowerShell/7/pwsh.exe')).toBeInTheDocument();
+    expect(screen.getByLabelText('Codex sandbox')).toHaveValue('workspace-write');
+    expect(screen.getByLabelText('Codex approval')).toHaveValue('on-request');
+    expect(screen.getByLabelText('Autonomous full access, no prompts')).not.toBeChecked();
   });
 
   it('saves custom shell settings through tauri', async () => {
@@ -101,6 +114,11 @@ describe('SettingsPanel', () => {
           custom_executable: 'C:/Tools/custom-shell.exe',
           custom_args: '--command',
           agent_session_persistence: 'resume',
+          codex_runtime_policy: {
+            sandbox_mode: 'workspace-write',
+            approval_policy: 'on-request',
+            full_auto: false,
+          },
         },
       });
     });
@@ -174,14 +192,87 @@ describe('SettingsPanel', () => {
     fireEvent.click(screen.getByText('Save Agent Runtime'));
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('save_agent_session_persistence', {
-        persistence: 'fresh',
+      expect(mockInvoke).toHaveBeenCalledWith('save_shell_settings', {
+        settings: {
+          shell_id: 'pwsh',
+          custom_executable: null,
+          custom_args: null,
+          agent_session_persistence: 'fresh',
+          codex_runtime_policy: {
+            sandbox_mode: 'workspace-write',
+            approval_policy: 'on-request',
+            full_auto: false,
+          },
+        },
       });
     });
 
     expect(await screen.findByText('Agent runtime updated.')).toBeInTheDocument();
     expect(screen.queryByText('Shell settings updated.')).not.toBeInTheDocument();
-    expect(mockInvoke).not.toHaveBeenCalledWith('save_shell_settings', expect.anything());
+    expect(mockInvoke).not.toHaveBeenCalledWith('save_agent_session_persistence', expect.anything());
+  });
+
+  it('saves Codex runtime defaults through shell settings payload', async () => {
+    render(<SettingsPanel />);
+
+    fireEvent.change(await screen.findByLabelText('Codex sandbox'), {
+      target: { value: 'danger-full-access' },
+    });
+    fireEvent.change(screen.getByLabelText('Codex approval'), {
+      target: { value: 'never' },
+    });
+    fireEvent.click(screen.getByLabelText('Autonomous full access, no prompts'));
+
+    fireEvent.click(screen.getByText('Save Agent Runtime'));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_shell_settings', {
+        settings: {
+          shell_id: 'pwsh',
+          custom_executable: null,
+          custom_args: null,
+          agent_session_persistence: 'resume',
+          codex_runtime_policy: {
+            sandbox_mode: 'danger-full-access',
+            approval_policy: 'never',
+            full_auto: true,
+          },
+        },
+      });
+    });
+  });
+
+  it('defaults Codex runtime policy to autonomous full access when backend omits it', async () => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      switch (command) {
+        case 'load_shell_settings':
+          return {
+            shell_id: 'pwsh',
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: 'resume',
+          };
+        case 'list_available_shells':
+          return [
+            {
+              id: 'pwsh',
+              label: 'PowerShell 7',
+              executable: 'C:/Program Files/PowerShell/7/pwsh.exe',
+              default_args: ['-NoProfile', '-Command'],
+            },
+          ];
+        case 'save_shell_settings':
+          return (args as { settings?: unknown } | undefined)?.settings;
+        default:
+          return null;
+      }
+    });
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByLabelText('Codex sandbox')).toHaveValue('danger-full-access');
+    expect(screen.getByLabelText('Codex approval')).toHaveValue('never');
+    expect(screen.getByLabelText('Autonomous full access, no prompts')).toBeChecked();
   });
 
   it('adjusts the terminal font size preference', async () => {

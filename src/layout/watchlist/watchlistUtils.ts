@@ -452,34 +452,6 @@ export function addAgentToTeam(
   });
 }
 
-export function addCloneToSourceTeam(
-  state: WatchlistState,
-  sourceAgentId: string,
-  cloneAgentId: string,
-): WatchlistState {
-  if (!sourceAgentId || !cloneAgentId || sourceAgentId === cloneAgentId) return state;
-  const sourceTeam = state.teams.find((team) => team.agentIds.includes(sourceAgentId));
-  if (!sourceTeam) return state;
-
-  return normalizeWatchlistState({
-    version: 2,
-    teams: state.teams
-      .map((team) => {
-        const withoutClone = team.agentIds.filter((id) => id !== cloneAgentId);
-        if (team.id !== sourceTeam.id) return { ...team, agentIds: withoutClone };
-
-        const sourceIndex = withoutClone.indexOf(sourceAgentId);
-        if (sourceIndex === -1) return { ...team, agentIds: withoutClone };
-
-        const agentIds = [...withoutClone];
-        agentIds.splice(sourceIndex + 1, 0, cloneAgentId);
-        return { ...team, agentIds };
-      })
-      .filter((team) => team.agentIds.length > 0),
-    watchlists: state.watchlists,
-  });
-}
-
 export function removeAgentFromTeam(
   state: WatchlistState,
   teamId: string,

@@ -195,3 +195,39 @@ fn interactive_multi_turn_echoes_each_submitted_input() {
     assert!(stdout.contains("Interactive turn 1: STALE_BEFORE_ASK"));
     assert!(stdout.contains("Interactive turn 2: ASK_AFTER_CURSOR"));
 }
+
+#[test]
+fn interactive_echo_then_response_emits_prompt_echo_before_response() {
+    let script = mock_script_path();
+
+    let mut child = Command::new("node")
+        .arg(&script)
+        .env("WARDIAN_MOCK_SCENARIO", "interactive_echo_then_response")
+        .env("WARDIAN_MOCK_DELAY_MS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn mock-agent.cjs");
+
+    {
+        let stdin = child.stdin.as_mut().expect("mock stdin");
+        writeln!(stdin, "AUTO_TEST_2_DONE").expect("write turn");
+    }
+
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("mock stdout")
+        .read_to_string(&mut stdout)
+        .expect("read stdout");
+    let status = child.wait().expect("mock agent exits");
+    assert!(status.success(), "mock agent should exit successfully");
+
+    let prompt_echo_index = stdout.find("AUTO_TEST_2_DONE").expect("prompt echo");
+    let response_index = stdout
+        .find("Actual response after echo: AUTO_TEST_2_DONE")
+        .expect("actual response");
+    assert!(prompt_echo_index < response_index);
+}

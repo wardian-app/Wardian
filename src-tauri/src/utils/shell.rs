@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use wardian_core::models::AgentSessionPersistence;
 
 const SHELL_SETTINGS_FILE: &str = "settings/shell.json";
+const CODEX_SANDBOX_MODES: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
+const CODEX_APPROVAL_POLICIES: &[&str] = &["untrusted", "on-failure", "on-request", "never"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellOption {
@@ -24,6 +26,25 @@ pub struct ShellSettings {
     pub custom_args: Option<String>,
     #[serde(default)]
     pub agent_session_persistence: AgentSessionPersistence,
+    #[serde(default)]
+    pub codex_runtime_policy: CodexRuntimePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRuntimePolicy {
+    pub sandbox_mode: String,
+    pub approval_policy: String,
+    pub full_auto: bool,
+}
+
+impl Default for CodexRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            sandbox_mode: "danger-full-access".to_string(),
+            approval_policy: "never".to_string(),
+            full_auto: true,
+        }
+    }
 }
 
 impl Default for ShellSettings {
@@ -33,6 +54,7 @@ impl Default for ShellSettings {
             custom_executable: None,
             custom_args: None,
             agent_session_persistence: AgentSessionPersistence::Resume,
+            codex_runtime_policy: CodexRuntimePolicy::default(),
         }
     }
 }
@@ -85,6 +107,10 @@ pub fn save_agent_session_persistence(
     let mut settings = load_shell_settings_from_path(&path).unwrap_or_default();
     settings.agent_session_persistence = persistence;
     save_shell_settings_to_path(&path, &settings)
+}
+
+pub fn load_codex_runtime_policy() -> Result<CodexRuntimePolicy, String> {
+    load_shell_settings().map(|settings| settings.codex_runtime_policy)
 }
 
 pub fn build_shell_command(command: &str) -> Result<ShellLaunchSpec, String> {
@@ -147,7 +173,22 @@ fn normalize_settings(mut settings: ShellSettings) -> ShellSettings {
     settings.custom_args = settings
         .custom_args
         .and_then(|value| trim_to_option(&value));
+    settings.codex_runtime_policy = normalize_codex_runtime_policy(settings.codex_runtime_policy);
     settings
+}
+
+fn normalize_codex_runtime_policy(mut policy: CodexRuntimePolicy) -> CodexRuntimePolicy {
+    policy.sandbox_mode = if CODEX_SANDBOX_MODES.contains(&policy.sandbox_mode.trim()) {
+        policy.sandbox_mode.trim().to_string()
+    } else {
+        CodexRuntimePolicy::default().sandbox_mode
+    };
+    policy.approval_policy = if CODEX_APPROVAL_POLICIES.contains(&policy.approval_policy.trim()) {
+        policy.approval_policy.trim().to_string()
+    } else {
+        CodexRuntimePolicy::default().approval_policy
+    };
+    policy
 }
 
 fn trim_to_option(value: &str) -> Option<String> {
@@ -163,7 +204,14 @@ fn validate_shell_settings(
     settings: &ShellSettings,
     available: &[ShellOption],
 ) -> Result<(), String> {
-    resolve_shell(settings, available).map(|_| ())
+    resolve_shell(settings, available)?;
+    if !CODEX_SANDBOX_MODES.contains(&settings.codex_runtime_policy.sandbox_mode.as_str()) {
+        return Err("Invalid Codex sandbox mode".to_string());
+    }
+    if !CODEX_APPROVAL_POLICIES.contains(&settings.codex_runtime_policy.approval_policy.as_str()) {
+        return Err("Invalid Codex approval policy".to_string());
+    }
+    Ok(())
 }
 
 pub fn build_shell_command_with_settings(
@@ -779,7 +827,7 @@ mod tests {
         build_interactive_shell_launch_with_settings, build_program_launch_with_settings,
         build_shell_cd_command, build_shell_command_with_settings, default_shell_args,
         load_shell_settings_from_path, save_shell_settings_to_path, shell_id_from_executable,
-        shell_option, ShellOption, ShellSettings,
+        shell_option, CodexRuntimePolicy, ShellOption, ShellSettings,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -854,6 +902,35 @@ mod tests {
 
         assert_eq!(saved, settings);
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn shell_settings_default_codex_policy_is_autonomous() {
+        let settings = ShellSettings::default();
+
+        assert_eq!(
+            settings.codex_runtime_policy,
+            CodexRuntimePolicy {
+                sandbox_mode: "danger-full-access".to_string(),
+                approval_policy: "never".to_string(),
+                full_auto: true,
+            }
+        );
+    }
+
+    #[test]
+    fn shell_settings_backfills_codex_policy_for_legacy_files() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        std::fs::write(
+            &path,
+            r#"{"shell_id":"auto","custom_executable":null,"custom_args":null,"agent_session_persistence":"resume"}"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(loaded.codex_runtime_policy, CodexRuntimePolicy::default());
     }
 
     #[test]

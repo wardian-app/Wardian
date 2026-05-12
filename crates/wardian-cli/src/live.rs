@@ -393,6 +393,21 @@ pub fn agent_watch(
     follow: bool,
     timeout: Duration,
 ) -> io::Result<AgentWatchResponse> {
+    agent_watch_with_output_echo_guard(
+        target, since, until, include, tail_bytes, follow, timeout, None,
+    )
+}
+
+fn agent_watch_with_output_echo_guard(
+    target: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    include: Vec<String>,
+    tail_bytes: Option<usize>,
+    follow: bool,
+    timeout: Duration,
+    output_echo_guard: Option<&str>,
+) -> io::Result<AgentWatchResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
@@ -409,6 +424,7 @@ pub fn agent_watch(
             tail_bytes,
             follow,
             timeout_ms: Some(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+            output_echo_guard: output_echo_guard.map(str::to_string),
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
@@ -465,7 +481,15 @@ pub fn ask_agent(
     tail_bytes: Option<usize>,
     timeout: Duration,
 ) -> io::Result<AskAgentResponse> {
-    send_message_and_watch_condition(target, message, thread, condition, tail_bytes, timeout)
+    send_message_and_watch_condition_with_output_echo_guard(
+        target,
+        message,
+        thread,
+        condition,
+        tail_bytes,
+        timeout,
+        ask_prompt_echo_guard(condition, message),
+    )
 }
 
 pub fn send_message_and_watch_condition(
@@ -475,6 +499,20 @@ pub fn send_message_and_watch_condition(
     condition: &str,
     tail_bytes: Option<usize>,
     timeout: Duration,
+) -> io::Result<AskAgentResponse> {
+    send_message_and_watch_condition_with_output_echo_guard(
+        target, message, thread, condition, tail_bytes, timeout, None,
+    )
+}
+
+fn send_message_and_watch_condition_with_output_echo_guard(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    condition: &str,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+    output_echo_guard: Option<&str>,
 ) -> io::Result<AskAgentResponse> {
     let initial = agent_watch(
         target,
@@ -490,7 +528,7 @@ pub fn send_message_and_watch_condition(
         Duration::from_secs(5),
     )?;
     let sent = send_message(target, message, thread)?;
-    let watch = agent_watch(
+    let watch = agent_watch_with_output_echo_guard(
         target,
         Some(&initial.cursor),
         Some(condition),
@@ -502,6 +540,7 @@ pub fn send_message_and_watch_condition(
         tail_bytes,
         false,
         timeout,
+        output_echo_guard,
     )?;
     Ok(AskAgentResponse {
         delivery: sent.delivery,
@@ -573,6 +612,11 @@ fn current_message_origin() -> Option<MessageOrigin> {
         .map(|session_id| session_id.trim().to_string())
         .filter(|session_id| !session_id.is_empty())
         .map(|session_id| MessageOrigin::WardianAgent { session_id })
+}
+
+fn ask_prompt_echo_guard<'a>(condition: &str, message: &'a str) -> Option<&'a str> {
+    let token = condition.strip_prefix("output:")?;
+    (!token.is_empty() && message.contains(token)).then_some(message)
 }
 
 fn wait_agent_until_after_snapshot(
@@ -825,6 +869,15 @@ mod tests {
 
         assert!(actual > requested);
         assert!(actual < requested + Duration::from_secs(10));
+    }
+
+    #[test]
+    fn ask_output_condition_sets_prompt_echo_guard() {
+        assert_eq!(
+            ask_prompt_echo_guard("output:AUTO_TEST_2_DONE", "Say AUTO_TEST_2_DONE"),
+            Some("Say AUTO_TEST_2_DONE")
+        );
+        assert_eq!(ask_prompt_echo_guard("status:idle", "Say DONE"), None);
     }
 
     #[test]

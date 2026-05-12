@@ -18,6 +18,7 @@
  *   headless      — single JSON response object, then exit
  *   multi_turn    — init → [user → generating → model_response → turn_completed] × 3
  *   interactive_multi_turn — init → action_required → stdin-driven responses × 2
+ *   interactive_echo_then_response — init → action_required → prompt echo → response
  */
 
 "use strict";
@@ -194,6 +195,20 @@ async function runInteractiveMultiTurn() {
   }
 }
 
+async function runInteractiveEchoThenResponse() {
+  emit(events.init());
+  await sleep(delay);
+
+  emit(events.actionRequired("Interactive echo test: waiting for input"));
+  const input = await waitForStdin();
+  await sleep(delay);
+  emit(events.modelResponse(input));
+  await sleep(delay);
+  emit(events.modelResponse(`Actual response after echo: ${input}`));
+  await sleep(delay);
+  emit(events.turnCompleted());
+}
+
 async function main() {
   // Headless mode: --print flag overrides scenario
   if (isPrint) {
@@ -210,6 +225,7 @@ async function main() {
     headless: runHeadless,
     multi_turn: runMultiTurn,
     interactive_multi_turn: runInteractiveMultiTurn,
+    interactive_echo_then_response: runInteractiveEchoThenResponse,
   };
 
   const runner = scenarios[scenario];

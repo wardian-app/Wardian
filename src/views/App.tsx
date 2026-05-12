@@ -15,7 +15,6 @@ import {
   createTeamFromAgents,
   ungroupTeam,
   addAgentToTeam,
-  addCloneToSourceTeam,
   removeAgentFromTeam,
   removeAgentFromTeamAtEntry,
   reorderTeamMember,
@@ -237,15 +236,18 @@ function AppBody() {
     };
   }, [telemetry, terminalTitles, currentThoughts, offAgentIds]);
 
-  useEffect(() => {
-    (async () => {
+  const loadWatchlistState = useCallback(async () => {
       try {
         const data = await invoke<unknown>("load_watchlists");
         const state = normalizeWatchlistState(data);
         setWatchlists(state.watchlists);
         setTeams(state.teams);
       } catch { /* first run */ }
+  }, []);
 
+  useEffect(() => {
+    (async () => {
+      await loadWatchlistState();
       try {
         const prefs = await invoke<WatchlistPrefs | null>("load_watchlist_prefs");
         if (prefs) {
@@ -269,7 +271,7 @@ function AppBody() {
       hasAutoPatched.current = true;
       invoke('run_gemini_patch').catch(e => console.error("Auto patch failed:", e));
     }
-  }, []);
+  }, [loadWatchlistState]);
 
   const persistWatchlistState = useCallback(async (state: WatchlistState) => {
     const normalized = normalizeWatchlistState(state);
@@ -362,15 +364,6 @@ function AppBody() {
   const handleReorderTeamMember = async (teamId: string, draggedAgentId: string, targetAgentId: string, position: "before" | "after" = "before") => {
     await persistWatchlistState(reorderTeamMember({ version: 2, watchlists, teams }, teamId, draggedAgentId, targetAgentId, position));
   };
-
-  const preserveCloneTeamPlacement = useCallback(async (sourceAgentId: string, cloneAgentId: string) => {
-    if (!teams.some((team) => team.agentIds.includes(sourceAgentId))) return;
-    await persistWatchlistState(addCloneToSourceTeam(
-      { version: 2, watchlists, teams },
-      sourceAgentId,
-      cloneAgentId,
-    ));
-  }, [persistWatchlistState, teams, watchlists]);
 
   const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
   const filteredAgents = getAgentsForList(agents, activeList, teams);
@@ -610,11 +603,13 @@ function AppBody() {
       }
     });
     const unlistenUpdate = listen("agents-updated", () => fetchAgents());
+    const unlistenWatchlists = listen("watchlists-updated", () => loadWatchlistState());
     return () => {
       unlistenJson.then(fn => fn());
       unlistenUpdate.then(fn => fn());
+      unlistenWatchlists.then(fn => fn());
     };
-  }, [appendAgentEvent, fetchLibraryTree, fetchWorkflows, loadQueueItems, loadScheduledRuns]);
+  }, [appendAgentEvent, fetchLibraryTree, fetchWorkflows, loadQueueItems, loadScheduledRuns, loadWatchlistState]);
 
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
@@ -830,13 +825,13 @@ function AppBody() {
     }
 
     try {
-      const cloned = await invoke<AgentConfig>("clone_agent", {
+      await invoke<AgentConfig>("clone_agent", {
         req: {
           source_session_id: id,
           mode,
         },
       });
-      await preserveCloneTeamPlacement(id, cloned.session_id);
+      await loadWatchlistState();
       fetchAgents();
     } catch (e) {
       console.error(e);
@@ -1056,12 +1051,9 @@ function AppBody() {
             agentClasses={agentClasses}
             isOpen={Boolean(customCloneSourceId)}
             onClose={() => setCustomCloneSourceId(null)}
-            onCloned={async (cloned) => {
-              const sourceId = customCloneSourceId;
+            onCloned={async () => {
               setCustomCloneSourceId(null);
-              if (sourceId) {
-                await preserveCloneTeamPlacement(sourceId, cloned.session_id);
-              }
+              await loadWatchlistState();
               fetchAgents();
             }}
           />
