@@ -108,18 +108,22 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return null;
       case "clone_agent":
         if (args?.req?.source_session_id) {
-          const source = currentAgents.find(a => a.session_id === args.req.source_session_id);
+          const sourceIndex = currentAgents.findIndex(a => a.session_id === args.req.source_session_id);
+          const source = currentAgents[sourceIndex];
           if (source) {
+            const clone = {
+              ...source,
+              session_id: "agent-clone",
+              session_name: `${source.session_name}-copy`,
+              resume_session: undefined,
+              is_off: false,
+            };
             currentAgents = [
-              ...currentAgents,
-              {
-                ...source,
-                session_id: "agent-clone",
-                session_name: `${source.session_name}-copy`,
-                resume_session: undefined,
-                is_off: false,
-              },
+              ...currentAgents.slice(0, sourceIndex + 1),
+              clone,
+              ...currentAgents.slice(sourceIndex + 1),
             ];
+            return clone;
           }
         }
         return currentAgents[currentAgents.length - 1] ?? null;
@@ -774,6 +778,66 @@ describe("Agent Watchlist Sidebar", () => {
           source_session_id: "agent-1",
           mode: "fresh",
         },
+      });
+    });
+  });
+
+  it("keeps a quick-cloned agent in the source team immediately after the source", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    });
+    render(<App />);
+
+    const alphaWatchlistRow = await waitFor(() => {
+      const row = screen
+        .getAllByText("Alpha")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Alpha watchlist row not found");
+      return row;
+    });
+
+    fireEvent.contextMenu(alphaWatchlistRow);
+    fireEvent.click(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Clone" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_watchlists", {
+        watchlists: expect.objectContaining({
+          teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-clone", "agent-2"] }],
+        }),
+      });
+    });
+  });
+
+  it("keeps a custom-cloned agent in the source team immediately after the source", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    });
+    render(<App />);
+
+    const alphaWatchlistRow = await waitFor(() => {
+      const row = screen
+        .getAllByText("Alpha")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Alpha watchlist row not found");
+      return row;
+    });
+
+    fireEvent.contextMenu(alphaWatchlistRow);
+    fireEvent.mouseEnter(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Clone" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Custom Clone" }));
+    fireEvent.click(await screen.findByTestId("custom-clone-submit"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_watchlists", {
+        watchlists: expect.objectContaining({
+          teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-clone", "agent-2"] }],
+        }),
       });
     });
   });
