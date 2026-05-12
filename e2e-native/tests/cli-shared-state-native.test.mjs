@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 import {
@@ -327,6 +328,16 @@ test("native CLI control commands operate through the running app", { timeout: 1
       "status",
       "action_required",
     );
+    const watchlistDir = path.join(harness.isolatedHome, "watchlists");
+    mkdirSync(watchlistDir, { recursive: true });
+    writeFileSync(
+      path.join(watchlistDir, "index.json"),
+      JSON.stringify({
+        version: 2,
+        teams: [{ id: "team-control", name: "Control Team", agentIds: [source.uuid, "team-tail"] }],
+        watchlists: [{ id: "main", name: "Main", entries: [{ type: "team", teamId: "team-control" }] }],
+      }),
+    );
 
     const waitResult = runCliOk(cliPath, harness, [
       "agent",
@@ -383,6 +394,12 @@ test("native CLI control commands operate through the running app", { timeout: 1
     const cloneAgent = JSON.parse(cloneResult.stdout).agent;
     assert.equal(cloneAgent.name, CONTROL_CLONE_NAME);
     assert.notEqual(cloneAgent.uuid, source.uuid);
+    const teamResult = runCliOk(cliPath, harness, ["team", "show", "team-control"]);
+    assert.deepEqual(JSON.parse(teamResult.stdout).team.agent_ids, [
+      source.uuid,
+      cloneAgent.uuid,
+      "team-tail",
+    ]);
     await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "action_required");
 
     await watchStep(harness, `Pausing ${CONTROL_CLONE_NAME} through the CLI`);
