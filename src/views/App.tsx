@@ -627,7 +627,16 @@ function AppBody() {
         const interactionUpdates: Record<string, string> = {};
         for (const [sessionId, metric] of Object.entries(mapping)) {
           const previousMetric = prev[sessionId];
-          if (previousMetric && (metric.query_count ?? 0) > (previousMetric.query_count ?? 0)) {
+          const previousQueryCount = previousMetric?.query_count ?? 0;
+          const currentQueryCount = metric.query_count ?? 0;
+          const isTranscriptHydration =
+            previousMetric &&
+            previousQueryCount === 0 &&
+            currentQueryCount > 0 &&
+            metric.current_status === "Idle" &&
+            Boolean(metric.log_path);
+
+          if (previousMetric && currentQueryCount > previousQueryCount && !isTranscriptHydration) {
             interactionUpdates[sessionId] = new Date().toISOString();
           }
           next[sessionId] = metric;
