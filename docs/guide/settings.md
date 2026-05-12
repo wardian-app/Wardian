@@ -2,6 +2,8 @@
 
 The Settings tab controls theme behavior, runtime shell selection, session policy defaults, and Gemini patch utilities.
 
+![Wardian Settings tab showing theme, session persistence, and shell selection controls](../assets/screenshots/settings/runtime-settings.png)
+
 ## Theme
 
 Theme options:

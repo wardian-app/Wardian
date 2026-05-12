@@ -2,6 +2,8 @@
 
 Wardian's Source Control tab lets you work with Git directly from the sidebar for the currently selected agent workspace.
 
+![Source Control panel showing branch state, commit box, staged changes, unstaged changes, and history](../assets/screenshots/source-control/status-panel.png)
+
 ## Scope and Context
 
 - The panel is available when exactly one agent is selected.

@@ -4,6 +4,8 @@ The Command panel is the left-sidebar surface for fast message delivery and prom
 
 ## Two Modes in One Panel
 
+![Wardian Command panel showing quick prompts and a broadcast message ready to send](../assets/screenshots/command-panel/broadcast-prompt.png)
+
 1. **Quick Prompts**
 2. **Broadcast**
 

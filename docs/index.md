@@ -44,6 +44,7 @@ This folder contains user guides, workflow references, developer architecture no
 - [Visual Builder](./developer/visual-builder.md)
 - [Native E2E Harness](./developer/native-e2e.md)
 - [Theming](./developer/theming.md)
+- [Screenshot Documentation](./developer/screenshot-documentation.md)
 
 ## Specs and Design
 

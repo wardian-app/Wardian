@@ -14,6 +14,9 @@ Before spawning an agent, you must understand **Classes**. A Class is a "Bluepri
 3. Browse the default classes (e.g., `Architect`, `Coder`, `Researcher`). Each class has its own `AGENTS.md` instruction set.
 
 ## 3. Spawning Your First Agent
+
+![Wardian spawn agent form with agent name, class, workspace, provider, and initialize controls](../assets/screenshots/spawn-agent/spawn-form.png)
+
 1. Navigate to the **Left Sidebar (Agent Configuration tab)**.
 2. Select an **Agent Class** from the dropdown.
 3. Give your agent a unique name (e.g., "Main Researcher").
