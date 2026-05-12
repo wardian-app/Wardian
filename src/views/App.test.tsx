@@ -493,6 +493,7 @@ describe("Agent Watchlist Sidebar", () => {
     mockInvoke.mockClear();
 
     await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Processing..." });
       emitJson({
         session_id: "agent-1",
         data: { type: "result", result: "Finished the requested update." },
@@ -574,6 +575,70 @@ describe("Agent Watchlist Sidebar", () => {
         }),
       );
     });
+  });
+
+  it("does not flush stale agent queue content from the initial Idle metrics snapshot", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    useQueueStore.setState({
+      items: [],
+      _agentBuffers: { "agent-1": "stale restored output" },
+      _workflowLastOutput: {},
+    });
+    const emitAgentMetrics = captureAgentMetricsListener();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitAgentMetrics([
+        {
+          session_id: "agent-1",
+          current_status: "Idle",
+          cpu_usage: 0,
+          memory_mb: 0,
+          uptime_seconds: 1,
+          query_count: 1,
+          init_timestamp: null,
+          log_path: null,
+        },
+      ]);
+    });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({ items: expect.any(Array) }),
+    );
+    expect(useQueueStore.getState().items).toHaveLength(0);
+  });
+
+  it("does not flush stale queue content from a non-active Idle status event", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    useQueueStore.setState({
+      items: [],
+      _agentBuffers: { "agent-1": "stale restored output" },
+      _workflowLastOutput: {},
+    });
+    const { emitStatus } = captureQueueAgentListeners();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Off" });
+      emitStatus({ session_id: "agent-1", current_status: "Idle" });
+    });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({ items: expect.any(Array) }),
+    );
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
   it("uses OpenCode assistant database text when an OpenCode agent completes", async () => {

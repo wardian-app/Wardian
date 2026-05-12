@@ -784,6 +784,7 @@ fn sync_resumed_input_sender(
     }
 }
 
+#[cfg(test)]
 fn agent_status_update_payload(session_id: &str, current_status: &str) -> serde_json::Value {
     serde_json::json!({
         "session_id": session_id,
@@ -1827,6 +1828,7 @@ pub async fn pause_agent(
         // For opencode: capture the real ses_xxx session ID from the log so
         // resume can pass --session ses_xxx rather than the internal UUID.
         capture_opencode_pause_resume_session(agent);
+        manager::set_agent_status(&app, &session_id, &agent.current_status, "Off");
         mark_agent_paused_off(agent);
 
         // Remove from input_senders
@@ -1835,10 +1837,6 @@ pub async fn pause_agent(
         }
         manager::save_state(&app, &agents, &order);
         let _ = app.emit("agents-updated", ());
-        let _ = app.emit(
-            "agent-status-updated",
-            agent_status_update_payload(&session_id, "Off"),
-        );
         Ok(())
     } else {
         Err(format!("Agent {} not found", session_id))
@@ -1901,10 +1899,6 @@ pub async fn resume_agent(
         terminal_cleared_payload(&session_id),
     );
     let _ = app.emit("agents-updated", ());
-    let _ = app.emit(
-        "agent-status-updated",
-        agent_status_update_payload(&session_id, "Idle"),
-    );
     let _ = app.emit(
         "agent-pty-output-ready",
         terminal_cleared_payload(&session_id),

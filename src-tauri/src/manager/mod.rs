@@ -191,18 +191,6 @@ pub(crate) fn set_agent_status(
     }
 }
 
-pub(crate) fn emit_agent_status(app: &AppHandle, session_id: &str, current_status: &str) {
-    let _ = wardian_core::db::update_agent_status(session_id, current_status, None);
-
-    let _ = app.emit(
-        "agent-status-updated",
-        serde_json::json!({
-            "session_id": session_id,
-            "current_status": current_status,
-        }),
-    );
-}
-
 pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
     let _ = app.emit(
         "agent-turn-completed",
@@ -226,14 +214,7 @@ pub(crate) fn mark_agent_prompt_started(agent: &crate::state::ActiveAgent) -> bo
         *count += 1;
     }
 
-    if let Ok(mut status) = agent.current_status.lock() {
-        if *status != "Processing..." {
-            *status = "Processing...".to_string();
-            return true;
-        }
-    }
-
-    false
+    current_status != "Processing..."
 }
 
 pub(crate) fn debug_preview_bytes(bytes: &[u8], limit: usize) -> String {
@@ -786,15 +767,12 @@ mod tests {
     }
 
     #[test]
-    fn mark_agent_prompt_started_sets_processing_and_counts_query() {
+    fn mark_agent_prompt_started_counts_query_and_requests_processing_transition() {
         let agent = test_active_agent("Idle");
 
         assert!(mark_agent_prompt_started(&agent));
 
-        assert_eq!(
-            agent.current_status.lock().unwrap().as_str(),
-            "Processing..."
-        );
+        assert_eq!(agent.current_status.lock().unwrap().as_str(), "Idle");
         assert_eq!(*agent.query_count.lock().unwrap(), 1);
     }
 

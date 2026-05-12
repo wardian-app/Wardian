@@ -64,6 +64,13 @@ fn set_snapshot_status(snap: &AgentSnapshot, next_status: &str) {
     }
 }
 
+fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_initial_replay: bool) {
+    if is_initial_replay {
+        return;
+    }
+    set_snapshot_status(snap, next_status);
+}
+
 fn collect_descendant_pids(
     pid: u32,
     children_map: &HashMap<u32, Vec<u32>>,
@@ -327,12 +334,18 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             if let Some(ref path) = *log_path_lock {
                 let mut should_parse = true;
                 let mut new_mtime = None;
+                let mut is_initial_log_replay = snap
+                    .log_last_modified
+                    .lock()
+                    .map(|last| last.is_none())
+                    .unwrap_or(false);
                 if let Ok(metadata) = std::fs::metadata(path) {
                     if let Ok(modified) = metadata.modified() {
                         let last_mod = *snap.log_last_modified.lock().unwrap();
                         if last_mod == Some(modified) {
                             should_parse = false;
                         } else {
+                            is_initial_log_replay = last_mod.is_none();
                             new_mtime = Some(modified);
                         }
                     }
@@ -374,7 +387,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 }
 
                                 if let Some(status) = codex_status_from_log(&lines) {
-                                    set_snapshot_status(snap, &status);
+                                    set_snapshot_status_from_log(
+                                        snap,
+                                        &status,
+                                        is_initial_log_replay,
+                                    );
                                 }
                             }
                             "claude" => {
@@ -418,7 +435,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     && !current_status_snap.starts_with("Action Needed")
                                 {
                                     if let Some(status) = claude_status_from_log(&lines) {
-                                        set_snapshot_status(snap, &status);
+                                        set_snapshot_status_from_log(
+                                            snap,
+                                            &status,
+                                            is_initial_log_replay,
+                                        );
                                     }
                                 }
                             }
@@ -431,7 +452,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     &mut i_ts,
                                     &mut status,
                                 );
-                                set_snapshot_status(snap, &status);
+                                set_snapshot_status_from_log(snap, &status, is_initial_log_replay);
                             }
                             _ => {
                                 // Gemini logs are a single JSON object with a messages array
@@ -456,11 +477,19 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                                     last_msg.get("role").and_then(|v| v.as_str())
                                                 });
                                             if msg_type == Some("user") {
-                                                set_snapshot_status(snap, "Processing...");
+                                                set_snapshot_status_from_log(
+                                                    snap,
+                                                    "Processing...",
+                                                    is_initial_log_replay,
+                                                );
                                             } else if msg_type == Some("gemini")
                                                 || msg_type == Some("assistant")
                                             {
-                                                set_snapshot_status(snap, "Idle");
+                                                set_snapshot_status_from_log(
+                                                    snap,
+                                                    "Idle",
+                                                    is_initial_log_replay,
+                                                );
                                             }
                                         }
                                     }
@@ -685,5 +714,46 @@ mod tests {
             .snapshot_since(None, None)
             .unwrap();
         assert!(snapshot.events.is_empty());
+    }
+
+    #[test]
+    fn initial_log_replay_does_not_record_status_transition() {
+        let snap = test_snapshot("Off");
+
+        super::set_snapshot_status_from_log(&snap, "Idle", true);
+
+        assert_eq!(*snap.current_status.lock().unwrap(), "Off");
+        assert!(snap.last_status_at.lock().unwrap().is_none());
+        let snapshot = snap
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, None)
+            .unwrap();
+        assert!(snapshot.events.is_empty());
+    }
+
+    #[test]
+    fn live_log_update_records_status_transition() {
+        let snap = test_snapshot("Processing...");
+
+        super::set_snapshot_status_from_log(&snap, "Idle", false);
+
+        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
+        assert!(snap.last_status_at.lock().unwrap().is_some());
+        let snapshot = snap
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, None)
+            .unwrap();
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(
+            snapshot.events[0]
+                .payload
+                .get("status")
+                .and_then(|value| value.as_str()),
+            Some("idle")
+        );
     }
 }

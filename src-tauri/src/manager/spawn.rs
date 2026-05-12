@@ -654,6 +654,7 @@ pub async fn spawn_agent(
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
         let watcher_config = config_lock.clone();
+        let watcher_skip_existing_log = is_restored;
         let wardian_agent_dir = get_wardian_home()
             .map(|home| home.join("agents").join(&watcher_session))
             .filter(|path| path.exists())
@@ -662,6 +663,7 @@ pub async fn spawn_agent(
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
             let mut last_lookup_session = String::new();
+            let mut positioned_initial_log = !watcher_skip_existing_log;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -692,6 +694,7 @@ pub async fn spawn_agent(
                         if last_lookup_session != lookup_session {
                             *lock = None;
                             offset = 0;
+                            positioned_initial_log = !watcher_skip_existing_log;
                             last_lookup_session = lookup_session.clone();
                         }
                         if lock.is_none() {
@@ -717,6 +720,10 @@ pub async fn spawn_agent(
                         if let Ok(metadata) = file.metadata() {
                             if metadata.len() < offset {
                                 offset = 0;
+                            }
+                            if !positioned_initial_log {
+                                offset = metadata.len();
+                                positioned_initial_log = true;
                             }
                         }
                         if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
@@ -763,12 +770,14 @@ pub async fn spawn_agent(
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
         let watcher_folder = expected_folder.clone();
+        let watcher_skip_existing_log = is_restored;
         let hook_event_log = claude_hook.as_ref().map(|hook| hook.event_log_path.clone());
         let waiting_for_permission = std::sync::Arc::new(std::sync::Mutex::new(false));
         let log_waiting_for_permission = waiting_for_permission.clone();
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
+            let mut positioned_initial_log = !watcher_skip_existing_log;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -803,6 +812,11 @@ pub async fn spawn_agent(
                         if let Ok(metadata) = file.metadata() {
                             if metadata.len() < offset {
                                 offset = 0;
+                                positioned_initial_log = true;
+                            }
+                            if !positioned_initial_log {
+                                offset = metadata.len();
+                                positioned_initial_log = true;
                             }
                         }
                         if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
