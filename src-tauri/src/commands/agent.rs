@@ -283,11 +283,14 @@ fn persisted_resume_session_for_provider(
 }
 
 fn provider_uses_generated_session_id(provider_name: &str) -> bool {
-    matches!(provider_name, "claude" | "codex" | "mock")
+    matches!(
+        provider_name,
+        "claude" | "codex" | "gemini" | "mock" | "opencode"
+    )
 }
 
-fn provider_needs_obtain_session_id_on_clear(provider_name: &str) -> bool {
-    matches!(provider_name, "gemini")
+fn provider_needs_obtain_session_id_on_clear(_provider_name: &str) -> bool {
+    false
 }
 
 fn restore_runtime_state_snapshot_after_resume(
@@ -342,6 +345,10 @@ fn agent_status_update_payload(session_id: &str, current_status: &str) -> serde_
     })
 }
 
+fn terminal_cleared_payload(session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "session_id": session_id })
+}
+
 struct ResumeRuntimeSnapshot {
     config: AgentConfig,
     init_timestamp: Option<String>,
@@ -376,6 +383,11 @@ fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
         .unwrap_or(true)
     {
         let log_path_snap = agent.log_path.lock().ok().and_then(|guard| guard.clone());
+        let log_path_snap = log_path_snap.or_else(|| {
+            manager::opencode_log_dirs()
+                .into_iter()
+                .find_map(|dir| manager::opencode_log_path_in(&dir, &config.session_id))
+        });
         if let Some(log_path) = log_path_snap {
             if let Some(ses_id) = manager::opencode_extract_created_session_id(&log_path) {
                 config.resume_session = Some(ses_id);
@@ -588,6 +600,7 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
             rs.trim().is_empty()
                 || rs == config.session_id
                 || !codex_provider_session_is_new(rs, &config.codex_cleared_provider_sessions)
+                || !manager::codex_session_exists_in_agent_home(&config.session_id, rs)
         })
     {
         config.resume_session = None;
@@ -601,6 +614,9 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
             codex_provider_session_is_new(
                 provider_session_id,
                 &config.codex_cleared_provider_sessions,
+            ) && manager::codex_session_exists_in_agent_home(
+                &config.session_id,
+                provider_session_id,
             )
         }) {
             config.resume_session = Some(provider_session_id);
@@ -1156,13 +1172,21 @@ pub async fn resume_agent(
     };
 
     sync_resumed_input_sender(&state, &session_id, stdin_tx);
+    manager::terminate_active_agent_process(&mut old_agent);
 
+    let _ = app.emit(
+        "agent-terminal-cleared",
+        terminal_cleared_payload(&session_id),
+    );
     let _ = app.emit("agents-updated", ());
     let _ = app.emit(
         "agent-status-updated",
         agent_status_update_payload(&session_id, "Idle"),
     );
-    manager::terminate_active_agent_process(&mut old_agent);
+    let _ = app.emit(
+        "agent-pty-output-ready",
+        terminal_cleared_payload(&session_id),
+    );
     Ok(())
 }
 
@@ -1265,7 +1289,7 @@ pub async fn clear_agent_session(
 
         let _ = app.emit(
             "agent-terminal-cleared",
-            serde_json::json!({ "session_id": session_id }),
+            terminal_cleared_payload(&session_id),
         );
 
         // 5. Spawn a FRESH process (is_restored = false)
@@ -1464,7 +1488,7 @@ mod tests {
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         reserve_spawn_session_name, resolve_requested_spawn_session_name,
         restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        AgentOrderPlacement,
+        terminal_cleared_payload, AgentOrderPlacement,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
@@ -1871,8 +1895,8 @@ mod tests {
     }
 
     #[test]
-    fn opencode_uses_provider_session_id_instead_of_generated_uuid() {
-        assert!(!provider_uses_generated_session_id("opencode"));
+    fn opencode_uses_generated_wardian_id_until_visible_pty_reports_provider_session() {
+        assert!(provider_uses_generated_session_id("opencode"));
     }
 
     #[test]
@@ -1887,8 +1911,13 @@ mod tests {
     }
 
     #[test]
-    fn gemini_needs_obtain_session_id_on_clear() {
-        assert!(provider_needs_obtain_session_id_on_clear("gemini"));
+    fn gemini_uses_generated_wardian_id_until_visible_pty_reports_provider_session() {
+        assert!(provider_uses_generated_session_id("gemini"));
+    }
+
+    #[test]
+    fn gemini_clear_starts_visible_fresh_session_without_headless_bootstrap() {
+        assert!(!provider_needs_obtain_session_id_on_clear("gemini"));
         assert!(!provider_needs_obtain_session_id_on_clear("claude"));
         assert!(!provider_needs_obtain_session_id_on_clear("codex"));
         assert!(!provider_needs_obtain_session_id_on_clear("opencode"));
@@ -1973,6 +2002,14 @@ mod tests {
                 "session_id": "agent-1",
                 "current_status": "Idle",
             })
+        );
+    }
+
+    #[test]
+    fn terminal_cleared_payload_uses_frontend_terminal_reset_contract() {
+        assert_eq!(
+            terminal_cleared_payload("agent-1"),
+            serde_json::json!({ "session_id": "agent-1" })
         );
     }
 
@@ -2191,6 +2228,63 @@ mod tests {
     }
 
     #[test]
+    fn codex_resume_clears_provider_thread_without_local_rollout_file() {
+        let (_guard, temp) = use_isolated_resume_setting();
+        let session_id = "22ff532b-007a-44c9-a4b4-9b7c0f546274";
+        let codex_home = temp
+            .path()
+            .join("agents")
+            .join(session_id)
+            .join("habitat")
+            .join(".codex");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let mut config = AgentConfig {
+            provider: "codex".to_string(),
+            session_id: session_id.to_string(),
+            resume_session: Some("019e15ff-5793-7bf3-b2fe-3be0233e26b1".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session, None);
+        assert!(!config.is_off);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn codex_resume_does_not_adopt_index_thread_without_local_rollout_file() {
+        let (_guard, temp) = use_isolated_resume_setting();
+        let session_id = "22ff532b-007a-44c9-a4b4-9b7c0f546274";
+        let codex_home = temp
+            .path()
+            .join("agents")
+            .join(session_id)
+            .join("habitat")
+            .join(".codex");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        std::fs::write(
+            codex_home.join("session_index.jsonl"),
+            "{\"id\":\"019e15ff-5793-7bf3-b2fe-3be0233e26b1\",\"thread_name\":\"Stale\",\"updated_at\":\"2026-05-11T03:45:16.000Z\"}\n",
+        )
+        .expect("write index");
+        let mut config = AgentConfig {
+            provider: "codex".to_string(),
+            session_id: session_id.to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session, None);
+        assert!(!config.is_off);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
     fn codex_resume_recovers_provider_thread_id_from_projected_history() {
         let (_guard, temp) = use_isolated_resume_setting();
         let session_id = "22ff532b-007a-44c9-a4b4-9b7c0f546274";
@@ -2206,6 +2300,18 @@ mod tests {
             "{\"session_id\":\"019db2f3-22de-7861-8bc6-1b86db1686db\",\"ts\":1776823781,\"text\":\"Hello\"}\n",
         )
         .expect("write history");
+        let session_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("20");
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        std::fs::write(
+            session_dir
+                .join("rollout-2026-04-20T00-00-00-019db2f3-22de-7861-8bc6-1b86db1686db.jsonl"),
+            "",
+        )
+        .expect("write rollout file");
         let mut config = AgentConfig {
             provider: "codex".to_string(),
             session_id: session_id.to_string(),
@@ -2285,6 +2391,19 @@ mod tests {
             ),
         )
         .expect("write history");
+        let session_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("20");
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        std::fs::write(
+            session_dir.join(format!(
+                "rollout-2026-04-20T00-00-00-{new_provider_session_id}.jsonl"
+            )),
+            "",
+        )
+        .expect("write rollout file");
         let mut config = AgentConfig {
             provider: "codex".to_string(),
             session_id: session_id.to_string(),

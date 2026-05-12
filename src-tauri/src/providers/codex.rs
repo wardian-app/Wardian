@@ -116,6 +116,13 @@ impl CodexProvider {
             // scrollback. Wardian embeds the TUI inside xterm, so interactive
             // sessions should prefer scrollback-friendly output.
             args.push("--no-alt-screen".into());
+            // Wardian supplies its own local skills/app surface. Disabling
+            // Codex's plugin/app startup sync prevents large provider-owned
+            // downloads from being triggered just by opening an agent terminal.
+            args.push("--disable".into());
+            args.push("plugins".into());
+            args.push("--disable".into());
+            args.push("apps".into());
         }
 
         let mut explicit_includes = Vec::new();
@@ -243,9 +250,12 @@ impl AgentProvider for CodexProvider {
                             .unwrap_or("");
                         Self::parse_action_required_from_arguments(arguments)
                             .map(|message| AgentEvent::ActionRequired { message })
-                            .or(Some(AgentEvent::Unknown))
+                            .or(Some(AgentEvent::Generating))
                     }
-                    "function_call_output" => Some(AgentEvent::Generating),
+                    "custom_tool_call"
+                    | "custom_tool_call_output"
+                    | "function_call_output"
+                    | "reasoning" => Some(AgentEvent::Generating),
                     "message" => {
                         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                         match role {
@@ -336,6 +346,12 @@ mod tests {
         assert!(args.contains(&"on-request".to_string()));
         assert!(args.contains(&"--search".to_string()));
         assert!(args.contains(&"--no-alt-screen".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
     }
 
     #[test]
@@ -346,6 +362,12 @@ mod tests {
         let args = p.get_spawn_args(&config, false);
 
         assert!(args.contains(&"--no-alt-screen".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
     }
 
     #[test]
@@ -462,6 +484,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_output_live_activity_response_items_set_generating() {
+        let p = make_provider();
+        for payload_type in [
+            "reasoning",
+            "function_call",
+            "custom_tool_call",
+            "custom_tool_call_output",
+        ] {
+            let line = format!(
+                r#"{{"type":"response_item","payload":{{"type":"{}","call_id":"abc"}}}}"#,
+                payload_type
+            );
+
+            assert_eq!(p.parse_output(&line).unwrap(), AgentEvent::Generating);
+        }
+    }
+
+    #[test]
     fn parse_output_response_item_function_call_requires_approval() {
         let p = make_provider();
         let line = r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"Get-Content foo\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Allow reading foo?\"}"}}"#;
@@ -474,9 +514,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_output_response_item_function_call_without_approval_is_unknown() {
+    fn parse_output_response_item_function_call_without_approval_sets_generating() {
         let p = make_provider();
         let line = r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"Get-Content foo\"}"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
     }
 }

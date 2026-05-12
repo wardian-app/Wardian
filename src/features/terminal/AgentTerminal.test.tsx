@@ -56,9 +56,10 @@ describe("AgentTerminal scrollback", () => {
     mockListen.mockResolvedValue(() => {});
     fitDimensions = { cols: 80, rows: 24 };
 
-    mockTerminal.mockImplementation(() => {
+    mockTerminal.mockImplementation((options?: ConstructorParameters<typeof Terminal>[0]) => {
       const state = { serializedState: "" };
       let resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined;
+      let scrollHandler: ((position: number) => void) | undefined;
       const terminal = {
         open: vi.fn(),
         write: vi.fn((data: string, callback?: () => void) => {
@@ -70,26 +71,35 @@ describe("AgentTerminal scrollback", () => {
           terminal.rows = rows;
           resizeHandler?.({ cols, rows });
         }),
+        clear: vi.fn(),
         onData: vi.fn(),
         onBinary: vi.fn(),
         onTitleChange: vi.fn(),
         onResize: vi.fn((handler: (size: { cols: number; rows: number }) => void) => {
           resizeHandler = handler;
         }),
+        onScroll: vi.fn((handler: (position: number) => void) => {
+          scrollHandler = handler;
+        }),
+        reset: vi.fn(),
         dispose: vi.fn(),
         focus: vi.fn(),
         scrollToBottom: vi.fn(),
+        scrollToTop: vi.fn(() => {
+          terminal.buffer.active.viewportY = 0;
+        }),
         buffer: { active: { baseY: 10, viewportY: 10 } },
         refresh: vi.fn(),
         cols: 80,
         rows: 24,
-        options: {},
+        options: { ...(options ?? {}) },
         unicode: { activeVersion: "" },
         loadAddon: vi.fn((addon: { __termState?: typeof state }) => {
           if (addon && "__termState" in addon) {
             addon.__termState = state;
           }
         }),
+        __emitScroll: (position: number) => scrollHandler?.(position),
       } as any;
       return terminal;
     });
@@ -402,7 +412,7 @@ describe("AgentTerminal scrollback", () => {
     expect(instance.loadAddon).toHaveBeenCalledWith(webglAddon);
   });
 
-  it("forwards codex PTY control sequences untouched", async () => {
+  it("strips Codex scrollback erase while preserving surrounding PTY output", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {
       switch (cmd) {
@@ -419,7 +429,7 @@ describe("AgentTerminal scrollback", () => {
 
     await waitFor(() => {
       const instance = getLatestTerminalInstance();
-      expect(instance.write).toHaveBeenCalledWith("before\u001b[3Jafter\n", expect.any(Function));
+      expect(instance.write).toHaveBeenCalledWith("beforeafter\n", expect.any(Function));
     });
   });
 
@@ -482,6 +492,156 @@ describe("AgentTerminal scrollback", () => {
       const instance = getLatestTerminalInstance();
       expect(instance.write).toHaveBeenCalledWith("latest frame\n", expect.any(Function));
     });
+  });
+
+  it("clears the cached renderer when the backend replaces the agent terminal", async () => {
+    let readCount = 0;
+    const listeners = new Map<string, (event: { payload: { session_id: string } }) => void>();
+    const onTitleChange = vi.fn();
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          if (readCount === 1) return "old provider frame\n";
+          if (readCount === 2) return null;
+          if (readCount === 3) return "fresh provider frame\n";
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    mockListen.mockImplementation(async (eventName, handler) => {
+      listeners.set(eventName, handler as (event: { payload: { session_id: string } }) => void);
+      return () => {};
+    });
+
+    render(<AgentTerminal sessionId="agent-reset" provider="claude" theme="dark" onTitleChange={onTitleChange} />);
+
+    await waitFor(() => {
+      const instance = getLatestTerminalInstance();
+      expect(instance.write).toHaveBeenCalledWith("old provider frame\n", expect.any(Function));
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.clear.mockClear();
+    instance.reset.mockClear();
+    instance.scrollToBottom.mockClear();
+    instance.refresh.mockClear();
+    instance.write.mockClear();
+
+    act(() => {
+      listeners.get("agent-terminal-cleared")?.({ payload: { session_id: "agent-reset" } });
+    });
+
+    expect(instance.reset).toHaveBeenCalledTimes(1);
+    expect(instance.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(instance.refresh).toHaveBeenCalledWith(0, 23);
+    expect(instance.clear).not.toHaveBeenCalled();
+    expect(instance.write).not.toHaveBeenCalledWith("\u001bc");
+    expect(onTitleChange).toHaveBeenLastCalledWith("");
+
+    act(() => {
+      listeners.get("agent-pty-output-ready")?.({ payload: { session_id: "agent-reset" } });
+    });
+
+    await waitFor(() => {
+      expect(instance.write).toHaveBeenCalledWith("fresh provider frame\n", expect.any(Function));
+    });
+  });
+
+  it("does not write stale PTY output that resolves after a terminal clear", async () => {
+    const listeners = new Map<string, (event: { payload: { session_id: string } }) => void>();
+    let readCount = 0;
+    let resolveStaleRead: ((value: string) => void) | undefined;
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          if (readCount === 1) {
+            return new Promise<string>((resolve) => {
+              resolveStaleRead = resolve;
+            });
+          }
+          if (readCount === 2) return null;
+          if (readCount === 3) return "fresh frame after restart\n";
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    mockListen.mockImplementation(async (eventName, handler) => {
+      listeners.set(eventName, handler as (event: { payload: { session_id: string } }) => void);
+      return () => {};
+    });
+
+    render(<AgentTerminal sessionId="codex-clear-race" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(resolveStaleRead).toBeDefined();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.write.mockClear();
+
+    act(() => {
+      listeners.get("agent-terminal-cleared")?.({ payload: { session_id: "codex-clear-race" } });
+      listeners.get("agent-pty-output-ready")?.({ payload: { session_id: "codex-clear-race" } });
+    });
+
+    resolveStaleRead!("stale frame from old process\n");
+
+    await waitFor(() => {
+      expect(instance.write).toHaveBeenCalledWith("fresh frame after restart\n", expect.any(Function));
+    });
+    expect(instance.write).not.toHaveBeenCalledWith("stale frame from old process\n", expect.any(Function));
+  });
+
+  it("exposes parser scroll geometry in terminal debug snapshots", async () => {
+    render(<AgentTerminal sessionId="debug-geometry" theme="dark" />);
+
+    await waitFor(() => {
+      const snapshot = window.__wardianTerminalDebug?.snapshot("debug-geometry");
+      expect(snapshot).toMatchObject({
+        cols: 80,
+        rows: 24,
+        baseY: expect.any(Number),
+        bufferLength: expect.any(Number),
+        viewportY: expect.any(Number),
+        renderer: {
+          cols: 80,
+          rows: 24,
+          fontFamily: defaultTerminalFontFamily(),
+          fontSize: 14,
+          cssCellWidth: null,
+          cssCellHeight: null,
+          deviceCellWidth: null,
+          deviceCellHeight: null,
+        },
+      });
+    });
+  });
+
+  it("exposes a debug scroll-to-top action for rendering audits", async () => {
+    render(<AgentTerminal sessionId="debug-scroll" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.viewportY = 10;
+
+    expect(window.__wardianTerminalDebug?.scrollToTop("debug-scroll")).toBe(true);
+    expect(instance.scrollToTop).toHaveBeenCalledTimes(1);
+    expect(instance.refresh).toHaveBeenCalledWith(0, 23);
   });
 
   it("does not resize repeatedly when ResizeObserver fires without a real size change", async () => {
@@ -616,6 +776,106 @@ describe("AgentTerminal scrollback", () => {
       },
       { timeout: 400 },
     );
+  });
+
+  it("defers backend PTY resize reports while the user is inspecting scrollback", async () => {
+    render(<AgentTerminal sessionId="codex-scrollback-resize" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    const onResize = instance.onResize.mock.calls[0]?.[0] as ((size: { cols: number; rows: number }) => void);
+    instance.buffer.active.baseY = 50;
+    instance.buffer.active.viewportY = 12;
+    mockInvoke.mockClear();
+
+    onResize({ cols: 100, rows: 30 });
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    expect(mockInvoke.mock.calls.some(([command]) => command === "resize_agent_terminal")).toBe(false);
+
+    instance.buffer.active.viewportY = 50;
+    instance.__emitScroll(50);
+
+    await waitFor(
+      () => {
+        expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+          sessionId: "codex-scrollback-resize",
+          cols: 100,
+          rows: 30,
+        });
+      },
+      { timeout: 400 },
+    );
+  });
+
+  it("defers frontend xterm resize while the user is inspecting scrollback", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="codex-frontend-scroll-resize" provider="codex" theme="dark" />);
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+
+      const instance = getLatestTerminalInstance();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      instance.buffer.active.baseY = 50;
+      instance.buffer.active.viewportY = 12;
+      instance.resize.mockClear();
+      mockInvoke.mockClear();
+      fitDimensions = { cols: 100, rows: 30 };
+      rectSpy.mockReturnValue({
+        width: 720,
+        height: 420,
+        top: 0,
+        left: 0,
+        right: 720,
+        bottom: 420,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      expect(resizeCallback).toBeDefined();
+      resizeCallback!([], {} as ResizeObserver);
+
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      expect(instance.resize).not.toHaveBeenCalled();
+      expect(mockInvoke.mock.calls.some(([command]) => command === "resize_agent_terminal")).toBe(false);
+
+      instance.buffer.active.viewportY = 50;
+      instance.__emitScroll(50);
+
+      await waitFor(() => {
+        expect(instance.resize).toHaveBeenCalledWith(100, 30);
+      });
+      await waitFor(
+        () => {
+          expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+            sessionId: "codex-frontend-scroll-resize",
+            cols: 100,
+            rows: 30,
+          });
+        },
+        { timeout: 500 },
+      );
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
   });
 
   it("replies to OpenCode terminal capability probes before rendering the PTY output", async () => {

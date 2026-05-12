@@ -33,6 +33,10 @@ function renderGrid(
   maximizedAgentId: string | null,
   filteredAgents: AgentConfig[] = agents,
   onTerminalFocus = vi.fn(),
+  options: {
+    selectedAgentIds?: Set<string>;
+    offAgentIds?: Set<string>;
+  } = {},
 ) {
   return render(
     <GridView
@@ -40,8 +44,8 @@ function renderGrid(
       telemetry={telemetry}
       terminalTitles={{}}
       currentThoughts={{}}
-      selectedAgentIds={new Set()}
-      offAgentIds={new Set()}
+      selectedAgentIds={options.selectedAgentIds ?? new Set()}
+      offAgentIds={options.offAgentIds ?? new Set()}
       maximizedAgentId={maximizedAgentId}
       draggedAgentId={null}
       dragOverAgentId={null}
@@ -121,6 +125,27 @@ describe('GridView maximize behavior', () => {
     const root = container.firstElementChild;
     // New grid implementation uses grid display
     expect((root as HTMLElement).style.display).toBe('grid');
+    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+  });
+
+  it('hides a selected off agent from the main grid', () => {
+    renderGrid(null, agents, vi.fn(), {
+      selectedAgentIds: new Set(['agent-1']),
+      offAgentIds: new Set(['agent-1']),
+    });
+
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-agent-2')).toBeInTheDocument();
+  });
+
+  it('falls back to the active grid when the maximized agent is off', () => {
+    const { container } = renderGrid('agent-1', agents, vi.fn(), {
+      offAgentIds: new Set(['agent-1']),
+    });
+    const root = container.firstElementChild as HTMLElement;
+
+    expect(root.style.gridAutoRows).not.toBe('100%');
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
 });

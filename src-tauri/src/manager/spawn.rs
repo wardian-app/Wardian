@@ -3,6 +3,7 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
+use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter};
@@ -10,8 +11,7 @@ use wardian_core::models::{AgentConfig, AgentEvent};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
 use super::codex::{
-    codex_log_lookup_session_id, codex_provider_session_is_excluded, codex_session_file_path,
-    latest_codex_session_index_entry,
+    codex_provider_session_is_excluded, codex_session_file_path, latest_codex_session_index_entry,
 };
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
 use super::{
@@ -48,6 +48,44 @@ pub(super) fn capture_codex_init_resume_session(
     config.resume_session = Some(session_id.to_string());
     config.codex_cleared_provider_sessions.clear();
     true
+}
+
+fn codex_status_log_session(
+    config: &mut AgentConfig,
+    latest_session: Option<String>,
+) -> Option<String> {
+    if config.resume_session.as_deref().is_some_and(|value| {
+        codex_provider_session_is_excluded(value, &config.codex_cleared_provider_sessions)
+    }) {
+        config.resume_session = None;
+    }
+
+    let candidate = config
+        .resume_session
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| latest_session.filter(|value| !value.trim().is_empty()));
+
+    let candidate = candidate?;
+
+    if codex_provider_session_is_excluded(&candidate, &config.codex_cleared_provider_sessions) {
+        return Some(candidate);
+    }
+
+    if config
+        .resume_session
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        config.resume_session = Some(candidate.clone());
+        config.codex_cleared_provider_sessions.clear();
+    } else if config.resume_session.as_deref() == Some(candidate.as_str())
+        && !config.codex_cleared_provider_sessions.is_empty()
+    {
+        config.codex_cleared_provider_sessions.clear();
+    }
+
+    Some(candidate)
 }
 
 fn save_agent_state_after_session_capture(app: &AppHandle) {
@@ -301,6 +339,7 @@ pub async fn spawn_agent(
         let mut current_line = String::new();
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
+        let mut pty_decoder = PtyUtf8Decoder::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -349,7 +388,7 @@ pub async fn spawn_agent(
                         "OUT",
                         &buf[0..n],
                     );
-                    let text = String::from_utf8_lossy(&buf[0..n]).to_string();
+                    let text = pty_decoder.decode_chunk(&buf[0..n]);
                     if let Ok(mut stamp) = last_output_at_clone.lock() {
                         *stamp = Some(std::time::SystemTime::now());
                     }
@@ -601,55 +640,20 @@ pub async fn spawn_agent(
                 }
 
                 let path = {
-                    let discovered_session = watcher_config.lock().ok().and_then(|mut cfg| {
-                        if cfg.resume_session.as_deref().is_some_and(|value| {
-                            codex_provider_session_is_excluded(
-                                value,
-                                &cfg.codex_cleared_provider_sessions,
-                            )
-                        }) {
-                            cfg.resume_session = None;
+                    let latest_session = latest_codex_session_index_entry(&watcher_session)
+                        .ok()
+                        .flatten()
+                        .map(|(session_id, _updated_at)| session_id);
+                    let lookup_session = watcher_config.lock().ok().and_then(|mut cfg| {
+                        let previous_resume = cfg.resume_session.clone();
+                        let previous_cleared = cfg.codex_cleared_provider_sessions.clone();
+                        let lookup = codex_status_log_session(&mut cfg, latest_session);
+                        if cfg.resume_session != previous_resume
+                            || cfg.codex_cleared_provider_sessions != previous_cleared
+                        {
+                            let _ = watcher_app.emit("agents-updated", ());
                         }
-                        cfg.resume_session
-                            .clone()
-                            .filter(|value| !value.trim().is_empty())
-                    });
-                    let discovered_session = if discovered_session.is_some() {
-                        discovered_session
-                    } else {
-                        latest_codex_session_index_entry(&watcher_session)
-                            .ok()
-                            .flatten()
-                            .map(|(session_id, _updated_at)| session_id)
-                    };
-                    if let Some(discovered_session) = discovered_session.as_ref() {
-                        if let Ok(mut cfg) = watcher_config.lock() {
-                            if codex_provider_session_is_excluded(
-                                discovered_session,
-                                &cfg.codex_cleared_provider_sessions,
-                            ) {
-                                if cfg.resume_session.as_deref() == Some(discovered_session) {
-                                    cfg.resume_session = None;
-                                }
-                            } else if cfg.resume_session.as_deref() == Some(discovered_session)
-                                && !cfg.codex_cleared_provider_sessions.is_empty()
-                            {
-                                cfg.codex_cleared_provider_sessions.clear();
-                                let _ = watcher_app.emit("agents-updated", ());
-                            } else if cfg
-                                .resume_session
-                                .as_deref()
-                                .is_none_or(|value| value.trim().is_empty())
-                            {
-                                cfg.resume_session = Some(discovered_session.clone());
-                                cfg.codex_cleared_provider_sessions.clear();
-                                let _ = watcher_app.emit("agents-updated", ());
-                            }
-                        }
-                    }
-                    let lookup_session = watcher_config.lock().ok().and_then(|cfg| {
-                        codex_log_lookup_session_id(cfg.resume_session.as_deref())
-                            .map(str::to_string)
+                        lookup
                     });
                     let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(lookup_session) = lookup_session {
@@ -1027,4 +1031,29 @@ pub async fn resize_pty(
     .map_err(|e| format!("Failed to join PTY resize task: {}", e))?
     .map_err(|e| format!("Failed to resize PTY: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_status_log_session_tracks_excluded_latest_without_adopting_resume() {
+        let mut config = AgentConfig {
+            provider: "codex".to_string(),
+            resume_session: None,
+            codex_cleared_provider_sessions: vec!["provider-session-1".to_string()],
+            ..Default::default()
+        };
+
+        let log_session =
+            codex_status_log_session(&mut config, Some("provider-session-1".to_string()));
+
+        assert_eq!(log_session.as_deref(), Some("provider-session-1"));
+        assert_eq!(config.resume_session, None);
+        assert_eq!(
+            config.codex_cleared_provider_sessions,
+            vec!["provider-session-1".to_string()]
+        );
+    }
 }

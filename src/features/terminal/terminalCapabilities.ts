@@ -15,6 +15,7 @@ const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
 const HOME_CURSOR = "\u001b[H";
+const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
 
 export type TerminalCapabilityContext = {
   cursorRow: number;
@@ -42,6 +43,7 @@ export type TerminalOutputState = {
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
+const CSI_SEQUENCE = /^\u001b\[([0-?]*)([ -/]*)([@-~])$/;
 
 function extractHomeRedrawLines(data: string) {
   const homeIndex = data.indexOf(HOME_CURSOR);
@@ -56,7 +58,53 @@ function extractHomeRedrawLines(data: string) {
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
 
-  return plain.length >= 2 ? plain : null;
+  if (plain.length >= 2) {
+    return plain;
+  }
+
+  return extractCursorAddressedHomeRedrawLines(data.slice(homeIndex));
+}
+
+function extractCursorAddressedHomeRedrawLines(data: string) {
+  const rows = new Map<number, string>();
+  let currentRow = 1;
+  let cursor = 0;
+
+  const appendText = (text: string) => {
+    for (const char of text) {
+      if (char === "\r") {
+        continue;
+      }
+      if (char === "\n") {
+        currentRow += 1;
+        continue;
+      }
+      if (char < " ") {
+        continue;
+      }
+      rows.set(currentRow, `${rows.get(currentRow) ?? ""}${char}`);
+    }
+  };
+
+  for (const match of data.matchAll(ANSI_SEQUENCE)) {
+    appendText(data.slice(cursor, match.index));
+    const sequence = match[0];
+    const csi = sequence.match(CSI_SEQUENCE);
+    if (csi && (csi[3] === "H" || csi[3] === "f")) {
+      const rowParam = csi[1].split(";")[0];
+      const row = Number.parseInt(rowParam || "1", 10);
+      currentRow = Number.isFinite(row) && row > 0 ? row : 1;
+    }
+    cursor = match.index + sequence.length;
+  }
+  appendText(data.slice(cursor));
+
+  const lines = Array.from(rows.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, line]) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+
+  return lines.length >= 2 ? lines : null;
 }
 
 function isSynchronizedHomeRedraw(data: string) {
@@ -65,6 +113,18 @@ function isSynchronizedHomeRedraw(data: string) {
 
 function normalizePlainLine(line: string) {
   return line.replace(/\s+/g, " ").trim();
+}
+
+function normalizeFullscreenClearByNewlines(data: string) {
+  return data.replace(
+    FULLSCREEN_CLEAR_BY_NEWLINES,
+    (_match, cursorShow: string | undefined) =>
+      `\u001b[?25l\u001b[2J\u001b[H${cursorShow ?? ""}`,
+  );
+}
+
+function stripCodexScrollbackErase(data: string, provider?: string) {
+  return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
 }
 
 export function shouldHomeCursorBeforeTransientResize(
@@ -166,15 +226,15 @@ export function normalizeOpenCodeOutput(
     state.transientHomeRedrawActive = true;
   }
 
-  if (provider === "codex") {
+  if (provider === "codex" || provider === "opencode") {
     data = reconstructHomeRedrawScrollback(data, state);
   }
 
-  data = data.replace(
-    FULLSCREEN_CLEAR_BY_NEWLINES,
-    (_match, cursorShow: string | undefined) =>
-      `\u001b[?25l\u001b[2J\u001b[H${cursorShow ?? ""}`,
-  );
+  if (provider !== "opencode") {
+    data = normalizeFullscreenClearByNewlines(data);
+  }
+
+  data = stripCodexScrollbackErase(data, provider);
 
   if (provider !== "opencode") {
     return data;
@@ -184,6 +244,20 @@ export function normalizeOpenCodeOutput(
     .replace(DECRQM_QUERY, "")
     .replace(SYNC_OUTPUT_TOGGLE, "")
     .replace(THEME_MODE_NOTIFICATION_TOGGLE, "");
+}
+
+export function normalizeTerminalOutputBatch(
+  rawChunks: string[],
+  provider?: string,
+  state?: TerminalOutputState,
+) {
+  const normalizedChunks = rawChunks
+    .map((data) => normalizeOpenCodeOutput(data, provider, state))
+    .join("");
+  const normalizedBatch = stripCodexScrollbackErase(normalizedChunks, provider);
+  return provider === "opencode"
+    ? normalizedBatch
+    : normalizeFullscreenClearByNewlines(normalizedBatch);
 }
 
 export function planTerminalCapabilityResponses(

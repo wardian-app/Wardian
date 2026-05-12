@@ -21,13 +21,39 @@ function existingPath(candidates) {
   return null;
 }
 
+function cargoTargetDirectory() {
+  const result = spawnSync(
+    "cargo",
+    ["metadata", "--format-version=1", "--no-deps"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      shell: process.platform === "win32",
+    },
+  );
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(result.stdout).target_directory || null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveAppPath() {
   if (process.env.WARDIAN_NATIVE_APP && fs.existsSync(process.env.WARDIAN_NATIVE_APP)) {
     return process.env.WARDIAN_NATIVE_APP;
   }
 
+  const metadataTargetDir = cargoTargetDirectory();
+
   if (process.platform === "win32") {
     return existingPath([
+      path.join(metadataTargetDir ?? "", "debug", "Wardian.exe"),
+      path.join(metadataTargetDir ?? "", "release", "Wardian.exe"),
       path.join(repoRoot, "target", "debug", "Wardian.exe"),
       path.join(repoRoot, "target", "release", "Wardian.exe"),
       path.join(repoRoot, "src-tauri", "target", "debug", "Wardian.exe"),
@@ -37,6 +63,26 @@ function resolveAppPath() {
 
   if (process.platform === "darwin") {
     return existingPath([
+      path.join(
+        metadataTargetDir ?? "",
+        "debug",
+        "bundle",
+        "macos",
+        "Wardian.app",
+        "Contents",
+        "MacOS",
+        "Wardian",
+      ),
+      path.join(
+        metadataTargetDir ?? "",
+        "release",
+        "bundle",
+        "macos",
+        "Wardian.app",
+        "Contents",
+        "MacOS",
+        "Wardian",
+      ),
       path.join(
         repoRoot,
         "target",
@@ -87,6 +133,10 @@ function resolveAppPath() {
   }
 
   return existingPath([
+    path.join(metadataTargetDir ?? "", "debug", "Wardian"),
+    path.join(metadataTargetDir ?? "", "release", "Wardian"),
+    path.join(metadataTargetDir ?? "", "debug", "wardian"),
+    path.join(metadataTargetDir ?? "", "release", "wardian"),
     path.join(repoRoot, "target", "debug", "Wardian"),
     path.join(repoRoot, "target", "release", "Wardian"),
     path.join(repoRoot, "target", "debug", "wardian"),
@@ -208,10 +258,19 @@ function npmCommand() {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
+export function nativeAppBuildArgs() {
+  const args = ["run", "tauri", "--", "build", "--debug", "--no-bundle"];
+  const features = (process.env.WARDIAN_NATIVE_BUILD_FEATURES || "").trim();
+  if (features) {
+    args.push("--features", features);
+  }
+  return args;
+}
+
 export function ensureNativeAppBuilt(harness) {
   const build = spawnSync(
     npmCommand(),
-    ["run", "tauri", "--", "build", "--debug", "--no-bundle"],
+    nativeAppBuildArgs(),
     {
       cwd: harness.repoRoot,
       stdio: "inherit",

@@ -3,6 +3,7 @@ pub mod fs;
 pub mod logging;
 pub mod migration;
 pub mod process;
+pub mod pty_decode;
 pub mod shell;
 pub mod terminal_input;
 
@@ -10,6 +11,7 @@ pub use cli_install::*;
 pub use fs::*;
 pub use logging::*;
 pub use process::*;
+pub use pty_decode::*;
 pub use shell::*;
 pub use terminal_input::*;
 

@@ -40,6 +40,7 @@ dist-ssr
 # Build & Tooling
 .eslintcache
 .stylelintcache
+.tmp/
 
 # Windows
 Thumbs.db

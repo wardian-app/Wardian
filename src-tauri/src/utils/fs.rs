@@ -373,8 +373,9 @@ pub(crate) fn sync_codex_agent_home(
     wardian_skills: &std::path::Path,
 ) -> Result<(), String> {
     std::fs::create_dir_all(projected_home).map_err(|e| e.to_string())?;
+    remove_legacy_codex_global_hardlinks(real_codex_home, projected_home)?;
 
-    for shared_name in ["auth.json", "config.toml", "cap_sid"] {
+    for shared_name in CODEX_SHARED_HOME_FILES {
         let source = real_codex_home.join(shared_name);
         if source.exists() && source.is_file() {
             project_file(&source, &projected_home.join(shared_name))?;
@@ -402,6 +403,59 @@ pub(crate) fn sync_codex_agent_home(
     }
 
     Ok(())
+}
+
+const CODEX_SHARED_HOME_FILES: &[&str] = &["auth.json", "config.toml", "cap_sid"];
+
+const CODEX_LEGACY_GLOBAL_HARDLINK_GROUPS: &[(&str, &[&str], bool)] = &[
+    ("history.jsonl", &[], true),
+    ("session_index.jsonl", &[], true),
+    (
+        "state_5.sqlite",
+        &["state_5.sqlite-shm", "state_5.sqlite-wal"],
+        false,
+    ),
+    (
+        "logs_2.sqlite",
+        &["logs_2.sqlite-shm", "logs_2.sqlite-wal"],
+        false,
+    ),
+];
+
+fn remove_legacy_codex_global_hardlinks(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+) -> Result<(), String> {
+    for (primary_name, sidecar_names, allow_content_match) in CODEX_LEGACY_GLOBAL_HARDLINK_GROUPS {
+        let source = real_codex_home.join(primary_name);
+        let target = projected_home.join(primary_name);
+        if same_file_identity(&source, &target)
+            || (*allow_content_match && same_file_contents(&source, &target))
+        {
+            std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+            for sidecar_name in *sidecar_names {
+                let sidecar = projected_home.join(sidecar_name);
+                if sidecar.exists() {
+                    std::fs::remove_file(&sidecar).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_file_identity(left: &std::path::Path, right: &std::path::Path) -> bool {
+    same_file::is_same_file(left, right).unwrap_or(false)
+}
+
+fn same_file_contents(left: &std::path::Path, right: &std::path::Path) -> bool {
+    let Ok(left_content) = std::fs::read(left) else {
+        return false;
+    };
+    let Ok(right_content) = std::fs::read(right) else {
+        return false;
+    };
+    left_content == right_content
 }
 
 fn write_habitat_instruction_files(
@@ -634,12 +688,9 @@ fn project_file(source: &std::path::Path, target: &std::path::Path) -> Result<()
         let _ = std::fs::remove_file(target);
     }
 
-    match std::fs::hard_link(source, target) {
-        Ok(_) => Ok(()),
-        Err(_) => std::fs::copy(source, target)
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-    }
+    std::fs::copy(source, target)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Ensures `.claude/skills` is a symlink (or junction on Windows) pointing to
@@ -811,6 +862,8 @@ mod tests {
         std::fs::write(real_home.join("config.toml"), "config").expect("write config");
         std::fs::write(real_home.join("cap_sid"), "cap").expect("write cap sid");
         std::fs::write(real_home.join("history.jsonl"), "history").expect("write unrelated file");
+        std::fs::write(real_home.join("session_index.jsonl"), "index")
+            .expect("write unrelated index");
 
         sync_codex_agent_home(&real_home, &projected_home, &wardian_skills)
             .expect("sync codex agent home");
@@ -819,6 +872,110 @@ mod tests {
         assert!(projected_home.join("config.toml").exists());
         assert!(projected_home.join("cap_sid").exists());
         assert!(!projected_home.join("history.jsonl").exists());
+        assert!(!projected_home.join("session_index.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_copies_shared_files_without_linking_real_home() {
+        let root = unique_temp_dir("codex-home-copy-shared-files");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+        let wardian_skills = root.join("wardian-skills");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&wardian_skills).expect("create wardian skills");
+        std::fs::write(real_home.join("auth.json"), "source auth").expect("write auth");
+
+        sync_codex_agent_home(&real_home, &projected_home, &wardian_skills)
+            .expect("sync codex agent home");
+
+        std::fs::write(projected_home.join("auth.json"), "projected auth")
+            .expect("mutate projected auth");
+
+        assert_eq!(
+            std::fs::read_to_string(real_home.join("auth.json")).expect("read source auth"),
+            "source auth"
+        );
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join("auth.json")).expect("read projected auth"),
+            "projected auth"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_removes_legacy_global_hardlinks_and_copies() {
+        let root = unique_temp_dir("codex-home-legacy-state");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&projected_home).expect("create projected codex home");
+
+        for file_name in [
+            "history.jsonl",
+            "session_index.jsonl",
+            "state_5.sqlite",
+            "state_5.sqlite-shm",
+            "state_5.sqlite-wal",
+            "logs_2.sqlite",
+            "logs_2.sqlite-shm",
+            "logs_2.sqlite-wal",
+        ] {
+            std::fs::write(real_home.join(file_name), file_name).expect("write real file");
+            if file_name == "session_index.jsonl" {
+                std::fs::copy(real_home.join(file_name), projected_home.join(file_name))
+                    .expect("create legacy copy");
+            } else {
+                std::fs::hard_link(real_home.join(file_name), projected_home.join(file_name))
+                    .expect("create legacy hardlink");
+            }
+        }
+
+        sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
+            .expect("sync codex agent home");
+
+        for file_name in [
+            "history.jsonl",
+            "session_index.jsonl",
+            "state_5.sqlite",
+            "state_5.sqlite-shm",
+            "state_5.sqlite-wal",
+            "logs_2.sqlite",
+            "logs_2.sqlite-shm",
+            "logs_2.sqlite-wal",
+        ] {
+            assert!(
+                !projected_home.join(file_name).exists(),
+                "{file_name} should be removed from projected Codex home"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_keeps_non_hardlinked_sqlite_state_files() {
+        let root = unique_temp_dir("codex-home-sqlite-copy");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&projected_home).expect("create projected codex home");
+        std::fs::write(real_home.join("state_5.sqlite"), "sqlite copy").expect("write real sqlite");
+        std::fs::copy(
+            real_home.join("state_5.sqlite"),
+            projected_home.join("state_5.sqlite"),
+        )
+        .expect("create projected sqlite copy");
+
+        sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
+            .expect("sync codex agent home");
+
+        assert!(projected_home.join("state_5.sqlite").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
