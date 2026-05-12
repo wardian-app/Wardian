@@ -15,6 +15,7 @@ import {
   createTeamFromAgents,
   ungroupTeam,
   addAgentToTeam,
+  addCloneToSourceTeam,
   removeAgentFromTeam,
   removeAgentFromTeamAtEntry,
   reorderTeamMember,
@@ -362,6 +363,15 @@ function AppBody() {
   const handleReorderTeamMember = async (teamId: string, draggedAgentId: string, targetAgentId: string, position: "before" | "after" = "before") => {
     await persistWatchlistState(reorderTeamMember({ version: 2, watchlists, teams }, teamId, draggedAgentId, targetAgentId, position));
   };
+
+  const preserveCloneTeamPlacement = useCallback(async (sourceAgentId: string, cloneAgentId: string) => {
+    if (!teams.some((team) => team.agentIds.includes(sourceAgentId))) return;
+    await persistWatchlistState(addCloneToSourceTeam(
+      { version: 2, watchlists, teams },
+      sourceAgentId,
+      cloneAgentId,
+    ));
+  }, [persistWatchlistState, teams, watchlists]);
 
   const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
   const filteredAgents = getAgentsForList(agents, activeList, teams);
@@ -818,12 +828,13 @@ function AppBody() {
     }
 
     try {
-      await invoke("clone_agent", {
+      const cloned = await invoke<AgentConfig>("clone_agent", {
         req: {
           source_session_id: id,
           mode,
         },
       });
+      await preserveCloneTeamPlacement(id, cloned.session_id);
       fetchAgents();
     } catch (e) {
       console.error(e);
@@ -1043,8 +1054,12 @@ function AppBody() {
             agentClasses={agentClasses}
             isOpen={Boolean(customCloneSourceId)}
             onClose={() => setCustomCloneSourceId(null)}
-            onCloned={() => {
+            onCloned={async (cloned) => {
+              const sourceId = customCloneSourceId;
               setCustomCloneSourceId(null);
+              if (sourceId) {
+                await preserveCloneTeamPlacement(sourceId, cloned.session_id);
+              }
               fetchAgents();
             }}
           />
