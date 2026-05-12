@@ -367,6 +367,10 @@ test("native CLI control commands operate through the running app", { timeout: 1
     ]);
     const watched = JSON.parse(watchResult.stdout);
     assert.match(watched.output.text, /Action approved/);
+    const idleStatusEvents = watched.events.filter(
+      (event) => event.kind === "status" && event.payload?.status === "idle",
+    );
+    assert.equal(idleStatusEvents.length, 1, JSON.stringify(watched.events));
 
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
     const cloneResult = runCliOk(cliPath, harness, [

@@ -94,14 +94,13 @@ function AppBody() {
   const createScheduledRun = useWorkflowStore(s => s.createScheduledRun);
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
-  const hasAgentBufferedContent = useQueueStore((s) => s.hasAgentBufferedContent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
   const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
   const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
   const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
     const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
-    if (currentStatus === "Idle" && (wasActive || hasAgentBufferedContent(sessionId))) {
+    if (currentStatus === "Idle" && wasActive) {
       if (pendingQueueFlushRef.current.has(sessionId)) return;
       pendingQueueFlushRef.current.add(sessionId);
       const agent = agentsRef.current.find((a) => a.session_id === sessionId);
@@ -122,7 +121,7 @@ function AppBody() {
         finishFlush();
       }
     }
-  }, [flushAgentCompletion, hasAgentBufferedContent]);
+  }, [flushAgentCompletion]);
 
   useEffect(() => {
     const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
@@ -622,7 +621,10 @@ function AppBody() {
       const mapping: Record<string, AgentTelemetry> = {};
       for (const m of event.payload) mapping[m.session_id] = m;
       for (const [sessionId, metric] of Object.entries(mapping)) {
-        maybeFlushAgentQueueCompletion(sessionId, metric.current_status, agentStatusRef.current[sessionId]);
+        const previousStatus = agentStatusRef.current[sessionId];
+        if (previousStatus !== undefined) {
+          maybeFlushAgentQueueCompletion(sessionId, metric.current_status, previousStatus);
+        }
         agentStatusRef.current[sessionId] = metric.current_status;
       }
       setTelemetry(prev => {

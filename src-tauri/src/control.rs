@@ -374,7 +374,6 @@ async fn deliver_message_to_target(
             .collect::<std::collections::HashMap<_, _>>()
     };
 
-    let message = message_with_origin(state, message, origin).await;
     let mut delivered = 0usize;
     let mut delivered_session_ids = Vec::new();
     let mut failures = Vec::new();
@@ -382,12 +381,15 @@ async fn deliver_message_to_target(
     for info in target_infos {
         match senders.get(&info.uuid).and_then(Clone::clone) {
             Some(tx) => {
+                let outbound_message =
+                    message_with_origin(state, message, origin, info.status == "action_required")
+                        .await;
                 let result = match wait_for_terminal_ready_for_control_send(state, &info).await {
                     Ok(()) => {
                         crate::utils::terminal_input::submit_prompt_chunks_via_sender(
                             &tx,
                             &info.provider,
-                            &message,
+                            &outbound_message,
                         )
                         .await
                     }
@@ -464,7 +466,12 @@ async fn message_with_origin(
     state: &AppState,
     message: &str,
     origin: Option<&MessageOrigin>,
+    allow_bare_approval_response: bool,
 ) -> String {
+    if allow_bare_approval_response && is_bare_approval_response(message) {
+        return message.to_string();
+    }
+
     let Some(MessageOrigin::WardianAgent { session_id }) = origin else {
         return message.to_string();
     };
@@ -473,6 +480,13 @@ async fn message_with_origin(
         Some(name) => format!("From {name}: {message}"),
         None => format!("From Wardian agent {session_id}: {message}"),
     }
+}
+
+fn is_bare_approval_response(message: &str) -> bool {
+    matches!(
+        message.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes" | "n" | "no"
+    )
 }
 
 async fn resolve_agent_name_in_state(state: &AppState, session_id: &str) -> Option<String> {
@@ -588,7 +602,12 @@ async fn mark_delivered_agents_prompt_started(
         if let Some(agent) = agents.get(session_id) {
             if crate::manager::mark_agent_prompt_started(agent) {
                 if let Some(app) = app {
-                    crate::manager::emit_agent_status(app, session_id, "Processing...");
+                    crate::manager::set_agent_status(
+                        app,
+                        session_id,
+                        &agent.current_status,
+                        "Processing...",
+                    );
                 }
             }
         }
@@ -1453,10 +1472,7 @@ mod tests {
         {
             let agents = state.agents.lock().await;
             let agent = agents.get("agent-1").unwrap();
-            assert_eq!(
-                agent.current_status.lock().unwrap().as_str(),
-                "Processing..."
-            );
+            assert_eq!(agent.current_status.lock().unwrap().as_str(), "Idle");
             assert_eq!(*agent.query_count.lock().unwrap(), 1);
         }
     }
@@ -1489,6 +1505,77 @@ mod tests {
         assert_eq!(
             rx.recv().await.unwrap(),
             b"From PlannerOne: check this".to_vec()
+        );
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+    }
+
+    #[tokio::test]
+    async fn message_delivery_keeps_bare_approval_responses_unprefixed() {
+        let state = AppState::new();
+        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "y",
+            None,
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), b"y".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+    }
+
+    #[tokio::test]
+    async fn message_delivery_prefixes_bare_approval_response_when_target_not_action_needed() {
+        let state = AppState::new();
+        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "yes",
+            None,
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            b"From PlannerOne: yes".to_vec()
         );
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
     }

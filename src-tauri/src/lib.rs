@@ -7,6 +7,13 @@ pub mod utils;
 pub mod workflow_engine;
 pub use wardian_core::models;
 
+// Tauri's Windows resource contains the Common Controls v6 manifest required by
+// wry/tao imports such as TaskDialogIndirect. Cargo links it for app binaries,
+// but the library unit-test harness needs the same resource explicitly.
+#[cfg(all(test, windows))]
+#[link(name = "resource", kind = "static")]
+extern "C" {}
+
 use crate::state::AppState;
 use tauri::{Emitter, Manager};
 use wardian_core::models::AgentConfig;

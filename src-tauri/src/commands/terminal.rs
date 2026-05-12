@@ -74,10 +74,7 @@ pub async fn send_input_to_agent(
                 if is_interrupt {
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
-                        if let Ok(mut status) = agent.current_status.lock() {
-                            *status = "Idle".to_string();
-                        }
-                        manager::emit_agent_status(&app, &session_id, "Idle");
+                        manager::set_agent_status(&app, &session_id, &agent.current_status, "Idle");
                     }
                 } else if is_submit {
                     let agents = state.agents.lock().await;
@@ -86,7 +83,12 @@ pub async fn send_input_to_agent(
                         if (provider == "opencode" || provider == "gemini")
                             && manager::mark_agent_prompt_started(agent)
                         {
-                            manager::emit_agent_status(&app, &session_id, "Processing...");
+                            manager::set_agent_status(
+                                &app,
+                                &session_id,
+                                &agent.current_status,
+                                "Processing...",
+                            );
                         }
                     }
                 }
@@ -178,7 +180,12 @@ pub async fn submit_prompt_to_agent(
             let agents = state.agents.lock().await;
             if let Some(agent) = agents.get(&session_id) {
                 if manager::mark_agent_prompt_started(agent) {
-                    manager::emit_agent_status(&_app, &session_id, "Processing...");
+                    manager::set_agent_status(
+                        &_app,
+                        &session_id,
+                        &agent.current_status,
+                        "Processing...",
+                    );
                 }
             }
         }
@@ -203,13 +210,14 @@ pub async fn submit_prompt_to_agent(
                 {
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
-                        if let Ok(mut status) = agent.current_status.lock() {
-                            *status = "Error".to_string();
-                        }
+                        manager::set_agent_status(
+                            &_app,
+                            &session_id,
+                            &agent.current_status,
+                            "Error",
+                        );
                     }
                 }
-
-                manager::emit_agent_status(&_app, &session_id, "Error");
 
                 return Err(error);
             }
@@ -252,13 +260,9 @@ pub async fn submit_prompt_to_agent(
         {
             let agents = state.agents.lock().await;
             if let Some(agent) = agents.get(&session_id) {
-                if let Ok(mut status) = agent.current_status.lock() {
-                    *status = "Idle".to_string();
-                }
+                manager::set_agent_status(&_app, &session_id, &agent.current_status, "Idle");
             }
         }
-
-        manager::emit_agent_status(&_app, &session_id, "Idle");
 
         return Ok(());
     }
@@ -267,7 +271,12 @@ pub async fn submit_prompt_to_agent(
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
             if manager::mark_agent_prompt_started(agent) {
-                manager::emit_agent_status(&_app, &session_id, "Processing...");
+                manager::set_agent_status(
+                    &_app,
+                    &session_id,
+                    &agent.current_status,
+                    "Processing...",
+                );
             }
         }
     }
