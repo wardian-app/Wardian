@@ -1,6 +1,6 @@
 # Wardian Documentation
 
-This folder contains user guides, workflow references, developer architecture notes, and long-form specs.
+This folder contains user guides, workflow references, developer architecture notes, research references, and long-form specs.
 
 ## Start Here
 
@@ -45,6 +45,19 @@ This folder contains user guides, workflow references, developer architecture no
 - [Native E2E Harness](./developer/native-e2e.md)
 - [Theming](./developer/theming.md)
 - [Screenshot Documentation](./developer/screenshot-documentation.md)
+
+## Research References
+
+- [Research Index](./research/index.md)
+- [Agent Evaluation References](./research/agent-evaluation-references.md)
+- [Agent Protocol and UI References](./research/agent-protocol-and-ui-references.md)
+- [Agent Runtime Sandbox References](./research/agent-runtime-sandbox-references.md)
+- [Dashboard Observability References](./research/dashboard-observability-references.md)
+- [Graph Visualization References](./research/graph-visualization-references.md)
+- [Local-First State References](./research/local-first-state-references.md)
+- [Multi-Agent Orchestrator References](./research/multi-agent-orchestrator-references.md)
+- [Skill Manager References](./research/skill-manager-references.md)
+- [Workflow Design References](./research/workflow-design-references.md)
 
 ## Specs and Design
 

@@ -10,7 +10,7 @@ The Library is the centralized repository for all reusable agent assets in Wardi
 
 Prompts are reusable text injections that you can send directly to an agent's terminal.
 
-- **Organization**: Prompts are stored as `.md` files in `~/.wardian/library/prompts/`. You can organize them into physical folders on your disk.
+- **Organization**: Prompts are stored as `.md` files in `<wardian-home>/library/prompts/`. You can organize them into physical folders on your disk.
 - **Quick Injection**: "Star" your favorite prompts to make them appear in the **Command** sidebar tab for one-click execution.
 - **Dynamic Context**: Use prompts to quickly set up environments, run test suites, or provide complex task instructions.
 
@@ -51,3 +51,7 @@ To run a prompt from the Library:
 ## 🚀 Advanced: Skill Auto-Patching
 
 If you use custom modular skills, ensure the **"Auto-patch Gemini CLI"** setting is enabled in the **Settings** panel. This ensures the underlying CLI is patched at launch to recognize the physical skill folders in your agent directories.
+
+## Related Research
+
+- [Skill Manager References](../research/skill-manager-references.md)

@@ -33,7 +33,7 @@ Click the **gear icon** (⚙) in the watchlist header to open the column picker.
 Click any column header to sort by that column. Clicking again cycles through ascending → descending → unsorted. The **Agent** column header sorts alphabetically by name. Sorting applies on top of your custom watchlist order; drag-to-reorder still works when no sort is active.
 
 ### Persistence
-Column visibility and sort state are saved to `~/.wardian/watchlists/prefs.json` and restored on next launch.
+Column visibility and sort state are saved to `<wardian-home>/watchlists/prefs.json` and restored on next launch.
 
 The CLI can inspect persisted watchlist and team state without starting the desktop app:
 
@@ -65,3 +65,7 @@ Hover over any agent in the Roster to access instant control icons:
 - **Pause/Resume**: Suspend the PTY process to save CPU.
 - **Restart**: Re-spawn the agent with its initial instructions.
 - **Quick-Jump**: Double-click an agent to center the main Grid view on that agent's terminal.
+
+## Related Research
+
+- [Dashboard Observability References](../research/dashboard-observability-references.md)
