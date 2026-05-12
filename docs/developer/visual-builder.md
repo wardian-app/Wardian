@@ -32,3 +32,8 @@ Users can click any variable in the IVA tree (e.g., `gatekeeper.decision`). The 
 
 ### Shared Storage
 The IVA also constantly displays the `storage.*` namespace, allowing easy access to the persistent Key-Value store shared across all workflows and agents.
+
+## Related Research
+
+- [Workflow Design References](../research/workflow-design-references.md)
+- [Graph Visualization References](../research/graph-visualization-references.md)

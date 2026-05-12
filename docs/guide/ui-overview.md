@@ -49,7 +49,7 @@ Use the single-agent roster context menu to create Fresh, Profile, or Custom clo
 
 ### "Physical-First" Navigation
 
-Wardian mirrors your local file system. Most items in the **Library** or **Explorer** correspond to physical files on your disk (`~/.wardian/`), ensuring your work is transparent and portable.
+Wardian mirrors your local file system. Most items in the **Library** or **Explorer** correspond to physical files on your disk (`<wardian-home>/`), ensuring your work is transparent and portable.
 
 ### Contextual Awareness
 
@@ -70,3 +70,9 @@ Wardian preserves terminal state across grid remounts so interactive TUIs, inclu
 - [Command Panel](./command-panel.md)
 - [Source Control](./source-control.md)
 - [Settings](./settings.md)
+
+## Related Research
+
+- [Dashboard Observability References](../research/dashboard-observability-references.md)
+- [Graph Visualization References](../research/graph-visualization-references.md)
+- [Multi-Agent Orchestrator References](../research/multi-agent-orchestrator-references.md)

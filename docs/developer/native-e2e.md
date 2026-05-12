@@ -89,7 +89,7 @@ It starts the native app with an isolated `WARDIAN_HOME`, creates agents through
 Real-provider checks are opt-in. Keep them isolated and only use them when the mock provider cannot prove the behavior.
 
 ```bash
-WARDIAN_E2E_REAL_OPENCODE=1 WARDIAN_E2E_REAL_WORKSPACE=/path/to/workspace npm run test:e2e:native
+WARDIAN_E2E_REAL_OPENCODE=1 WARDIAN_E2E_REAL_WORKSPACE=<absolute-workspace-path> npm run test:e2e:native
 ```
 
 On PowerShell, use the same placeholder with a Windows absolute path:
@@ -100,4 +100,8 @@ $env:WARDIAN_E2E_REAL_WORKSPACE='<absolute-workspace-path>'
 npm run test:e2e:native
 ```
 
-The harness uses an isolated `WARDIAN_HOME` by default, so native E2E runs should not modify production `~/.wardian` state.
+The harness uses an isolated `WARDIAN_HOME` by default, so native E2E runs should not modify production `<wardian-home>` state.
+
+## Related Research
+
+- [Agent Evaluation References](../research/agent-evaluation-references.md)
