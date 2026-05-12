@@ -14,7 +14,8 @@ Fixes # (issue)
 Please describe the tests that you ran to verify your changes.
 
 ## Screenshots
-<!-- For UI/layout changes: embed feature-specific screenshots that demonstrate the changed interaction/state. Do not include generic empty-state screenshots. -->
+<!-- For frontend feature/fix/layout changes: embed a feature-specific screenshot directly in this PR using markdown image syntax or an <img> tag. Do not provide only a local path. -->
+<!-- The PR CI check requires an embedded HTTPS image in this PR body when frontend files change. -->
 <!-- For non-UI changes: delete this section. -->
 
 ## Checklist:
@@ -25,4 +26,4 @@ Please describe the tests that you ran to verify your changes.
 - [ ] My changes generate no new warnings
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] New and existing unit tests pass locally with my changes
-- [ ] (UI changes) Feature-specific screenshot evidence embedded above, or not applicable
+- [ ] (Frontend changes) Feature-specific screenshot evidence is embedded above, or not applicable
