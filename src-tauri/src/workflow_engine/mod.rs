@@ -2306,21 +2306,12 @@ pub async fn run_workflow(
                                                 }
                                             }
                                         } else {
-                                            if let Err(err) =
-                                        crate::utils::terminal_input::submit_prompt_via_sender(
-                                            &tx, &prompt, &provider_name
-                                        )
-                                        .await
-                                    {
-                                        node_error = Some(err);
-                                    }
+                                            let (completion_tx, mut completion_rx) =
+                                                tokio::sync::mpsc::channel::<Value>(1);
+                                            let agent_id_clone = agent_id.to_string();
 
-                                            if node_error.is_none() {
-                                                let (completion_tx, mut completion_rx) =
-                                                    tokio::sync::mpsc::channel::<Value>(1);
-                                                let agent_id_clone = agent_id.to_string();
-
-                                                let handler_id = app.listen_any(
+                                            let handler_id =
+                                                app.listen_any(
                                                     "agent-turn-completed",
                                                     move |event| {
                                                         if let Ok(parsed) =
@@ -2340,6 +2331,18 @@ pub async fn run_workflow(
                                                     },
                                                 );
 
+                                            if let Err(err) =
+                                                crate::utils::terminal_input::submit_prompt_via_sender(
+                                                    &tx,
+                                                    &prompt,
+                                                    &provider_name,
+                                                )
+                                                .await
+                                            {
+                                                node_error = Some(err);
+                                            }
+
+                                            if node_error.is_none() {
                                                 let completion = match timeout_ms {
                                                     Some(ms) => match tokio::time::timeout(
                                                         std::time::Duration::from_millis(ms),
@@ -2368,8 +2371,8 @@ pub async fn run_workflow(
                                                     }
                                                     Err(err) => node_error = Some(err),
                                                 }
-                                                app.unlisten(handler_id);
                                             }
+                                            app.unlisten(handler_id);
                                         }
                                     } else {
                                         // Agent is OFFLINE: Fallback to Headless Execution

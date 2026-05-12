@@ -227,7 +227,7 @@ impl AgentProvider for CodexProvider {
                 })
             }
             "turn.started" => Some(AgentEvent::UserQuery),
-            "turn.completed" => Some(AgentEvent::ModelResponse),
+            "turn.completed" => Some(AgentEvent::TurnCompleted),
             "item.completed" => {
                 let item_type = parsed
                     .get("item")
@@ -279,7 +279,7 @@ impl AgentProvider for CodexProvider {
                     }
                     "user_message" => Some(AgentEvent::UserQuery),
                     "agent_message" => Some(AgentEvent::Unknown),
-                    "task_complete" => Some(AgentEvent::ModelResponse),
+                    "task_complete" => Some(AgentEvent::TurnCompleted),
                     "exec_approval_request" => {
                         let message = parsed
                             .get("payload")
@@ -437,7 +437,7 @@ mod tests {
     fn parse_output_turn_completed_event() {
         let p = make_provider();
         let line = r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
     fn parse_output_task_complete_event() {
         let p = make_provider();
         let line = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::ModelResponse);
+        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
     }
 
     #[test]
