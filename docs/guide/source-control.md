@@ -53,17 +53,20 @@ The History section shows recent commits for the selected workspace with message
 
 ## Worktree Mode
 
-Source Control also exposes a worktree toggle:
+Source Control also exposes worktree actions:
 
-- `+ Worktree` enables worktree mode for that agent
+- `Create Worktree` opens an inline name field, then creates a worktree for that agent
+- available shared worktrees can be joined from the same action area
 - removing worktree returns the agent to main workspace behavior
 
-When toggled for a running agent, Wardian updates the config and restarts/resumes the agent runtime so branch isolation is applied consistently.
+When enabled, Wardian creates a named worktree under `<wardian-home>/agents/<session-id>/worktrees/`, creates a matching `wardian/<worktree-name>` branch, shares supported build caches with the source checkout, and moves the agent runtime to that path with a fresh provider session. Joining an existing shared worktree assigns the same worktree path to another agent and also starts that agent fresh in the shared path.
 
 ## Safety Notes
 
 - Discard is destructive; Wardian asks for confirmation.
 - Git operations are executed with non-interactive credential prompts disabled to avoid blocking UI flows.
+- Provider resume is workspace-path-bound. Worktree moves use a fresh provider session, not `--resume` from the new path.
+- Removing a worktree assignment does not delete the physical worktree immediately; the provider may still have files or cwd handles open during the transition.
 - If pull/push fails, check local credentials and remote permissions in your terminal environment.
 
 ## Related References

@@ -65,13 +65,23 @@ pub(crate) fn codex_session_file_path(
     codex_session_file_path_in(&global_home, session_id)
 }
 
-pub(crate) fn codex_log_lookup_session_id<'a>(
-    wardian_session_id: &'a str,
-    resume_session: Option<&'a str>,
-) -> &'a str {
-    resume_session
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(wardian_session_id)
+pub(crate) fn codex_session_exists_in_agent_home(
+    wardian_session_id: &str,
+    provider_session_id: &str,
+) -> bool {
+    let Some(wardian_home) = get_wardian_home() else {
+        return false;
+    };
+    let codex_home = wardian_home
+        .join("agents")
+        .join(wardian_session_id)
+        .join("habitat")
+        .join(".codex");
+    codex_session_file_path_in(&codex_home, provider_session_id).is_some()
+}
+
+pub(crate) fn codex_log_lookup_session_id(resume_session: Option<&str>) -> Option<&str> {
+    resume_session.filter(|value| !value.trim().is_empty())
 }
 
 pub(crate) fn codex_provider_session_is_excluded(candidate: &str, excluded: &[String]) -> bool {
@@ -83,6 +93,7 @@ pub(crate) fn codex_provider_session_is_excluded(candidate: &str, excluded: &[St
 }
 
 fn latest_codex_session_from_index(
+    codex_home: &std::path::Path,
     index_path: &std::path::Path,
 ) -> Result<Option<(String, String)>, String> {
     if !index_path.exists() {
@@ -103,12 +114,14 @@ fn latest_codex_session_from_index(
         if session_id.is_empty() || updated_at.is_empty() {
             return None;
         }
+        codex_session_file_path_in(codex_home, session_id)?;
 
         Some((session_id.to_string(), updated_at.to_string()))
     }))
 }
 
 fn latest_codex_session_from_history(
+    codex_home: &std::path::Path,
     history_path: &std::path::Path,
 ) -> Result<Option<(String, String)>, String> {
     if !history_path.exists() {
@@ -128,6 +141,7 @@ fn latest_codex_session_from_history(
         if session_id.is_empty() {
             return None;
         }
+        codex_session_file_path_in(codex_home, session_id)?;
         let updated_at = parsed
             .get("ts")
             .and_then(|value| {
@@ -199,16 +213,65 @@ fn latest_codex_session_from_logs(
     Ok(latest)
 }
 
+fn codex_entry_timestamp_key(updated_at: &str) -> Option<i128> {
+    let trimmed = updated_at.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(i128::from(parsed.timestamp_millis()));
+    }
+
+    let numeric = trimmed.parse::<i128>().ok()?;
+    if numeric.abs() < 100_000_000_000 {
+        numeric.checked_mul(1_000)
+    } else {
+        Some(numeric)
+    }
+}
+
+fn newest_codex_session_entry(
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> Option<(String, String)> {
+    entries
+        .into_iter()
+        .fold(None, |best: Option<(String, String)>, candidate| {
+            let Some(ref best_entry) = best else {
+                return Some(candidate);
+            };
+
+            match (
+                codex_entry_timestamp_key(&candidate.1),
+                codex_entry_timestamp_key(&best_entry.1),
+            ) {
+                (Some(candidate_key), Some(best_key)) if candidate_key > best_key => {
+                    Some(candidate)
+                }
+                (Some(_), None) => Some(candidate),
+                _ => best,
+            }
+        })
+}
+
 pub(crate) fn latest_codex_session_entry_in(
     codex_home: &std::path::Path,
 ) -> Result<Option<(String, String)>, String> {
-    if let Some(entry) = latest_codex_session_from_index(&codex_home.join("session_index.jsonl"))? {
-        return Ok(Some(entry));
+    let mut entries = Vec::new();
+    if let Some(entry) =
+        latest_codex_session_from_index(codex_home, &codex_home.join("session_index.jsonl"))?
+    {
+        entries.push(entry);
     }
-    if let Some(entry) = latest_codex_session_from_history(&codex_home.join("history.jsonl"))? {
-        return Ok(Some(entry));
+    if let Some(entry) =
+        latest_codex_session_from_history(codex_home, &codex_home.join("history.jsonl"))?
+    {
+        entries.push(entry);
     }
-    latest_codex_session_from_logs(codex_home)
+    if let Some(entry) = latest_codex_session_from_logs(codex_home)? {
+        entries.push(entry);
+    }
+    Ok(newest_codex_session_entry(entries))
 }
 
 pub fn latest_codex_session_index_entry(
@@ -230,7 +293,15 @@ pub(crate) fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<Strin
         let payload_type = payload.get("type").and_then(|v| v.as_str())?;
         match payload_type {
             "exec_approval_request" => return Some("Action Needed".to_string()),
-            "task_started" | "agent_message" | "exec_command_begin" | "exec_command_start" => {
+            "task_started"
+            | "agent_message"
+            | "exec_command_begin"
+            | "exec_command_start"
+            | "custom_tool_call"
+            | "custom_tool_call_output"
+            | "function_call"
+            | "function_call_output"
+            | "reasoning" => {
                 return Some("Processing...".to_string());
             }
             "task_complete" => return Some("Idle".to_string()),
@@ -320,26 +391,98 @@ mod tests {
     #[test]
     fn codex_log_lookup_prefers_provider_thread_id_when_available() {
         assert_eq!(
-            codex_log_lookup_session_id(
-                "22ff532b-007a-44c9-a4b4-9b7c0f546274",
-                Some("codex-thread-123")
-            ),
-            "codex-thread-123"
-        );
-        assert_eq!(
-            codex_log_lookup_session_id("22ff532b-007a-44c9-a4b4-9b7c0f546274", Some("   ")),
-            "22ff532b-007a-44c9-a4b4-9b7c0f546274"
-        );
-        assert_eq!(
-            codex_log_lookup_session_id("22ff532b-007a-44c9-a4b4-9b7c0f546274", None),
-            "22ff532b-007a-44c9-a4b4-9b7c0f546274"
+            codex_log_lookup_session_id(Some("codex-thread-123")),
+            Some("codex-thread-123")
         );
     }
 
     #[test]
-    fn latest_codex_session_entry_reads_history_when_index_is_missing() {
+    fn codex_log_lookup_waits_until_provider_thread_id_is_known() {
+        assert_eq!(codex_log_lookup_session_id(Some("   ")), None,);
+        assert_eq!(codex_log_lookup_session_id(None), None);
+    }
+
+    #[test]
+    fn latest_codex_session_entry_ignores_history_without_rollout_file() {
         let temp = tempfile::tempdir().expect("temp dir");
         let codex_home = temp.path();
+        std::fs::write(
+            codex_home.join("history.jsonl"),
+            concat!(
+                "{\"session_id\":\"019db2df-5679-7e91-b553-ce7a434bc31c\",\"ts\":1776823760,\"text\":\"Test\"}\n",
+                "{\"session_id\":\"019db2f3-22de-7861-8bc6-1b86db1686db\",\"ts\":1776823781,\"text\":\"What was my last message?\"}\n",
+            ),
+        )
+        .expect("write history");
+
+        assert_eq!(
+            latest_codex_session_entry_in(codex_home).expect("latest entry"),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_codex_session_entry_ignores_index_without_rollout_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp.path();
+        std::fs::write(
+            codex_home.join("session_index.jsonl"),
+            "{\"id\":\"index-session\",\"thread_name\":\"Stale\",\"updated_at\":\"2026-05-11T03:45:16.000Z\"}\n",
+        )
+        .expect("write index");
+
+        assert_eq!(
+            latest_codex_session_entry_in(codex_home).expect("latest entry"),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_codex_session_entry_reads_index_when_rollout_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp.path();
+        let session_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("11");
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        std::fs::write(
+            session_dir.join("rollout-2026-05-11T03-45-16-index-session.jsonl"),
+            "",
+        )
+        .expect("write rollout");
+        std::fs::write(
+            codex_home.join("session_index.jsonl"),
+            "{\"id\":\"index-session\",\"thread_name\":\"Current\",\"updated_at\":\"2026-05-11T03:45:16.000Z\"}\n",
+        )
+        .expect("write index");
+
+        assert_eq!(
+            latest_codex_session_entry_in(codex_home).expect("latest entry"),
+            Some((
+                "index-session".to_string(),
+                "2026-05-11T03:45:16.000Z".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn latest_codex_session_entry_reads_history_when_rollout_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp.path();
+        let session_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("20");
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        std::fs::write(
+            session_dir
+                .join("rollout-2026-04-20T00-00-00-019db2f3-22de-7861-8bc6-1b86db1686db.jsonl"),
+            "",
+        )
+        .expect("write rollout");
         std::fs::write(
             codex_home.join("history.jsonl"),
             concat!(
@@ -355,6 +498,38 @@ mod tests {
                 "019db2f3-22de-7861-8bc6-1b86db1686db".to_string(),
                 "1776823781".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn latest_codex_session_entry_prefers_newer_history_with_rollout_file_over_stale_index() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp.path();
+        let session_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("11");
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        std::fs::write(
+            session_dir.join("rollout-2026-05-11T03-45-16-new-history-session.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"new-history-session\",\"timestamp\":\"2026-05-11T03:45:16.000Z\"}}\n",
+        )
+        .expect("write rollout");
+        std::fs::write(
+            codex_home.join("session_index.jsonl"),
+            "{\"id\":\"stale-index-session\",\"thread_name\":\"Old\",\"updated_at\":\"2026-03-30T01:04:37.6878417Z\"}\n",
+        )
+        .expect("write index");
+        std::fs::write(
+            codex_home.join("history.jsonl"),
+            "{\"session_id\":\"new-history-session\",\"ts\":1778484314,\"text\":\"Current prompt\"}\n",
+        )
+        .expect("write history");
+
+        assert_eq!(
+            latest_codex_session_entry_in(codex_home).expect("latest entry"),
+            Some(("new-history-session".to_string(), "1778484314".to_string()))
         );
     }
 
@@ -444,6 +619,46 @@ mod tests {
         assert_eq!(provider_cwd, workspace_cwd);
         assert!(bootstrap_home.starts_with(wardian_home.join("provider-bootstrap").join("codex")));
         assert_ne!(bootstrap_home, workspace_cwd);
+    }
+
+    #[test]
+    fn codex_status_from_log_treats_response_items_as_processing() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell_command"
+                }
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count"
+                }
+            }),
+        ];
+
+        assert_eq!(
+            codex_status_from_log(&lines).as_deref(),
+            Some("Processing...")
+        );
+    }
+
+    #[test]
+    fn codex_status_from_log_treats_custom_tool_items_as_processing() {
+        let lines = vec![serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_1"
+            }
+        })];
+
+        assert_eq!(
+            codex_status_from_log(&lines).as_deref(),
+            Some("Processing...")
+        );
     }
 
     #[test]

@@ -143,10 +143,7 @@ mod terminal_trace {
         }
     }
 
-    pub fn log_terminal_trace_note(session_id: &str, provider: &str, note: &str) {
-        if provider != "codex" {
-            return;
-        }
+    pub fn log_terminal_trace_note(session_id: &str, _provider: &str, note: &str) {
         append_trace_line(
             session_id,
             &format!("[{}] NOTE {}", trace_timestamp(), note),
@@ -155,11 +152,11 @@ mod terminal_trace {
 
     pub fn log_terminal_trace_bytes(
         session_id: &str,
-        provider: &str,
+        _provider: &str,
         direction: &str,
         bytes: &[u8],
     ) {
-        if provider != "codex" || bytes.is_empty() {
+        if bytes.is_empty() {
             return;
         }
         let flags = trace_flags(bytes);
@@ -179,7 +176,18 @@ mod terminal_trace {
 
     #[cfg(test)]
     mod tests {
-        use super::{escape_bytes_preview, trace_flags};
+        use super::{
+            escape_bytes_preview, log_terminal_trace_bytes, terminal_trace_path, trace_flags,
+        };
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            std::env::temp_dir().join(format!("wardian-{label}-{stamp}"))
+        }
 
         #[test]
         fn trace_flags_detects_key_terminal_sequences() {
@@ -191,6 +199,28 @@ mod terminal_trace {
         fn escape_bytes_preview_escapes_control_bytes() {
             let bytes = b"a\r\n\t\x1b\x00";
             assert_eq!(escape_bytes_preview(bytes, 32), "a\\r\\n\\t\\x1b\\x00");
+        }
+
+        #[test]
+        fn terminal_trace_records_claude_provider_bytes() {
+            let _guard = crate::utils::wardian_test_env_lock();
+            let root = unique_temp_dir("terminal-trace-claude");
+            std::fs::create_dir_all(&root).expect("create wardian home");
+            unsafe { std::env::set_var("WARDIAN_HOME", root.to_string_lossy().to_string()) };
+
+            log_terminal_trace_bytes("claude-session", "claude", "OUT", b"Claude Code");
+
+            let path = terminal_trace_path("claude-session").expect("trace path");
+            let contents = std::fs::read_to_string(&path).unwrap_or_default();
+
+            unsafe { std::env::remove_var("WARDIAN_HOME") };
+            let _ = std::fs::remove_dir_all(&root);
+
+            assert!(
+                contents.contains("OUT len=11"),
+                "expected Claude trace bytes to be recorded, got {contents:?}"
+            );
+            assert!(contents.contains("Claude Code"));
         }
     }
 }

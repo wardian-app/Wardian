@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use wardian_core::models::{AgentTelemetry, AppTelemetry};
 
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
-use super::codex::{codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log};
+use super::codex::{
+    codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log,
+    latest_codex_session_index_entry,
+};
 use super::display_log_path;
 use super::opencode::{
     apply_opencode_log_metrics, opencode_log_dirs, opencode_log_path_in,
@@ -248,14 +251,21 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             .map(|home| home.join("agents").join(&snap.session_id))
                             .filter(|path| path.exists())
                             .map(|path| path.to_string_lossy().to_string());
-                        let codex_session_id = codex_log_lookup_session_id(
-                            &snap.session_id,
-                            snap.resume_session.as_deref(),
-                        );
-                        if let Some(path) =
-                            codex_session_file_path(codex_session_id, agent_home.as_deref())
-                        {
-                            *log_path_lock = Some(path);
+                        let codex_session_id =
+                            codex_log_lookup_session_id(snap.resume_session.as_deref())
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    latest_codex_session_index_entry(&snap.session_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|(session_id, _updated_at)| session_id)
+                                });
+                        if let Some(codex_session_id) = codex_session_id {
+                            if let Some(path) =
+                                codex_session_file_path(&codex_session_id, agent_home.as_deref())
+                            {
+                                *log_path_lock = Some(path);
+                            }
                         }
                     }
                     "claude" => {

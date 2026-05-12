@@ -113,13 +113,16 @@ export const GridView: React.FC<GridViewProps> = ({
     setContextMenu({ visible: true, x, y, agentId });
   };
 
+  const renderableAgents = filteredAgents.filter(
+    (agent: AgentConfig) => !offAgentIds.has(agent.session_id.toString()),
+  );
   const maximizedAgents = maximizedAgentId
-    ? filteredAgents.filter((agent: AgentConfig) => agent.session_id.toString() === maximizedAgentId)
+    ? renderableAgents.filter((agent: AgentConfig) => agent.session_id.toString() === maximizedAgentId)
     : [];
   const hasVisibleMaximizedAgent = maximizedAgents.length > 0;
-  const visibleAgents = hasVisibleMaximizedAgent ? maximizedAgents : filteredAgents;
+  const visibleAgents = hasVisibleMaximizedAgent ? maximizedAgents : renderableAgents;
 
-  const isMaximized = !!maximizedAgentId;
+  const isMaximized = hasVisibleMaximizedAgent;
   const isMobile = windowWidth < 1000;
   // While a stack-exit drag is in flight, render the multi-column preview even though gridStacked is still true.
   const renderStacked = (gridStacked || isMobile) && resizeType !== 'stack-exit';
@@ -157,8 +160,6 @@ export const GridView: React.FC<GridViewProps> = ({
         const isAgentMaximized = maximizedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
-        
-        if (isOff && !isAgentMaximized) return null;
         
         const metrics = telemetry[agentId];
         const rawTitle = terminalTitles[agentId] || "";
@@ -252,7 +253,6 @@ export const GridView: React.FC<GridViewProps> = ({
       {gridStacked && !isMaximized && (
         <>
           {visibleAgents
-            .filter((agent: AgentConfig) => !offAgentIds.has(agent.session_id.toString()))
             .map((agent: AgentConfig, idx: number) => {
               const agentId = agent.session_id.toString();
               return (
@@ -320,7 +320,7 @@ export const GridView: React.FC<GridViewProps> = ({
         </>
       )}
 
-      {filteredAgents.length === 0 && (
+      {visibleAgents.length === 0 && (
         <div className="col-span-full h-64 flex flex-col items-center justify-center text-muted border-2 border-dashed border-wardian-border rounded-xl w-full">
           <svg className="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
           <p className="text-sm font-bold tracking-normal">No Active Instances</p>

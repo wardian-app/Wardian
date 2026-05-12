@@ -18,6 +18,10 @@ pub struct AgentConfig {
     pub folder: String,
     #[serde(default)]
     pub git_worktree: Option<bool>,
+    #[serde(default)]
+    pub git_worktree_source: Option<String>,
+    #[serde(default)]
+    pub git_worktree_folder: Option<String>,
     pub resume_session: Option<String>,
     #[serde(default)]
     pub is_off: bool,
@@ -120,6 +124,8 @@ mod tests {
             agent_class: "Coder".into(),
             folder: "C:/project".into(),
             git_worktree: Some(true),
+            git_worktree_source: Some("C:/source-project".into()),
+            git_worktree_folder: Some("C:/source-project-worktree".into()),
             resume_session: Some("def-456".into()),
             codex_cleared_provider_sessions: vec!["old-codex-session".into()],
             is_off: true,
@@ -132,6 +138,8 @@ mod tests {
         assert_eq!(config.agent_class, deserialized.agent_class);
         assert_eq!(config.folder, deserialized.folder);
         assert_eq!(config.git_worktree, deserialized.git_worktree);
+        assert_eq!(config.git_worktree_source, deserialized.git_worktree_source);
+        assert_eq!(config.git_worktree_folder, deserialized.git_worktree_folder);
         assert_eq!(config.resume_session, deserialized.resume_session);
         assert_eq!(
             config.codex_cleared_provider_sessions,
@@ -148,6 +156,15 @@ mod tests {
             config.session_persistence,
             AgentSessionPersistenceOverride::Default
         );
+    }
+
+    #[test]
+    fn agent_config_defaults_missing_git_worktree_source_to_none() {
+        let config: AgentConfig =
+            serde_json::from_str(r#"{"session_id":"abc-123","git_worktree":true}"#).unwrap();
+
+        assert_eq!(config.git_worktree, Some(true));
+        assert_eq!(config.git_worktree_source, None);
     }
 
     #[test]

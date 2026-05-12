@@ -3,6 +3,7 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
+use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter};
@@ -10,8 +11,7 @@ use wardian_core::models::{AgentConfig, AgentEvent};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
 use super::codex::{
-    codex_log_lookup_session_id, codex_provider_session_is_excluded, codex_session_file_path,
-    latest_codex_session_index_entry,
+    codex_provider_session_is_excluded, codex_session_file_path, latest_codex_session_index_entry,
 };
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
 use super::{
@@ -28,6 +28,76 @@ use super::{
     app_process_supervisor_active, assign_pid_to_job, cleanup_stale_session_processes,
     create_kill_on_close_job,
 };
+
+pub(super) fn capture_codex_init_resume_session(
+    provider_name: &str,
+    session_id: &str,
+    config: &mut AgentConfig,
+) -> bool {
+    let session_id = session_id.trim();
+    if provider_name != "codex"
+        || session_id.is_empty()
+        || config
+            .resume_session
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || codex_provider_session_is_excluded(session_id, &config.codex_cleared_provider_sessions)
+    {
+        return false;
+    }
+
+    config.resume_session = Some(session_id.to_string());
+    config.codex_cleared_provider_sessions.clear();
+    true
+}
+
+fn codex_status_log_session(
+    config: &mut AgentConfig,
+    latest_session: Option<String>,
+) -> Option<String> {
+    if config.resume_session.as_deref().is_some_and(|value| {
+        codex_provider_session_is_excluded(value, &config.codex_cleared_provider_sessions)
+    }) {
+        config.resume_session = None;
+    }
+
+    let candidate = config
+        .resume_session
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| latest_session.filter(|value| !value.trim().is_empty()));
+
+    let candidate = candidate?;
+
+    if codex_provider_session_is_excluded(&candidate, &config.codex_cleared_provider_sessions) {
+        return Some(candidate);
+    }
+
+    if config
+        .resume_session
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        config.resume_session = Some(candidate.clone());
+        config.codex_cleared_provider_sessions.clear();
+    } else if config.resume_session.as_deref() == Some(candidate.as_str())
+        && !config.codex_cleared_provider_sessions.is_empty()
+    {
+        config.codex_cleared_provider_sessions.clear();
+    }
+
+    Some(candidate)
+}
+
+fn save_agent_state_after_session_capture(app: &AppHandle) {
+    use tauri::Manager;
+
+    let app_state = app.state::<crate::state::app_state::AppState>();
+    let agents = app_state.agents.blocking_lock();
+    let order = app_state.agent_order.blocking_lock();
+    crate::manager::save_state(app, &agents, &order);
+}
+
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
@@ -281,6 +351,7 @@ pub async fn spawn_agent(
         let mut current_line = String::new();
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
+        let mut pty_decoder = PtyUtf8Decoder::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -332,7 +403,7 @@ pub async fn spawn_agent(
                         "OUT",
                         &buf[0..n],
                     );
-                    let text = String::from_utf8_lossy(&buf[0..n]).to_string();
+                    let text = pty_decoder.decode_chunk(&buf[0..n]);
                     if let Ok(mut stamp) = last_output_at_clone.lock() {
                         *stamp = Some(std::time::SystemTime::now());
                     }
@@ -353,24 +424,29 @@ pub async fn spawn_agent(
                                         }
                                     }
                                     if !session_id.trim().is_empty() {
-                                        let mut config = config_lock_clone.lock().unwrap();
-                                        if provider_name_for_pty == "codex"
-                                            && codex_provider_session_is_excluded(
+                                        let needs_save = {
+                                            let mut config = config_lock_clone.lock().unwrap();
+                                            if capture_codex_init_resume_session(
+                                                &provider_name_for_pty,
                                                 &session_id,
-                                                &config.codex_cleared_provider_sessions,
-                                            )
-                                        {
-                                            continue;
-                                        }
-                                        if config.resume_session.as_deref() != Some(&session_id) {
+                                                &mut config,
+                                            ) {
+                                                true
+                                            } else if provider_name_for_pty != "codex"
+                                                && config.resume_session.as_deref()
+                                                    != Some(&session_id)
+                                            {
+                                                config.resume_session = Some(session_id.clone());
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if needs_save {
                                             log_debug(&format!(
                                                 "[Wardian] Session ID mapped for {}: {}",
                                                 sid_for_pty, session_id
                                             ));
-                                            config.resume_session = Some(session_id.clone());
-                                            if provider_name_for_pty == "codex" {
-                                                config.codex_cleared_provider_sessions.clear();
-                                            }
 
                                             // Notify UI that metadata (resume_session ID) has changed
                                             let _ = pty_emit_app.emit("agents-updated", ());
@@ -378,6 +454,7 @@ pub async fn spawn_agent(
                                                 "agent-pty-output-ready",
                                                 serde_json::json!({ "session_id": sid_for_pty }),
                                             );
+                                            save_agent_state_after_session_capture(&pty_emit_app);
                                         }
                                     }
                                 }
@@ -483,27 +560,18 @@ pub async fn spawn_agent(
                                                 let needs_save = {
                                                     let mut config =
                                                         config_lock_clone.lock().unwrap();
-                                                    let is_excluded = provider_name_for_pty
-                                                        == "codex"
-                                                        && codex_provider_session_is_excluded(
-                                                            session_id,
-                                                            &config.codex_cleared_provider_sessions,
-                                                        );
-                                                    if !is_excluded
+                                                    if capture_codex_init_resume_session(
+                                                        &provider_name_for_pty,
+                                                        session_id,
+                                                        &mut config,
+                                                    ) {
+                                                        true
+                                                    } else if provider_name_for_pty != "codex"
                                                         && config.resume_session.as_deref()
                                                             != Some(session_id.as_str())
                                                     {
-                                                        log_debug(&format!(
-                                                            "[Wardian] Session ID mapped for {}: {}",
-                                                            sid_for_pty, session_id
-                                                        ));
                                                         config.resume_session =
                                                             Some(session_id.clone());
-                                                        if provider_name_for_pty == "codex" {
-                                                            config
-                                                                .codex_cleared_provider_sessions
-                                                                .clear();
-                                                        }
                                                         true
                                                     } else {
                                                         false
@@ -511,26 +579,19 @@ pub async fn spawn_agent(
                                                 };
 
                                                 if needs_save {
+                                                    log_debug(&format!(
+                                                        "[Wardian] Session ID mapped for {}: {}",
+                                                        sid_for_pty, session_id
+                                                    ));
                                                     // Notify UI that metadata (resume_session ID) has changed
                                                     let _ = pty_emit_app.emit("agents-updated", ());
                                                     let _ = pty_emit_app.emit(
                                                         "agent-pty-output-ready",
                                                         serde_json::json!({ "session_id": sid_for_pty }),
                                                     );
-
-                                                    {
-                                                        use tauri::Manager;
-                                                        let app_state = pty_emit_app.state::<crate::state::app_state::AppState>();
-                                                        let agents =
-                                                            app_state.agents.blocking_lock();
-                                                        let order =
-                                                            app_state.agent_order.blocking_lock();
-                                                        crate::manager::save_state(
-                                                            &pty_emit_app,
-                                                            &agents,
-                                                            &order,
-                                                        );
-                                                    }
+                                                    save_agent_state_after_session_capture(
+                                                        &pty_emit_app,
+                                                    );
                                                 }
                                             }
                                         }
@@ -603,74 +664,41 @@ pub async fn spawn_agent(
                 }
 
                 let path = {
-                    let discovered_session = watcher_config.lock().ok().and_then(|mut cfg| {
-                        if cfg.resume_session.as_deref().is_some_and(|value| {
-                            codex_provider_session_is_excluded(
-                                value,
-                                &cfg.codex_cleared_provider_sessions,
-                            )
-                        }) {
-                            cfg.resume_session = None;
-                        }
-                        cfg.resume_session
-                            .clone()
-                            .filter(|value| !value.trim().is_empty())
-                    });
-                    let discovered_session = if discovered_session.is_some() {
-                        discovered_session
-                    } else {
-                        latest_codex_session_index_entry(&watcher_session)
-                            .ok()
-                            .flatten()
-                            .map(|(session_id, _updated_at)| session_id)
-                    };
-                    if let Some(discovered_session) = discovered_session.as_ref() {
-                        if let Ok(mut cfg) = watcher_config.lock() {
-                            if codex_provider_session_is_excluded(
-                                discovered_session,
-                                &cfg.codex_cleared_provider_sessions,
-                            ) {
-                                if cfg.resume_session.as_deref() == Some(discovered_session) {
-                                    cfg.resume_session = None;
-                                }
-                            } else if cfg.resume_session.as_deref() == Some(discovered_session)
-                                && !cfg.codex_cleared_provider_sessions.is_empty()
-                            {
-                                cfg.codex_cleared_provider_sessions.clear();
-                                let _ = watcher_app.emit("agents-updated", ());
-                            } else if cfg
-                                .resume_session
-                                .as_deref()
-                                .is_none_or(|value| value.trim().is_empty())
-                            {
-                                cfg.resume_session = Some(discovered_session.clone());
-                                cfg.codex_cleared_provider_sessions.clear();
-                                let _ = watcher_app.emit("agents-updated", ());
-                            }
-                        }
-                    }
-                    let lookup_session = watcher_config
-                        .lock()
+                    let latest_session = latest_codex_session_index_entry(&watcher_session)
                         .ok()
-                        .map(|cfg| {
-                            codex_log_lookup_session_id(
-                                &watcher_session,
-                                cfg.resume_session.as_deref(),
-                            )
-                            .to_string()
-                        })
-                        .unwrap_or_else(|| watcher_session.clone());
+                        .flatten()
+                        .map(|(session_id, _updated_at)| session_id);
+                    let lookup_session = watcher_config.lock().ok().and_then(|mut cfg| {
+                        let previous_resume = cfg.resume_session.clone();
+                        let previous_cleared = cfg.codex_cleared_provider_sessions.clone();
+                        let lookup = codex_status_log_session(&mut cfg, latest_session);
+                        if cfg.resume_session != previous_resume
+                            || cfg.codex_cleared_provider_sessions != previous_cleared
+                        {
+                            let _ = watcher_app.emit("agents-updated", ());
+                        }
+                        lookup
+                    });
                     let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
-                    if last_lookup_session != lookup_session {
+                    if let Some(lookup_session) = lookup_session {
+                        if last_lookup_session != lookup_session {
+                            *lock = None;
+                            offset = 0;
+                            last_lookup_session = lookup_session.clone();
+                        }
+                        if lock.is_none() {
+                            *lock = codex_session_file_path(
+                                &lookup_session,
+                                wardian_agent_dir.as_deref(),
+                            );
+                        }
+                        lock.clone()
+                    } else {
                         *lock = None;
                         offset = 0;
-                        last_lookup_session = lookup_session.clone();
+                        last_lookup_session.clear();
+                        None
                     }
-                    if lock.is_none() {
-                        *lock =
-                            codex_session_file_path(&lookup_session, wardian_agent_dir.as_deref());
-                    }
-                    lock.clone()
                 };
 
                 if let Some(path) = path {
@@ -1029,4 +1057,29 @@ pub async fn resize_pty(
     .map_err(|e| format!("Failed to join PTY resize task: {}", e))?
     .map_err(|e| format!("Failed to resize PTY: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_status_log_session_tracks_excluded_latest_without_adopting_resume() {
+        let mut config = AgentConfig {
+            provider: "codex".to_string(),
+            resume_session: None,
+            codex_cleared_provider_sessions: vec!["provider-session-1".to_string()],
+            ..Default::default()
+        };
+
+        let log_session =
+            codex_status_log_session(&mut config, Some("provider-session-1".to_string()));
+
+        assert_eq!(log_session.as_deref(), Some("provider-session-1"));
+        assert_eq!(config.resume_session, None);
+        assert_eq!(
+            config.codex_cleared_provider_sessions,
+            vec!["provider-session-1".to_string()]
+        );
+    }
 }

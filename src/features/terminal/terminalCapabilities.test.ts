@@ -1,4 +1,5 @@
 import {
+  normalizeTerminalOutputBatch,
   normalizeOpenCodeOutput,
   planTerminalCapabilityResponses,
   shouldHomeCursorBeforeTransientResize,
@@ -73,11 +74,44 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput("\u001b[2Jreset", "claude")).toBe("\u001b[2Jreset");
   });
 
+  it("strips Codex scrollback erase without stripping clear-screen redraws", () => {
+    expect(normalizeOpenCodeOutput("before\u001b[3Jmiddle\u001b[2Jafter", "codex")).toBe(
+      "beforemiddle\u001b[2Jafter",
+    );
+  });
+
+  it("strips Codex scrollback erase when the control sequence is split across chunks", () => {
+    expect(normalizeTerminalOutputBatch(["before\u001b[", "3Jafter"], "codex")).toBe(
+      "beforeafter",
+    );
+  });
+
   it("normalizes fullscreen clear preambles so TUI redraws do not enter scrollback", () => {
     const clearByNewlines =
       "\u001b[?25l" + "\u001b[K\r\n".repeat(24) + "\u001b[K\u001b[H\u001b[?25h";
 
     expect(normalizeOpenCodeOutput(`${clearByNewlines}redraw`, "claude")).toBe(
+      "\u001b[?25l\u001b[2J\u001b[H\u001b[?25hredraw",
+    );
+  });
+
+  it("preserves OpenCode fullscreen clear preambles so provider history remains scrollable", () => {
+    const clearByNewlines =
+      "\u001b[?25l" + "\u001b[K\r\n".repeat(24) + "\u001b[K\u001b[H\u001b[?25h";
+
+    expect(normalizeOpenCodeOutput(`${clearByNewlines}redraw`, "opencode")).toBe(
+      `${clearByNewlines}redraw`,
+    );
+  });
+
+  it("normalizes fullscreen clear preambles that are split across PTY chunks", () => {
+    const state: TerminalOutputState = { lastHomeRedrawLines: null };
+    const chunks = [
+      "\u001b[?25l" + "\u001b[K\r\n".repeat(12),
+      "\u001b[K\r\n".repeat(12) + "\u001b[K\u001b[H\u001b[?25hredraw",
+    ];
+
+    expect(normalizeTerminalOutputBatch(chunks, "claude", state)).toBe(
       "\u001b[?25l\u001b[2J\u001b[H\u001b[?25hredraw",
     );
   });
@@ -138,6 +172,30 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput(firstFrame, "codex", state)).toBe(firstFrame);
     expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(
       `\u001b[999;1H  60\r\n${secondFrame}`,
+    );
+  });
+
+  it("reconstructs OpenCode scrollback from cursor-addressed home redraw frames", () => {
+    const state: TerminalOutputState = { lastHomeRedrawLines: null };
+    const stripSyncToggles = (value: string) =>
+      value.split("\u001b[?2026h").join("").split("\u001b[?2026l").join("");
+    const firstFrame =
+      "\u001b[?2026h\u001b[H" +
+      "\u001b[3;3H┃  \"Introduce yourself\"" +
+      "\u001b[6;6HI'm OpenCode, running as your coding" +
+      "\u001b[7;6Hagent in this Wardian workspace." +
+      "\u001b[?2026l";
+    const secondFrame =
+      "\u001b[?2026h\u001b[H" +
+      "\u001b[1;6Hagent in this Wardian workspace." +
+      "\u001b[3;6HI can inspect the repo, make targeted" +
+      "\u001b[?2026l";
+
+    expect(normalizeOpenCodeOutput(firstFrame, "opencode", state)).toBe(
+      stripSyncToggles(firstFrame),
+    );
+    expect(normalizeOpenCodeOutput(secondFrame, "opencode", state)).toBe(
+      `\u001b[999;1H┃  "Introduce yourself"\r\nI'm OpenCode, running as your coding\r\n${stripSyncToggles(secondFrame)}`,
     );
   });
 

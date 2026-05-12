@@ -1,6 +1,21 @@
 use std::fs;
 use std::path::Path;
+use wardian_core::models::AgentConfig;
 use wardian_core::models::FileNode;
+
+fn resolve_agent_visible_workspace(config: &AgentConfig) -> String {
+    if config.git_worktree == Some(true) {
+        if let Some(path) = config
+            .git_worktree_folder
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            return path.to_string();
+        }
+    }
+    config.folder.clone()
+}
 
 #[tauri::command]
 pub fn resolve_system_include_directories(class_name: String, session_id: String) -> Vec<String> {
@@ -21,7 +36,7 @@ pub async fn get_explorer_root(
         let agents = state.agents.lock().await;
         agents
             .get(&id)
-            .map(|agent| agent.config.lock().unwrap().folder.clone())
+            .map(|agent| resolve_agent_visible_workspace(&agent.config.lock().unwrap()))
             .ok_or_else(|| "Agent not found".to_string())
     } else {
         let app_dir = crate::manager::get_wardian_home().ok_or("No home dir")?;
@@ -129,6 +144,34 @@ pub async fn read_file_preview(path: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_agent_visible_workspace_uses_worktree_folder_for_tooling_only() {
+        let config = AgentConfig {
+            folder: "C:/repo".to_string(),
+            git_worktree: Some(true),
+            git_worktree_source: Some("C:/repo".to_string()),
+            git_worktree_folder: Some("C:/wardian/agents/agent-1/worktree".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_agent_visible_workspace(&config),
+            "C:/wardian/agents/agent-1/worktree"
+        );
+        assert_eq!(config.folder, "C:/repo");
+    }
+
+    #[test]
+    fn resolve_agent_visible_workspace_falls_back_to_launch_folder_without_worktree_path() {
+        let config = AgentConfig {
+            folder: "C:/repo".to_string(),
+            git_worktree: Some(true),
+            ..Default::default()
+        };
+
+        assert_eq!(resolve_agent_visible_workspace(&config), "C:/repo");
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

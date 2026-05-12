@@ -1,6 +1,7 @@
 use crate::manager;
 use crate::state::{AppState, UserTerminalSession};
 use crate::utils::terminal_input::submit_prompt_via_sender;
+use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -462,6 +463,7 @@ fn spawn_user_terminal_session(
 
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
+        let mut pty_decoder = PtyUtf8Decoder::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -475,7 +477,7 @@ fn spawn_user_terminal_session(
                     break;
                 }
                 Ok(n) => {
-                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let text = pty_decoder.decode_chunk(&buf[..n]);
                     let should_emit = if let Ok(mut output) = output_buffer_for_reader.lock() {
                         let was_empty = output.is_empty();
                         output.push_str(&text);

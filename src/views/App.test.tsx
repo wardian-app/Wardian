@@ -1049,7 +1049,7 @@ describe("Sidebar Navigation", () => {
 // ── Agent Off State Tests ──────────────────────────────────────────────
 
 describe("Agent Off State Operations", () => {
-  it("removes an agent from the main grid when paused and requires Start from context menu", async () => {
+  it("hides a paused agent from the main grid and requires Start from context menu", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {
       render(<App />);
@@ -1073,19 +1073,14 @@ describe("Agent Off State Operations", () => {
       pauseButton.click();
     });
 
-    // The agent should no longer be in the main grid (only 1 occurrence remains from Watchlist)
+    // Paused agents stay available in the watchlist but leave the main grid.
     await waitFor(() => {
-      const alphaElements = screen.getAllByText("Alpha");
-      if (alphaElements.length !== 1) {
-        console.log(`DEBUG: Found ${alphaElements.length} Alpha elements:`, 
-          alphaElements.map(el => `${el.tagName} in ${el.parentElement?.tagName} (id: ${el.id}, class: ${el.className})`)
-        );
-      }
-      expect(alphaElements.length).toBe(1);
+      expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
+      expect(screen.getAllByText("Alpha").length).toBe(1);
     }, { timeout: 3000 });
     
     // Find the Watchlist row and fire context menu
-    const watchlistRowText = screen.getByText("Alpha");
+    const watchlistRowText = screen.getByText("Alpha", { selector: "p" });
     const watchlistRow = watchlistRowText.closest("div.watchlist-row");
     expect(watchlistRow).not.toBeNull();
     

@@ -9,7 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
-  normalizeOpenCodeOutput,
+  normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
   shouldHomeCursorBeforeTransientResize,
   shouldSuppressDuplicateResizeRedraw,
@@ -51,6 +51,8 @@ type TerminalRendererEntry = {
 
 type TerminalSessionEntry = {
   lastReportedSize: { cols: number; rows: number } | null;
+  pendingBackendResize: { cols: number; rows: number } | null;
+  pendingFrontendFit: boolean;
   lastMeasuredHostSize: { width: number; height: number } | null;
   recentWritePreviews: string[];
   opencodeFocusReported: boolean;
@@ -65,6 +67,7 @@ type TerminalSessionEntry = {
   titleHandlerRef: TitleHandlerRef;
   drainInFlight: boolean;
   drainQueued: boolean;
+  generation: number;
   disposed: boolean;
 } & TerminalOutputState;
 
@@ -74,12 +77,25 @@ declare global {
   interface Window {
     __wardianTerminalDebug?: {
       sessionIds: () => string[];
+      scrollToTop: (sessionId: string) => boolean;
       snapshot: (sessionId: string) => {
         cols: number;
         rows: number;
         cursorX: number;
         cursorY: number;
+        baseY: number;
+        bufferLength: number;
         viewportY: number;
+        renderer: {
+          cols: number;
+          rows: number;
+          fontFamily: string;
+          fontSize: number | null;
+          cssCellWidth: number | null;
+          cssCellHeight: number | null;
+          deviceCellWidth: number | null;
+          deviceCellHeight: number | null;
+        } | null;
         lines: string[];
         recentWritePreviews: string[];
       } | null;
@@ -95,6 +111,16 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
     configurable: true,
     value: Object.freeze({
       sessionIds: () => Array.from(terminalSessionMap.keys()),
+      scrollToTop: (sessionId: string) => {
+        const entry = terminalSessionMap.get(sessionId);
+        if (!entry) {
+          return false;
+        }
+        (entry.parser as unknown as { scrollToTop?: () => void }).scrollToTop?.();
+        entry.renderer?.term.scrollToTop();
+        entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+        return true;
+      },
       snapshot: (sessionId: string) => {
         const entry = terminalSessionMap.get(sessionId);
         const term = entry?.parser;
@@ -103,15 +129,47 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
           return null;
         }
         const lineCount = Math.min(term.rows, 24);
+        const getLine =
+          typeof buffer.getLine === "function"
+            ? (index: number) => buffer.getLine(index)?.translateToString(true) || ""
+            : (_index: number) => "";
         const lines = Array.from({ length: lineCount }, (_, index) =>
-          buffer.getLine(index + buffer.viewportY)?.translateToString(true) || "",
+          getLine(index + (buffer.viewportY ?? 0)),
         );
+        const renderer = entry.renderer;
+        const rendererTerm = renderer?.term;
+        const renderDimensions = (rendererTerm as unknown as {
+          _core?: {
+            _renderService?: {
+              dimensions?: {
+                css?: { cell?: { width?: number; height?: number } };
+                device?: { cell?: { width?: number; height?: number } };
+              };
+            };
+          };
+        })?._core?._renderService?.dimensions;
+        const nullableNumber = (value: unknown) =>
+          typeof value === "number" && Number.isFinite(value) ? value : null;
         return {
           cols: term.cols,
           rows: term.rows,
           cursorX: buffer.cursorX,
           cursorY: buffer.cursorY,
+          baseY: buffer.baseY ?? 0,
+          bufferLength: buffer.length ?? term.rows,
           viewportY: buffer.viewportY,
+          renderer: rendererTerm
+            ? {
+                cols: rendererTerm.cols,
+                rows: rendererTerm.rows,
+                fontFamily: String(rendererTerm.options.fontFamily ?? ""),
+                fontSize: nullableNumber(rendererTerm.options.fontSize),
+                cssCellWidth: nullableNumber(renderDimensions?.css?.cell?.width),
+                cssCellHeight: nullableNumber(renderDimensions?.css?.cell?.height),
+                deviceCellWidth: nullableNumber(renderDimensions?.device?.cell?.width),
+                deviceCellHeight: nullableNumber(renderDimensions?.device?.cell?.height),
+              }
+            : null,
           lines,
           recentWritePreviews: [...entry.recentWritePreviews],
         };
@@ -221,7 +279,12 @@ function clearTerminalSession(sessionId: string) {
   }
 
   entry.recentWritePreviews = [];
+  entry.generation += 1;
   entry.latestTitle = null;
+  entry.lastReportedSize = null;
+  entry.pendingBackendResize = null;
+  entry.pendingFrontendFit = false;
+  entry.lastMeasuredHostSize = null;
   entry.lastHomeRedrawLines = null;
   entry.homeRedrawScrollbackSeen?.clear();
   entry.transientHomeRedrawActive = false;
@@ -234,13 +297,20 @@ function clearTerminalSession(sessionId: string) {
   } else {
     entry.parser.write("\u001bc");
   }
+  (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
 
   if (entry.renderer) {
-    entry.renderer.term.clear();
-    entry.renderer.term.write("\u001bc");
+    entry.renderer.term.reset();
+    entry.renderer.term.scrollToBottom();
+    entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
   }
   
   entry.titleHandlerRef.current?.("");
+}
+
+function isRendererViewingScrollback(entry: TerminalSessionEntry) {
+  const buffer = entry.renderer?.term.buffer.active;
+  return Boolean(buffer && (buffer.viewportY ?? 0) < (buffer.baseY ?? 0));
 }
 
 async function reportTerminalSize(sessionId: string, entry: TerminalSessionEntry, cols: number, rows: number) {
@@ -248,11 +318,18 @@ async function reportTerminalSize(sessionId: string, entry: TerminalSessionEntry
     return;
   }
 
-  const last = entry.lastReportedSize;
-  if (last && last.cols === cols && last.rows === rows) {
+  if (isRendererViewingScrollback(entry)) {
+    entry.pendingBackendResize = { cols, rows };
     return;
   }
 
+  const last = entry.lastReportedSize;
+  if (last && last.cols === cols && last.rows === rows) {
+    entry.pendingBackendResize = null;
+    return;
+  }
+
+  entry.pendingBackendResize = null;
   entry.lastReportedSize = { cols, rows };
   await invoke("resize_agent_terminal", { sessionId, cols, rows }).catch(() => {});
 }
@@ -276,11 +353,17 @@ async function fitTerminalToContainer(
   }
 
   const force = options?.force ?? false;
+  if (!force && isRendererViewingScrollback(entry)) {
+    entry.pendingFrontendFit = true;
+    return;
+  }
+
   const lastMeasured = entry.lastMeasuredHostSize;
   if (!force && lastMeasured && lastMeasured.width === width && lastMeasured.height === height) {
     return;
   }
 
+  entry.pendingFrontendFit = false;
   entry.lastMeasuredHostSize = { width, height };
 
   try {
@@ -323,6 +406,7 @@ async function drainPty(sessionId: string) {
   try {
     do {
       entry.drainQueued = false;
+      const drainGeneration = entry.generation;
       const rawChunks: string[] = [];
       while (!entry.disposed) {
         const data = await invoke<string | null>("read_agent_pty", { sessionId });
@@ -346,6 +430,10 @@ async function drainPty(sessionId: string) {
         rawChunks.push(data);
       }
 
+      if (entry.generation !== drainGeneration) {
+        continue;
+      }
+
       if (rawChunks.length > 0) {
         const rawBatch = rawChunks.join("");
         if (
@@ -360,9 +448,7 @@ async function drainPty(sessionId: string) {
         }
 
         entry.existingScrollbackLines = readParserScrollbackLineSet(entry);
-        const batchedWrite = rawChunks
-          .map((data) => normalizeOpenCodeOutput(data, entry.provider, entry))
-          .join("");
+        const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
         useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
         entry.existingScrollbackLines = undefined;
         entry.parser.write(batchedWrite);
@@ -404,6 +490,8 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
 
   const entry: TerminalSessionEntry = {
     lastReportedSize: null,
+    pendingBackendResize: null,
+    pendingFrontendFit: false,
     lastMeasuredHostSize: null,
     recentWritePreviews: [],
     opencodeFocusReported: false,
@@ -418,6 +506,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     titleHandlerRef: {},
     drainInFlight: false,
     drainQueued: false,
+    generation: 0,
     disposed: false,
     lastHomeRedrawLines: null,
     homeRedrawScrollbackSeen: new Set(),
@@ -560,6 +649,21 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     renderer.resizeTimeout = setTimeout(() => {
       void reportTerminalSize(sessionId, entry, size.cols, size.rows);
     }, 120);
+  });
+
+  term.onScroll(() => {
+    if (entry.pendingFrontendFit && !isRendererViewingScrollback(entry)) {
+      const container = renderer.host.parentElement as HTMLDivElement | null;
+      if (container) {
+        void fitTerminalToContainer(sessionId, entry, container, { force: true });
+      }
+    }
+
+    const pendingResize = entry.pendingBackendResize;
+    if (!pendingResize || isRendererViewingScrollback(entry)) {
+      return;
+    }
+    void reportTerminalSize(sessionId, entry, pendingResize.cols, pendingResize.rows);
   });
 
   return renderer;

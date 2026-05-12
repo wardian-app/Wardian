@@ -1,0 +1,16 @@
+export const viteWatchIgnored = [
+  "**/src-tauri/**",
+  "**/.learnings/**",
+  "**/.gemini/**",
+  "**/tmp/**",
+  "**/.tmp/**",
+  "**/.wardian/**",
+  "**/state.db",
+  "**/state.db-*",
+  "**/agents/*/habitat/**",
+  "**/agents/*/worktree/**",
+  "**/agents/*/claude/**",
+  "**/agents/*/.codex/**",
+  "**/agents/*/.claude/**",
+  "**/agents/*/.opencode/**",
+] as const;
