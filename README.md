@@ -4,7 +4,7 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**GUI command center for multi-agent CLI workflows** — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian.
+**Local command center for multi-agent CLI workflows** — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian.
 
 [![CI](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml)
 [![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend&label=frontend%20coverage)](https://codecov.io/gh/tangemicioglu/Wardian)
@@ -21,7 +21,7 @@
 
 > 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/tangemicioglu/Wardian/issues) when something breaks.
 
-Wardian is an **Integrated Agent Environment** — a GUI-first governance layer for AI orchestration. It centralizes PTY management, live telemetry, completion queues, workflow execution, and shared context into a unified desktop Command Center for developers managing many long-running agent sessions across multiple projects. The bundled `wardian` CLI gives agents a textual control surface for discovering their own identity, coordinating peers, and controlling Wardian without driving the graphical app.
+Wardian is an **Integrated Agent Environment** — a local, app-first governance layer for AI orchestration. It centralizes PTY management, live telemetry, completion queues, workflow execution, and shared context into a unified desktop Command Center for developers managing many long-running agent sessions across multiple projects. The bundled `wardian` CLI gives agents a textual control surface for discovering their own identity, coordinating peers, and controlling Wardian without driving the graphical app.
 
 ---
 
