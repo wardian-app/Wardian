@@ -15,6 +15,7 @@ Use kebab-case for folders and filenames. Match the folder to the feature guide 
 - `docs/assets/screenshots/grid/`
 - `docs/assets/screenshots/dashboard/`
 - `docs/assets/screenshots/explorer/`
+- `docs/assets/screenshots/spawn-agent/`
 - `docs/assets/screenshots/command-panel/`
 - `docs/assets/screenshots/watchlists/`
 - `docs/assets/screenshots/library/`
@@ -30,7 +31,7 @@ Do not place committed documentation images under `e2e/screenshots/`. That direc
 Embed screenshots from the guide or reference page that explains the feature:
 
 ```md
-![Source Control diff modal showing staged and unstaged changes](../assets/screenshots/source-control/diff-modal.png)
+![Source Control panel showing branch state, commit box, staged changes, unstaged changes, and history](../assets/screenshots/source-control/status-panel.png)
 ```
 
 Use alt text that describes the visible state. Avoid vague labels such as `Screenshot of Source Control`.

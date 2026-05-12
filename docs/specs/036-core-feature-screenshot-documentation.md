@@ -22,16 +22,16 @@ Examples:
 
 ```text
 docs/assets/screenshots/grid/active-agent-card.png
-docs/assets/screenshots/dashboard/system-health.png
-docs/assets/screenshots/library/prompt-library.png
+docs/assets/screenshots/dashboard/system-summary.png
+docs/assets/screenshots/library/library-view.png
 docs/assets/screenshots/workflows/builder-canvas.png
-docs/assets/screenshots/source-control/diff-modal.png
+docs/assets/screenshots/source-control/status-panel.png
 ```
 
 Embed screenshots from the guide or reference page that owns the workflow:
 
 ```md
-![Source Control diff modal showing staged and unstaged changes](../assets/screenshots/source-control/diff-modal.png)
+![Source Control panel showing branch state, commit box, staged changes, unstaged changes, and history](../assets/screenshots/source-control/status-panel.png)
 ```
 
 Keep `e2e/screenshots/` for ignored PR evidence and local audit runs. When an E2E or Playwright capture is clean enough to become long-lived documentation, copy or recapture the selected image into `docs/assets/screenshots/` with a stable kebab-case name.
@@ -94,4 +94,3 @@ After capture, move only the useful reader-facing images into `docs/assets/scree
 - **Positive:** The `e2e/screenshots/` and `docs/assets/screenshots/` split keeps PR evidence separate from committed documentation assets.
 - **Negative:** Screenshots require periodic refresh when the UI changes.
 - **Negative:** The repository size will grow if screenshots are not curated and compressed.
-

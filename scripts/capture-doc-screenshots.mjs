@@ -1,12 +1,14 @@
 import { chromium } from "@playwright/test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 
 const root = process.cwd();
-const baseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL ?? "http://127.0.0.1:1420";
+const explicitBaseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL;
+const screenshotPort = Number.parseInt(process.env.WARDIAN_DOCS_SCREENSHOT_PORT ?? "1420", 10);
+const baseUrl = explicitBaseUrl ?? `http://127.0.0.1:${screenshotPort}`;
 const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
 
 const agents = [
@@ -204,9 +206,9 @@ const workflows = [
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function isServerReady() {
+async function isUrlReady(url = baseUrl) {
   return new Promise((resolve) => {
-    const req = http.get(baseUrl, (res) => {
+    const req = http.get(url, (res) => {
       res.resume();
       resolve(res.statusCode && res.statusCode < 500);
     });
@@ -220,14 +222,20 @@ async function isServerReady() {
 
 async function waitForServer() {
   for (let i = 0; i < 90; i += 1) {
-    if (await isServerReady()) return;
+    if (await isUrlReady()) return;
     await wait(1_000);
   }
   throw new Error(`Timed out waiting for ${baseUrl}`);
 }
 
-function startServerIfNeeded() {
-  const child = spawn("npm run vite -- --host 127.0.0.1 --port 1420", {
+async function startOwnedServer() {
+  if (await isUrlReady()) {
+    throw new Error(
+      `${baseUrl} is already serving content. Stop that process, set WARDIAN_DOCS_SCREENSHOT_PORT, or set WARDIAN_DOCS_SCREENSHOT_URL to opt into capturing an existing app.`,
+    );
+  }
+
+  const child = spawn(`npm run vite -- --host 127.0.0.1 --port ${screenshotPort} --strictPort`, {
     cwd: root,
     env: {
       ...process.env,
@@ -237,6 +245,29 @@ function startServerIfNeeded() {
     stdio: "inherit",
   });
   return child;
+}
+
+function stopOwnedServer(child) {
+  if (!child?.pid) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    return;
+  }
+  child.kill();
+}
+
+async function stabilizeVisuals(page) {
+  await page.addStyleTag({
+    content: `
+      *, *::before, *::after {
+        animation-delay: 0s !important;
+        animation-duration: 0s !important;
+        caret-color: transparent !important;
+        transition-delay: 0s !important;
+        transition-duration: 0s !important;
+      }
+    `,
+  });
 }
 
 async function ensureDir(filePath) {
@@ -260,6 +291,21 @@ async function capture(page, relativePath, locator) {
 
 async function installTauriDocsMock(page) {
   await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory }) => {
+    const fixedNow = 1778590800000;
+    const RealDate = Date;
+
+    class FixedDate extends RealDate {
+      constructor(...args) {
+        super(...(args.length === 0 ? [fixedNow] : args));
+      }
+
+      static now() {
+        return fixedNow;
+      }
+    }
+
+    window.Date = FixedDate;
+
     const callbacks = new Map();
     const listeners = new Map();
     const terminalReads = {};
@@ -433,19 +479,22 @@ async function main() {
   await fs.mkdir(screenshotHome, { recursive: true });
 
   let server = null;
-  if (!(await isServerReady())) {
-    server = startServerIfNeeded();
+  if (explicitBaseUrl) {
+    await waitForServer();
+  } else {
+    server = await startOwnedServer();
     await waitForServer();
   }
 
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
+  const browserErrors = [];
   page.on("pageerror", (error) => {
-    console.error(`page error: ${error.stack || error.message}`);
+    browserErrors.push(`page error: ${error.stack || error.message}`);
   });
   page.on("console", (message) => {
     if (message.type() === "error") {
-      console.error(`browser console: ${message.text()}`);
+      browserErrors.push(`browser console: ${message.text()}`);
     }
   });
 
@@ -453,13 +502,17 @@ async function main() {
     await installTauriDocsMock(page);
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+    await stabilizeVisuals(page);
     await page.waitForTimeout(1_500);
 
+    await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
     await capture(page, "grid/app-shell.png");
 
+    await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
 
     await page.getByRole("button", { name: "Dashboard" }).click();
+    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "dashboard/system-summary.png");
 
@@ -470,24 +523,31 @@ async function main() {
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.waitForTimeout(500);
     await page.locator('[data-testid="spawn-agent-name"]').fill("docs-demo");
-    await page.locator('[data-testid="spawn-workspace-path"]').fill("<workspace>");
+    await page.locator('[data-testid="spawn-workspace-path"]').fill("<absolute-workspace-path>");
+    await page.locator('[data-testid="spawn-agent-name"]').waitFor({ timeout: 10_000 });
+    await page.locator('[data-testid="spawn-workspace-path"]').blur();
     await capture(page, "spawn-agent/spawn-form.png");
 
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
     await page.locator('[data-testid="broadcast-textarea"]').fill("Summarize the current branch and list verification evidence.");
+    await page.locator('[data-testid="broadcast-textarea"]').waitFor({ timeout: 10_000 });
+    await page.locator('[data-testid="broadcast-textarea"]').blur();
     await capture(page, "command-panel/broadcast-prompt.png");
 
     await page.getByRole("button", { name: "Library" }).click();
+    await page.getByRole("heading", { name: "Review Checklist" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "library/library-view.png");
 
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
+    await page.getByRole("heading", { name: "Agent Runtime" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(500);
     await capture(page, "settings/runtime-settings.png");
 
     await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
     await page.locator('[data-testid="sidebar-tab-workflows"]').click();
+    await page.getByRole("heading", { name: "Docs Screenshot Refresh" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "workflows/builder-canvas.png");
 
@@ -498,16 +558,22 @@ async function main() {
     await page.getByText("docs", { exact: true }).click();
     await page.waitForTimeout(300);
     await page.getByText("guide", { exact: true }).click();
+    await page.getByText("ui-overview.md").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(300);
     await capture(page, "explorer/workspace-tree.png", page.locator('[data-testid="explorer-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-git"]').click();
+    await page.getByText("docs/core-feature-screenshots").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
+
+    if (browserErrors.length > 0) {
+      throw new Error(`Browser errors were logged during screenshot capture:\n${browserErrors.join("\n")}`);
+    }
   } finally {
     await browser.close();
     if (server) {
-      server.kill();
+      stopOwnedServer(server);
     }
   }
 }
