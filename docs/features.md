@@ -66,7 +66,7 @@ Related docs:
 - Visual node-based builder with variable assistant
 - Manual, scheduled, and listener-style trigger behaviors
 - Scheduled run management and run-time role assignment
-- Deterministic Rust workflow engine with candidate queue execution, pulse consumption, branch/loop/wait control, agent execution modes, shared storage, and live telemetry
+- Deterministic Rust workflow engine with pulse-driven candidate-node execution, branch/loop/wait control, agent execution modes, shared storage, and live telemetry
 
 Related docs:
 
@@ -79,7 +79,7 @@ Related docs:
 ## Queue and Completion Triage
 
 - Captures agent completions when active terminal output settles back to Idle
-- Captures workflow completions and failures from workflow telemetry
+- Records completed and failed workflow outcomes for later review
 - Persists queue items under the Wardian home so unread work survives app restarts
 - Supports unread badges, mark-read, clear-read, dismiss, and expandable long summaries
 

@@ -16,13 +16,13 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Worker Threads**:
   - **Heartbeat (Scheduler)**: Handles periodic tasks and cron triggers.
   - **Metrics Push**: Pushes system/agent resource usage to the UI via Tauri events.
-- **Queue Persistence**: Completion triage state is stored under the active Wardian home so agent and workflow outcomes survive app restarts.
+- **App Queue Persistence**: Completion triage state is stored under the active Wardian home so agent and workflow outcomes survive app restarts.
 
 ### 2. The Logical Layer (Workflow Engine)
 
 - **Deterministic Execution**: Detailed in [Workflow Engine Architecture](./workflow-engine.md).
 - **Shared Registry**: A global Handlebars-based registry where agent outputs are stored for cross-agent referencing.
-- **Node Execution Queue**: Deterministic execution of workflow nodes (loops, triggers, waits, branches, memory, commands, and agent calls) through a backend queue of candidate node IDs.
+- **Workflow Candidate Queue**: Deterministic execution of workflow nodes (loops, triggers, waits, branches, memory, commands, and agent calls) through the engine's internal candidate-node FIFO.
 - **Injection Logic**: Solves CLI input limits by writing prompts to temp files (`~\.gemini\tmp\wardian-1`) and using `<` redirection.
 
 ### 2.5 Memory and Knowledge

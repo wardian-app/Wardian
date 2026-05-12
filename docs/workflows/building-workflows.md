@@ -2,7 +2,7 @@
 
 Use the Workflow Builder when you want to create, edit, or test workflow logic directly on the canvas.
 
-The canvas is the authoring surface; the Rust workflow engine is the runtime. When you run a workflow, Wardian saves the graph, resolves launch-time input, then processes candidate nodes through a backend queue that records node output, pulses downstream ports, and emits telemetry for the UI and Queue.
+The canvas is the authoring surface; the Rust workflow engine is the runtime. When you run a workflow, Wardian saves the graph, resolves launch-time input, then processes candidate nodes through the engine's internal execution loop, records node output, pulses downstream ports, and emits run telemetry.
 
 ## Builder Layout
 
@@ -70,7 +70,7 @@ That usually means one or both of these are true:
 
 If neither is needed, the workflow launches immediately based on its trigger type.
 
-Completed and failed workflow runs are added to the [Queue](../guide/queue.md) so the final outcome remains visible after you leave the canvas.
+After a workflow finishes, the app can add its completed or failed outcome to the separate [Queue](../guide/queue.md) triage surface.
 
 ## Builder vs Library
 

@@ -1,13 +1,13 @@
 # Queue
 
-The Queue is Wardian's triage surface for completed work. It keeps agent and workflow outcomes visible after the terminal or workflow canvas has moved on.
+The Queue is Wardian's app-level triage surface for completed work. It is separate from the workflow engine: agents and workflows can produce outcomes, and the Queue keeps those outcomes visible after the originating terminal or workflow run has moved on.
 
 ## What Appears in the Queue
 
 Wardian currently records two item types:
 
 - **Agent task completed**: added when an agent that was active returns to Idle. Wardian uses captured provider or terminal output when available; otherwise it records a generic completion summary.
-- **Workflow completed** or **Workflow failed**: added when workflow telemetry reports the final run status. If a workflow node emitted text output, Wardian uses that as the queue summary.
+- **Workflow completed** or **Workflow failed**: added when the app receives a final workflow run status. If the workflow produced text output, Wardian can use that as the queue summary.
 
 The Queue is not yet the full human-in-the-loop approval system from the roadmap. Provider approval prompts still surface through agent status and provider-specific UI behavior. The current Queue is for completion review and failure triage.
 

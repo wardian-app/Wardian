@@ -1,6 +1,6 @@
 # Workflows
 
-Wardian workflows are reusable automations built from nodes, connections, and runtime assignment data. A visual builder defines the graph, while the Rust workflow engine executes it as a deterministic queue of candidate node work, pulses, registry updates, and telemetry events. This section is the main user-facing reference for building workflows, understanding how they launch, and managing scheduled or live workflow behavior over time.
+Wardian workflows are reusable automations built from nodes, connections, and runtime assignment data. A visual builder defines the graph, while the Rust workflow engine executes it through a deterministic candidate-node loop with pulses, registry updates, and telemetry events. This section is the main user-facing reference for building workflows, understanding how they launch, and managing scheduled or live workflow behavior over time.
 
 ## Workflow Mental Model
 
@@ -9,7 +9,7 @@ A workflow has four layers:
 - **Template**: the saved graph of nodes, edges, and workflow settings.
 - **Launch behavior**: whether that template runs manually, creates a scheduled task, or starts a live listener.
 - **Runtime state**: active runs, scheduled instances, listener status, node outputs, and role mappings.
-- **Engine loop**: the backend queue that decides which nodes are ready, consumes dependency pulses, executes each node, and emits run telemetry back to the UI.
+- **Engine loop**: the internal candidate-node loop that decides which nodes are ready, consumes dependency pulses, executes each node, and emits run telemetry back to the UI.
 
 In practice, you usually move through workflows in this order:
 
@@ -44,7 +44,7 @@ This workflow section focuses on user-visible behavior:
 - how scheduled tasks behave
 - what happens when a workflow is launched from different surfaces
 - how agent assignments affect execution
-- how completed and failed workflow runs appear in the [Queue](../guide/queue.md)
+- where workflow outcomes can surface after a run completes
 
 For backend implementation details, see:
 
