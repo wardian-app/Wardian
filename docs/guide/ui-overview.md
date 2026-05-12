@@ -4,6 +4,8 @@ Wardian features a high-fidelity, professional interface designed for dense info
 
 ## 🧱 The Layout Architecture
 
+![Wardian Grid view showing the left control rail, active agent cards, and right agent roster](../assets/screenshots/grid/app-shell.png)
+
 ### 1. Unified Top Bar
 
 The fixed header at the top of the application acts as the global navigation and system telemetry hub.
@@ -16,6 +18,8 @@ The fixed header at the top of the application acts as the global navigation and
   - **WORKFLOWS**: Visual canvas for building automated agent sequences.
   - **QUEUE / GRAPH / GARDEN**: Specialized visualizations for high-fidelity orchestration.
 - **Right (Telemetry)**: Real-time monitoring of aggregate **CPU**, **Memory**, and **Active Agent** count.
+
+![Wardian Dashboard view showing compact agent status rows and quick controls](../assets/screenshots/dashboard/system-summary.png)
 
 ### 2. Left Sidebar (Control & Context)
 

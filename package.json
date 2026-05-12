@@ -23,6 +23,7 @@
     "stage-cli": "node scripts/stage-cli.mjs",
     "lint": "tsc --noEmit",
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
+    "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",

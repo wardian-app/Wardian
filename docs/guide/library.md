@@ -2,6 +2,8 @@
 
 The Library is the centralized repository for all reusable agent assets in Wardian. It allows you to manage "Blueprints" (what an agent can be) and "Actions" (what an agent can do).
 
+![Wardian Library view showing folders, reusable prompts, starred prompts, and search controls](../assets/screenshots/library/library-view.png)
+
 ## 🗂️ Library Sections
 
 ### 1. Prompts

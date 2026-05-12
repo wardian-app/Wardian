@@ -4,6 +4,8 @@ The Workflow view is Wardian's canvas for building and testing automations.
 
 Use this page as a quick manual for the view itself. For the full workflow reference, start at [Workflows](../workflows/index.md).
 
+![Wardian Workflow view showing the workflow sidebar, builder canvas, connected nodes, and run controls](../assets/screenshots/workflows/builder-canvas.png)
+
 ## What You Can Do Here
 
 - open an existing workflow

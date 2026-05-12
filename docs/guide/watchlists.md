@@ -2,6 +2,8 @@
 
 The **Agent Watchlist** (Right Sidebar) is your primary high-fidelity tool for monitoring the health, activity, and thoughts of your agent swarm.
 
+![Wardian agent roster showing grouped agents with status, query count, and last queried columns](../assets/screenshots/watchlists/agent-roster.png)
+
 ## 🕵️ Real-Time Monitoring
 
 ### Status Indicators
