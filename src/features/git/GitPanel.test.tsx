@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitPanel } from "./GitPanel";
 import { ConfirmProvider } from "../../components/ConfirmDialog";
@@ -27,17 +27,40 @@ const telemetry: Record<string, AgentTelemetry> = {
   },
 };
 
-function renderGitPanel() {
-  render(
+function renderGitPanel(options?: {
+  agentOverride?: Partial<AgentConfig>;
+  telemetryOverride?: Record<string, AgentTelemetry>;
+}) {
+  const renderedAgent = { ...agent, ...options?.agentOverride };
+  const renderedTelemetry = options?.telemetryOverride ?? telemetry;
+
+  return render(
     <ConfirmProvider>
       <GitPanel
         selectedAgentIds={new Set(["agent-1"])}
-        agents={[agent]}
+        agents={[renderedAgent]}
         onAgentsUpdated={vi.fn()}
-        telemetry={telemetry}
+        telemetry={renderedTelemetry}
       />
     </ConfirmProvider>,
   );
+}
+
+function mockLoadedRepository(statusBranch = "main") {
+  mockInvoke.mockImplementation(async (command) => {
+    if (command === "get_explorer_root") return "C:/repo";
+    if (command === "list_agent_worktrees") return [];
+    if (command === "git_status") {
+      return {
+        branch: statusBranch,
+        ahead: 0,
+        behind: 0,
+        files: [],
+      };
+    }
+    if (command === "git_log") return [];
+    return null;
+  });
 }
 
 describe("GitPanel", () => {
@@ -144,5 +167,226 @@ describe("GitPanel", () => {
 
     expect(await screen.findByText("changed.ts")).toBeInTheDocument();
     expect(screen.getByText("History unavailable")).toBeInTheDocument();
+  });
+
+  it("re-resolves source control root when the selected agent worktree assignment changes", async () => {
+    let rootCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") {
+        rootCalls += 1;
+        return rootCalls === 1 ? "C:/repo" : "C:/repo-worktree";
+      }
+      if (command === "git_status") {
+        return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    const { rerender } = render(
+      <ConfirmProvider>
+        <GitPanel
+          selectedAgentIds={new Set(["agent-1"])}
+          agents={[agent]}
+          onAgentsUpdated={vi.fn()}
+          telemetry={telemetry}
+        />
+      </ConfirmProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText("wardian/repo-agent").length).toBeGreaterThan(0);
+    });
+
+    rerender(
+      <ConfirmProvider>
+        <GitPanel
+          selectedAgentIds={new Set(["agent-1"])}
+          agents={[{ ...agent, git_worktree: true, git_worktree_folder: "C:/repo-worktree" }]}
+          onAgentsUpdated={vi.fn()}
+          telemetry={telemetry}
+        />
+      </ConfirmProvider>,
+    );
+
+    await waitFor(() => {
+      expect(rootCalls).toBeGreaterThanOrEqual(2);
+      expect(mockInvoke).toHaveBeenCalledWith("git_status", { cwd: "C:/repo-worktree" });
+    });
+  });
+
+  it("enables a named real agent worktree without resuming a running agent", async () => {
+    mockLoadedRepository();
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByText("Create Worktree"));
+    const input = await screen.findByPlaceholderText("worktree-name");
+    expect(input).toHaveValue("Repo Agent");
+    fireEvent.change(input, { target: { value: "review fixes" } });
+    fireEvent.click(screen.getByTitle("Create and start fresh"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("enable_agent_worktree", {
+        sessionId: "agent-1",
+        worktreeName: "review fixes",
+      });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Create Worktree")).toBeInTheDocument();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
+  });
+
+  it("does not create a worktree when inline naming is cancelled", async () => {
+    mockLoadedRepository();
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByText("Create Worktree"));
+    const input = await screen.findByPlaceholderText("worktree-name");
+    fireEvent.change(input, { target: { value: "review fixes" } });
+    fireEvent.click(screen.getByTitle("Cancel"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Create Worktree")).toBeInTheDocument();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("enable_agent_worktree", expect.anything());
+    expect(mockInvoke).not.toHaveBeenCalledWith("clear_agent_session", expect.anything());
+  });
+
+  it("creates a named worktree from the inline input with Enter", async () => {
+    mockLoadedRepository();
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByText("Create Worktree"));
+    const input = await screen.findByPlaceholderText("worktree-name");
+    fireEvent.change(input, { target: { value: "keyboard branch" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("enable_agent_worktree", {
+        sessionId: "agent-1",
+        worktreeName: "keyboard branch",
+      });
+    });
+  });
+
+  it("joins an existing shared worktree without resuming a running agent", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: ["agent-2"],
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByText("Move to repo-worktree"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("assign_agent_worktree", {
+        sessionId: "agent-1",
+        worktreeFolder: "C:/repo-worktree",
+      });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
+  });
+
+  it("repairs a stale worktree assignment by moving the runtime fresh", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo-worktree";
+      if (command === "list_agent_worktrees") return [
+        {
+          id: "C:/repo-worktree",
+          name: "repo-agent worktree",
+          source_folder: "C:/repo",
+          worktree_folder: "C:/repo-worktree",
+          member_agent_ids: ["agent-1"],
+        },
+      ];
+      if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+    renderGitPanel({
+      agentOverride: {
+        folder: "C:/repo",
+        git_worktree: true,
+        git_worktree_source: "C:/repo",
+        git_worktree_folder: "C:/repo-worktree",
+      },
+    });
+
+    fireEvent.click(await screen.findByText("Start Fresh Here"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("assign_agent_worktree", {
+        sessionId: "agent-1",
+        worktreeFolder: "C:/repo-worktree",
+      });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
+  });
+
+  it("disables the agent worktree without resuming a running agent", async () => {
+    mockLoadedRepository("wardian/repo-agent");
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByTitle("Remove worktree assignment"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("disable_agent_worktree", { sessionId: "agent-1" });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTitle("Remove worktree assignment")).toBeInTheDocument();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
+  });
+
+  it("surfaces worktree disable failures instead of appearing inert", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo-worktree";
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      if (command === "disable_agent_worktree") throw new Error("worktree is locked");
+      return null;
+    });
+    renderGitPanel({
+      agentOverride: {
+        folder: "C:/repo-worktree",
+        git_worktree: true,
+        git_worktree_source: "C:/repo",
+        git_worktree_folder: "C:/repo-worktree",
+      },
+    });
+
+    fireEvent.click(await screen.findByTitle("Remove worktree assignment"));
+
+    expect(await screen.findByText("Unable to Load Source Control")).toBeInTheDocument();
+    expect(screen.getByText("worktree is locked")).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
   });
 });

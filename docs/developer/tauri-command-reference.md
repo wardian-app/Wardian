@@ -24,6 +24,13 @@ This page documents the current command surface registered in `src-tauri/src/lib
 - `rename_agent`
 - `reorder_agents`
 - `update_agent_config`
+- `enable_agent_worktree`
+- `list_agent_worktrees`
+- `assign_agent_worktree`
+- `disable_agent_worktree`
+
+Worktree commands update agent config only. UI callers that move an agent between the source checkout and a worktree must follow the config command with `clear_agent_session` so the provider starts fresh in the new workspace instead of resuming across a cwd change.
+`enable_agent_worktree` accepts an optional `worktree_name`; when present, Wardian uses it for the `wardian/<slug>` branch and the per-agent `worktrees/<slug>` folder.
 
 ## Terminal (`commands/terminal.rs`)
 

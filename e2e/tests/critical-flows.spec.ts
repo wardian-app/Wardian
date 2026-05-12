@@ -17,7 +17,7 @@ test.describe("Critical browser flows", () => {
     const dialog = page.locator("#confirm-dialog-panel");
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText(
-      "No agents selected. This will broadcast to ALL agents. Are you sure?",
+      "No agents selected. This will broadcast to all agents. Are you sure?",
     );
 
     await page.getByRole("button", { name: "Cancel" }).click();

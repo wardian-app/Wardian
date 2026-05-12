@@ -4,13 +4,14 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { FolderOpen } from 'lucide-react';
 import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
-import { GitStatusResult } from '../../types';
+import { AgentConfig, GitStatusResult } from '../../types';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
+  agents: AgentConfig[];
 }
 
-export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }) => {
+export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, agents }) => {
   const confirm = useConfirm();
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [gitStatusMap, setGitStatusMap] = useState<Record<string, string>>({});
@@ -40,6 +41,13 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
   const [refreshKey, setRefreshKey] = useState(0);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
+  const selectedAgent = agents.find((agent) => agent.session_id === selectedAgentId) ?? null;
+  const selectedWorkspaceRevision = [
+    selectedAgent?.folder ?? "",
+    selectedAgent?.git_worktree ? "worktree" : "main",
+    selectedAgent?.git_worktree_source ?? "",
+    selectedAgent?.git_worktree_folder ?? "",
+  ].join("|");
 
   useEffect(() => {
     const fetchPath = async () => {
@@ -51,7 +59,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds }
       }
     };
     fetchPath();
-  }, [selectedAgentId]);
+  }, [selectedAgentId, selectedWorkspaceRevision]);
 
   useEffect(() => {
     if (!rootPath) return;

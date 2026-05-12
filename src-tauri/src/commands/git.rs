@@ -1,5 +1,7 @@
 use crate::state::AppState;
+use crate::utils::fs::create_directory_link;
 use notify::Watcher;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
@@ -275,14 +277,156 @@ pub async fn git_push(cwd: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn git_create_worktree(cwd: String, path: String, branch: String) -> Result<(), String> {
-    run_git(&cwd, &["worktree", "add", &path, "-b", &branch])?;
-    Ok(())
+    create_worktree_with_build_caches(Path::new(&cwd), Path::new(&path), &branch)
 }
 
 #[tauri::command]
 pub async fn git_remove_worktree(cwd: String, path: String) -> Result<(), String> {
-    run_git(&cwd, &["worktree", "remove", &path, "--force"])?;
+    remove_worktree(Path::new(&cwd), Path::new(&path))?;
     Ok(())
+}
+
+pub(crate) fn create_worktree_with_build_caches(
+    workspace_path: &Path,
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<(), String> {
+    let workspace_path = absolute_existing_path(workspace_path)?;
+    let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let workspace = path_to_git_arg(&workspace_path)?;
+    let worktree = path_to_git_arg(&worktree_path)?;
+    run_git(&workspace, &["worktree", "add", &worktree, "-b", branch])?;
+
+    let worktree_path = absolute_existing_path(&worktree_path)?;
+    setup_worktree_build_caches(&worktree_path, &workspace_path)
+}
+
+pub(crate) fn remove_worktree(workspace_path: &Path, worktree_path: &Path) -> Result<(), String> {
+    let workspace_path = absolute_existing_path(workspace_path)?;
+    let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
+    let workspace = path_to_git_arg(&workspace_path)?;
+    let worktree = path_to_git_arg(&worktree_path)?;
+    run_git(&workspace, &["worktree", "remove", &worktree, "--force"])?;
+    Ok(())
+}
+
+fn absolute_worktree_target_path(workspace_path: &Path, worktree_path: &Path) -> PathBuf {
+    if worktree_path.is_absolute() {
+        worktree_path.to_path_buf()
+    } else {
+        workspace_path.join(worktree_path)
+    }
+}
+
+fn path_to_git_arg(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))
+}
+
+pub(crate) fn setup_worktree_build_caches(
+    worktree_path: &Path,
+    workspace_path: &Path,
+) -> Result<(), String> {
+    let worktree_path = absolute_existing_path(worktree_path)?;
+    let workspace_path = absolute_existing_path(workspace_path)?;
+
+    if workspace_path.join("Cargo.toml").is_file() {
+        write_cargo_worktree_config(&worktree_path, &workspace_path)?;
+    }
+
+    if workspace_path.join("package.json").is_file() {
+        let target = ensure_shared_cache_dir(&workspace_path.join("node_modules"))?;
+        ensure_worktree_cache_link(&target, &worktree_path.join("node_modules"))?;
+    }
+
+    if workspace_path.join("pyproject.toml").is_file()
+        || workspace_path.join("requirements.txt").is_file()
+    {
+        let venv = workspace_path.join(".venv");
+        if venv.is_dir() {
+            let target = absolute_existing_path(&venv)?;
+            ensure_worktree_cache_link(&target, &worktree_path.join(".venv"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_cargo_worktree_config(worktree_path: &Path, workspace_path: &Path) -> Result<(), String> {
+    let cargo_dir = worktree_path.join(".cargo");
+    std::fs::create_dir_all(&cargo_dir).map_err(|e| e.to_string())?;
+
+    let target_dir = workspace_path.join("target");
+    let config = format!(
+        "[build]\ntarget-dir = \"{}\"\n",
+        escape_toml_basic_string(&target_dir.to_string_lossy())
+    );
+    std::fs::write(cargo_dir.join("config.toml"), config).map_err(|e| e.to_string())
+}
+
+fn ensure_shared_cache_dir(path: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
+    absolute_existing_path(path)
+}
+
+fn ensure_worktree_cache_link(target: &Path, link: &Path) -> Result<(), String> {
+    if link.exists() || link.symlink_metadata().is_ok() {
+        if link_matches_target(link, target) {
+            return Ok(());
+        }
+        return Err(format!(
+            "Refusing to replace existing worktree cache path {}",
+            link.to_string_lossy()
+        ));
+    }
+
+    create_directory_link(target, link)
+}
+
+fn link_matches_target(link: &Path, target: &Path) -> bool {
+    match (absolute_existing_path(link), absolute_existing_path(target)) {
+        (Ok(link_path), Ok(target_path)) => link_path == target_path,
+        _ => false,
+    }
+}
+
+fn absolute_existing_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    normalize_canonical_path(&absolute)
+}
+
+fn normalize_canonical_path(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+
+    Ok(canonical)
+}
+
+fn escape_toml_basic_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Start watching a git repo's index and HEAD for changes.
@@ -403,10 +547,130 @@ mod tests {
     }
 
     #[test]
+    fn create_worktree_with_build_caches_creates_branch_and_cache_redirects() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("agents").join("agent-1").join("worktree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\n",
+        )
+        .unwrap();
+
+        let cwd = workspace.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        run_git(cwd, &["add", "Cargo.toml"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        create_worktree_with_build_caches(&workspace, &worktree, "wardian/repo-agent").unwrap();
+
+        assert!(worktree.join(".git").exists());
+        assert_eq!(
+            run_git(worktree.to_str().unwrap(), &["branch", "--show-current"])
+                .unwrap()
+                .trim(),
+            "wardian/repo-agent"
+        );
+        assert!(worktree.join(".cargo").join("config.toml").exists());
+    }
+
+    #[test]
     fn git_failure_message_never_returns_empty_error() {
         assert_eq!(
             git_failure_message(Some(1), "", ""),
             "git exited with status 1"
         );
+    }
+
+    #[test]
+    fn setup_worktree_build_caches_writes_cargo_target_dir_to_workspace_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("worktree");
+
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\n",
+        )
+        .unwrap();
+
+        setup_worktree_build_caches(&worktree, &workspace).unwrap();
+
+        let cargo_config =
+            std::fs::read_to_string(worktree.join(".cargo").join("config.toml")).unwrap();
+        let expected_target = workspace
+            .join("target")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        assert_eq!(
+            cargo_config,
+            format!("[build]\ntarget-dir = \"{expected_target}\"\n")
+        );
+    }
+
+    #[test]
+    fn setup_worktree_build_caches_links_node_modules_and_existing_python_venv() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("worktree");
+        let node_modules = workspace.join("node_modules");
+        let venv = workspace.join(".venv");
+
+        std::fs::create_dir_all(&node_modules).unwrap();
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(workspace.join("package.json"), "{}\n").unwrap();
+        std::fs::write(
+            workspace.join("pyproject.toml"),
+            "[project]\nname = \"sample\"\n",
+        )
+        .unwrap();
+
+        setup_worktree_build_caches(&worktree, &workspace).unwrap();
+
+        assert_eq!(
+            normalize_canonical_path(&worktree.join("node_modules")).unwrap(),
+            normalize_canonical_path(&node_modules).unwrap()
+        );
+        assert_eq!(
+            normalize_canonical_path(&worktree.join(".venv")).unwrap(),
+            normalize_canonical_path(&venv).unwrap()
+        );
+    }
+
+    #[test]
+    fn setup_worktree_build_caches_skips_python_venv_when_workspace_venv_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("worktree");
+
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(workspace.join("requirements.txt"), "pytest\n").unwrap();
+
+        setup_worktree_build_caches(&worktree, &workspace).unwrap();
+
+        assert!(!worktree.join(".venv").exists());
+    }
+
+    #[test]
+    fn setup_worktree_build_caches_noops_for_unrecognized_project_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("worktree");
+
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        setup_worktree_build_caches(&worktree, &workspace).unwrap();
+
+        assert!(!worktree.join(".cargo").exists());
+        assert!(!worktree.join("node_modules").exists());
+        assert!(!worktree.join(".venv").exists());
     }
 }

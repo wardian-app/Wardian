@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AgentConfig, GitStatusResult, GitLogEntry } from "../../types";
+import { Check, GitBranch, X } from "lucide-react";
+import { AgentConfig, AgentWorktreeSummary, GitStatusResult, GitLogEntry } from "../../types";
 import { GitFileList } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
 import { useConfirm } from "../../components/ConfirmDialog";
@@ -15,7 +16,7 @@ interface GitPanelProps {
   telemetry: Record<string, import("../../types").AgentTelemetry>;
 }
 
-export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, onAgentsUpdated, telemetry }) => {
+export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, onAgentsUpdated }) => {
   const confirm = useConfirm();
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [status, setStatus] = useState<GitStatusResult | null>(null);
@@ -25,6 +26,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [diffFilePath, setDiffFilePath] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [worktreeLoading, setWorktreeLoading] = useState(false);
+  const [availableWorktrees, setAvailableWorktrees] = useState<AgentWorktreeSummary[]>([]);
+  const [isNamingWorktree, setIsNamingWorktree] = useState(false);
+  const [worktreeName, setWorktreeName] = useState("");
+  const createWorktreeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const worktreeNameInputRef = useRef<HTMLInputElement | null>(null);
 
   // Collapsible sections
   const [stagedOpen, setStagedOpen] = useState(true);
@@ -38,18 +45,45 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
+  const selectedWorkspaceRevision = [
+    selectedAgent?.folder ?? "",
+    selectedAgent?.git_worktree ? "worktree" : "main",
+    selectedAgent?.git_worktree_source ?? "",
+    selectedAgent?.git_worktree_folder ?? "",
+  ].join("|");
   const errorMessage = error === null ? "" : error.trim() || DEFAULT_GIT_ERROR;
   const isNotGitRepoError =
     errorMessage.toLowerCase().includes("not a git repository") ||
     errorMessage.toLowerCase().includes("not a git directory");
-  // Branch starts with "wardian/" when the agent is actively running inside a worktree
-  const isWorktreeActive = status?.branch?.startsWith("wardian/") ?? false;
-  const isAgentRunning = (telemetry[selectedAgentId ?? ""]?.current_status ?? "Off") !== "Off";
+  const isWorktreeActive = selectedAgent?.git_worktree === true || (status?.branch?.startsWith("wardian/") ?? false);
+  const selectedSourceFolder = (selectedAgent?.git_worktree_source ?? selectedAgent?.folder ?? "").replace(/\\/g, "/");
+  const selectedRuntimeFolder = selectedAgent?.folder?.replace(/\\/g, "/") ?? rootPath ?? "";
+  const selectedWorktreeFolder = selectedAgent?.git_worktree_folder?.replace(/\\/g, "/") ?? "";
+  const hasStaleWorktreeAssignment =
+    selectedAgent?.git_worktree === true &&
+    selectedWorktreeFolder.length > 0 &&
+    selectedRuntimeFolder.length > 0 &&
+    selectedRuntimeFolder !== selectedWorktreeFolder;
 
   const formatError = (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     return message.trim() || DEFAULT_GIT_ERROR;
   };
+
+  const slugifyWorktreeName = (name: string) => {
+    const slug = name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug || "agent";
+  };
+
+  const worktreeNameSlug = slugifyWorktreeName(worktreeName);
+  const isWorktreeNameDuplicate = availableWorktrees.some(
+    (worktree) => slugifyWorktreeName(worktree.name) === worktreeNameSlug,
+  );
+  const canCreateNamedWorktree = worktreeName.trim().length > 0 && !isWorktreeNameDuplicate && !worktreeLoading;
 
   // Resolve the agent's working directory
   useEffect(() => {
@@ -75,7 +109,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       }
     };
     fetchPath();
-  }, [selectedAgentId]);
+  }, [selectedAgentId, selectedWorkspaceRevision]);
 
   // Fetch git status
   const refreshStatus = useCallback(async () => {
@@ -124,6 +158,44 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       unlistenPromise.then((fn) => fn());
     };
   }, [rootPath, refreshStatus, refreshHistory]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchWorktrees = async () => {
+      if (!selectedAgentId || !selectedSourceFolder) {
+        setAvailableWorktrees([]);
+        return;
+      }
+      try {
+        const summaries = await invoke<AgentWorktreeSummary[]>("list_agent_worktrees");
+        if (!isMounted) return;
+        const currentWorktree = selectedAgent?.git_worktree_folder?.replace(/\\/g, "/") ?? "";
+        setAvailableWorktrees(
+          summaries.filter((worktree) => {
+            const sameSource = worktree.source_folder.replace(/\\/g, "/") === selectedSourceFolder;
+            const notCurrent = worktree.worktree_folder.replace(/\\/g, "/") !== currentWorktree;
+            const notMember = !worktree.member_agent_ids.includes(selectedAgentId);
+            return sameSource && notCurrent && notMember;
+          }),
+        );
+      } catch {
+        if (isMounted) setAvailableWorktrees([]);
+      }
+    };
+
+    fetchWorktrees();
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedAgentId, selectedSourceFolder, selectedWorkspaceRevision, selectedAgent?.git_worktree_folder]);
+
+  useEffect(() => {
+    if (!isNamingWorktree) return;
+    const input = worktreeNameInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, [isNamingWorktree]);
 
   // File operations
   const handleStage = async (path: string) => {
@@ -209,17 +281,87 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   };
 
-  // Worktree action — updates config then restarts agent if it's running
-  const [worktreeLoading, setWorktreeLoading] = useState(false);
+  // Worktree action — moves the provider runtime by forcing a fresh session in the selected tree.
+  const beginCreateWorktree = () => {
+    if (!selectedAgent) return;
+    setWorktreeName(selectedAgent.session_name || "worktree");
+    setIsNamingWorktree(true);
+  };
+
+  const cancelCreateWorktree = () => {
+    setIsNamingWorktree(false);
+    setWorktreeName("");
+    requestAnimationFrame(() => createWorktreeButtonRef.current?.focus());
+  };
+
+  const createNamedWorktree = async () => {
+    if (!selectedAgent || !selectedAgentId || !canCreateNamedWorktree) return;
+    setWorktreeLoading(true);
+    try {
+      await invoke("enable_agent_worktree", {
+        sessionId: selectedAgentId,
+        worktreeName: worktreeName.trim(),
+      });
+      await invoke("clear_agent_session", { sessionId: selectedAgentId });
+      setIsNamingWorktree(false);
+      setWorktreeName("");
+      onAgentsUpdated();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setWorktreeLoading(false);
+    }
+  };
+
   const handleWorktreeAction = async (enable: boolean) => {
+    if (!selectedAgent || !selectedAgentId) return;
+    if (enable) {
+      beginCreateWorktree();
+      return;
+    }
+    setWorktreeLoading(true);
+    try {
+      await invoke("disable_agent_worktree", {
+        sessionId: selectedAgentId,
+      });
+      await invoke("clear_agent_session", { sessionId: selectedAgentId });
+      onAgentsUpdated();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setWorktreeLoading(false);
+    }
+  };
+
+  const handleJoinWorktree = async (worktree: AgentWorktreeSummary) => {
     if (!selectedAgent || !selectedAgentId) return;
     setWorktreeLoading(true);
     try {
-      await invoke("update_agent_config", { newConfig: { ...selectedAgent, git_worktree: enable } });
+      await invoke("assign_agent_worktree", {
+        sessionId: selectedAgentId,
+        worktreeFolder: worktree.worktree_folder,
+      });
+      await invoke("clear_agent_session", { sessionId: selectedAgentId });
       onAgentsUpdated();
-      if (isAgentRunning) {
-        await invoke("resume_agent", { sessionId: selectedAgentId });
-      }
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setWorktreeLoading(false);
+    }
+  };
+
+  const handleActivateAssignedWorktree = async () => {
+    if (!selectedAgent || !selectedAgentId || !selectedWorktreeFolder) return;
+    setWorktreeLoading(true);
+    try {
+      await invoke("assign_agent_worktree", {
+        sessionId: selectedAgentId,
+        worktreeFolder: selectedWorktreeFolder,
+      });
+      await invoke("clear_agent_session", { sessionId: selectedAgentId });
+      onAgentsUpdated();
+    } catch (err) {
+      setError(formatError(err));
     } finally {
       setWorktreeLoading(false);
     }
@@ -358,12 +500,27 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <circle cx="7" cy="5" r="2" fill="none" /><circle cx="7" cy="19" r="2" fill="none" /><circle cx="17" cy="12" r="2" fill="none" />
               <line x1="7" y1="7" x2="7" y2="17" /><path fill="none" d="M7 17 C7 13 17 13 17 12" />
             </svg>
-            <span className="text-[11px] font-mono text-[var(--color-wardian-processing)] truncate flex-1">{status.branch}</span>
+            <div className="min-w-0 flex-1">
+                <div className="text-[11px] font-semibold text-[var(--color-wardian-processing)] truncate">Worktree runtime</div>
+                <div className="text-[10px] font-mono text-muted truncate" title={selectedRuntimeFolder}>
+                  {selectedRuntimeFolder || status.branch}
+                </div>
+              </div>
+            {hasStaleWorktreeAssignment && (
+              <button
+                onClick={handleActivateAssignedWorktree}
+                disabled={worktreeLoading}
+                className="text-[10px] px-1.5 py-0.5 rounded border border-[color-mix(in_srgb,var(--color-wardian-processing),transparent_55%)] text-[var(--color-wardian-processing)] hover:bg-[color-mix(in_srgb,var(--color-wardian-processing),transparent_88%)] transition-colors disabled:opacity-40 shrink-0"
+                title={selectedWorktreeFolder}
+              >
+                Start Fresh Here
+              </button>
+            )}
             <button
               onClick={() => handleWorktreeAction(false)}
               disabled={worktreeLoading}
               className="text-[var(--color-wardian-processing)] hover:text-[var(--color-wardian-error)] transition-colors disabled:opacity-40 shrink-0"
-              title="Remove worktree — restarts agent on main branch"
+              title="Remove worktree assignment"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" />
@@ -371,17 +528,75 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
             </button>
           </div>
         ) : (
-          <button
-            onClick={() => handleWorktreeAction(true)}
-            disabled={worktreeLoading}
-            className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border border-dashed border-wardian-border text-[var(--color-wardian-text-muted)] hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)] transition-colors group disabled:opacity-40"
-          >
-            <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="7" cy="5" r="2" fill="none" /><circle cx="7" cy="19" r="2" fill="none" /><circle cx="17" cy="12" r="2" fill="none" />
-              <line x1="7" y1="7" x2="7" y2="17" /><path fill="none" d="M7 17 C7 13 17 13 17 12" />
-            </svg>
-            <span className="text-[11px]">{worktreeLoading ? "Applying…" : "+ Worktree"}</span>
-          </button>
+          <div className="flex flex-col gap-1.5">
+            {isNamingWorktree ? (
+              <div className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border bg-[var(--color-wardian-input-bg)] ${isWorktreeNameDuplicate ? "border-[var(--color-wardian-warning)]" : "border-wardian-border"}`}>
+                <GitBranch className="w-3.5 h-3.5 shrink-0 text-[var(--color-wardian-accent)]" />
+                <input
+                  ref={worktreeNameInputRef}
+                  value={worktreeName}
+                  onChange={(e) => setWorktreeName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      createNamedWorktree();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      cancelCreateWorktree();
+                    }
+                  }}
+                  readOnly={worktreeLoading}
+                  placeholder="worktree-name"
+                  className={`min-w-0 flex-1 bg-transparent text-[11px] text-primary outline-none placeholder:text-[var(--color-wardian-text-muted)] ${isWorktreeNameDuplicate ? "text-[var(--color-wardian-warning)]" : ""}`}
+                />
+                <button
+                  onClick={createNamedWorktree}
+                  disabled={!canCreateNamedWorktree}
+                  className="p-0.5 rounded text-[var(--color-wardian-success)] hover:bg-wardian-card-bg-muted transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                  title="Create and start fresh"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={cancelCreateWorktree}
+                  disabled={worktreeLoading}
+                  className="p-0.5 rounded text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] hover:bg-wardian-card-bg-muted transition-colors disabled:opacity-30 shrink-0"
+                  title="Cancel"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                ref={createWorktreeButtonRef}
+                onClick={() => handleWorktreeAction(true)}
+                disabled={worktreeLoading}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border border-dashed border-wardian-border text-[var(--color-wardian-text-muted)] hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)] transition-colors group disabled:opacity-40"
+                title="Create isolated worktree"
+              >
+                <GitBranch className="w-3.5 h-3.5 shrink-0" />
+                <span className="text-[11px]">{worktreeLoading ? "Creating..." : "Create Worktree"}</span>
+              </button>
+            )}
+            {availableWorktrees.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <div className="text-[10px] uppercase tracking-wide text-muted px-1">Available Worktrees</div>
+                {availableWorktrees.map((worktree) => (
+                  <button
+                    key={worktree.id}
+                    onClick={() => handleJoinWorktree(worktree)}
+                    disabled={worktreeLoading}
+                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border border-wardian-border text-[var(--color-wardian-text-muted)] hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)] transition-colors disabled:opacity-40"
+                    title={worktree.worktree_folder}
+                  >
+                    <span className="text-[11px] truncate">Move to {worktree.name}</span>
+                    <span className="ml-auto text-[10px] font-mono text-muted">{worktree.member_agent_ids.length}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

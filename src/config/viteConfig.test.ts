@@ -14,6 +14,7 @@ describe("vite dev server config", () => {
       "**/.tmp/**",
       "**/state.db-*",
       "**/agents/*/habitat/**",
+      "**/agents/*/worktree/**",
       "**/agents/*/claude/**",
     ]));
     expect(viteWatchIgnored).not.toContain("**/agents/**");

@@ -1,5 +1,6 @@
 use crate::manager;
 use crate::state::AppState;
+use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
@@ -33,6 +34,15 @@ pub struct CloneAgentRequest {
     pub folder: Option<String>,
     pub agent_class: Option<String>,
     pub start: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentWorktreeSummary {
+    pub id: String,
+    pub name: String,
+    pub source_folder: String,
+    pub worktree_folder: String,
+    pub member_agent_ids: Vec<String>,
 }
 
 fn clone_unique_name(
@@ -555,6 +565,185 @@ async fn release_spawn_name_reservation(state: &AppState, session_name: &str) {
 
 fn normalize_workspace_record_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn resolve_agent_worktree_path(
+    wardian_home: &std::path::Path,
+    session_id: &str,
+    worktree_name: Option<&str>,
+) -> std::path::PathBuf {
+    if let Some(slug) = worktree_name
+        .map(slugify_worktree_name)
+        .filter(|slug| !slug.is_empty())
+    {
+        return wardian_home
+            .join("agents")
+            .join(session_id)
+            .join("worktrees")
+            .join(slug);
+    }
+
+    wardian_home
+        .join("agents")
+        .join(session_id)
+        .join("worktree")
+}
+
+fn slugify_worktree_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_hyphen = false;
+
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            previous_was_hyphen = false;
+        } else if (ch.is_ascii_whitespace() || ch == '-')
+            && !slug.is_empty()
+            && !previous_was_hyphen
+        {
+            slug.push('-');
+            previous_was_hyphen = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        slug = "agent".to_string();
+    }
+
+    slug
+}
+
+fn resolve_agent_worktree_branch_name(worktree_name: &str) -> String {
+    let slug = slugify_worktree_name(worktree_name);
+    format!("wardian/{slug}")
+}
+
+fn enable_worktree_config(config: &mut AgentConfig, worktree_path: &std::path::Path) {
+    let source_folder = config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| config.folder.clone());
+    if config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        config.git_worktree_source = Some(source_folder);
+    }
+    let worktree_folder = normalize_workspace_record_path(worktree_path);
+    config.git_worktree = Some(true);
+    config.folder = worktree_folder.clone();
+    config.git_worktree_folder = Some(worktree_folder);
+}
+
+fn disable_worktree_config(config: &mut AgentConfig) -> Result<(), String> {
+    let source = config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .ok_or_else(|| {
+            "Cannot disable worktree because the original workspace is not recorded.".to_string()
+        })?
+        .to_string();
+
+    config.git_worktree = Some(false);
+    config.folder = source;
+    config.git_worktree_source = None;
+    config.git_worktree_folder = None;
+    Ok(())
+}
+
+fn collect_agent_worktrees(configs: &[AgentConfig]) -> Vec<AgentWorktreeSummary> {
+    let mut summaries: BTreeMap<String, AgentWorktreeSummary> = BTreeMap::new();
+
+    for config in configs {
+        if config.git_worktree != Some(true) {
+            continue;
+        }
+        let Some(worktree_folder) = config
+            .git_worktree_folder
+            .as_deref()
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+        else {
+            continue;
+        };
+        let source_folder = config
+            .git_worktree_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .unwrap_or(config.folder.trim());
+        if source_folder.is_empty() {
+            continue;
+        }
+
+        let normalized_worktree = worktree_folder.replace('\\', "/");
+        let entry = summaries
+            .entry(normalized_worktree.clone())
+            .or_insert_with(|| {
+                let fallback_name = std::path::Path::new(worktree_folder)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(worktree_folder)
+                    .to_string();
+                let name = if fallback_name == "worktree" && !config.session_name.trim().is_empty()
+                {
+                    format!("{} worktree", config.session_name)
+                } else {
+                    fallback_name
+                };
+                AgentWorktreeSummary {
+                    id: normalized_worktree.clone(),
+                    name,
+                    source_folder: source_folder.replace('\\', "/"),
+                    worktree_folder: normalized_worktree.clone(),
+                    member_agent_ids: Vec::new(),
+                }
+            });
+        entry.member_agent_ids.push(config.session_id.clone());
+    }
+
+    summaries.into_values().collect()
+}
+
+fn assign_worktree_config(config: &mut AgentConfig, worktree_folder: &str) -> Result<(), String> {
+    let worktree_folder = worktree_folder.trim();
+    if worktree_folder.is_empty() {
+        return Err("Worktree folder is required".to_string());
+    }
+    let source_folder = config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| config.folder.clone());
+    if config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        config.git_worktree_source = Some(source_folder);
+    }
+    let worktree_folder = worktree_folder.replace('\\', "/");
+    config.git_worktree = Some(true);
+    config.folder = worktree_folder.clone();
+    config.git_worktree_folder = Some(worktree_folder);
+    Ok(())
 }
 
 fn normalize_spawn_folder(folder: &str) -> Result<String, String> {
@@ -1463,6 +1652,167 @@ pub async fn update_agent_config(
 }
 
 #[tauri::command]
+pub async fn enable_agent_worktree(
+    session_id: String,
+    worktree_name: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("Session id is required".to_string());
+    }
+
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
+    let worktree_name = worktree_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let worktree_path =
+        resolve_agent_worktree_path(&wardian_home, &session_id, worktree_name.as_deref());
+    let (workspace_folder, branch_name) = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(&session_id)
+            .ok_or_else(|| format!("Agent {} not found", session_id))?;
+        let config = agent.config.lock().unwrap();
+        let workspace_folder = config
+            .git_worktree_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .unwrap_or(config.folder.trim())
+            .to_string();
+        if workspace_folder.is_empty() {
+            return Err("Agent workspace is not configured".to_string());
+        }
+        let branch_source = worktree_name.as_deref().unwrap_or(&config.session_name);
+        (
+            workspace_folder,
+            resolve_agent_worktree_branch_name(branch_source),
+        )
+    };
+
+    let workspace_path = std::path::PathBuf::from(&workspace_folder);
+    if worktree_path.exists() {
+        crate::commands::git::setup_worktree_build_caches(&worktree_path, &workspace_path)?;
+    } else {
+        crate::commands::git::create_worktree_with_build_caches(
+            &workspace_path,
+            &worktree_path,
+            &branch_name,
+        )?;
+    }
+
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+    if let Some(agent) = agents.get_mut(&session_id) {
+        {
+            let mut config = agent.config.lock().unwrap();
+            enable_worktree_config(&mut config, &worktree_path);
+        }
+        manager::save_state(&app, &agents, &order);
+        let _ = app.emit("agents-updated", ());
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", session_id))
+    }
+}
+
+#[tauri::command]
+pub async fn list_agent_worktrees(
+    state: State<'_, AppState>,
+) -> Result<Vec<AgentWorktreeSummary>, String> {
+    let agents = state.agents.lock().await;
+    let configs = agents
+        .values()
+        .map(|agent| agent.config.lock().unwrap().clone())
+        .collect::<Vec<_>>();
+    Ok(collect_agent_worktrees(&configs))
+}
+
+#[tauri::command]
+pub async fn assign_agent_worktree(
+    session_id: String,
+    worktree_folder: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("Session id is required".to_string());
+    }
+    let worktree_path = std::path::Path::new(worktree_folder.trim());
+    if !worktree_path.is_dir() {
+        return Err("Worktree folder does not exist".to_string());
+    }
+    let normalized_worktree_folder = worktree_folder.trim().replace('\\', "/");
+
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+    let configs = agents
+        .values()
+        .map(|agent| agent.config.lock().unwrap().clone())
+        .collect::<Vec<_>>();
+    let managed_worktree = collect_agent_worktrees(&configs)
+        .into_iter()
+        .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
+        .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
+    if let Some(agent) = agents.get_mut(&session_id) {
+        {
+            let mut config = agent.config.lock().unwrap();
+            let source_folder = config
+                .git_worktree_source
+                .as_deref()
+                .map(str::trim)
+                .filter(|folder| !folder.is_empty())
+                .unwrap_or(config.folder.trim())
+                .replace('\\', "/");
+            if source_folder != managed_worktree.source_folder {
+                return Err(
+                    "Cannot assign an agent to a worktree from another source workspace"
+                        .to_string(),
+                );
+            }
+            assign_worktree_config(&mut config, &worktree_folder)?;
+        }
+        manager::save_state(&app, &agents, &order);
+        let _ = app.emit("agents-updated", ());
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", session_id))
+    }
+}
+
+#[tauri::command]
+pub async fn disable_agent_worktree(
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("Session id is required".to_string());
+    }
+
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+    if let Some(agent) = agents.get_mut(&session_id) {
+        {
+            let mut config = agent.config.lock().unwrap();
+            disable_worktree_config(&mut config)?;
+        }
+        manager::save_state(&app, &agents, &order);
+        let _ = app.emit("agents-updated", ());
+        Ok(())
+    } else {
+        Err(format!("Agent {} not found", session_id))
+    }
+}
+
+#[tauri::command]
 pub async fn reorder_agents(
     session_ids: Vec<String>,
     state: State<'_, AppState>,
@@ -1479,14 +1829,16 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, capture_opencode_pause_resume_session,
+        agent_status_update_payload, assign_worktree_config, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_copy_agent_profile_files,
         clone_ensure_profile_destination_available, clone_sanitize_config, clone_unique_name,
-        codex_provider_session_is_new, generated_agent_name, insert_new_agent_order,
+        codex_provider_session_is_new, collect_agent_worktrees, disable_worktree_config,
+        enable_worktree_config, generated_agent_name, insert_new_agent_order,
         mark_agent_paused_off, normalize_spawn_folder, persisted_resume_session_for_provider,
         prepare_clear_config, prepare_resume_config, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        reserve_spawn_session_name, resolve_requested_spawn_session_name,
+        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
+        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
         restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
         terminal_cleared_payload, AgentOrderPlacement,
     };
@@ -1647,6 +1999,166 @@ mod tests {
 
         assert!(!normalized.contains('\\'));
         assert!(std::path::Path::new(&normalized).is_absolute());
+    }
+
+    #[test]
+    fn resolve_agent_worktree_branch_name_slugifies_session_name() {
+        assert_eq!(
+            resolve_agent_worktree_branch_name("Repo Agent!! 2"),
+            "wardian/repo-agent-2"
+        );
+        assert_eq!(resolve_agent_worktree_branch_name(" !!! "), "wardian/agent");
+    }
+
+    #[test]
+    fn resolve_agent_worktree_path_uses_agent_worktree_directory() {
+        let home = std::path::Path::new("C:/wardian");
+
+        assert_eq!(
+            resolve_agent_worktree_path(home, "agent-1", None),
+            std::path::PathBuf::from("C:/wardian")
+                .join("agents")
+                .join("agent-1")
+                .join("worktree")
+        );
+    }
+
+    #[test]
+    fn resolve_agent_worktree_path_uses_requested_worktree_name() {
+        let home = std::path::Path::new("C:/wardian");
+
+        assert_eq!(
+            resolve_agent_worktree_path(home, "agent-1", Some("Review Fixes")),
+            std::path::PathBuf::from("C:/wardian")
+                .join("agents")
+                .join("agent-1")
+                .join("worktrees")
+                .join("review-fixes")
+        );
+    }
+
+    #[test]
+    fn enable_worktree_config_records_worktree_and_moves_launch_folder_to_worktree() {
+        let worktree_path = std::path::Path::new("C:/wardian/agents/agent-1/worktree");
+        let mut config = AgentConfig {
+            folder: "C:/repo".to_string(),
+            ..Default::default()
+        };
+
+        enable_worktree_config(&mut config, worktree_path);
+
+        assert_eq!(config.git_worktree, Some(true));
+        assert_eq!(config.git_worktree_source.as_deref(), Some("C:/repo"));
+        let expected_worktree = worktree_path.to_string_lossy().replace('\\', "/");
+        assert_eq!(config.folder, expected_worktree);
+        assert_eq!(
+            config.git_worktree_folder.as_deref(),
+            Some(expected_worktree.as_str())
+        );
+    }
+
+    #[test]
+    fn enable_worktree_config_preserves_existing_source() {
+        let worktree_path = std::path::Path::new("C:/wardian/agents/agent-1/worktree");
+        let mut config = AgentConfig {
+            folder: "C:/wardian/agents/agent-1/worktree".to_string(),
+            git_worktree_source: Some("C:/repo".to_string()),
+            ..Default::default()
+        };
+
+        enable_worktree_config(&mut config, worktree_path);
+
+        assert_eq!(config.git_worktree_source.as_deref(), Some("C:/repo"));
+    }
+
+    #[test]
+    fn disable_worktree_config_clears_worktree_and_restores_source_launch_folder() {
+        let mut config = AgentConfig {
+            folder: "C:/wardian/agents/agent-1/worktree".to_string(),
+            git_worktree: Some(true),
+            git_worktree_source: Some("C:/repo".to_string()),
+            git_worktree_folder: Some("C:/wardian/agents/agent-1/worktree".to_string()),
+            ..Default::default()
+        };
+
+        disable_worktree_config(&mut config).expect("disable worktree");
+
+        assert_eq!(config.git_worktree, Some(false));
+        assert_eq!(config.git_worktree_source, None);
+        assert_eq!(config.git_worktree_folder, None);
+        assert_eq!(config.folder, "C:/repo");
+    }
+
+    #[test]
+    fn disable_worktree_config_requires_original_source() {
+        let mut config = AgentConfig {
+            folder: "C:/wardian/agents/agent-1/worktree".to_string(),
+            git_worktree: Some(true),
+            ..Default::default()
+        };
+
+        let err = disable_worktree_config(&mut config).expect_err("missing source should fail");
+
+        assert!(err.contains("original workspace"));
+        assert_eq!(config.git_worktree, Some(true));
+    }
+
+    #[test]
+    fn collect_agent_worktrees_groups_members_by_worktree_folder() {
+        let configs = vec![
+            AgentConfig {
+                session_id: "agent-1".to_string(),
+                session_name: "agent-one".to_string(),
+                folder: "C:/repo".to_string(),
+                git_worktree: Some(true),
+                git_worktree_source: Some("C:/repo".to_string()),
+                git_worktree_folder: Some("C:/repo-worktree".to_string()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "agent-2".to_string(),
+                session_name: "agent-two".to_string(),
+                folder: "C:/repo".to_string(),
+                git_worktree: Some(true),
+                git_worktree_source: Some("C:/repo".to_string()),
+                git_worktree_folder: Some("C:\\repo-worktree".to_string()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "agent-3".to_string(),
+                folder: "C:/other".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let worktrees = collect_agent_worktrees(&configs);
+
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].name, "repo-worktree");
+        assert_eq!(worktrees[0].worktree_folder, "C:/repo-worktree");
+        assert_eq!(worktrees[0].source_folder, "C:/repo");
+        assert_eq!(
+            worktrees[0].member_agent_ids,
+            vec!["agent-1".to_string(), "agent-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn assign_worktree_config_records_shared_worktree_and_moves_launch_folder() {
+        let mut config = AgentConfig {
+            folder: "C:/repo".to_string(),
+            ..Default::default()
+        };
+
+        assign_worktree_config(&mut config, "C:\\repo-worktree").expect("assign worktree");
+
+        assert_eq!(config.folder, "C:/repo-worktree");
+        assert_eq!(config.git_worktree, Some(true));
+        assert_eq!(config.git_worktree_source.as_deref(), Some("C:/repo"));
+        assert_eq!(
+            config.git_worktree_folder.as_deref(),
+            Some("C:/repo-worktree")
+        );
     }
 
     #[cfg(windows)]

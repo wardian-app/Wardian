@@ -8,6 +8,7 @@ export const viteWatchIgnored = [
   "**/state.db",
   "**/state.db-*",
   "**/agents/*/habitat/**",
+  "**/agents/*/worktree/**",
   "**/agents/*/claude/**",
   "**/agents/*/.codex/**",
   "**/agents/*/.claude/**",

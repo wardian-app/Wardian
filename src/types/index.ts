@@ -46,6 +46,8 @@ export interface AgentConfig {
 
     // Git isolation
     git_worktree?: boolean;
+    git_worktree_source?: string;
+    git_worktree_folder?: string;
 
 }
 
@@ -67,6 +69,14 @@ export interface GitLogEntry {
     message: string;
     author: string;
     date: string;
+}
+
+export interface AgentWorktreeSummary {
+    id: string;
+    name: string;
+    source_folder: string;
+    worktree_folder: string;
+    member_agent_ids: string[];
 }
 
 export * from "./workflow";
