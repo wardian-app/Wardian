@@ -7,12 +7,14 @@ This page maps Wardian's major capabilities to their detailed guides.
 - High-density Grid and Dashboard views for active session monitoring
 - Left control rail for spawning, commands, workflows, explorer, and settings
 - Right roster with status lights, thought snippets, and watchlists
+- Queue tab for unread agent completions and workflow outcomes
 
 Related docs:
 
 - [UI Overview](./guide/ui-overview.md)
 - [Getting Started](./guide/getting-started.md)
 - [Watchlists](./guide/watchlists.md)
+- [Queue](./guide/queue.md)
 
 ## Agent Classes and Reusable Library
 
@@ -35,6 +37,19 @@ Related docs:
 
 - [Command Panel](./guide/command-panel.md)
 
+## Agent-Facing Wardian CLI
+
+- Give agents a textual control surface for inspecting live or persisted Wardian state
+- Let agents spawn, clone, pause, resume, kill, wait on, and watch peers through the same backend control layer used by the desktop app
+- Send prompts from inline text, standard input, or files; use `wardian ask` for bounded peer handoffs with response evidence
+- List workflows, show workflow definitions, and start or stop workflow runs when the desktop app is available
+- Inspect Wardian-managed agent worktrees, teams, and watchlists for automation-friendly coordination without treating the CLI as the primary human UI
+
+Related docs:
+
+- [Wardian CLI](./guide/cli.md)
+- [Native E2E Harness](./developer/native-e2e.md)
+
 ## Source Control Per Agent
 
 - Git status, staging/unstaging, discard, commit, pull/push
@@ -51,6 +66,7 @@ Related docs:
 - Visual node-based builder with variable assistant
 - Manual, scheduled, and listener-style trigger behaviors
 - Scheduled run management and run-time role assignment
+- Deterministic Rust workflow engine with candidate queue execution, pulse consumption, branch/loop/wait control, agent execution modes, shared storage, and live telemetry
 
 Related docs:
 
@@ -58,6 +74,19 @@ Related docs:
 - [Building Workflows](./workflows/building-workflows.md)
 - [Node Reference](./workflows/node-reference.md)
 - [Triggers](./workflows/triggers.md)
+- [Workflow Engine Architecture](./developer/workflow-engine.md)
+
+## Queue and Completion Triage
+
+- Captures agent completions when active terminal output settles back to Idle
+- Captures workflow completions and failures from workflow telemetry
+- Persists queue items under the Wardian home so unread work survives app restarts
+- Supports unread badges, mark-read, clear-read, dismiss, and expandable long summaries
+
+Related docs:
+
+- [Queue](./guide/queue.md)
+- [Workflow Overview](./workflows/index.md)
 
 ## Runtime Shell and Session Policy Controls
 

@@ -6,29 +6,29 @@ Wardian is an advanced Agent Terminal Manager designed for managing multiple aut
 
 _Goal: Provide a professional-grade command center for agent orchestration.
 
-- [ ] **Dual-Sidebar "Command Center" Architecture**
+- [x] **Dual-Sidebar "Command Center" Architecture**
   - **Left Sidebar (Primary)**:
     - A thin **Icon Bar** for switching between views (Explorer, Connections, Workflows, Settings).
     - A collapsible **Content Pane** that displays the menu for the active icon (e.g., Spawn Instance form, SSH hosts).
   - **Right Sidebar (Secondary)**:
     - A **collapsible, searchable agent list** for rapid selection, status monitoring, and drag-drop reordering.
   - Support for multi-select in the right sidebar and main grid views.
-- [ ] **Dynamic Grid Layouts**
+- [x] **Dynamic Grid Layouts**
   - Implement predefined grid templates (Single, 2x2, 1+2, etc.).
   - Support for drag-and-drop reordering of terminals.
   - Ability to "move" selected agents between grid slots or view layers.
   - Perspective/Layout saving and restoration across sessions.
-- [ ] **Dashboard Command Matrix Refresh**
+- [x] **Dashboard Command Matrix Refresh**
   - Replace generic buttons with standard action set:
     - **Delete**: Terminates the active process and removes it from the roster.
     - **Pause**: Suspends the terminal process but preserves agent session and metadata in `Wardian_state.json`.
     - **Query**: A versatile prompt injection tool (evolution of "Summarize") for rapid context extraction.
     - **Restart**: Resets the PTY session and re-initializes the agent from its current configuration.
-- [ ] **Selection-Based Orchestration**
+- [x] **Selection-Based Orchestration**
   - Target broadcasting to only selected agents.
   - Bulk actions (terminate, restart, group) for selected instances.
   - "Pinning" agents to specific grid slots from the sidebar list.
-- [ ] **Identity & Customization**
+- [x] **Identity & Customization**
   - Support for renaming agents (display names vs. session IDs).
   - Custom color coding and icons for different agent roles.
 
@@ -36,27 +36,28 @@ _Goal: Provide a professional-grade command center for agent orchestration.
 
 _Goal: Empower agents with local persistence and self-awareness._
 
-- [ ] **Home Directories**
-  - Automate creation of `~/.Wardian/agents/<session_id>/` for each instance.
+- [x] **Home Directories**
+  - Automate creation of per-agent state under the Wardian home for each instance.
   - Isolate temporary and permanent files per agent.
-- [ ] **Wardian CLI Utility**
-  - Implement a lightweight binary/script accessible within the agent's PTY.
-  - `Wardian whoami`: Returns current session ID and role.
-  - `Wardian notify "message"`: Triggers a UI notification from the agent.
-- [ ] **Session Branching (Forking)**
-  - Support for "cloning" a session ID to start a new parallel conversation from a snapshot.
-- [ ] **Agent-Specific Include Directories**
+- [x] **Wardian CLI Utility**
+  - Implement a lightweight binary accessible from terminals and managed agent processes.
+  - `wardian agent`: Returns the current managed session when `WARDIAN_SESSION_ID` is set.
+  - `wardian agent list --scope all`: Lists live or persisted agents for coordination.
+  - `wardian send`, `wardian ask`, `wardian agent wait`, and `wardian agent watch`: Provide terminal-native coordination and response evidence.
+  - `wardian workflow list/show/run/stop`: Expose workflow inspection and live run control from the shell.
+- [x] **Session Branching (Forking)**
+  - Support cloning an agent configuration into a new parallel session.
+- [x] **Agent-Specific Include Directories**
   - Ability to specify additional `include` paths for each agent to monitor or reference beyond its base `folder`.
-- [ ] **CLI Portability Tools**
-  - Implement a "Copy Full CLI Command" button in the agent UI.
-  - Generates the exact command needed to resume the session manually in an external terminal (e.g., `cd D:\Project && gemini --resume 1a2b3c...`).
-- [ ] **Optional Startup Management**
-  - Ability to toggle "Spawn at Startup" on a per-agent basis.
-  - Agents with startup disabled will appear in the roster but remain in a "Hibernating" state until manually started.
-- [ ] **Scheduled Task Engine**
-  - Implement a scheduler for recurring agent tasks (e.g., "Every 2 hours, audit the codebase for tech debt").
-  - Support for one-off scheduled prompts ("At 5 PM, summarize the day's progress").
-  - UI for managing, pausing, and auditing scheduled executions.
+- [x] **CLI Portability Tools**
+  - Expose agent identity, workspace, provider, status, and worktree state through scriptable CLI commands.
+  - Keep direct provider resume commands as provider-runtime implementation details rather than the primary user contract.
+- [x] **Session Lifecycle Management**
+  - Preserve inactive agents in the roster and allow users to start, pause, resume, kill, clone, and reassign sessions explicitly.
+- [x] **Scheduled Task Engine**
+  - Implement scheduled workflow triggers and scheduled run instances.
+  - Support interval, daily, weekly, and one-time scheduled workflow launches.
+  - Provide UI and backend commands for managing, pausing, running, and deleting scheduled executions.
 
 ## Phase 3: Communication & Orchestration
 
@@ -66,7 +67,7 @@ _Goal: Enable collaborative workflows between isolated agent instances._
   - Implement a message bus (Pub/Sub) in the Rust backend.
   - **Deterministic Routing Engine**: Define UI-based rules for routing JSON outputs between agents.
 - [ ] **Human-in-the-Loop (HITL) Queue**
-  - Centralized approval UI for sensitive agent actions.
+  - Expand the current completion Queue into a centralized approval and interruption surface for sensitive agent actions.
 - [ ] **Context Janitor (Memory Management)**
   - Automated summarization workflows to compress context windows when token limits are approached.
 

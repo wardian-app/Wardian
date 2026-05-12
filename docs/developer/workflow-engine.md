@@ -1,6 +1,6 @@
 # Workflow Engine Architecture
 
-The Wardian Workflow Engine is a **Deterministic, Event-Driven Execution Environment** designed for multi-agent orchestration. It supports periodic triggers, conditional logic, and stateful memory.
+The Wardian Workflow Engine is a **Deterministic, Event-Driven Execution Environment** designed for multi-agent orchestration. It supports manual, scheduled, and listener-style triggers; conditional logic; loops; waits; agent execution modes; shared storage; and telemetry that feeds both the workflow UI and the user-facing Queue.
 
 ## 🧱 Core Concepts
 
@@ -16,6 +16,9 @@ Unlike traditional DAGs, Wardian supports **Cycles** and **Loops** through a pul
 - **Consumption**: A downstream node only executes if it has "unconsumed pulses" from its dependencies.
 - **Wait Nodes**: Specifically require a pulse from *every* dependency before triggering.
 
+### 3. The Execution Queue
+Each run owns a FIFO queue of candidate node IDs. The engine seeds the queue from trigger entry points, pops one node at a time, validates dependency consumption, executes the node, stores output in the registry, and enqueues downstream candidates. This keeps graph execution inspectable without making each agent node responsible for orchestrating the rest of the graph.
+
 ## 🚀 Execution Flow
 
 1. **Trigger Phase**:
@@ -24,14 +27,15 @@ Unlike traditional DAGs, Wardian supports **Cycles** and **Loops** through a pul
    - **Manual**: Triggered via the `run_workflow` Tauri command.
 2. **Initialization**:
    - Resolves the `WorkflowDefinition` from JSON.
-   - Sets up the `Registry` and `Queue` (identifying entry points).
+   - Sets up the `Registry` and execution queue by identifying entry-point candidates.
 3. **The Loop**:
-   - Pops a node ID from the `Queue`.
+   - Pops a candidate node ID from the execution queue.
    - Validates dependency satisfaction (Transactional Logic).
    - Executes node-specific logic (see below).
    - Updates the `Registry` and pulses downstream nodes.
 4. **Finalization**:
    - Emits telemetry events (`workflow-telemetry`) for real-time UI visualization.
+   - Emits workflow completion status so the frontend can add completion or failure cards to the Queue.
    - Persists `shared_storage.json` if memory nodes were used.
 
 ## 🧩 Node Types & Logic

@@ -4,7 +4,7 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**Local command center for multi-agent CLI workflows** — see every session, swap skills on the fly, and chain agents into deterministic pipelines.
+**GUI command center for multi-agent CLI workflows** — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian.
 
 [![CI](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml)
 [![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend&label=frontend%20coverage)](https://codecov.io/gh/tangemicioglu/Wardian)
@@ -21,7 +21,7 @@
 
 > 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/tangemicioglu/Wardian/issues) when something breaks.
 
-Wardian is an **Integrated Agent Environment** — a desktop governance layer for AI orchestration. It centralizes PTY management, telemetry, and shared context into a unified Command Center, designed for developers who need to manage multiple long-running agent sessions across multiple projects.
+Wardian is an **Integrated Agent Environment** — a GUI-first governance layer for AI orchestration. It centralizes PTY management, live telemetry, completion queues, workflow execution, and shared context into a unified desktop Command Center for developers managing many long-running agent sessions across multiple projects. The bundled `wardian` CLI gives agents a textual control surface for discovering their own identity, coordinating peers, and controlling Wardian without driving the graphical app.
 
 ---
 
@@ -72,6 +72,7 @@ For complete user and developer docs, start here:
 - [Documentation Index](docs/index.md)
 - [User Guide Index](docs/guide/index.md)
 - [Wardian CLI](docs/guide/cli.md)
+- [Queue](docs/guide/queue.md)
 - [Workflow Reference](docs/workflows/index.md)
 - [Developer Index](docs/developer/index.md)
 
@@ -98,6 +99,8 @@ Unlike generic terminal wrappers or monolithic prompt orchestrators, Wardian foc
 
 - **Scoped Skill Management**: Wardian doesn't just send system prompts. It uses filesystem-based junctions to inject or strip real capabilities (scripts, tools, configs) from an agent's workspace in real-time.
 - **Deterministic-Agentic Hybrid**: Wardian's pulse-based workflow engine pairs strict, deterministic execution with agentic flexibility. Instead of opaque, API-driven chains, you build complex automation **locally**—retaining full control over the execution flow while allowing agents to handle the creative problem-solving within each node.
+- **Agent-Facing Control Plane**: The `wardian` CLI shares state and live-control protocols with the desktop app, so agents can inspect rosters, spawn reviewers, send prompts, wait for status changes, watch output, and run workflows without scraping or automating the GUI.
+- **Completion Queue**: Wardian captures agent completions and workflow outcomes into a durable Queue view so finished work does not disappear into terminal scrollback.
 - **High-Fidelity Status Tracking**: Wardian actively parses raw PTY streams to detect complex occupancy states (`Idle`, `Processing`, `Action Needed`) while monitoring per-process CPU and memory usage.
 
 > Explore our [Key Features guide](docs/features.md) for more technical comparisons.
@@ -120,10 +123,15 @@ Scale your workflows by coordinating independent, specialized agents rather than
 
 - **Persona Class System**: Spawn new agents from pre-configured default classes (e.g., Coder, Architect, Researcher) or define custom personas tailored exactly to your repository's conventions.
 - **Broadcast & Bulk Actions**: Dispatch unified instructions, project context, or terminal commands to all agents or a filtered subset simultaneously via the global Command Panel.
+- **Queue View**: Review unread completions from agents and workflow runs, expand long summaries, and clear completed items after triage.
 
 ### Wardian CLI
 
-The desktop app installs a `wardian` command into the user Wardian bin directory. Use `wardian agent`, `wardian agent <name-or-uuid>`, and `wardian agent list --scope all` to inspect active or persisted agent identity from a terminal. See the [CLI guide](docs/guide/cli.md) for output fields, filters, environment variables, and exit codes.
+The desktop app installs a `wardian` command into the user Wardian bin directory for agents and automation. Agents use it to inspect active or persisted peers, spawn and clone sessions, manage Wardian worktrees, send prompts, wait for status transitions, watch retained output, and run saved workflows through the app-owned backend. See the [CLI guide](docs/guide/cli.md) for command examples, output fields, filters, environment variables, live-control requirements, and exit codes.
+
+### Workflow Engine
+
+Wardian workflows combine a visual builder with a Rust execution engine. Manual triggers, scheduled triggers, file listeners, agent nodes, branch/loop/wait control, shared storage, and run telemetry all flow through the same deterministic runtime model.
 
 ---
 
@@ -145,8 +153,8 @@ Wardian leverages native OS capabilities for high-performance terminal emulation
 
 Wardian is evolving toward a fully autonomous home for your agents.
 
-- **Phase 1-2**: Dual-Sidebar UI, PTY Grid, Shared Habitat, CLI Utility. [ALMOST-DONE]
-- **Phase 3-4**: Agent-to-Agent IPC, Human-in-the-loop Queue, and Cross-Platform Hardening. [ACTIVE]
+- **Phase 1-2**: Dual-Sidebar UI, PTY Grid, Shared Habitat, CLI Utility, live CLI control, agent cloning, worktrees, and scheduled workflow foundations. [DONE]
+- **Phase 3-4**: Agent-to-Agent IPC, HITL approval queue expansion, workflow hardening, and cross-platform runtime polish. [ACTIVE]
 - **Phase 5**: Swarm Visualization, Plugins, and File-System Watcher Hooks. [PLANNED]
 
 Full details available in [ROADMAP.md](ROADMAP.md).

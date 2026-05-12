@@ -6,6 +6,8 @@ This folder contains user guides, workflow references, developer architecture no
 
 - [Getting Started](./guide/getting-started.md)
 - [UI Overview](./guide/ui-overview.md)
+- [Wardian CLI](./guide/cli.md)
+- [Queue](./guide/queue.md)
 - [Workflows](./workflows/index.md)
 - [Key Features](./features.md)
 - [Provider Runtimes](./providers.md)
@@ -18,6 +20,8 @@ This folder contains user guides, workflow references, developer architecture no
 - [Explorer](./guide/explorer.md)
 - [Watchlists](./guide/watchlists.md)
 - [Command Panel](./guide/command-panel.md)
+- [Wardian CLI](./guide/cli.md)
+- [Queue](./guide/queue.md)
 - [Source Control](./guide/source-control.md)
 - [Settings](./guide/settings.md)
 

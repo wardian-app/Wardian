@@ -14,6 +14,7 @@ Use this index to find user-facing documentation by task.
 - [Library](./library.md)
 - [Command Panel](./command-panel.md)
 - [Watchlists](./watchlists.md)
+- [Queue](./queue.md)
 - [Explorer](./explorer.md)
 
 ## Source Control and Runtime Settings

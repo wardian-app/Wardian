@@ -16,12 +16,13 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Worker Threads**:
   - **Heartbeat (Scheduler)**: Handles periodic tasks and cron triggers.
   - **Metrics Push**: Pushes system/agent resource usage to the UI via Tauri events.
+- **Queue Persistence**: Completion triage state is stored under the active Wardian home so agent and workflow outcomes survive app restarts.
 
 ### 2. The Logical Layer (Workflow Engine)
 
 - **Deterministic Execution**: Detailed in [Workflow Engine Architecture](./workflow-engine.md).
 - **Shared Registry**: A global Handlebars-based registry where agent outputs are stored for cross-agent referencing.
-- **Node Execution**: Deterministic execution of workflow nodes (loops, triggers, agent calls).
+- **Node Execution Queue**: Deterministic execution of workflow nodes (loops, triggers, waits, branches, memory, commands, and agent calls) through a backend queue of candidate node IDs.
 - **Injection Logic**: Solves CLI input limits by writing prompts to temp files (`~\.gemini\tmp\wardian-1`) and using `<` redirection.
 
 ### 2.5 Memory and Knowledge
@@ -36,6 +37,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Passive Observation**: The UI primarily observes and edits the state; it does not manage process lifecycles.
 - **Visual Builder**: A specialized canvas for designing complex multi-agent workflows, featuring the [Integrated Variable Assistant](./visual-builder.md).
 - **Dynamic Grid**: A responsive grid system for monitoring multiple terminal TUIs simultaneously.
+- **Queue View**: A triage surface for unread agent completions and workflow outcomes.
 
 ## 📡 Communication (IPC)
 
@@ -48,4 +50,4 @@ Wardian uses a bidirectional event system, detailed in [IPC and Event Governance
 
 ## Wardian CLI
 
-The `crates/wardian-cli` binary shares DTOs, paths, migrations, identity filters, and the live control protocol through `wardian-core`. For read commands it first tries the running desktop app's local control endpoint for the same `WARDIAN_HOME` and falls back to `$WARDIAN_HOME/state.db` when the app is not running. The desktop app stages the binary as a Tauri resource and installs it into the user Wardian bin directory on startup.
+The `crates/wardian-cli` binary shares DTOs, paths, migrations, identity filters, and the live control protocol through `wardian-core`. Wardian remains GUI/app-first; the CLI exists so agents and automation can inspect and control Wardian through a stable textual surface. For read commands it first tries the running desktop app's local control endpoint for the same `WARDIAN_HOME` and falls back to `$WARDIAN_HOME/state.db` when the app is not running. Live-control commands cover agent lifecycle, message delivery, watch/wait coordination, worktree assignment, and workflow run control. The desktop app stages the binary as a Tauri resource and installs it into the user Wardian bin directory on startup.
