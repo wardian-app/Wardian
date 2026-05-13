@@ -186,6 +186,7 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
+        let claude = config.claude_config();
         let mut args: Vec<String> = vec![
             "--verbose".into(),
             "--input-format".into(),
@@ -246,37 +247,37 @@ impl AgentProvider for ClaudeProvider {
         }
 
         // Claude-specific parameters
-        if let Some(ref mode) = config.permission_mode {
+        if let Some(ref mode) = claude.permission_mode {
             if !mode.trim().is_empty() {
                 args.push("--permission-mode".into());
                 args.push(mode.clone());
             }
         }
-        if let Some(turns) = config.max_turns {
+        if let Some(turns) = claude.max_turns {
             if turns > 0 {
                 args.push("--max-turns".into());
                 args.push(turns.to_string());
             }
         }
-        if let Some(ref tools) = config.allowed_tools {
+        if let Some(ref tools) = claude.allowed_tools {
             for tool in tools {
                 args.push("--allowedTools".into());
                 args.push(tool.clone());
             }
         }
-        if let Some(ref tools) = config.disallowed_tools {
+        if let Some(ref tools) = claude.disallowed_tools {
             for tool in tools {
                 args.push("--disallowedTools".into());
                 args.push(tool.clone());
             }
         }
-        if let Some(ref prompt) = config.append_system_prompt {
+        if let Some(ref prompt) = claude.append_system_prompt {
             if !prompt.trim().is_empty() {
                 args.push("--append-system-prompt".into());
                 args.push(prompt.clone());
             }
         }
-        if let Some(ref path) = config.mcp_config {
+        if let Some(ref path) = claude.mcp_config {
             if !path.trim().is_empty() {
                 args.push("--mcp-config".into());
                 args.push(path.clone());
@@ -367,9 +368,18 @@ impl AgentProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wardian_core::models::{ClaudeProviderConfig, ProviderConfig};
 
     fn make_provider() -> ClaudeProvider {
         ClaudeProvider::new()
+    }
+
+    fn make_claude_config(claude: ClaudeProviderConfig) -> AgentConfig {
+        AgentConfig {
+            provider: "claude".into(),
+            provider_config: ProviderConfig::Claude(claude),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -515,10 +525,10 @@ mod tests {
     #[test]
     fn spawn_args_permission_mode() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_claude_config(ClaudeProviderConfig {
             permission_mode: Some("auto-accept".into()),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--permission-mode".to_string()));
         assert!(args.contains(&"auto-accept".to_string()));
@@ -527,10 +537,10 @@ mod tests {
     #[test]
     fn spawn_args_max_turns() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_claude_config(ClaudeProviderConfig {
             max_turns: Some(10),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--max-turns".to_string()));
         assert!(args.contains(&"10".to_string()));
@@ -539,10 +549,10 @@ mod tests {
     #[test]
     fn spawn_args_allowed_tools() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_claude_config(ClaudeProviderConfig {
             allowed_tools: Some(vec!["Read".into(), "Write".into()]),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         let count = args.iter().filter(|a| *a == "--allowedTools").count();
         assert_eq!(count, 2);
@@ -551,10 +561,10 @@ mod tests {
     #[test]
     fn spawn_args_disallowed_tools() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_claude_config(ClaudeProviderConfig {
             disallowed_tools: Some(vec!["Bash".into()]),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--disallowedTools".to_string()));
         assert!(args.contains(&"Bash".to_string()));
@@ -563,10 +573,10 @@ mod tests {
     #[test]
     fn spawn_args_append_system_prompt() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_claude_config(ClaudeProviderConfig {
             append_system_prompt: Some("Always respond in JSON".into()),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--append-system-prompt".to_string()));
         assert!(args.contains(&"Always respond in JSON".to_string()));
@@ -575,10 +585,10 @@ mod tests {
     #[test]
     fn spawn_args_mcp_config() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_claude_config(ClaudeProviderConfig {
             mcp_config: Some("/path/to/mcp.json".into()),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--mcp-config".to_string()));
         assert!(args.contains(&"/path/to/mcp.json".to_string()));
