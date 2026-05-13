@@ -125,6 +125,17 @@ pub fn build_program_launch(program: &str, args: &[String]) -> Result<ShellLaunc
     build_program_launch_with_settings(program, args, &settings, &available)
 }
 
+pub fn build_copyable_program_command(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+) -> Result<String, String> {
+    let settings = load_shell_settings().unwrap_or_default();
+    let available = list_available_shells();
+    build_copyable_program_command_with_settings(program, args, cwd, envs, &settings, &available)
+}
+
 pub fn build_interactive_shell_launch() -> Result<InteractiveShellLaunchSpec, String> {
     let settings = load_shell_settings().unwrap_or_default();
     let available = list_available_shells();
@@ -267,6 +278,28 @@ pub fn build_program_launch_with_settings(
         executable: shell.executable,
         args,
     })
+}
+
+pub fn build_copyable_program_command_with_settings(
+    program: &str,
+    program_args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+    settings: &ShellSettings,
+    available: &[ShellOption],
+) -> Result<String, String> {
+    if program.trim().is_empty() {
+        return Err("Missing program executable".to_string());
+    }
+
+    let shell = resolve_shell(settings, available)?;
+    Ok(build_copyable_command_text(
+        &shell.id,
+        program,
+        program_args,
+        cwd,
+        envs,
+    ))
 }
 
 pub fn build_interactive_shell_launch_with_settings(
@@ -481,6 +514,73 @@ fn build_posix_invocation(program: &str, program_args: &[String]) -> String {
     fragments.push(quote_posix_arg(program));
     fragments.extend(program_args.iter().map(|arg| quote_posix_arg(arg)));
     fragments.join(" ")
+}
+
+fn build_copyable_command_text(
+    shell_id: &str,
+    program: &str,
+    program_args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+) -> String {
+    match shell_id {
+        "cmd" => build_copyable_cmd_command(program, program_args, cwd, envs),
+        "powershell" | "pwsh" => {
+            build_copyable_powershell_command(program, program_args, cwd, envs)
+        }
+        _ => build_copyable_posix_command(shell_id, program, program_args, cwd, envs),
+    }
+}
+
+fn build_copyable_cmd_command(
+    program: &str,
+    program_args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+) -> String {
+    let mut fragments = Vec::with_capacity(envs.len() + 2);
+    for (key, value) in envs {
+        fragments.push(format!("set \"{}={}\"", key, value.replace('"', r#"\""#)));
+    }
+    fragments.push(build_shell_cd_command("cmd", cwd).trim().to_string());
+    fragments.push(build_cmd_invocation(program, program_args));
+    fragments.join(" && ")
+}
+
+fn build_copyable_powershell_command(
+    program: &str,
+    program_args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+) -> String {
+    let mut fragments = Vec::with_capacity(envs.len() + 2);
+    for (key, value) in envs {
+        fragments.push(format!("$env:{} = {}", key, quote_powershell_arg(value)));
+    }
+    fragments.push(format!(
+        "Set-Location -LiteralPath {} -ErrorAction Stop",
+        quote_powershell_arg(&shell_cd_path("pwsh", cwd))
+    ));
+    fragments.push(build_powershell_invocation(program, program_args));
+    fragments.join("; ")
+}
+
+fn build_copyable_posix_command(
+    shell_id: &str,
+    program: &str,
+    program_args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+) -> String {
+    let mut fragments = Vec::with_capacity(envs.len() + 2);
+    fragments.push(build_shell_cd_command(shell_id, cwd).trim().to_string());
+    let mut invocation_prefix = envs
+        .iter()
+        .map(|(key, value)| format!("{}={}", key, quote_posix_arg(value)))
+        .collect::<Vec<_>>();
+    invocation_prefix.push(build_program_command_text(shell_id, program, program_args));
+    fragments.push(invocation_prefix.join(" "));
+    fragments.join(" && ")
 }
 
 fn quote_cmd_arg(value: &str) -> String {
@@ -824,10 +924,11 @@ fn is_windows_cmd_shim(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        CodexRuntimePolicy, ShellOption, ShellSettings,
         build_interactive_shell_launch_with_settings, build_program_launch_with_settings,
         build_shell_cd_command, build_shell_command_with_settings, default_shell_args,
         load_shell_settings_from_path, save_shell_settings_to_path, shell_id_from_executable,
-        shell_option, CodexRuntimePolicy, ShellOption, ShellSettings,
+        shell_option,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
