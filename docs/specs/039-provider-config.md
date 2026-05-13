@@ -62,9 +62,11 @@ Provider examples:
 
 The top-level `provider` remains the launch provider. New configs must have a
 matching `provider_config.type`. Explicit IPC updates with mismatched provider
-config are rejected. Compatibility loads normalize mismatches to a default
-provider config for the selected provider so wrong-provider fields are never
-used to assemble launch arguments.
+config are rejected. Compatibility loads fall back to valid legacy flat fields
+when nested provider config is malformed or mismatched. If no legacy provider
+fields are present, the load normalizes to a default provider config for the
+selected provider so wrong-provider fields are never used to assemble launch
+arguments.
 
 ## Compatibility
 
@@ -76,7 +78,9 @@ Routine whole-state saves preserve legacy-flat serialization for agents that
 were loaded from legacy flat state. Wardian emits the nested shape only for new
 agents, clones, explicit config updates, or a future explicit migration path.
 
-If both nested and flat fields are present, nested `provider_config` wins.
+If both nested and flat fields are present, valid matching nested
+`provider_config` wins. Invalid or mismatched nested config falls back to valid
+legacy flat fields before defaulting.
 
 ## Runtime Fields
 
