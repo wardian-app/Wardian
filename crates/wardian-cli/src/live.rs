@@ -6,9 +6,9 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
-    AgentWorktreeMutationResponse, AgentWorktreeSummary, ControlRequest, DeliveryDetail,
-    MessageInputMode, MessageOrigin, SendMessageResponse, WorkflowListResponse, WorkflowResponse,
-    WorkflowSummary,
+    AgentWorktreeMutationResponse, AgentWorktreeSummary, AskResponse, ControlRequest,
+    DeliveryDetail, MessageInputMode, MessageOrigin, ReplyResponse, ReplyStatus,
+    SendMessageResponse, StructuredReply, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
@@ -33,6 +33,11 @@ enum ControlOperation {
     WorkflowRun,
     WorkflowStop,
     SendMessage,
+    Ask {
+        requested: Duration,
+        target: String,
+    },
+    SubmitReply,
     AgentWatch {
         requested: Duration,
         target: String,
@@ -165,6 +170,8 @@ impl fmt::Display for WaitTargetNotFoundError {
 impl std::error::Error for WaitTargetNotFoundError {}
 
 pub struct AskAgentResponse {
+    pub request_id: Option<String>,
+    pub reply: Option<StructuredReply>,
     pub delivery: Vec<DeliveryDetail>,
     pub watch: AgentWatchResponse,
 }
@@ -391,6 +398,25 @@ pub fn send_message_with_input_mode(
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
+pub fn submit_reply(
+    request_id: &str,
+    status: ReplyStatus,
+    body: &str,
+) -> io::Result<ReplyResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::SubmitReply,
+        send_request(ControlRequest::SubmitReply {
+            request_id: request_id.to_string(),
+            status,
+            body: body.to_string(),
+            origin: current_message_origin(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
 pub fn wait_agent_until(target: &str, until: &str, timeout: Duration) -> io::Result<AgentIdentity> {
     wait_agent_until_after_snapshot(target, until, timeout, None)
 }
@@ -493,6 +519,9 @@ pub fn ask_agent(
     tail_bytes: Option<usize>,
     timeout: Duration,
 ) -> io::Result<AskAgentResponse> {
+    if condition == "reply" {
+        return ask_agent_structured(target, message, thread, tail_bytes, timeout);
+    }
     send_message_and_watch_condition_with_output_echo_guard(
         target,
         message,
@@ -503,6 +532,39 @@ pub fn ask_agent(
         timeout,
         ask_prompt_echo_guard(condition, message),
     )
+}
+
+fn ask_agent_structured(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+) -> io::Result<AskAgentResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::Ask {
+            requested: timeout,
+            target: target.to_string(),
+        },
+        send_request(ControlRequest::Ask {
+            target: target.to_string(),
+            message: message.to_string(),
+            thread: thread.map(str::to_string),
+            tail_bytes,
+            timeout_ms: Some(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+            origin: current_message_origin(),
+        }),
+    )?;
+    let response: AskResponse =
+        serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(AskAgentResponse {
+        request_id: Some(response.request_id),
+        reply: Some(response.reply),
+        delivery: response.delivery,
+        watch: response.watch,
+    })
 }
 
 pub fn send_message_and_watch_condition(
@@ -558,6 +620,8 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         output_echo_guard,
     )?;
     Ok(AskAgentResponse {
+        request_id: None,
+        reply: None,
         delivery: sent.delivery,
         watch,
     })
@@ -588,6 +652,10 @@ fn timeout_block(
                 io::ErrorKind::TimedOut,
                 WatchTimeoutError::new(&target, &until, "unknown"),
             )),
+            ControlOperation::Ask { target, .. } => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                WatchTimeoutError::new(&target, "reply", "unknown"),
+            )),
             _ => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Wardian control endpoint timed out",
@@ -611,8 +679,10 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentWorktreeDisable
         | ControlOperation::WorkflowRun
         | ControlOperation::WorkflowStop
-        | ControlOperation::SendMessage => CONTROL_MUTATION_TIMEOUT,
+        | ControlOperation::SendMessage
+        | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWorktreeList => CONTROL_TIMEOUT,
+        ControlOperation::Ask { requested, .. } => watch_timeout_for(*requested),
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
     }
 }
