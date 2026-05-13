@@ -18,6 +18,46 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        with:
+          fetch-depth: 0
+      - name: Sync release PR Cargo lockfile
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          release_branch="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --base main \
+              --label "autorelease: pending" \
+              --json headRefName \
+              --jq '.[0].headRefName'
+          )"
+
+          if [ -z "$release_branch" ] || [ "$release_branch" = "null" ]; then
+            echo "No pending Release Please PR branch found."
+            exit 1
+          fi
+
+          git fetch origin "$release_branch"
+          git checkout -B "$release_branch" "origin/$release_branch"
+          cargo metadata --format-version 1 --no-deps > /dev/null
+
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already matches release manifests."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: sync release Cargo.lock"
+          git push origin "HEAD:$release_branch"
       - name: Dispatch asset build
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:

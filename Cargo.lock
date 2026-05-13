@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "Wardian"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -4989,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "wardian-cli"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "clap",
  "rusqlite",
@@ -5002,7 +5002,7 @@ dependencies = [
 
 [[package]]
 name = "wardian-core"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
