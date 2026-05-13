@@ -1,3 +1,57 @@
+export type ProviderName = "claude" | "codex" | "gemini" | "opencode" | "mock";
+
+export interface ClaudeProviderConfig {
+    type: "claude";
+    permission_mode?: "default" | "plan" | "auto-accept";
+    max_turns?: number;
+    allowed_tools?: string[];
+    disallowed_tools?: string[];
+    append_system_prompt?: string;
+    mcp_config?: string;
+}
+
+export interface GeminiProviderConfig {
+    type: "gemini";
+    sandbox?: boolean;
+    yolo?: boolean;
+    approval_mode?: "default" | "auto_edit" | "yolo" | "plan" | string;
+    policy?: string[];
+    experimental_acp?: boolean;
+    allowed_mcp_server_names?: string[];
+    extensions?: string[];
+    screen_reader?: boolean;
+    output_format?: "text" | "json" | "stream-json";
+}
+
+export interface CodexProviderConfig {
+    type: "codex";
+    sandbox_mode?: "read-only" | "workspace-write" | "danger-full-access";
+    approval_policy?: "untrusted" | "on-failure" | "on-request" | "never";
+    profile?: string;
+    full_auto?: boolean;
+    search?: boolean;
+    skip_git_repo_check?: boolean;
+    ephemeral?: boolean;
+    cleared_provider_sessions?: string[];
+}
+
+export interface OpenCodeProviderConfig {
+    type: "opencode";
+    agent?: string;
+    port?: number;
+}
+
+export interface MockProviderConfig {
+    type: "mock";
+}
+
+export type ProviderConfig =
+    | ClaudeProviderConfig
+    | GeminiProviderConfig
+    | CodexProviderConfig
+    | OpenCodeProviderConfig
+    | MockProviderConfig;
+
 export interface AgentConfig {
     session_id: string;
     session_name: string;
@@ -5,9 +59,12 @@ export interface AgentConfig {
     folder: string;
     resume_session?: string;
     is_off: boolean;
-    provider?: string;
+    provider?: ProviderName | string;
     debug?: boolean;
     model?: string;
+    provider_config?: ProviderConfig;
+
+    // Legacy flat provider fields accepted from older persisted configs.
     sandbox?: boolean;
     yolo?: boolean;
     approval_mode?: "default" | "auto_edit" | "yolo" | "plan";
