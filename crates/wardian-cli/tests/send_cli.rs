@@ -108,3 +108,56 @@ fn send_wait_until_rejects_class_selector_before_app_lookup() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""code":"not_supported""#));
 }
+
+#[test]
+fn send_as_command_to_all_rejects_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args(["send", "--to", "all", "--as-command", "/goal test"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+    assert!(stderr.contains("--as-command requires a single agent name or uuid"));
+}
+
+#[test]
+fn send_as_command_to_class_rejects_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args(["send", "--to", "class:Coder", "--as-command", "/status"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+    assert!(stderr.contains("--as-command requires a single agent name or uuid"));
+}
+
+#[test]
+fn send_as_command_rejects_thread_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "send",
+            "--to",
+            "coder-a1",
+            "--thread",
+            "review",
+            "--as-command",
+            "/goal test",
+        ])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+    assert!(stderr.contains("--as-command cannot be combined with --thread"));
+}

@@ -13,6 +13,7 @@ use args::{
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
+use wardian_core::control::MessageInputMode;
 use wardian_core::identity::{self, ListFilters, Scope};
 
 fn main() {
@@ -373,33 +374,53 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
 
 fn handle_send(args: SendArgs) -> Result<String, CliError> {
     let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
+    let input_mode = if args.as_command {
+        validate_single_agent_target(&args.to, "send --as-command")?;
+        validate_send_command_thread(args.thread.as_deref())?;
+        MessageInputMode::Command
+    } else {
+        MessageInputMode::Message
+    };
 
     let response = if let Some(until) = args.wait_until.as_deref() {
         validate_single_agent_target(&args.to, "send --wait-until")?;
         let timeout = parse_timeout(&args.timeout)?;
-        let watch = live::send_message_and_watch(
+        let response = live::send_message_and_watch(
             &args.to,
             &message,
             args.thread.as_deref(),
+            input_mode,
             until,
             timeout,
         )
+        .map_err(control_error)?;
+        let watch = response.watch;
+        serde_json::json!({
+            "schema": 1,
+            "ok": true,
+            "target": args.to,
+            "input_mode": input_mode,
+            "status": watch.agent.status,
+            "delivery": response.delivery,
+            "cursor": watch.cursor,
+        })
+    } else {
+        let sent = if input_mode == MessageInputMode::Message {
+            live::send_message(&args.to, &message, args.thread.as_deref())
+        } else {
+            live::send_message_with_input_mode(
+                &args.to,
+                &message,
+                args.thread.as_deref(),
+                input_mode,
+            )
+        }
         .map_err(control_error)?;
         serde_json::json!({
             "schema": 1,
             "ok": true,
             "target": args.to,
-            "status": watch.agent.status,
-            "delivery": watch.delivery.delivery,
-            "cursor": watch.cursor,
-        })
-    } else {
-        let sent = live::send_message(&args.to, &message, args.thread.as_deref())
-            .map_err(control_error)?;
-        serde_json::json!({
-            "schema": 1,
-            "ok": true,
-            "target": args.to,
+            "input_mode": input_mode,
             "delivery": sent.delivery,
         })
     };
@@ -465,6 +486,17 @@ fn validate_ask_thread(thread: Option<&str>) -> Result<(), CliError> {
             ExitCode::Generic,
             "not_supported",
             "--thread is not supported by wardian ask yet",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_send_command_thread(thread: Option<&str>) -> Result<(), CliError> {
+    if thread.is_some() {
+        return Err(CliError::backend(
+            ExitCode::Generic,
+            "not_supported",
+            "--as-command cannot be combined with --thread",
         ));
     }
     Ok(())
@@ -859,6 +891,7 @@ mod tests {
                 provider: "mock".to_string(),
                 runtime_state: "live_pty_available".to_string(),
                 delivery_state: "submitted".to_string(),
+                input_mode: MessageInputMode::Message,
                 error: None,
             }],
             watch: wardian_core::control::AgentWatchResponse {

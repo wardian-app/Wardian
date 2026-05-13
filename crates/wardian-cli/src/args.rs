@@ -91,6 +91,10 @@ pub struct SendArgs {
     #[arg(long)]
     pub thread: Option<String>,
 
+    /// Send the message body as a provider slash command without sender attribution
+    #[arg(long = "as-command")]
+    pub as_command: bool,
+
     /// Wait until the target reaches this status after sending
     #[arg(long = "wait-until")]
     pub wait_until: Option<String>,
@@ -253,6 +257,26 @@ mod tests {
     fn parses_agent_target_shorthand() {
         let cli = Cli::try_parse_from(["wardian", "agent", "coder-a1"]).unwrap();
         assert!(matches!(cli.command, Command::Agent(_)));
+    }
+
+    #[test]
+    fn parses_send_as_command() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "send",
+            "--to",
+            "Wardian-Codex",
+            "--as-command",
+            "/goal test",
+        ])
+        .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+
+        assert!(args.as_command);
+        assert_eq!(args.to, "Wardian-Codex");
+        assert_eq!(args.message.as_deref(), Some("/goal test"));
     }
 
     #[test]
