@@ -9,8 +9,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ControlRequest, DeliveryDetail,
-    DeliveryErrorDetail, MessageOrigin, OkResponse, SendMessageResponse, WatchAgentSnapshot,
-    WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
+    DeliveryErrorDetail, MessageInputMode, MessageOrigin, OkResponse, SendMessageResponse,
+    WatchAgentSnapshot, WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse,
+    WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -214,6 +215,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             target,
             message,
             thread,
+            input_mode,
             origin,
         } => {
             let state = app.state::<AppState>();
@@ -223,6 +225,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 &target,
                 &message,
                 thread.as_deref(),
+                input_mode,
                 origin.as_ref(),
             )
             .await?;
@@ -601,9 +604,10 @@ async fn deliver_message_to_target(
     target: &str,
     message: &str,
     thread: Option<&str>,
+    input_mode: MessageInputMode,
     origin: Option<&MessageOrigin>,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
-    validate_send_message_thread(thread)?;
+    validate_send_message_options(target, thread, input_mode)?;
     let session_ids = resolve_send_targets_in_state(state, target).await;
     if session_ids.is_empty() {
         return Err(ControlError::not_found(format!(
@@ -630,9 +634,14 @@ async fn deliver_message_to_target(
     for info in target_infos {
         match senders.get(&info.uuid).and_then(Clone::clone) {
             Some(tx) => {
-                let outbound_message =
-                    message_with_origin(state, message, origin, info.status == "action_required")
-                        .await;
+                let outbound_message = message_with_origin(
+                    state,
+                    message,
+                    input_mode,
+                    origin,
+                    info.status == "action_required",
+                )
+                .await;
                 let result = match wait_for_terminal_ready_for_control_send(state, &info).await {
                     Ok(()) => {
                         crate::utils::terminal_input::submit_prompt_chunks_via_sender(
@@ -653,6 +662,7 @@ async fn deliver_message_to_target(
                             provider: info.provider,
                             runtime_state: "live_pty_available".to_string(),
                             delivery_state: "submitted".to_string(),
+                            input_mode,
                             error: None,
                         };
                         delivered_session_ids.push(detail.uuid.clone());
@@ -666,6 +676,7 @@ async fn deliver_message_to_target(
                             "live_pty_available",
                             "send_failed",
                             error,
+                            input_mode,
                         );
                         record_delivery_attempt(state, &detail).await;
                         delivery.push(detail);
@@ -684,6 +695,7 @@ async fn deliver_message_to_target(
                     runtime_state,
                     "no_input_channel",
                     "missing sender",
+                    input_mode,
                 );
                 record_delivery_attempt(state, &detail).await;
                 delivery.push(detail);
@@ -714,9 +726,14 @@ async fn deliver_message_to_target(
 async fn message_with_origin(
     state: &AppState,
     message: &str,
+    input_mode: MessageInputMode,
     origin: Option<&MessageOrigin>,
     allow_bare_approval_response: bool,
 ) -> String {
+    if input_mode == MessageInputMode::Command {
+        return message.to_string();
+    }
+
     if allow_bare_approval_response && is_bare_approval_response(message) {
         return message.to_string();
     }
@@ -1214,6 +1231,23 @@ fn validate_send_message_thread(thread: Option<&str>) -> Result<(), ControlError
     Ok(())
 }
 
+fn validate_send_message_options(
+    target: &str,
+    thread: Option<&str>,
+    input_mode: MessageInputMode,
+) -> Result<(), ControlError> {
+    validate_send_message_thread(thread)?;
+
+    if input_mode == MessageInputMode::Command && (target == "all" || target.starts_with("class:"))
+    {
+        return Err(ControlError::not_supported(
+            "--as-command requires a single agent name or uuid",
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct DeliveryTargetInfo {
     uuid: String,
@@ -1256,6 +1290,7 @@ fn failed_delivery_detail(
     runtime_state: &str,
     error_code: &str,
     error_message: impl Into<String>,
+    input_mode: MessageInputMode,
 ) -> DeliveryDetail {
     DeliveryDetail {
         uuid: info.uuid,
@@ -1263,6 +1298,7 @@ fn failed_delivery_detail(
         provider: info.provider,
         runtime_state: runtime_state.to_string(),
         delivery_state: "failed".to_string(),
+        input_mode,
         error: Some(DeliveryErrorDetail {
             code: error_code.to_string(),
             message: error_message.into(),
@@ -1658,9 +1694,17 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(None, &state, "OpenCodeOne", "hello", None, None)
-            .await
-            .unwrap();
+        deliver_message_to_target(
+            None,
+            &state,
+            "OpenCodeOne",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
@@ -1871,9 +1915,17 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(None, &state, "CoderOne", "hello", None, None)
-            .await
-            .unwrap();
+        deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
@@ -1903,6 +1955,7 @@ mod tests {
             "CoderOne",
             "check this",
             None,
+            MessageInputMode::Message,
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
@@ -1915,6 +1968,51 @@ mod tests {
             b"From PlannerOne: check this".to_vec()
         );
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+    }
+
+    #[tokio::test]
+    async fn command_delivery_keeps_origin_unattributed_and_records_input_mode() {
+        let state = AppState::new();
+        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let delivery = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "/goal test",
+            None,
+            MessageInputMode::Command,
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), b"/goal test".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        assert_eq!(delivery[0].input_mode, MessageInputMode::Command);
+    }
+
+    #[test]
+    fn command_delivery_rejects_multi_target_selectors() {
+        let all =
+            validate_send_message_options("all", None, MessageInputMode::Command).unwrap_err();
+        let class = validate_send_message_options("class:Coder", None, MessageInputMode::Command)
+            .unwrap_err();
+
+        assert_eq!(all.code(), "not_supported");
+        assert_eq!(class.code(), "not_supported");
+        assert!(all
+            .to_string()
+            .contains("--as-command requires a single agent name or uuid"));
     }
 
     #[tokio::test]
@@ -1940,6 +2038,7 @@ mod tests {
             "CoderOne",
             "y",
             None,
+            MessageInputMode::Message,
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
@@ -1974,6 +2073,7 @@ mod tests {
             "CoderOne",
             "yes",
             None,
+            MessageInputMode::Message,
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
@@ -1989,9 +2089,17 @@ mod tests {
     async fn message_delivery_reports_missing_target_as_not_found() {
         let state = AppState::new();
 
-        let error = deliver_message_to_target(None, &state, "ghost", "hello", None, None)
-            .await
-            .unwrap_err();
+        let error = deliver_message_to_target(
+            None,
+            &state,
+            "ghost",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            None,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code(), "not_found");
         assert!(error
@@ -2004,9 +2112,17 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
 
-        let error = deliver_message_to_target(None, &state, "agent-1", "hello", None, None)
-            .await
-            .unwrap_err();
+        let error = deliver_message_to_target(
+            None,
+            &state,
+            "agent-1",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            None,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code(), "request_failed");
         assert!(error.to_string().contains("agent-1: no input channel"));
@@ -2032,9 +2148,17 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        let error = deliver_message_to_target(None, &state, "class:Coder", "hello", None, None)
-            .await
-            .unwrap_err();
+        let error = deliver_message_to_target(
+            None,
+            &state,
+            "class:Coder",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            None,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
@@ -2064,9 +2188,17 @@ mod tests {
             .unwrap()
             .insert("agent-1".to_string(), tx);
 
-        deliver_message_to_target(None, &state, "CoderOne", "hello", None, None)
-            .await
-            .unwrap();
+        deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(rx.recv().await.is_some());
         let agents = state.agents.lock().await;

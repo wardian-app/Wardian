@@ -141,6 +141,7 @@ Use `wardian send` for live inter-agent communication:
 wardian send "review this patch" --to reviewer-a1
 wardian send --stdin --to reviewer-a1
 wardian send --file prompt.md --to reviewer-a1
+wardian send --as-command "/goal test" --to reviewer-a1
 wardian send "status?" --to class:Coder
 wardian send "stand down" --to all
 wardian send "review this patch" --to reviewer-a1 --wait-until idle --timeout 10m
@@ -150,9 +151,30 @@ Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. Use
 `--wait-until` only with a single-agent target; broadcasts are for messages that
 should not block the current command.
 
+Normal sends preserve inter-agent attribution when Wardian knows the sender.
+Use `--as-command` when delivering provider slash commands that must be the
+first input token:
+
+```bash
+wardian send --as-command "/goal test" --to reviewer-a1
+printf '%s' '/status' | wardian send --stdin --as-command --to reviewer-a1
+```
+
+PowerShell:
+
+```powershell
+"/status" | wardian send --stdin --as-command --to reviewer-a1
+```
+
+`--as-command` sends the exact message body without a `From <sender>:` prefix,
+while still using the provider-aware submit path. It accepts only one explicit
+agent name or UUID and rejects `all`, `class:<ClassName>`, and `--thread` with
+`not_supported`.
+
 Successful sends include `delivery[]`. Failed delivery emits JSON on stderr with
-`details.delivery[]`, including `runtime_state`, `delivery_state`, and any input
-channel error.
+`details.delivery[]`, including `runtime_state`, `delivery_state`,
+`input_mode`, and any input channel error. Successful command sends also expose
+`input_mode: "command"` in the response for automation.
 
 `--thread` is reserved for grouped conversations. Until threading is implemented
 end-to-end, the running app rejects it with `not_supported` instead of silently

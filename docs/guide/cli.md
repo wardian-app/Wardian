@@ -63,6 +63,7 @@ wardian workflow run <id>
 wardian workflow stop <run-instance-id>
 wardian ask reviewer-a1 --stdin --until output:REVIEW_DONE --timeout 10m
 wardian send "review this" --to coder-a1
+wardian send --as-command "/goal test" --to coder-a1
 wardian send "review this" --to reviewer-a1 --wait-until idle --timeout 10m
 wardian send "status?" --to class:Coder
 wardian send "stand down" --to all
@@ -117,9 +118,24 @@ Mutating commands use Wardian's local control endpoint and require the desktop a
 
 `ask <target>` sends one prompt to one live agent and returns the response evidence observed after a pre-send watch cursor. It accepts the same message sources as `send`: inline text, `--stdin`, or `--file <path>`. The default completion condition is `status:idle`; use `--until output:<token>` for deterministic task handoff. `ask` rejects `all`, `class:<ClassName>`, and reserved `--thread` usage with `not_supported`.
 
-`send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. `--wait-until <status>` is available for single-agent targets and waits from a pre-send watch cursor for a newer matching status observation. `--thread` is reserved but not implemented yet; when the app is running, using it returns `not_supported`.
+`send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. By default, Wardian keeps inter-agent attribution and delivers messages with a `From <sender>:` prefix when sender context is available. Use `--as-command` for provider slash commands that must start at the first input token:
 
-Successful `send` responses include `delivery[]`. Failed or partial delivery returns a nonzero exit with JSON on stderr and `details.delivery[]`, including `runtime_state`, `delivery_state`, and provider-specific input errors.
+```bash
+wardian send --as-command "/goal test" --to coder-a1
+printf '%s' '/status' | wardian send --stdin --as-command --to coder-a1
+```
+
+PowerShell:
+
+```powershell
+"/status" | wardian send --stdin --as-command --to coder-a1
+```
+
+`--as-command` sends the exact message body without the attribution prefix while still using the normal provider-aware submit path. It accepts only one explicit agent name or UUID, rejects `all` and `class:<ClassName>` with `not_supported`, and cannot be combined with `--thread`.
+
+`--wait-until <status>` is available for single-agent targets and waits from a pre-send watch cursor for a newer matching status observation. `--thread` is reserved but not implemented yet; when the app is running, using it returns `not_supported`.
+
+Successful `send` responses include `input_mode` and `delivery[]`; command sends also include `delivery[].input_mode` so automation can confirm command delivery. Failed or partial delivery returns a nonzero exit with JSON on stderr and `details.delivery[]`, including `runtime_state`, `delivery_state`, and provider-specific input errors.
 
 List filters:
 

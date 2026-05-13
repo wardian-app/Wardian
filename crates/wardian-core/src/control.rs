@@ -54,6 +54,8 @@ pub enum ControlRequest {
         target: String,
         message: String,
         thread: Option<String>,
+        #[serde(default, skip_serializing_if = "MessageInputMode::is_message")]
+        input_mode: MessageInputMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<MessageOrigin>,
     },
@@ -74,6 +76,20 @@ pub enum ControlRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageOrigin {
     WardianAgent { session_id: String },
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageInputMode {
+    #[default]
+    Message,
+    Command,
+}
+
+impl MessageInputMode {
+    pub fn is_message(&self) -> bool {
+        matches!(self, Self::Message)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +141,8 @@ pub struct DeliveryDetail {
     pub provider: String,
     pub runtime_state: String,
     pub delivery_state: String,
+    #[serde(default)]
+    pub input_mode: MessageInputMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DeliveryErrorDetail>,
 }
@@ -347,6 +365,7 @@ mod tests {
             target: "all".to_string(),
             message: "hello".to_string(),
             thread: None,
+            input_mode: MessageInputMode::Message,
             origin: None,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -361,6 +380,7 @@ mod tests {
             target: "CoderOne".to_string(),
             message: "hello".to_string(),
             thread: None,
+            input_mode: MessageInputMode::Message,
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
@@ -374,6 +394,23 @@ mod tests {
     }
 
     #[test]
+    fn send_message_request_serializes_command_input_mode() {
+        let req = ControlRequest::SendMessage {
+            target: "CoderOne".to_string(),
+            message: "/goal test".to_string(),
+            thread: None,
+            input_mode: MessageInputMode::Command,
+            origin: Some(MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+
+        assert!(json.contains(r#""input_mode":"command""#));
+    }
+
+    #[test]
     fn send_message_request_accepts_missing_origin() {
         let json = r#"{"command":"send_message","target":"all","message":"hello","thread":null}"#;
         let req: ControlRequest = serde_json::from_str(json).unwrap();
@@ -384,6 +421,7 @@ mod tests {
                 target: "all".to_string(),
                 message: "hello".to_string(),
                 thread: None,
+                input_mode: MessageInputMode::Message,
                 origin: None,
             }
         );
@@ -509,6 +547,7 @@ mod tests {
             provider: "codex".to_string(),
             runtime_state: "live_pty_available".to_string(),
             delivery_state: "submitted".to_string(),
+            input_mode: MessageInputMode::Message,
             error: None,
         };
 
@@ -529,6 +568,7 @@ mod tests {
                 provider: "codex".to_string(),
                 runtime_state: "live_pty_available".to_string(),
                 delivery_state: "submitted".to_string(),
+                input_mode: MessageInputMode::Command,
                 error: None,
             }],
         };
@@ -537,6 +577,7 @@ mod tests {
 
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""delivery_state":"submitted""#));
+        assert!(json.contains(r#""input_mode":"command""#));
     }
 
     #[test]

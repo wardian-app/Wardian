@@ -7,7 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ControlRequest, DeliveryDetail,
-    MessageOrigin, SendMessageResponse, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
+    MessageInputMode, MessageOrigin, SendMessageResponse, WorkflowListResponse, WorkflowResponse,
+    WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
@@ -366,6 +367,15 @@ pub fn send_message(
     message: &str,
     thread: Option<&str>,
 ) -> io::Result<SendMessageResponse> {
+    send_message_with_input_mode(target, message, thread, MessageInputMode::Message)
+}
+
+pub fn send_message_with_input_mode(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    input_mode: MessageInputMode,
+) -> io::Result<SendMessageResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
@@ -374,6 +384,7 @@ pub fn send_message(
             target: target.to_string(),
             message: message.to_string(),
             thread: thread.map(str::to_string),
+            input_mode,
             origin: current_message_origin(),
         }),
     )?;
@@ -459,18 +470,19 @@ pub fn send_message_and_watch(
     target: &str,
     message: &str,
     thread: Option<&str>,
+    input_mode: MessageInputMode,
     until: &str,
     timeout: Duration,
-) -> io::Result<AgentWatchResponse> {
-    let response = send_message_and_watch_condition(
+) -> io::Result<AskAgentResponse> {
+    send_message_and_watch_condition(
         target,
         message,
         thread,
+        input_mode,
         &format!("status:{until}"),
         Some(4096),
         timeout,
-    )?;
-    Ok(response.watch)
+    )
 }
 
 pub fn ask_agent(
@@ -485,6 +497,7 @@ pub fn ask_agent(
         target,
         message,
         thread,
+        MessageInputMode::Message,
         condition,
         tail_bytes,
         timeout,
@@ -496,12 +509,13 @@ pub fn send_message_and_watch_condition(
     target: &str,
     message: &str,
     thread: Option<&str>,
+    input_mode: MessageInputMode,
     condition: &str,
     tail_bytes: Option<usize>,
     timeout: Duration,
 ) -> io::Result<AskAgentResponse> {
     send_message_and_watch_condition_with_output_echo_guard(
-        target, message, thread, condition, tail_bytes, timeout, None,
+        target, message, thread, input_mode, condition, tail_bytes, timeout, None,
     )
 }
 
@@ -509,6 +523,7 @@ fn send_message_and_watch_condition_with_output_echo_guard(
     target: &str,
     message: &str,
     thread: Option<&str>,
+    input_mode: MessageInputMode,
     condition: &str,
     tail_bytes: Option<usize>,
     timeout: Duration,
@@ -527,7 +542,7 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         false,
         Duration::from_secs(5),
     )?;
-    let sent = send_message(target, message, thread)?;
+    let sent = send_message_with_input_mode(target, message, thread, input_mode)?;
     let watch = agent_watch_with_output_echo_guard(
         target,
         Some(&initial.cursor),
