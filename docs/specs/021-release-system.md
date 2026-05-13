@@ -18,7 +18,7 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 
 **In scope:**
 
-- Synchronized version bumps across `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`.
+- Synchronized version bumps across `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the root `Cargo.toml` workspace package version used by `wardian-core` and `wardian-cli`.
 - Automated CHANGELOG.md generation from Conventional Commits, via release-please.
 - GitHub Actions workflow that builds unsigned multi-OS bundles on tag push and publishes them to a GitHub Release.
 - Stable and Preview release channels, both manually cut.
@@ -37,7 +37,8 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 
 **Files introduced at repo root:**
 
-- `release-please-config.json` — configures Wardian as a single-package manifest release, enables CHANGELOG generation with Keep-a-Changelog section taxonomy (Features, Bug Fixes, Performance, Documentation, Miscellaneous), and uses `extra-files` to keep `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` in sync with `package.json`.
+- `release-please-config.json` — configures Wardian as a single-package manifest release, enables CHANGELOG generation with Keep-a-Changelog section taxonomy (Features, Bug Fixes, Performance, Documentation, Miscellaneous), and uses `extra-files` to keep `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the root Rust workspace version in sync with `package.json`.
+- `.github/workflows/release-please.yml` — after Release Please creates or updates the release PR, the workflow checks out the pending release branch, runs `cargo metadata --format-version 1 --no-deps`, and commits `Cargo.lock` if Cargo regenerated local workspace crate versions.
 - `.release-please-manifest.json` — tracks the current version (`0.2.1`).
 - `CHANGELOG.md` — Keep-a-Changelog format, seeded with the `[0.2.1]` entry so release-please has a known anchor.
 
@@ -112,7 +113,7 @@ The Tauri bundle configuration (`src-tauri/tauri.conf.json` → `bundle.resource
 ### Testing & Rollout Plan
 
 1. **Dry-run build** via `workflow_dispatch` on `feat/release-system` branch. Download each artifact, install on each host OS, confirm the app launches and basic UI renders.
-2. **Dry-run release-please** by merging synthetic `feat:` and `fix:` commits and observing the Release PR output. Verify all three version files bump together and CHANGELOG renders as expected.
+2. **Dry-run release-please** by merging synthetic `feat:` and `fix:` commits and observing the Release PR output. Verify the frontend package, Tauri app, and Rust workspace version files bump together and CHANGELOG renders as expected.
 3. **First real release**: cut `v0.2.2` from the next trivial patch to validate the tag-triggered build + publish path with low stakes.
 4. **First preview release**: cut `v0.3.0-preview.1` shortly after to validate the prerelease marking path.
 
@@ -129,7 +130,7 @@ The Tauri bundle configuration (`src-tauri/tauri.conf.json` → `bundle.resource
 ## Consequences
 
 - **Positive:** users can download installable Wardian builds from GitHub Releases on all three major OSes without cloning the repo.
-- **Positive:** versions cannot drift across `package.json`, `tauri.conf.json`, and `Cargo.toml` — release-please syncs all three.
+- **Positive:** versions cannot drift across `package.json`, `tauri.conf.json`, the Tauri crate manifest, and the root Rust workspace manifest — release-please syncs all release-bearing manifests.
 - **Positive:** CHANGELOG stays curated with minimal maintainer effort; commit discipline (Conventional Commits) is the only ongoing cost.
 - **Positive:** pipeline is sized to accept code signing, auto-updates, OS package managers, and the CLI without restructuring.
 - **Negative:** Windows users see a SmartScreen warning on first install; macOS users must right-click → Open or `xattr -cr` the app. Acceptable for a 0.x developer-audience project, unacceptable long-term.

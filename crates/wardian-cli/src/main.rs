@@ -531,9 +531,8 @@ fn validate_send_command_thread(thread: Option<&str>) -> Result<(), CliError> {
 }
 
 fn normalize_ask_condition(until: &str) -> Result<String, CliError> {
-    if until == "reply" {
-        Ok(until.to_string())
-    } else if until.starts_with("status:")
+    if until == "reply"
+        || until.starts_with("status:")
         || until.starts_with("output:")
         || until.starts_with("event:")
         || until.starts_with("delivery:")

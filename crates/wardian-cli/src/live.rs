@@ -16,6 +16,28 @@ use wardian_core::models::WorkflowDefinition;
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
 const CONTROL_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+struct AgentWatchRequest<'a> {
+    target: &'a str,
+    since: Option<&'a str>,
+    until: Option<&'a str>,
+    include: Vec<String>,
+    tail_bytes: Option<usize>,
+    follow: bool,
+    timeout: Duration,
+    output_echo_guard: Option<&'a str>,
+}
+
+struct SendAndWatchRequest<'a> {
+    target: &'a str,
+    message: &'a str,
+    thread: Option<&'a str>,
+    input_mode: MessageInputMode,
+    condition: &'a str,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+    output_echo_guard: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ControlOperation {
     AgentList,
@@ -430,38 +452,38 @@ pub fn agent_watch(
     follow: bool,
     timeout: Duration,
 ) -> io::Result<AgentWatchResponse> {
-    agent_watch_with_output_echo_guard(
-        target, since, until, include, tail_bytes, follow, timeout, None,
-    )
+    agent_watch_with_output_echo_guard(AgentWatchRequest {
+        target,
+        since,
+        until,
+        include,
+        tail_bytes,
+        follow,
+        timeout,
+        output_echo_guard: None,
+    })
 }
 
 fn agent_watch_with_output_echo_guard(
-    target: &str,
-    since: Option<&str>,
-    until: Option<&str>,
-    include: Vec<String>,
-    tail_bytes: Option<usize>,
-    follow: bool,
-    timeout: Duration,
-    output_echo_guard: Option<&str>,
+    request: AgentWatchRequest<'_>,
 ) -> io::Result<AgentWatchResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
         ControlOperation::AgentWatch {
-            requested: timeout,
-            target: target.to_string(),
-            until: until.unwrap_or("snapshot").to_string(),
+            requested: request.timeout,
+            target: request.target.to_string(),
+            until: request.until.unwrap_or("snapshot").to_string(),
         },
         send_request(ControlRequest::AgentWatch {
-            target: target.to_string(),
-            since: since.map(str::to_string),
-            until: until.map(str::to_string),
-            include,
-            tail_bytes,
-            follow,
-            timeout_ms: Some(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
-            output_echo_guard: output_echo_guard.map(str::to_string),
+            target: request.target.to_string(),
+            since: request.since.map(str::to_string),
+            until: request.until.map(str::to_string),
+            include: request.include,
+            tail_bytes: request.tail_bytes,
+            follow: request.follow,
+            timeout_ms: Some(request.timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+            output_echo_guard: request.output_echo_guard.map(str::to_string),
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
@@ -522,16 +544,16 @@ pub fn ask_agent(
     if condition == "reply" {
         return ask_agent_structured(target, message, thread, tail_bytes, timeout);
     }
-    send_message_and_watch_condition_with_output_echo_guard(
+    send_message_and_watch_condition_with_output_echo_guard(SendAndWatchRequest {
         target,
         message,
         thread,
-        MessageInputMode::Message,
+        input_mode: MessageInputMode::Message,
         condition,
         tail_bytes,
         timeout,
-        ask_prompt_echo_guard(condition, message),
-    )
+        output_echo_guard: ask_prompt_echo_guard(condition, message),
+    })
 }
 
 fn ask_agent_structured(
@@ -576,23 +598,23 @@ pub fn send_message_and_watch_condition(
     tail_bytes: Option<usize>,
     timeout: Duration,
 ) -> io::Result<AskAgentResponse> {
-    send_message_and_watch_condition_with_output_echo_guard(
-        target, message, thread, input_mode, condition, tail_bytes, timeout, None,
-    )
+    send_message_and_watch_condition_with_output_echo_guard(SendAndWatchRequest {
+        target,
+        message,
+        thread,
+        input_mode,
+        condition,
+        tail_bytes,
+        timeout,
+        output_echo_guard: None,
+    })
 }
 
 fn send_message_and_watch_condition_with_output_echo_guard(
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-    condition: &str,
-    tail_bytes: Option<usize>,
-    timeout: Duration,
-    output_echo_guard: Option<&str>,
+    request: SendAndWatchRequest<'_>,
 ) -> io::Result<AskAgentResponse> {
     let initial = agent_watch(
-        target,
+        request.target,
         None,
         None,
         vec![
@@ -600,25 +622,30 @@ fn send_message_and_watch_condition_with_output_echo_guard(
             "output".to_string(),
             "delivery".to_string(),
         ],
-        tail_bytes.or(Some(4096)),
+        request.tail_bytes.or(Some(4096)),
         false,
         Duration::from_secs(5),
     )?;
-    let sent = send_message_with_input_mode(target, message, thread, input_mode)?;
-    let watch = agent_watch_with_output_echo_guard(
-        target,
-        Some(&initial.cursor),
-        Some(condition),
-        vec![
+    let sent = send_message_with_input_mode(
+        request.target,
+        request.message,
+        request.thread,
+        request.input_mode,
+    )?;
+    let watch = agent_watch_with_output_echo_guard(AgentWatchRequest {
+        target: request.target,
+        since: Some(&initial.cursor),
+        until: Some(request.condition),
+        include: vec![
             "status".to_string(),
             "output".to_string(),
             "delivery".to_string(),
         ],
-        tail_bytes,
-        false,
-        timeout,
-        output_echo_guard,
-    )?;
+        tail_bytes: request.tail_bytes,
+        follow: false,
+        timeout: request.timeout,
+        output_echo_guard: request.output_echo_guard,
+    })?;
     Ok(AskAgentResponse {
         request_id: None,
         reply: None,

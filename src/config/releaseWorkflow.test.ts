@@ -18,6 +18,22 @@ describe("release workflow contract", () => {
     expect(releasePleaseWorkflow).toContain("steps.release.outputs.tag_name");
   });
 
+  it("keeps Rust workspace crate versions in the Release Please bump set", () => {
+    expect(releasePleaseConfig.packages["."]["extra-files"]).toContainEqual({
+      type: "toml",
+      path: "Cargo.toml",
+      jsonpath: "$.workspace.package.version",
+    });
+    expect(releasePleaseWorkflow).toContain("Sync release PR Cargo lockfile");
+    expect(releasePleaseWorkflow).toContain("steps.release.outputs.prs_created == 'true'");
+    expect(releasePleaseWorkflow).toContain("actions/checkout@v4");
+    expect(releasePleaseWorkflow).toContain("fetch-depth: 0");
+    expect(releasePleaseWorkflow).toContain("--label \"autorelease: pending\"");
+    expect(releasePleaseWorkflow).toContain("cargo metadata --format-version 1 --no-deps");
+    expect(releasePleaseWorkflow).toContain("git add Cargo.lock");
+    expect(releasePleaseWorkflow).toContain("chore: sync release Cargo.lock");
+  });
+
   it("keeps the artifact release workflow responsible for tag releases", () => {
     expect(releaseWorkflow).toContain("tags:");
     expect(releaseWorkflow).toContain('- "v*"');
