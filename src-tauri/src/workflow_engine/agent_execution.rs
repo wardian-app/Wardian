@@ -68,11 +68,9 @@ pub fn resolve_agent_execution_context(
         }
     }
     if let Some(provider) = node_config.get("provider").and_then(|v| v.as_str()) {
-        if !provider.trim().is_empty() {
-            if config.provider != provider {
-                config.provider = provider.to_string();
-                config.reset_provider_config_for_provider();
-            }
+        if !provider.trim().is_empty() && config.provider != provider {
+            config.provider = provider.to_string();
+            config.reset_provider_config_for_provider();
         }
     }
     if let Some(output_format) = node_config.get("output_format").and_then(|v| v.as_str()) {
