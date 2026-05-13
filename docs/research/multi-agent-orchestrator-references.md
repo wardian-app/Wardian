@@ -1,12 +1,12 @@
 # Multi-Agent Orchestrator References
 
-This document maps public multi-agent orchestration systems to design patterns relevant to Wardian's command center, workflow runtime, and local agent roster.
+This document maps public multi-agent orchestration systems to design patterns relevant to Wardian's command center, workflow runtime, local agent roster, and agent-team management surfaces.
 
 This is not an endorsement, affiliation claim, product evaluation, or competitive teardown. The notes below describe public architecture and design pressure only.
 
-Last reviewed: 2026-05-12.
+Last reviewed: 2026-05-13.
 
-Source basis: the local-agent and worktree-manager entries in this note were rechecked against their public repositories where available. Repo-checked means the README plus project metadata and visible source layout were inspected. When a public website and repository disagreed, the repository was treated as the higher-confidence source.
+Source basis: the local-agent, worktree-manager, organization-management, and SDLC-control entries in this note were rechecked against their public repositories or first-party documentation where available. Repo-checked means the README plus project metadata and visible source layout were inspected. When a public website and repository disagreed, the repository was treated as the higher-confidence source.
 
 ## Surface Taxonomy
 
@@ -14,10 +14,11 @@ Wardian should distinguish interaction surface from orchestration model:
 
 - **GUI/web command centers**: emphasize dashboards, visual configuration, run history, and team-level visibility.
 - **CLI/TUI/local-terminal systems**: emphasize fast keyboard control, local worktrees, terminal multiplexing, and developer-loop ergonomics.
+- **Organization and SDLC control planes**: emphasize goals, org charts, budgets, issue/task ownership, approval gates, CI, PRs, and management/accountability workflows above individual agent sessions.
 - **Libraries/frameworks**: emphasize programmable agent composition, state models, message routing, tools, memory, and runtime APIs.
 - **Hybrid systems**: expose more than one surface, often pairing a code or YAML source of truth with a GUI or CLI execution surface.
 
-This distinction matters because Wardian is not only an agent framework. It is a local command center for visible, long-running agent sessions. Systems that look similar at the orchestration layer can feel very different when the primary control surface is a browser, a terminal, a Python API, or a workspace-local YAML file.
+This distinction matters because Wardian is not only an agent framework. It is a local command center for visible, long-running agent sessions. Systems that look similar at the orchestration layer can feel very different when the primary control surface is a browser, a terminal, a Python API, an organization chart, or a workspace-local YAML file.
 
 ## Summary Map
 
@@ -36,6 +37,8 @@ This distinction matters because Wardian is not only an agent framework. It is a
 | [webmux](https://github.com/windmill-labs/webmux) | Web dashboard + CLI | Parallel AI agent dashboard with YAML-defined layouts, tmux terminals, worktrees, service ports, PR/CI, Linear, and Docker sandboxes. | A web command center can remain reproducible if its layout and runtime assumptions are text-defined. |
 | [OctoAlly](https://github.com/ai-genius-automations/octoally) | Web dashboard + Electron | Local-first Claude Code/Codex dashboard with tmux persistence, sessions grid, specialist agents, source control, and voice input. | Agent dashboards should treat live output, task lifecycle, terminals, and source control as one surface. |
 | [Overstory](https://github.com/jayminwest/overstory) | CLI + web UI + TUI dashboard | Multi-agent coding orchestration with worktrees, runtime adapters, SQLite mail, watchdogs, web UI, TUI dashboard, and conflict resolution. | Agent-agent messaging, health monitoring, and merge coordination are key pieces beyond simply spawning workers. |
+| [Paperclip](https://github.com/paperclipai/paperclip) | Org/company control plane | Node.js server and React UI for managing teams of agents through companies, org charts, goals, issues, budgets, approvals, heartbeats, and audit trails. | Wardian should distinguish agent execution from management primitives such as goals, reporting lines, budgets, governance, and accountability. |
+| [Shep](https://github.com/shep-ai/shep) | CLI + web dashboard | Feature/SDLC control plane for AI coding agents, worktrees, feature phases, approval gates, CI auto-fix, PR creation, and multi-repo dashboards. | Wardian needs lifecycle views that sit above sessions: feature state, gates, CI, PRs, and evidence should be visible independently of the terminal. |
 | [Archon](https://github.com/coleam00/Archon) | Hybrid CLI/web | YAML workflows, isolated worktrees, visual execution. | Treat agent work as inspectable workflow runs with source-controlled definitions. |
 | [AWS CLI Agent Orchestrator](https://github.com/awslabs/cli-agent-orchestrator) | CLI/TUI | Terminal-native orchestration of multiple coding agents in Git worktrees. | TUI-style agent rosters and worktree dispatch are directly relevant to Wardian. |
 | [Claude Squad](https://github.com/smtg-ai/claude-squad) | TUI/local terminal | Manage multiple AI coding agents in isolated workspaces from one terminal UI. | Local multiplexing, resumable sessions, and per-agent workspace isolation are first-class UX concerns. |
@@ -49,6 +52,47 @@ This distinction matters because Wardian is not only an agent framework. It is a
 | [SuperAGI](https://github.com/TransformerOptimus/SuperAGI) | GUI/web platform | Agent platform with marketplace, tools, memory, and execution visibility. | Web dashboards can make agent lifecycle visible, but local-first inspection remains Wardian's differentiator. |
 | [AutoGPT Platform](https://github.com/Significant-Gravitas/AutoGPT) | GUI/web + server | Visual block-based agent workflows with marketplace/server components. | Block-based agent graphs show how visual composition and reusable agent components fit together. |
 | [Flowise](https://github.com/FlowiseAI/Flowise) | GUI/web | Low-code LLM app, agent, and workflow builder. | Visual construction is accessible, but Wardian should retain text-native definitions for agent authors. |
+
+## Organization and SDLC Control Planes
+
+This cluster is adjacent to local terminal multiplexers but operates at a higher management layer. These systems do not only ask "which agent is running?" They ask "what goal is this work serving?", "who owns it?", "what budget or approval gate constrains it?", "what evidence shows it is ready?", and "what happens after the agent finishes?"
+
+### Paperclip
+
+**Source basis:** Public repo and first-party product/docs pages checked.
+
+**What it includes:** Paperclip is a Node.js server and React UI for orchestrating a team of AI agents as an organization. It models companies, org charts, agents, goals, issues, tasks, heartbeats, budgets, governance, approvals, workspaces, plugins, schedules, audit activity, and multi-company isolation.
+
+**Distinctive components:**
+
+- Org chart with roles, titles, reporting lines, permissions, and job descriptions.
+- Goal hierarchy and issue/task system so work traces back to company/project objectives.
+- Heartbeat execution for scheduled or event-triggered agent work.
+- Budget and cost control by company, agent, project, goal, provider, and model.
+- Governance workflows for approvals, pause/resume/terminate, rollback, and audit trails.
+- Bring-your-own-agent posture for Claude Code, Codex, Cursor, shell processes, HTTP/webhook bots, and similar adapters.
+- Import/export direction for company templates, agents, skills, projects, routines, and issues.
+
+**Wardian relevance:** Paperclip is a direct reference for "manage an organization, not just sessions." Wardian should not collapse agent management into terminals and workflows alone. As Wardian grows teams, watchlists, roles, workflows, budgets, approvals, and memory, it should make management primitives explicit: goal, owner, reporting relationship, budget policy, approval state, audit trail, and work product.
+
+### Shep
+
+**Source basis:** Public repo, project site, and first-party docs checked.
+
+**What it includes:** Shep is a CLI and web dashboard for running AI coding agents across features in isolated Git worktrees. It creates feature branches/worktrees, launches configured agents, streams live output, commits, pushes, opens draft PRs, watches CI, retries fixes, and preserves feature records.
+
+Shep is not an org-chart system in the Paperclip sense. It is still relevant to this cluster because it elevates the unit of management from "agent session" to "feature lifecycle."
+
+**Distinctive components:**
+
+- Feature-centered lifecycle: started, analyze, requirements, research, planning, implementation, review, maintain, and blocked.
+- Fast mode for direct implementation and spec-driven mode with PRD, plan, and merge approval gates.
+- One worktree per feature, leaving the user's main checkout untouched.
+- Web dashboard with feature sidebar, live agent output, activity log, diff viewer, chat, controls, and multi-repo views.
+- CI watch and auto-fix loop after pushed branches.
+- Agent-agnostic execution for configured coding agents such as Claude Code, Cursor CLI, Gemini CLI, Codex, and related tools.
+
+**Wardian relevance:** Shep is a reference for work-as-lifecycle rather than session-as-lifecycle. Wardian should support durable work objects above agents: feature/request/run state, approval gates, CI evidence, PR links, diffs, blocked reasons, and follow-up chat. This belongs beside, not inside, the terminal pane.
 
 ## CLI, TUI, and Local-Terminal Systems
 
@@ -483,6 +527,7 @@ Wardian sits at the intersection of these categories:
 
 - GUI/web systems prove the value of human-observable dashboards.
 - CLI/TUI systems prove the value of fast local control and worktree-aware dispatch.
+- Organization and SDLC control planes prove the value of explicit management primitives: goals, ownership, budgets, approvals, lifecycle phases, work products, and audit trails.
 - Frameworks prove the value of structured agent roles, messages, tools, and workflow state.
 
 Wardian's direction should be hybrid and local-first: visible agent terminals, durable roster state, workflow graph telemetry, filesystem-inspectable skills and definitions, and enough structured APIs that agents can construct and operate the system without depending on fragile UI actions.
