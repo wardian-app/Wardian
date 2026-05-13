@@ -30,3 +30,4 @@ Use this index when implementing or debugging Wardian internals.
 - [Native E2E Harness](./native-e2e.md)
 - [Screenshot Documentation](./screenshot-documentation.md)
 - [Core Feature Screenshot Capture Plan](./screenshot-capture-plan.md)
+- [README Demo Capture](./readme-demo-capture.md)
