@@ -1103,16 +1103,17 @@ mod tests {
 
         assert_eq!(spec.executable, "C:/Program Files/Git/bin/bash.exe");
         assert_eq!(spec.args[0], "-lc");
+        assert_eq!(spec.args[1], "exec \"$@\"");
+        assert_eq!(spec.args[2], "wardian-shell");
         if cfg!(windows) {
-            assert_eq!(spec.args[1], "exec \"$@\"");
-            assert_eq!(spec.args[2], "wardian-shell");
             assert_eq!(spec.args[3], "cmd.exe");
             assert_eq!(spec.args[4], "/d");
             assert_eq!(spec.args[5], "/c");
             assert_eq!(spec.args[6], "claude.cmd");
             assert_eq!(spec.args[7], "--verbose");
         } else {
-            assert!(spec.args[1].starts_with("exec 'claude.cmd'"));
+            assert_eq!(spec.args[3], "claude.cmd");
+            assert_eq!(spec.args[4], "--verbose");
         }
     }
 
