@@ -2,8 +2,9 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen } from "lucide-react";
-import { AgentConfig, AgentClassDefinition } from "../../types";
+import { AgentConfig, AgentClassDefinition, ProviderName } from "../../types";
 import { AdvancedSettings } from "../../components/AdvancedSettings";
+import { defaultProviderConfig, withProvider } from "./configUtils";
 
 interface Props {
   agentClasses: AgentClassDefinition[];
@@ -26,7 +27,11 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
 
   const [newFolder, setNewFolder] = useState("");
   const [resumeSession, setResumeSession] = useState("");
-  const [spawnAdvancedConfig, setSpawnAdvancedConfig] = useState<Partial<AgentConfig>>({});
+  const initialProviderConfig: Partial<AgentConfig> = {
+    provider: "claude",
+    provider_config: defaultProviderConfig("claude"),
+  };
+  const [spawnAdvancedConfig, setSpawnAdvancedConfig] = useState<Partial<AgentConfig>>(initialProviderConfig);
   const [isSpawning, setIsSpawning] = useState(false);
   const [folderIsValid, setFolderIsValid] = useState<boolean | null>(null);
 
@@ -64,7 +69,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
       setNewAgentClass("Generalist");
       setNewFolder("");
       setResumeSession("");
-      setSpawnAdvancedConfig({});
+      setSpawnAdvancedConfig(initialProviderConfig);
       onSpawned();
     } catch (error) {
       console.error("Failed to spawn agent:", error);
@@ -194,7 +199,12 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
             data-testid="spawn-provider"
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             value={spawnAdvancedConfig.provider || "claude"}
-            onChange={(e) => setSpawnAdvancedConfig(prev => ({ ...prev, provider: e.target.value }))}
+            onChange={(e) => {
+              const provider = e.currentTarget.value as ProviderName;
+              setSpawnAdvancedConfig((prev) =>
+                withProvider(prev, provider),
+              );
+            }}
           >
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
