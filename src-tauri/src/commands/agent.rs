@@ -204,11 +204,13 @@ fn clone_sanitize_config(
         config.reset_provider_config_for_provider();
         config.custom_args = None;
     } else {
-        config.custom_args = clone_custom_args_without_provider_memory(config.custom_args.as_deref());
+        config.custom_args =
+            clone_custom_args_without_provider_memory(config.custom_args.as_deref());
     }
     config.opencode_port = None;
     if config.provider == "opencode" {
-        if let wardian_core::models::ProviderConfig::OpenCode(opencode) = &mut config.provider_config
+        if let wardian_core::models::ProviderConfig::OpenCode(opencode) =
+            &mut config.provider_config
         {
             opencode.port = None;
         }
@@ -1272,13 +1274,11 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
         )?
         .filter(|(provider_session_id, _updated_at)| {
             let cleared_provider_sessions = codex_cleared_provider_sessions(config);
-            codex_provider_session_is_new(
-                provider_session_id,
-                &cleared_provider_sessions,
-            ) && manager::codex_session_exists_in_agent_home(
-                &config.session_id,
-                provider_session_id,
-            )
+            codex_provider_session_is_new(provider_session_id, &cleared_provider_sessions)
+                && manager::codex_session_exists_in_agent_home(
+                    &config.session_id,
+                    provider_session_id,
+                )
         }) {
             config.resume_session = Some(provider_session_id);
             clear_codex_cleared_provider_sessions(config);

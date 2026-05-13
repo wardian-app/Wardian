@@ -68,9 +68,11 @@ fn codex_status_log_session(
     latest_session: Option<String>,
 ) -> Option<String> {
     let mut cleared_provider_sessions = codex_cleared_provider_sessions(config);
-    if config.resume_session.as_deref().is_some_and(|value| {
-        codex_provider_session_is_excluded(value, &cleared_provider_sessions)
-    }) {
+    if config
+        .resume_session
+        .as_deref()
+        .is_some_and(|value| codex_provider_session_is_excluded(value, &cleared_provider_sessions))
+    {
         config.resume_session = None;
     }
 

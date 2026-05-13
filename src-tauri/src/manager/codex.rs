@@ -772,11 +772,7 @@ mod tests {
         let spawn_args =
             strip_flag_value_pairs(provider.get_spawn_args(&config, false), "--add-dir");
         provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
-        if config
-            .codex_config()
-            .skip_git_repo_check
-            .unwrap_or(true)
-        {
+        if config.codex_config().skip_git_repo_check.unwrap_or(true) {
             provider_args.push("--skip-git-repo-check".to_string());
         }
 
