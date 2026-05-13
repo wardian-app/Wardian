@@ -201,6 +201,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
         <AdvancedSettings 
           config={config} 
           updateField={updateField} 
+          showCopyFullCommand
         />
 
         <button

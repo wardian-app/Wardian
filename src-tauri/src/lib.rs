@@ -267,6 +267,7 @@ pub fn run() {
             commands::agent::rename_agent,
             commands::agent::reorder_agents,
             commands::agent::update_agent_config,
+            commands::agent::build_agent_cli_command,
             commands::agent::enable_agent_worktree,
             commands::agent::list_agent_worktrees,
             commands::agent::assign_agent_worktree,

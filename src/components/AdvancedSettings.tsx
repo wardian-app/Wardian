@@ -2,17 +2,37 @@ import React, { useState } from 'react';
 import { ListEditor } from './ListEditor';
 import { AgentConfig } from '../types';
 import { invoke } from '@tauri-apps/api/core';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { Check, Copy } from 'lucide-react';
 
 interface AdvancedSettingsProps {
   config: Partial<AgentConfig>;
   updateField: (field: keyof AgentConfig, value: any) => void;
+  showCopyFullCommand?: boolean;
 }
 
 export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({ 
   config, 
-  updateField
+  updateField,
+  showCopyFullCommand = false
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [copyCommandState, setCopyCommandState] = useState<"idle" | "copied" | "error">("idle");
+
+  const copyFullAgentCommand = async () => {
+    try {
+      const command = await invoke<string>("build_agent_cli_command", {
+        sessionId: config.session_id,
+      });
+      await writeText(command);
+      setCopyCommandState("copied");
+      setTimeout(() => setCopyCommandState("idle"), 2000);
+    } catch (error) {
+      console.error("Failed to copy full agent command", error);
+      setCopyCommandState("error");
+      setTimeout(() => setCopyCommandState("idle"), 3000);
+    }
+  };
 
   return (
     <>
@@ -47,6 +67,33 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                   <option value="resume">Resume provider session</option>
               </select>
           </div>
+
+          {showCopyFullCommand && config.session_id && config.folder && (
+            <div>
+              <button
+                type="button"
+                onClick={copyFullAgentCommand}
+                className={`w-full flex items-center justify-center gap-2 rounded border px-3 py-2 text-[10px] font-bold tracking-wide transition-all active:scale-95 ${
+                  copyCommandState === "copied"
+                    ? "border-wardian-success/30 bg-wardian-success/20 text-wardian-success"
+                    : copyCommandState === "error"
+                      ? "border-wardian-error/30 bg-wardian-error/15 text-wardian-error"
+                      : "border-wardian-border bg-wardian-card-bg-muted text-muted-neutral hover:border-[var(--color-wardian-accent)]/40 hover:text-primary hover:bg-wardian-light/30"
+                }`}
+              >
+                {copyCommandState === "copied" ? (
+                  <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                {copyCommandState === "copied"
+                  ? "Copied!"
+                  : copyCommandState === "error"
+                    ? "Copy failed"
+                    : "Copy Full Agent Command"}
+              </button>
+            </div>
+          )}
 
           {/* Gemini CLI Properties */}
           <div className="flex flex-col gap-4">

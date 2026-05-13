@@ -1,4 +1,5 @@
 use crate::manager;
+use crate::providers::ProviderFactory;
 use crate::state::AppState;
 use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, State};
@@ -2194,6 +2195,208 @@ pub async fn update_agent_config(
 }
 
 #[tauri::command]
+pub async fn build_agent_cli_command(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let settings = crate::utils::load_shell_settings().unwrap_or_default();
+    let available_shells = crate::utils::list_available_shells();
+    build_agent_cli_command_for_session_id_with_shells(
+        &session_id,
+        state.inner(),
+        &settings,
+        &available_shells,
+    )
+    .await
+}
+
+async fn build_agent_cli_command_for_session_id_with_shells(
+    session_id: &str,
+    state: &AppState,
+    shell_settings: &crate::utils::ShellSettings,
+    available_shells: &[crate::utils::ShellOption],
+) -> Result<String, String> {
+    if session_id.trim().is_empty() {
+        return Err("Agent session id is required".to_string());
+    }
+
+    let config = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(session_id)
+            .ok_or_else(|| format!("Agent {} not found", session_id))?;
+        let config = agent.config.lock().unwrap().clone();
+        config
+    };
+
+    build_agent_cli_command_with_shells(&config, shell_settings, available_shells)
+}
+
+fn build_agent_cli_command_with_shells(
+    config: &AgentConfig,
+    shell_settings: &crate::utils::ShellSettings,
+    available_shells: &[crate::utils::ShellOption],
+) -> Result<String, String> {
+    if config.session_id.trim().is_empty() {
+        return Err("Agent session id is required".to_string());
+    }
+    if config.folder.trim().is_empty() {
+        return Err("Agent workspace is not configured".to_string());
+    }
+    validate_external_terminal_custom_args(config.custom_args.as_deref())?;
+
+    let mut resume_config = config.clone();
+    resume_config.resume_session = Some(resolve_external_resume_session(config)?);
+
+    let provider = ProviderFactory::resolve(&resume_config.provider)?;
+    let workspace_cwd =
+        crate::utils::fs::resolve_cwd(&resume_config.folder, &resume_config.session_id);
+    let habitat_root = crate::utils::fs::prepare_provider_habitat(
+        &resume_config.provider,
+        &workspace_cwd,
+        &resume_config.agent_class,
+        Some(&resume_config.session_id),
+    )?;
+    let provider_cwd = manager::interactive_provider_cwd(
+        &resume_config.provider,
+        &workspace_cwd,
+        habitat_root.as_deref(),
+        None,
+    );
+
+    let (bin, mut provider_args) = provider.get_executable();
+    let spawn_args = external_terminal_spawn_args(
+        &resume_config.provider,
+        provider.get_spawn_args(&resume_config, true),
+    );
+    provider_args.extend(spawn_args);
+    provider_args = manager::interactive_provider_args(
+        &resume_config.provider,
+        &provider_cwd,
+        &workspace_cwd,
+        provider_args,
+    );
+    let launch =
+        manager::interactive_provider_launch(&resume_config.provider, &bin, &provider_args)?;
+    let envs = external_terminal_env(&resume_config, habitat_root.as_deref(), &provider_cwd)?;
+
+    crate::utils::build_copyable_program_command_with_settings(
+        &launch.executable,
+        &launch.args,
+        &provider_cwd,
+        &envs,
+        shell_settings,
+        available_shells,
+    )
+}
+
+fn resolve_external_resume_session(config: &AgentConfig) -> Result<String, String> {
+    if let Some(resume_session) = config
+        .resume_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(resume_session.to_string());
+    }
+
+    let session_id = config.session_id.trim();
+    if matches!(config.provider.as_str(), "claude" | "opencode") && !session_id.is_empty() {
+        return Ok(session_id.to_string());
+    }
+
+    Err("Provider resume session is not available for this agent".to_string())
+}
+
+fn validate_external_terminal_custom_args(custom_args: Option<&str>) -> Result<(), String> {
+    let Some(custom_args) = custom_args.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+
+    shlex::split(custom_args)
+        .map(|_| ())
+        .ok_or_else(|| "Provider custom arguments are not valid shell syntax".to_string())
+}
+
+fn external_terminal_spawn_args(provider: &str, args: Vec<String>) -> Vec<String> {
+    match provider {
+        "claude" => strip_claude_embedded_stream_flags(args),
+        "codex" => strip_codex_embedded_runtime_flags(args),
+        _ => args,
+    }
+}
+
+fn strip_codex_embedded_runtime_flags(args: Vec<String>) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--no-alt-screen" {
+            continue;
+        }
+        if arg == "--disable"
+            && iter
+                .peek()
+                .is_some_and(|value| matches!(value.as_str(), "plugins" | "apps"))
+        {
+            let _ = iter.next();
+            continue;
+        }
+        stripped.push(arg);
+    }
+    stripped
+}
+
+fn strip_claude_embedded_stream_flags(args: Vec<String>) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--verbose" {
+            continue;
+        }
+        if matches!(arg.as_str(), "--input-format" | "--output-format")
+            && iter.peek().is_some_and(|value| value == "stream-json")
+        {
+            let _ = iter.next();
+            continue;
+        }
+        stripped.push(arg);
+    }
+    stripped
+}
+
+fn external_terminal_env(
+    config: &AgentConfig,
+    habitat_root: Option<&std::path::Path>,
+    provider_cwd: &std::path::Path,
+) -> Result<Vec<(String, String)>, String> {
+    let mut envs = vec![("WARDIAN_SESSION_ID".to_string(), config.session_id.clone())];
+    match config.provider.as_str() {
+        "claude" => envs.push((
+            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(),
+            "1".to_string(),
+        )),
+        "codex" => {
+            if let Some(root) = habitat_root {
+                envs.push((
+                    "CODEX_HOME".to_string(),
+                    crate::utils::fs::habitat_codex_home(root)
+                        .to_string_lossy()
+                        .to_string(),
+                ));
+            }
+        }
+        "opencode" => {
+            envs.extend(crate::manager::opencode::opencode_interactive_env(
+                provider_cwd,
+                config,
+            )?);
+        }
+        _ => {}
+    }
+    Ok(envs)
+}
+
+#[tauri::command]
 pub async fn enable_agent_worktree(
     session_id: String,
     worktree_name: Option<String>,
@@ -2371,10 +2574,12 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, assign_worktree_config, build_agent_clone_preview,
-        capture_opencode_pause_resume_session, capture_resume_runtime_snapshot,
-        clone_cleanup_created_profile_dirs, clone_collect_eligible_file_tree,
-        clone_copy_agent_profile_files, clone_copy_profile_plan,
+        AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
+        agent_status_update_payload, assign_worktree_config,
+        build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
+        build_agent_clone_preview, capture_opencode_pause_resume_session,
+        capture_resume_runtime_snapshot, clone_cleanup_created_profile_dirs,
+        clone_collect_eligible_file_tree, clone_copy_agent_profile_files, clone_copy_profile_plan,
         clone_copy_selected_agent_profile_files, clone_copy_selected_agent_skills,
         clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
@@ -2388,11 +2593,11 @@ mod tests {
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, terminal_cleared_payload, AgentOrderPlacement,
-        CloneProfileCopyPlan, CloneProfileSelection,
+        sync_resumed_input_sender, terminal_cleared_payload,
     };
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
+    use crate::utils::{ShellOption, ShellSettings};
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
     use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, DeployedSkillRef};
@@ -2448,6 +2653,175 @@ mod tests {
         names.iter().map(|name| name.to_string()).collect()
     }
 
+    fn test_pwsh_shell() -> (ShellSettings, Vec<ShellOption>) {
+        (
+            ShellSettings {
+                shell_id: "pwsh".to_string(),
+                ..Default::default()
+            },
+            vec![ShellOption {
+                id: "pwsh".to_string(),
+                label: "PowerShell 7".to_string(),
+                executable: "pwsh".to_string(),
+                default_args: vec!["-NoProfile".to_string(), "-Command".to_string()],
+            }],
+        )
+    }
+
+    #[test]
+    fn full_agent_command_requires_configured_agent_identity() {
+        let (settings, shells) = test_pwsh_shell();
+        let err = build_agent_cli_command_with_shells(
+            &AgentConfig {
+                provider: "codex".to_string(),
+                folder: "C:/repo".to_string(),
+                ..Default::default()
+            },
+            &settings,
+            &shells,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "Agent session id is required");
+    }
+
+    #[test]
+    fn full_agent_command_builds_codex_resume_with_cwd_and_env() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (settings, shells) = test_pwsh_shell();
+
+        let command = build_agent_cli_command_with_shells(
+            &AgentConfig {
+                session_id: "agent-1".to_string(),
+                session_name: "CoderOne".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace.to_string_lossy().to_string(),
+                provider: "codex".to_string(),
+                resume_session: Some("provider-session".to_string()),
+                ..Default::default()
+            },
+            &settings,
+            &shells,
+        )
+        .expect("full command");
+
+        assert!(command.contains("$env:WARDIAN_SESSION_ID = 'agent-1'"));
+        assert!(command.contains("$env:CODEX_HOME = "));
+        assert!(command.contains("Set-Location -LiteralPath "));
+        assert!(command.contains("-ErrorAction Stop"));
+        assert!(command.contains("resume"));
+        assert!(command.contains("provider-session"));
+        assert!(!command.contains("--no-alt-screen"));
+        assert!(!command.contains("--disable"));
+        assert!(!command.contains("plugins"));
+        assert!(!command.contains("apps"));
+    }
+
+    #[tokio::test]
+    async fn full_agent_command_loads_saved_config_from_state() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (settings, shells) = test_pwsh_shell();
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            *config = AgentConfig {
+                session_id: "agent-1".to_string(),
+                session_name: "SavedName".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace.to_string_lossy().to_string(),
+                provider: "codex".to_string(),
+                resume_session: Some("saved-provider-session".to_string()),
+                model: Some("saved-model".to_string()),
+                ..Default::default()
+            };
+        }
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+
+        let command = build_agent_cli_command_for_session_id_with_shells(
+            "agent-1", &state, &settings, &shells,
+        )
+        .await
+        .expect("full command");
+
+        assert!(command.contains("saved-provider-session"));
+        assert!(command.contains("saved-model"));
+        assert!(!command.contains("draft-model"));
+    }
+
+    #[test]
+    fn full_agent_command_rejects_malformed_custom_args() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (settings, shells) = test_pwsh_shell();
+
+        let err = build_agent_cli_command_with_shells(
+            &AgentConfig {
+                session_id: "agent-1".to_string(),
+                session_name: "CoderOne".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace.to_string_lossy().to_string(),
+                provider: "claude".to_string(),
+                resume_session: Some("claude-session".to_string()),
+                custom_args: Some("--flag 'unterminated".to_string()),
+                ..Default::default()
+            },
+            &settings,
+            &shells,
+        )
+        .expect_err("malformed custom args must fail");
+
+        assert_eq!(err, "Provider custom arguments are not valid shell syntax");
+    }
+
+    #[test]
+    fn full_agent_command_strips_claude_embedded_stream_flags() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (settings, shells) = test_pwsh_shell();
+
+        let command = build_agent_cli_command_with_shells(
+            &AgentConfig {
+                session_id: "agent-1".to_string(),
+                session_name: "ClaudeOne".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace.to_string_lossy().to_string(),
+                provider: "claude".to_string(),
+                resume_session: Some("claude-session".to_string()),
+                model: Some("sonnet".to_string()),
+                ..Default::default()
+            },
+            &settings,
+            &shells,
+        )
+        .expect("full command");
+
+        assert!(command.contains("--resume"));
+        assert!(command.contains("claude-session"));
+        assert!(command.contains("--model"));
+        assert!(command.contains("sonnet"));
+        assert!(!command.contains("stream-json"));
+        assert!(!command.contains("--verbose"));
+    }
+
     #[test]
     fn clone_preview_defaults_to_profile_selection() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -2478,11 +2852,13 @@ mod tests {
             preview.default_selected_files,
             vec!["AGENTS.md".to_string()]
         );
-        assert!(preview
-            .files
-            .children
-            .iter()
-            .any(|node| node.path() == "notes.md"));
+        assert!(
+            preview
+                .files
+                .children
+                .iter()
+                .any(|node| node.path() == "notes.md")
+        );
     }
 
     #[test]
@@ -2594,12 +2970,14 @@ mod tests {
         )
         .expect("permission log");
 
-        assert!(clone_validate_selected_profile_files(
-            home,
-            "source-agent",
-            &["claude/permission-requests.jsonl".to_string()]
-        )
-        .is_err());
+        assert!(
+            clone_validate_selected_profile_files(
+                home,
+                "source-agent",
+                &["claude/permission-requests.jsonl".to_string()]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2656,18 +3034,22 @@ mod tests {
         std::fs::create_dir_all(&source).expect("source");
         std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
 
-        assert!(clone_validate_selected_profile_files(
-            home,
-            "source-agent",
-            &["../secret.md".to_string()]
-        )
-        .is_err());
-        assert!(clone_validate_selected_profile_files(
-            home,
-            "source-agent",
-            &["C:/secret.md".to_string()]
-        )
-        .is_err());
+        assert!(
+            clone_validate_selected_profile_files(
+                home,
+                "source-agent",
+                &["../secret.md".to_string()]
+            )
+            .is_err()
+        );
+        assert!(
+            clone_validate_selected_profile_files(
+                home,
+                "source-agent",
+                &["C:/secret.md".to_string()]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2686,12 +3068,14 @@ mod tests {
             return;
         }
 
-        assert!(clone_validate_selected_profile_files(
-            home,
-            "source-agent",
-            &["linked/secret.md".to_string()]
-        )
-        .is_err());
+        assert!(
+            clone_validate_selected_profile_files(
+                home,
+                "source-agent",
+                &["linked/secret.md".to_string()]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2733,14 +3117,17 @@ mod tests {
         )
         .expect("copy selected skills");
 
-        assert!(temp
-            .path()
-            .join("agents/dest-agent/.agents/skills/planner/SKILL.md")
-            .is_file());
-        assert!(!temp
-            .path()
-            .join("agents/dest-agent/.agents/skills/ignored")
-            .exists());
+        assert!(
+            temp.path()
+                .join("agents/dest-agent/.agents/skills/planner/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            !temp
+                .path()
+                .join("agents/dest-agent/.agents/skills/ignored")
+                .exists()
+        );
     }
 
     #[test]
@@ -3517,10 +3904,12 @@ mod tests {
             "# Skill\n"
         );
         assert!(!dest.join("habitat").exists());
-        assert!(!dest
-            .join("claude")
-            .join("permission-requests.jsonl")
-            .exists());
+        assert!(
+            !dest
+                .join("claude")
+                .join("permission-requests.jsonl")
+                .exists()
+        );
     }
 
     #[test]
