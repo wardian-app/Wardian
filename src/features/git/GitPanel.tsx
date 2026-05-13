@@ -16,6 +16,12 @@ interface GitPanelProps {
   telemetry: Record<string, import("../../types").AgentTelemetry>;
 }
 
+interface ActiveWorktreeName {
+  agentId: string;
+  folder: string;
+  name: string;
+}
+
 export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, onAgentsUpdated }) => {
   const confirm = useConfirm();
   const [rootPath, setRootPath] = useState<string | null>(null);
@@ -28,6 +34,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [syncing, setSyncing] = useState(false);
   const [worktreeLoading, setWorktreeLoading] = useState(false);
   const [availableWorktrees, setAvailableWorktrees] = useState<AgentWorktreeSummary[]>([]);
+  const [currentWorktreeName, setCurrentWorktreeName] = useState<ActiveWorktreeName | null>(null);
   const [isNamingWorktree, setIsNamingWorktree] = useState(false);
   const [worktreeName, setWorktreeName] = useState("");
   const createWorktreeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -59,6 +66,21 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const selectedSourceFolder = (selectedAgent?.git_worktree_source ?? selectedAgent?.folder ?? "").replace(/\\/g, "/");
   const selectedRuntimeFolder = selectedAgent?.folder?.replace(/\\/g, "/") ?? rootPath ?? "";
   const selectedWorktreeFolder = selectedAgent?.git_worktree_folder?.replace(/\\/g, "/") ?? "";
+  const worktreeFolderName = (folder: string) => {
+    const normalized = folder.replace(/\\/g, "/").replace(/\/+$/g, "");
+    return normalized.split("/").pop()?.trim() ?? "";
+  };
+  const currentSummaryName =
+    currentWorktreeName?.agentId === selectedAgentId &&
+    (!selectedWorktreeFolder || currentWorktreeName.folder === selectedWorktreeFolder)
+      ? currentWorktreeName.name
+      : null;
+  const activeWorktreeName =
+    currentSummaryName ||
+    worktreeFolderName(selectedWorktreeFolder) ||
+    worktreeFolderName(selectedRuntimeFolder) ||
+    status?.branch ||
+    "worktree";
   const hasStaleWorktreeAssignment =
     selectedAgent?.git_worktree === true &&
     selectedWorktreeFolder.length > 0 &&
@@ -164,12 +186,26 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     const fetchWorktrees = async () => {
       if (!selectedAgentId || !selectedSourceFolder) {
         setAvailableWorktrees([]);
+        setCurrentWorktreeName(null);
         return;
       }
       try {
         const summaries = await invoke<AgentWorktreeSummary[]>("list_agent_worktrees");
         if (!isMounted) return;
         const currentWorktree = selectedAgent?.git_worktree_folder?.replace(/\\/g, "/") ?? "";
+        const currentSummary = summaries.find((worktree) => {
+          const worktreeFolder = worktree.worktree_folder.replace(/\\/g, "/");
+          return worktreeFolder === currentWorktree || worktree.member_agent_ids.includes(selectedAgentId);
+        });
+        setCurrentWorktreeName(
+          currentSummary
+            ? {
+                agentId: selectedAgentId,
+                folder: currentSummary.worktree_folder.replace(/\\/g, "/"),
+                name: currentSummary.name,
+              }
+            : null,
+        );
         setAvailableWorktrees(
           summaries.filter((worktree) => {
             const sameSource = worktree.source_folder.replace(/\\/g, "/") === selectedSourceFolder;
@@ -179,7 +215,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           }),
         );
       } catch {
-        if (isMounted) setAvailableWorktrees([]);
+        if (isMounted) {
+          setAvailableWorktrees([]);
+          setCurrentWorktreeName(null);
+        }
       }
     };
 
@@ -501,7 +540,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <line x1="7" y1="7" x2="7" y2="17" /><path fill="none" d="M7 17 C7 13 17 13 17 12" />
             </svg>
             <div className="min-w-0 flex-1">
-                <div className="text-[11px] font-semibold text-[var(--color-wardian-processing)] truncate">Worktree runtime</div>
+                <div className="text-[11px] font-semibold text-[var(--color-wardian-processing)] truncate">Worktree: {activeWorktreeName}</div>
                 <div className="text-[10px] font-mono text-muted truncate" title={selectedRuntimeFolder}>
                   {selectedRuntimeFolder || status.branch}
                 </div>

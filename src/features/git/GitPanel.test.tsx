@@ -314,7 +314,7 @@ describe("GitPanel", () => {
       if (command === "list_agent_worktrees") return [
         {
           id: "C:/repo-worktree",
-          name: "repo-agent worktree",
+          name: "repo-worktree",
           source_folder: "C:/repo",
           worktree_folder: "C:/repo-worktree",
           member_agent_ids: ["agent-1"],
@@ -345,6 +345,36 @@ describe("GitPanel", () => {
       expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
+  });
+
+  it("shows the active worktree name in the source control worktree chip", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo-worktree";
+      if (command === "list_agent_worktrees") return [
+        {
+          id: "C:/repo-worktree",
+          name: "repo-worktree",
+          source_folder: "C:/repo",
+          worktree_folder: "C:/repo-worktree",
+          member_agent_ids: ["agent-1"],
+        },
+      ];
+      if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      agentOverride: {
+        folder: "C:/repo-worktree",
+        git_worktree: true,
+        git_worktree_source: "C:/repo",
+        git_worktree_folder: "C:/repo-worktree",
+      },
+    });
+
+    expect(await screen.findByText("Worktree: repo-worktree")).toBeInTheDocument();
+    expect(screen.queryByText("Worktree runtime")).not.toBeInTheDocument();
   });
 
   it("disables the agent worktree without resuming a running agent", async () => {
