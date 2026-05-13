@@ -55,7 +55,10 @@ pub(crate) fn preserve_clone_team_placement_in_watchlist_state(
         return false;
     }
 
-    let Some(teams) = state.get_mut("teams").and_then(|value| value.as_array_mut()) else {
+    let Some(teams) = state
+        .get_mut("teams")
+        .and_then(|value| value.as_array_mut())
+    else {
         return false;
     };
     let Some(source_team_index) = teams
@@ -97,8 +100,7 @@ pub(crate) fn preserve_clone_team_placement(
     let Some(home) = crate::utils::fs::get_wardian_home() else {
         return Ok(false);
     };
-    let changed =
-        preserve_clone_team_placement_in_home(&home, source_agent_id, clone_agent_id)?;
+    let changed = preserve_clone_team_placement_in_home(&home, source_agent_id, clone_agent_id)?;
     if changed {
         let _ = app.emit("watchlists-updated", ());
     }
@@ -132,8 +134,8 @@ pub(crate) fn preserve_clone_team_placement_in_home(
 
 #[cfg(test)]
 mod tests {
-    use super::preserve_clone_team_placement_in_watchlist_state;
     use super::preserve_clone_team_placement_in_home;
+    use super::preserve_clone_team_placement_in_watchlist_state;
 
     #[test]
     fn clone_team_placement_inserts_clone_after_source_and_removes_from_other_teams() {
@@ -156,10 +158,7 @@ mod tests {
             state["teams"][0]["agentIds"],
             serde_json::json!(["source", "clone", "beta"])
         );
-        assert_eq!(
-            state["teams"][1]["agentIds"],
-            serde_json::json!(["gamma"])
-        );
+        assert_eq!(state["teams"][1]["agentIds"], serde_json::json!(["gamma"]));
         assert_eq!(
             state["watchlists"][0]["entries"][0],
             serde_json::json!({ "type": "team", "teamId": "team-a" })

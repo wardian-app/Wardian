@@ -1,6 +1,6 @@
 use crate::utils::CodexRuntimePolicy;
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
-use wardian_core::models::AgentConfig;
+use wardian_core::models::{AgentConfig, CodexProviderConfig};
 
 /// Provider adapter for the OpenAI Codex CLI.
 pub struct CodexProvider;
@@ -67,12 +67,13 @@ impl CodexProvider {
     }
 
     fn append_common_args(&self, args: &mut Vec<String>, config: &AgentConfig, is_exec_mode: bool) {
+        let codex = config.codex_config();
         if let Some(ref model) = config.model {
             args.push("--model".into());
             args.push(model.clone());
         }
 
-        if let Some(ref profile) = config.codex_profile {
+        if let Some(ref profile) = codex.profile {
             if !profile.trim().is_empty() {
                 args.push("--profile".into());
                 args.push(profile.clone());
@@ -80,7 +81,7 @@ impl CodexProvider {
         }
 
         let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-        let effective_policy = effective_codex_runtime_policy(config, &runtime_policy);
+        let effective_policy = effective_codex_runtime_policy(&codex, &runtime_policy);
         if effective_policy.full_auto {
             #[cfg(target_os = "windows")]
             {
@@ -106,16 +107,16 @@ impl CodexProvider {
             }
         }
 
-        if config.codex_search.unwrap_or(false) {
+        if codex.search.unwrap_or(false) {
             args.push("--search".into());
         }
 
         if is_exec_mode {
-            if config.codex_skip_git_repo_check.unwrap_or(true) {
+            if codex.skip_git_repo_check.unwrap_or(true) {
                 args.push("--skip-git-repo-check".into());
             }
 
-            if config.codex_ephemeral.unwrap_or(false) {
+            if codex.ephemeral.unwrap_or(false) {
                 args.push("--ephemeral".into());
             }
         } else {
@@ -148,21 +149,21 @@ impl CodexProvider {
 }
 
 fn effective_codex_runtime_policy(
-    config: &AgentConfig,
+    config: &CodexProviderConfig,
     global_policy: &CodexRuntimePolicy,
 ) -> CodexRuntimePolicy {
     let explicit_sandbox = config
-        .codex_sandbox_mode
+        .sandbox_mode
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let explicit_approval = config
-        .codex_approval_policy
+        .approval_policy
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let explicit_policy = explicit_sandbox.is_some() || explicit_approval.is_some();
-    let full_auto = config.codex_full_auto.unwrap_or({
+    let full_auto = config.full_auto.unwrap_or({
         if explicit_policy {
             false
         } else {
@@ -345,6 +346,7 @@ impl AgentProvider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wardian_core::models::ProviderConfig;
 
     fn make_provider() -> CodexProvider {
         CodexProvider::new()
@@ -366,12 +368,16 @@ mod tests {
     fn spawn_args_resume_and_model() {
         let p = make_provider();
         let config = AgentConfig {
+            provider: "codex".into(),
             resume_session: Some("session-abc".into()),
             model: Some("gpt-5.4".into()),
-            codex_profile: Some("wardian".into()),
-            codex_sandbox_mode: Some("workspace-write".into()),
-            codex_approval_policy: Some("on-request".into()),
-            codex_search: Some(true),
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                profile: Some("wardian".into()),
+                sandbox_mode: Some("workspace-write".into()),
+                approval_policy: Some("on-request".into()),
+                search: Some(true),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let args = p.get_spawn_args(&config, true);
@@ -440,10 +446,10 @@ mod tests {
     #[test]
     fn explicit_codex_sandbox_policy_disables_global_full_auto_default() {
         let policy = CodexRuntimePolicy::default();
-        let config = AgentConfig {
-            codex_sandbox_mode: Some("workspace-write".into()),
-            codex_approval_policy: Some("on-request".into()),
-            codex_full_auto: Some(false),
+        let config = CodexProviderConfig {
+            sandbox_mode: Some("workspace-write".into()),
+            approval_policy: Some("on-request".into()),
+            full_auto: Some(false),
             ..Default::default()
         };
 
@@ -458,9 +464,13 @@ mod tests {
     fn explicit_codex_full_auto_uses_bypass_even_with_policy_values() {
         let p = make_provider();
         let config = AgentConfig {
-            codex_full_auto: Some(true),
-            codex_sandbox_mode: Some("workspace-write".into()),
-            codex_approval_policy: Some("on-request".into()),
+            provider: "codex".into(),
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                full_auto: Some(true),
+                sandbox_mode: Some("workspace-write".into()),
+                approval_policy: Some("on-request".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -474,8 +484,8 @@ mod tests {
     #[test]
     fn explicit_codex_full_auto_false_disables_global_full_auto_default() {
         let policy = CodexRuntimePolicy::default();
-        let config = AgentConfig {
-            codex_full_auto: Some(false),
+        let config = CodexProviderConfig {
+            full_auto: Some(false),
             ..Default::default()
         };
 

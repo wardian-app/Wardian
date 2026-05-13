@@ -6,6 +6,7 @@ import type { CloneMode } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
+import { normalizeAgentConfigs } from "../features/agents/configUtils";
 import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
 import {
   getAgentsForList,
@@ -570,9 +571,10 @@ function AppBody() {
   const fetchAgents = async () => {
     try {
       const list = await invoke<AgentConfig[]>("list_agents");
-      setAgents(list);
+      const normalized = normalizeAgentConfigs(list);
+      setAgents(normalized);
       const newOffIds = new Set<string>();
-      for (const agent of list) if (agent.is_off) newOffIds.add(agent.session_id);
+      for (const agent of normalized) if (agent.is_off) newOffIds.add(agent.session_id);
       setOffAgentIds(newOffIds);
     } catch (e) { console.error("Failed to fetch agents:", e); }
   };

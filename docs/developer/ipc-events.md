@@ -80,6 +80,30 @@ Pushed in real-time as the Workflow Engine executes nodes.
 
 Emitted whenever the global agent roster changes (spawned, renamed, killed). Signals the UI to refresh its list via `list_agents`.
 
+## AgentConfig Provider Config
+
+Provider-specific launch settings are nested under `provider_config` instead of
+being authored as new top-level `AgentConfig` fields. The wire shape is an
+internally tagged object whose `type` matches the selected top-level
+`provider`:
+
+```json
+{
+  "provider": "codex",
+  "provider_config": {
+    "type": "codex",
+    "sandbox_mode": "workspace-write",
+    "approval_policy": "never"
+  }
+}
+```
+
+Shared launch settings such as `model`, `include_directories`,
+`system_include_directories`, `custom_args`, `debug`, and
+`session_persistence` remain top-level. Legacy flat provider fields may still be
+returned while reading older persisted state, but new spawn, clone, and explicit
+config update requests should send the nested `provider_config` shape.
+
 ## 🛠️ Global Governance Contract
 
 - **Stop All (Safety-First)**: Invokes `stop_all_triggers`. This affects background automation only.

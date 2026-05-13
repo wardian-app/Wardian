@@ -958,7 +958,13 @@ mod tests {
     fn opencode_fresh_headless_args_omit_session_flag_but_keep_config() {
         let provider = crate::providers::ProviderFactory::resolve("opencode").unwrap();
         let config = AgentConfig {
-            opencode_agent: Some("build".into()),
+            provider: "opencode".into(),
+            provider_config: wardian_core::models::ProviderConfig::OpenCode(
+                wardian_core::models::OpenCodeProviderConfig {
+                    agent: Some("build".into()),
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         };
 

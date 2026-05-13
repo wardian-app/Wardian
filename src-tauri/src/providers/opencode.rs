@@ -219,6 +219,7 @@ impl AgentProvider for OpenCodeProvider {
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
         let mut args = Vec::new();
+        let opencode = config.opencode_config();
 
         if config.debug.unwrap_or(false) {
             args.push("--print-logs".into());
@@ -229,11 +230,7 @@ impl AgentProvider for OpenCodeProvider {
             args.push(model.clone());
         }
 
-        if let Some(agent) = config
-            .opencode_agent
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-        {
+        if let Some(agent) = opencode.agent.as_ref().filter(|s| !s.trim().is_empty()) {
             args.push("--agent".into());
             args.push(agent.clone());
         }
@@ -290,9 +287,18 @@ impl AgentProvider for OpenCodeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wardian_core::models::{OpenCodeProviderConfig, ProviderConfig};
 
     fn make_provider() -> OpenCodeProvider {
         OpenCodeProvider::new()
+    }
+
+    fn make_opencode_config(opencode: OpenCodeProviderConfig) -> AgentConfig {
+        AgentConfig {
+            provider: "opencode".into(),
+            provider_config: ProviderConfig::OpenCode(opencode),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -313,9 +319,11 @@ mod tests {
         let config = AgentConfig {
             debug: Some(true),
             model: Some("openai/gpt-5".into()),
-            opencode_agent: Some("build".into()),
             resume_session: Some("ses_123".into()),
-            ..Default::default()
+            ..make_opencode_config(OpenCodeProviderConfig {
+                agent: Some("build".into()),
+                ..Default::default()
+            })
         };
 
         let args = provider.get_spawn_args(&config, true);

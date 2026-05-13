@@ -755,7 +755,12 @@ mod tests {
     fn codex_bootstrap_exec_mode_keeps_skip_git_repo_check() {
         let config = AgentConfig {
             provider: "codex".to_string(),
-            codex_skip_git_repo_check: Some(true),
+            provider_config: wardian_core::models::ProviderConfig::Codex(
+                wardian_core::models::CodexProviderConfig {
+                    skip_git_repo_check: Some(true),
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         };
 
@@ -767,7 +772,7 @@ mod tests {
         let spawn_args =
             strip_flag_value_pairs(provider.get_spawn_args(&config, false), "--add-dir");
         provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
-        if config.codex_skip_git_repo_check.unwrap_or(true) {
+        if config.codex_config().skip_git_repo_check.unwrap_or(true) {
             provider_args.push("--skip-git-repo-check".to_string());
         }
 

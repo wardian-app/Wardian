@@ -417,10 +417,11 @@ pub async fn obtain_session_id(
             let spawn_args =
                 strip_flag_value_pairs(provider.get_spawn_args(config, false), "--add-dir");
             provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
-            if config.codex_skip_git_repo_check.unwrap_or(true) {
+            let codex = config.codex_config();
+            if codex.skip_git_repo_check.unwrap_or(true) {
                 provider_args.push("--skip-git-repo-check".to_string());
             }
-            if config.codex_ephemeral.unwrap_or(false) {
+            if codex.ephemeral.unwrap_or(false) {
                 provider_args.push("--ephemeral".to_string());
             }
         }
@@ -699,7 +700,13 @@ mod tests {
     fn opencode_fresh_headless_args_omit_session_flag_but_keep_config() {
         let provider = crate::providers::ProviderFactory::resolve("opencode").unwrap();
         let config = AgentConfig {
-            opencode_agent: Some("build".into()),
+            provider: "opencode".into(),
+            provider_config: wardian_core::models::ProviderConfig::OpenCode(
+                wardian_core::models::OpenCodeProviderConfig {
+                    agent: Some("build".into()),
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         };
 
