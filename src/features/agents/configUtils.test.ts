@@ -139,6 +139,20 @@ describe("provider config utilities", () => {
         expect(normalized.provider_config).toEqual({ type: "gemini" });
     });
 
+    it("preserves unknown provider config from backend state", () => {
+        const normalized = normalizeAgentConfig({
+            ...baseConfig,
+            provider: "future-provider",
+            provider_config: { type: "future-provider", launch_mode: "fast" },
+        });
+
+        expect(normalized.provider).toBe("future-provider");
+        expect(normalized.provider_config).toEqual({
+            type: "future-provider",
+            launch_mode: "fast",
+        });
+    });
+
     it("clears custom args when changing provider", () => {
         expect(withProvider({ custom_args: "--codex-only" }, "gemini")).toEqual({
             provider: "gemini",

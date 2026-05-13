@@ -20,9 +20,7 @@ fn provider_key(provider: &str) -> &str {
 
 fn provider_type_name(provider: &str) -> String {
     match provider_key(provider) {
-        "claude" | "gemini" | "codex" | "opencode" | "mock" => {
-            provider_key(provider).to_string()
-        }
+        "claude" | "gemini" | "codex" | "opencode" | "mock" => provider_key(provider).to_string(),
         _ => {
             let provider = provider.trim().to_ascii_lowercase();
             if provider.is_empty() {
@@ -35,7 +33,10 @@ fn provider_type_name(provider: &str) -> String {
 }
 
 fn is_known_provider_type(provider: &str) -> bool {
-    matches!(provider, "claude" | "gemini" | "codex" | "opencode" | "mock")
+    matches!(
+        provider,
+        "claude" | "gemini" | "codex" | "opencode" | "mock"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -156,8 +157,16 @@ impl ProviderConfig {
             "codex" => Self::Codex(CodexProviderConfig::default()),
             "opencode" => Self::OpenCode(OpenCodeProviderConfig::default()),
             "mock" => Self::Mock(MockProviderConfig::default()),
-            "claude" | "" => Self::Claude(ClaudeProviderConfig::default()),
-            _ => Self::Unknown(serde_json::json!({ "type": provider })),
+            "claude" => Self::Claude(ClaudeProviderConfig::default()),
+            "" => {
+                let provider_type = provider_type_name(provider);
+                if provider_type == "claude" {
+                    Self::Claude(ClaudeProviderConfig::default())
+                } else {
+                    Self::Unknown(serde_json::json!({ "type": provider_type }))
+                }
+            }
+            _ => unreachable!("provider_key only returns known provider keys or an empty marker"),
         }
     }
 
@@ -170,9 +179,31 @@ impl ProviderConfig {
     fn to_value_with_type<T: Serialize>(type_name: &str, config: &T) -> serde_json::Value {
         let mut value = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
         if let serde_json::Value::Object(ref mut object) = value {
-            object.insert("type".to_string(), serde_json::Value::String(type_name.into()));
+            object.insert(
+                "type".to_string(),
+                serde_json::Value::String(type_name.into()),
+            );
         }
         value
+    }
+
+    fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        let provider_type = value
+            .get("type")
+            .and_then(|kind| kind.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        match provider_type.as_str() {
+            "claude" => serde_json::from_value::<ClaudeProviderConfig>(value).map(Self::Claude),
+            "gemini" => serde_json::from_value::<GeminiProviderConfig>(value).map(Self::Gemini),
+            "codex" => serde_json::from_value::<CodexProviderConfig>(value).map(Self::Codex),
+            "opencode" => {
+                serde_json::from_value::<OpenCodeProviderConfig>(value).map(Self::OpenCode)
+            }
+            "mock" => serde_json::from_value::<MockProviderConfig>(value).map(Self::Mock),
+            _ => Ok(Self::Unknown(value)),
+        }
     }
 }
 
@@ -199,30 +230,7 @@ impl<'de> Deserialize<'de> for ProviderConfig {
         D: Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let provider_type = value
-            .get("type")
-            .and_then(|kind| kind.as_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        match provider_type.as_str() {
-            "claude" => serde_json::from_value::<ClaudeProviderConfig>(value)
-                .map(Self::Claude)
-                .map_err(serde::de::Error::custom),
-            "gemini" => serde_json::from_value::<GeminiProviderConfig>(value)
-                .map(Self::Gemini)
-                .map_err(serde::de::Error::custom),
-            "codex" => serde_json::from_value::<CodexProviderConfig>(value)
-                .map(Self::Codex)
-                .map_err(serde::de::Error::custom),
-            "opencode" => serde_json::from_value::<OpenCodeProviderConfig>(value)
-                .map(Self::OpenCode)
-                .map_err(serde::de::Error::custom),
-            "mock" => serde_json::from_value::<MockProviderConfig>(value)
-                .map(Self::Mock)
-                .map_err(serde::de::Error::custom),
-            _ => Ok(Self::Unknown(value)),
-        }
+        Self::from_value(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -348,7 +356,7 @@ struct AgentConfigCompat {
     pub system_include_directories: Option<Vec<String>>,
     pub custom_args: Option<String>,
     pub session_persistence: AgentSessionPersistenceOverride,
-    pub provider_config: Option<ProviderConfig>,
+    pub provider_config: Option<serde_json::Value>,
     pub sandbox: Option<bool>,
     pub yolo: Option<bool>,
     pub approval_mode: Option<String>,
@@ -455,7 +463,7 @@ impl AgentConfigCompat {
                 port: self.opencode_port,
             }),
             "mock" => ProviderConfig::Mock(MockProviderConfig::default()),
-            _ => ProviderConfig::Claude(ClaudeProviderConfig {
+            "claude" => ProviderConfig::Claude(ClaudeProviderConfig {
                 permission_mode: self.permission_mode.clone(),
                 max_turns: self.max_turns,
                 allowed_tools: self.allowed_tools.clone(),
@@ -463,6 +471,16 @@ impl AgentConfigCompat {
                 append_system_prompt: self.append_system_prompt.clone(),
                 mcp_config: self.mcp_config.clone(),
             }),
+            "" if self.provider.trim().is_empty() => ProviderConfig::Claude(ClaudeProviderConfig {
+                permission_mode: self.permission_mode.clone(),
+                max_turns: self.max_turns,
+                allowed_tools: self.allowed_tools.clone(),
+                disallowed_tools: self.disallowed_tools.clone(),
+                append_system_prompt: self.append_system_prompt.clone(),
+                mcp_config: self.mcp_config.clone(),
+            }),
+            "" => ProviderConfig::default_for_provider(&self.provider),
+            _ => unreachable!("provider_key only returns known provider keys or an empty marker"),
         }
     }
 }
@@ -470,16 +488,18 @@ impl AgentConfigCompat {
 impl From<AgentConfigCompat> for AgentConfig {
     fn from(compat: AgentConfigCompat) -> Self {
         let legacy_provider_config = compat.legacy_provider_config();
-        let provider_config = match compat.provider_config.clone() {
+        let default_provider_config = ProviderConfig::default_for_provider(&compat.provider);
+        let had_nested_provider_config = compat.provider_config.is_some();
+        let parsed_provider_config = compat
+            .provider_config
+            .clone()
+            .and_then(|value| ProviderConfig::from_value(value).ok());
+        let provider_config = match parsed_provider_config {
             Some(provider_config) if provider_config.matches_provider(&compat.provider) => {
                 provider_config
             }
-            Some(ProviderConfig::Unknown(_))
-                if legacy_provider_config != ProviderConfig::default_for_provider(&compat.provider) =>
-            {
-                legacy_provider_config
-            }
-            Some(_) => ProviderConfig::default_for_provider(&compat.provider),
+            Some(_) if legacy_provider_config != default_provider_config => legacy_provider_config,
+            Some(_) => default_provider_config,
             None => legacy_provider_config,
         };
 
@@ -502,7 +522,7 @@ impl From<AgentConfigCompat> for AgentConfig {
             session_persistence: compat.session_persistence,
             fresh_provider_session_id: None,
             provider_config,
-            provider_config_encoding: if compat.provider_config.is_some() {
+            provider_config_encoding: if had_nested_provider_config {
                 ProviderConfigEncoding::Nested
             } else {
                 ProviderConfigEncoding::LegacyFlat
@@ -733,10 +753,7 @@ impl AgentConfig {
                 map.serialize_entry("approval_mode", &config.approval_mode)?;
                 map.serialize_entry("policy", &config.policy)?;
                 map.serialize_entry("experimental_acp", &config.experimental_acp)?;
-                map.serialize_entry(
-                    "allowed_mcp_server_names",
-                    &config.allowed_mcp_server_names,
-                )?;
+                map.serialize_entry("allowed_mcp_server_names", &config.allowed_mcp_server_names)?;
                 map.serialize_entry("extensions", &config.extensions)?;
                 map.serialize_entry("screen_reader", &config.screen_reader)?;
                 map.serialize_entry("output_format", &config.output_format)?;
@@ -944,10 +961,7 @@ mod tests {
         assert_eq!(gemini.yolo, Some(true));
         assert_eq!(gemini.approval_mode.as_deref(), Some("plan"));
         assert_eq!(gemini.policy, Some(vec!["read_only".into()]));
-        assert_eq!(
-            gemini.allowed_mcp_server_names,
-            Some(vec!["sqlite".into()])
-        );
+        assert_eq!(gemini.allowed_mcp_server_names, Some(vec!["sqlite".into()]));
         assert_eq!(gemini.extensions, Some(vec!["github".into()]));
         assert_eq!(gemini.experimental_acp, Some(true));
         assert_eq!(gemini.screen_reader, Some(true));
@@ -1048,11 +1062,44 @@ mod tests {
     }
 
     #[test]
-    fn legacy_flat_config_preserves_flat_serialization_until_marked_nested() {
-        let mut config: AgentConfig = serde_json::from_str(
-            r#"{"provider":"codex","codex_sandbox_mode":"workspace-write"}"#,
+    fn malformed_typed_provider_config_falls_back_to_legacy_flat_fields() {
+        let config: AgentConfig = serde_json::from_str(
+            r#"{
+              "provider":"codex",
+              "codex_sandbox_mode":"workspace-write",
+              "provider_config":{"type":"codex","full_auto":"yes"}
+            }"#,
         )
         .unwrap();
+
+        assert_eq!(
+            config.codex_config().sandbox_mode.as_deref(),
+            Some("workspace-write")
+        );
+    }
+
+    #[test]
+    fn mismatched_provider_config_falls_back_to_legacy_flat_fields() {
+        let config: AgentConfig = serde_json::from_str(
+            r#"{
+              "provider":"codex",
+              "codex_sandbox_mode":"workspace-write",
+              "provider_config":{"type":"gemini"}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.codex_config().sandbox_mode.as_deref(),
+            Some("workspace-write")
+        );
+    }
+
+    #[test]
+    fn legacy_flat_config_preserves_flat_serialization_until_marked_nested() {
+        let mut config: AgentConfig =
+            serde_json::from_str(r#"{"provider":"codex","codex_sandbox_mode":"workspace-write"}"#)
+                .unwrap();
 
         let legacy_value = serde_json::to_value(&config).unwrap();
         assert!(legacy_value.get("codex_sandbox_mode").is_some());

@@ -45,6 +45,11 @@ export interface MockProviderConfig {
     type: "mock";
 }
 
+export interface UnknownProviderConfig {
+    type: string;
+    [key: string]: unknown;
+}
+
 export type ProviderConfig =
     | ClaudeProviderConfig
     | GeminiProviderConfig
@@ -62,7 +67,7 @@ export interface AgentConfig {
     provider?: ProviderName | string;
     debug?: boolean;
     model?: string;
-    provider_config?: ProviderConfig;
+    provider_config?: ProviderConfig | UnknownProviderConfig;
 
     // Legacy flat provider fields accepted from older persisted configs.
     sandbox?: boolean;

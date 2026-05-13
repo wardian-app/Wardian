@@ -190,25 +190,25 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                       </select>
                   </div>
 
-                  <ListEditor 
-                    label="Policies" 
-                    values={providerConfig.policy} 
+                  <ListEditor
+                    label="Policies"
+                    values={providerConfig.policy}
                     placeholder="e.g. read_only"
-                    onChange={(vals: string[]) => updateProviderConfigField("policy", vals)} 
+                    onChange={(vals: string[]) => updateProviderConfigField("policy", vals)}
                   />
 
-                  <ListEditor 
-                    label="Allowed MCP Servers" 
-                    values={providerConfig.allowed_mcp_server_names} 
+                  <ListEditor
+                    label="Allowed MCP Servers"
+                    values={providerConfig.allowed_mcp_server_names}
                     placeholder="e.g. sqlite-mcp"
-                    onChange={(vals: string[]) => updateProviderConfigField("allowed_mcp_server_names", vals)} 
+                    onChange={(vals: string[]) => updateProviderConfigField("allowed_mcp_server_names", vals)}
                   />
 
-                  <ListEditor 
-                    label="Extensions" 
-                    values={providerConfig.extensions} 
+                  <ListEditor
+                    label="Extensions"
+                    values={providerConfig.extensions}
                     placeholder="e.g. github, search"
-                    onChange={(vals: string[]) => updateProviderConfigField("extensions", vals)} 
+                    onChange={(vals: string[]) => updateProviderConfigField("extensions", vals)}
                   />
 
                   <div>

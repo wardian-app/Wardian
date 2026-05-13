@@ -8,8 +8,16 @@ import {
   ProviderName,
 } from "../../types";
 
+function isKnownProviderName(provider: string | undefined): provider is ProviderName {
+  return provider === "claude" || provider === "codex" || provider === "gemini" || provider === "opencode" || provider === "mock";
+}
+
+function providerValue(provider: AgentConfig["provider"]): string {
+  return provider && provider.trim() ? provider : "claude";
+}
+
 export function normalizeProviderName(provider: AgentConfig["provider"]): ProviderName {
-  if (provider === "codex" || provider === "gemini" || provider === "opencode" || provider === "mock") {
+  if (isKnownProviderName(provider)) {
     return provider;
   }
   return "claude";
@@ -31,7 +39,10 @@ export function defaultProviderConfig(provider: AgentConfig["provider"]): Provid
   }
 }
 
-function providerConfigMatches(provider: ProviderName, config: ProviderConfig | undefined): boolean {
+function providerConfigMatches(
+  provider: ProviderName,
+  config: AgentConfig["provider_config"],
+): config is ProviderConfig {
   return Boolean(config && config.type === provider);
 }
 
@@ -107,7 +118,15 @@ function stripUndefined<T extends object>(value: T): T {
 }
 
 export function normalizeAgentConfig(config: AgentConfig): AgentConfig {
-  const provider = normalizeProviderName(config.provider);
+  const provider = providerValue(config.provider);
+  if (!isKnownProviderName(provider)) {
+    return {
+      ...config,
+      provider,
+      provider_config: config.provider_config ?? { type: provider },
+    };
+  }
+
   const provider_config = providerConfigMatches(provider, config.provider_config)
     ? config.provider_config
     : legacyProviderConfig(config, provider);
@@ -124,6 +143,10 @@ export function normalizeAgentConfigs(configs: AgentConfig[]): AgentConfig[] {
 
 export function toPersistedAgentConfig(config: AgentConfig): AgentConfig {
   const normalized = normalizeAgentConfig(config);
+  if (!isKnownProviderName(normalized.provider)) {
+    return normalized;
+  }
+
   return {
     ...normalized,
     provider_config: providerConfigFor(normalized),
