@@ -8,7 +8,11 @@ pub mod provider;
 pub mod session_policy;
 pub mod workflow;
 
-pub use agent_config::{AgentClassDefinition, AgentConfig};
+pub use agent_config::{
+    AgentClassDefinition, AgentConfig, ClaudeProviderConfig, CodexProviderConfig,
+    GeminiProviderConfig, MockProviderConfig, OpenCodeProviderConfig, ProviderConfig,
+    ProviderConfigEncoding,
+};
 pub use agent_telemetry::AgentTelemetry;
 pub use app_telemetry::AppTelemetry;
 pub use fs::*;
