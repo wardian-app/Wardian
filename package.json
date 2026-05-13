@@ -24,6 +24,7 @@
     "lint": "tsc --noEmit",
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
     "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
+    "docs:demo-gif": "node scripts/capture-readme-demo.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",
