@@ -59,6 +59,22 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<MessageOrigin>,
     },
+    Ask {
+        target: String,
+        message: String,
+        thread: Option<String>,
+        tail_bytes: Option<usize>,
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<MessageOrigin>,
+    },
+    SubmitReply {
+        request_id: String,
+        status: ReplyStatus,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<MessageOrigin>,
+    },
     AgentWatch {
         target: String,
         since: Option<String>,
@@ -152,6 +168,44 @@ pub struct SendMessageResponse {
     pub schema: u8,
     pub ok: bool,
     pub delivery: Vec<DeliveryDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyStatus {
+    Done,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredReply {
+    pub request_id: String,
+    pub status: ReplyStatus,
+    pub body: String,
+    pub target_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
+    pub replied_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AskResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub request_id: String,
+    pub target: String,
+    pub delivery: Vec<DeliveryDetail>,
+    pub reply: StructuredReply,
+    pub watch: AgentWatchResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub request_id: String,
+    pub reply: StructuredReply,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -465,6 +519,51 @@ mod tests {
         let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
 
         assert!(json.contains(r#""output_echo_guard":"Say AUTO_TEST_2_DONE""#));
+        assert_eq!(roundtrip, req);
+    }
+
+    #[test]
+    fn ask_request_serializes_structured_reply_options() {
+        let req = ControlRequest::Ask {
+            target: "Wardian-Codex".to_string(),
+            message: "review this".to_string(),
+            thread: None,
+            tail_bytes: Some(65_536),
+            timeout_ms: Some(30_000),
+            origin: Some(MessageOrigin::WardianAgent {
+                session_id: "source-1".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""command":"ask""#));
+        assert!(json.contains(r#""target":"Wardian-Codex""#));
+        assert!(json.contains(r#""message":"review this""#));
+        assert!(json.contains(r#""tail_bytes":65536"#));
+        assert!(json.contains(r#""timeout_ms":30000"#));
+        assert_eq!(roundtrip, req);
+    }
+
+    #[test]
+    fn submit_reply_request_serializes_status_and_body() {
+        let req = ControlRequest::SubmitReply {
+            request_id: "ask_0123456789abcdef".to_string(),
+            status: ReplyStatus::Done,
+            body: "finished".to_string(),
+            origin: Some(MessageOrigin::WardianAgent {
+                session_id: "agent-1".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""command":"submit_reply""#));
+        assert!(json.contains(r#""request_id":"ask_0123456789abcdef""#));
+        assert!(json.contains(r#""status":"done""#));
+        assert!(json.contains(r#""body":"finished""#));
         assert_eq!(roundtrip, req);
     }
 

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
+use wardian_core::control::StructuredReply;
 
 pub struct LibraryWatchRegistration {
     pub watcher: notify::RecommendedWatcher,
@@ -32,6 +33,16 @@ pub struct AppState {
     pub library_watchers: Mutex<HashMap<String, LibraryWatchRegistration>>,
     // Single standalone terminal session for the human user.
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
+    // Live-only structured ask/reply requests keyed by backend-owned request id.
+    pub ask_requests: Mutex<HashMap<String, AskRequestRecord>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AskRequestRecord {
+    pub request_id: String,
+    pub target_session_id: String,
+    pub created_at: String,
+    pub reply: Option<StructuredReply>,
 }
 
 impl AppState {
@@ -57,6 +68,7 @@ impl Default for AppState {
             git_watchers: Mutex::new(HashMap::new()),
             library_watchers: Mutex::new(HashMap::new()),
             user_terminal: Mutex::new(None),
+            ask_requests: Mutex::new(HashMap::new()),
         }
     }
 }

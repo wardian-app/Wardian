@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "wardian", version, about = "Wardian command-line interface")]
@@ -15,6 +15,7 @@ pub enum Command {
     Watchlist(WatchlistArgs),
     Send(SendArgs),
     Ask(AskArgs),
+    Reply(ReplyArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +125,8 @@ pub struct AskArgs {
     #[arg(long, conflicts_with_all = ["message", "stdin"])]
     pub file: Option<String>,
 
-    /// Completion condition: status:<status>, output:<substring>, event:<kind>, delivery:<state>, or a bare status
-    #[arg(long, default_value = "status:idle")]
+    /// Completion condition: reply, status:<status>, output:<substring>, event:<kind>, delivery:<state>, or a bare status
+    #[arg(long, default_value = "reply")]
     pub until: Option<String>,
 
     /// Maximum time to wait, e.g. 30s, 10m, or 1000ms
@@ -139,6 +140,38 @@ pub struct AskArgs {
     /// Thread name for grouped conversations
     #[arg(long)]
     pub thread: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// wardian reply
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct ReplyArgs {
+    /// Structured ask request id.
+    pub request_id: String,
+
+    /// Reply status.
+    #[arg(long, value_enum)]
+    pub status: ReplyStatusArg,
+
+    /// Reply body text (omit when using --stdin or --file)
+    pub message: Option<String>,
+
+    /// Read reply body from stdin
+    #[arg(long, conflicts_with = "message")]
+    pub stdin: bool,
+
+    /// Read reply body from a file
+    #[arg(long, conflicts_with_all = ["message", "stdin"])]
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReplyStatusArg {
+    Done,
+    Blocked,
+    Failed,
 }
 
 #[derive(Debug, Args)]
@@ -648,7 +681,7 @@ mod tests {
         assert_eq!(args.message.as_deref(), Some("review this"));
         assert!(!args.stdin);
         assert_eq!(args.file, None);
-        assert_eq!(args.until.as_deref(), Some("status:idle"));
+        assert_eq!(args.until.as_deref(), Some("reply"));
         assert_eq!(args.timeout, "10m");
         assert_eq!(args.tail, 65536);
     }
@@ -676,6 +709,39 @@ mod tests {
         assert_eq!(args.until.as_deref(), Some("output:REVIEW_DONE"));
         assert_eq!(args.tail, 131072);
         assert_eq!(args.timeout, "30s");
+    }
+
+    #[test]
+    fn parses_reply_with_done_status_and_stdin() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "reply",
+            "ask_0123456789abcdef",
+            "--status",
+            "done",
+            "--stdin",
+        ])
+        .unwrap();
+        let Command::Reply(args) = cli.command else {
+            panic!("expected Reply command")
+        };
+        assert_eq!(args.request_id, "ask_0123456789abcdef");
+        assert_eq!(args.status, ReplyStatusArg::Done);
+        assert!(args.stdin);
+    }
+
+    #[test]
+    fn reply_rejects_unknown_status() {
+        let err = Cli::try_parse_from([
+            "wardian",
+            "reply",
+            "ask_0123456789abcdef",
+            "--status",
+            "waiting",
+            "--stdin",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]

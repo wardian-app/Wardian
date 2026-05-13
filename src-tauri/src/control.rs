@@ -8,10 +8,10 @@ use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
-    AgentWorktreeMutationResponse, AgentWorktreeSummary, ControlRequest, DeliveryDetail,
-    DeliveryErrorDetail, MessageInputMode, MessageOrigin, OkResponse, SendMessageResponse,
-    WatchAgentSnapshot, WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse,
-    WorkflowSummary,
+    AgentWorktreeMutationResponse, AgentWorktreeSummary, AskResponse, ControlRequest,
+    DeliveryDetail, DeliveryErrorDetail, MessageInputMode, MessageOrigin, OkResponse,
+    ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
+    WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -233,6 +233,44 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 schema: wardian_core::control::CONTROL_SCHEMA,
                 ok: true,
                 delivery,
+            })
+        }
+
+        ControlRequest::Ask {
+            target,
+            message,
+            thread,
+            tail_bytes,
+            timeout_ms,
+            origin,
+        } => {
+            handle_structured_ask(
+                app,
+                &target,
+                &message,
+                thread.as_deref(),
+                tail_bytes,
+                Duration::from_millis(timeout_ms.unwrap_or(30_000)),
+                origin.as_ref(),
+            )
+            .await
+        }
+
+        ControlRequest::SubmitReply {
+            request_id,
+            status,
+            body,
+            origin,
+        } => {
+            let state = app.state::<AppState>();
+            let reply =
+                submit_structured_reply(&state, &request_id, status, &body, origin.as_ref())
+                    .await?;
+            ok_json(&ReplyResponse {
+                schema: wardian_core::control::CONTROL_SCHEMA,
+                ok: true,
+                request_id,
+                reply,
             })
         }
 
@@ -880,6 +918,225 @@ async fn mark_delivered_agents_prompt_started(
     }
 }
 
+async fn handle_structured_ask(
+    app: &AppHandle,
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+    origin: Option<&MessageOrigin>,
+) -> Result<String, ControlError> {
+    validate_send_message_thread(thread)?;
+    validate_watch_target(target)?;
+    let state = app.state::<AppState>();
+    let target_uuid = resolve_target_uuid_in_state(&state, target)
+        .await
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
+    let watch_state = agent_watch_state(&state, &target_uuid).await?;
+    let initial_cursor = watch_state
+        .lock()
+        .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
+        .latest_cursor();
+    let request_id = create_pending_ask_request(&state, &target_uuid).await?;
+    let delivery = deliver_message_to_target(
+        Some(app),
+        &state,
+        target,
+        &message_with_structured_reply_instruction(message, &request_id),
+        thread,
+        MessageInputMode::Message,
+        origin,
+    )
+    .await?;
+    let reply = wait_for_structured_reply(&state, &request_id, timeout).await?;
+    let snapshot = watch_state
+        .lock()
+        .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
+        .snapshot_since(Some(&initial_cursor), tail_bytes)
+        .map_err(control_error_from_watch_state)?;
+    let agent = watch_agent_snapshot(&state, &target_uuid).await?;
+
+    let delivery_snapshot = delivery_snapshot_from_events(&snapshot.events);
+    ok_json(&AskResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        ok: true,
+        request_id,
+        target: target.to_string(),
+        delivery,
+        reply,
+        watch: AgentWatchResponse {
+            schema: wardian_core::control::CONTROL_SCHEMA,
+            agent,
+            cursor: snapshot.cursor,
+            events: snapshot.events,
+            output: snapshot.output,
+            delivery: delivery_snapshot,
+        },
+    })
+}
+
+fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
+    format!(
+        "{message}\n\nWardian request id: {request_id}\nRespond to this request with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the reply body on stdin."
+    )
+}
+
+fn new_ask_request_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("ask_{:016x}", nanos ^ counter)
+}
+
+async fn create_pending_ask_request(
+    state: &AppState,
+    target_session_id: &str,
+) -> Result<String, ControlError> {
+    if !state.agents.lock().await.contains_key(target_session_id) {
+        return Err(ControlError::not_found(format!(
+            "agent not found: {target_session_id}"
+        )));
+    }
+
+    let request_id = new_ask_request_id();
+    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    state.ask_requests.lock().await.insert(
+        request_id.clone(),
+        crate::state::app_state::AskRequestRecord {
+            request_id: request_id.clone(),
+            target_session_id: target_session_id.to_string(),
+            created_at: created_at.clone(),
+            reply: None,
+        },
+    );
+    push_watch_event_for_agent(
+        state,
+        target_session_id,
+        "request",
+        serde_json::json!({
+            "request_id": request_id,
+            "target_session_id": target_session_id,
+            "status": "pending",
+            "created_at": created_at,
+        }),
+    )
+    .await?;
+    Ok(request_id)
+}
+
+async fn submit_structured_reply(
+    state: &AppState,
+    request_id: &str,
+    status: ReplyStatus,
+    body: &str,
+    origin: Option<&MessageOrigin>,
+) -> Result<StructuredReply, ControlError> {
+    let source_session_id =
+        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+
+    let reply = {
+        let mut requests = state.ask_requests.lock().await;
+        let request = requests.get_mut(request_id).ok_or_else(|| {
+            ControlError::not_found(format!("ask request not found: {request_id}"))
+        })?;
+        if let Some(source) = &source_session_id {
+            if source != &request.target_session_id {
+                return Err(ControlError::coded(
+                    "unauthorized",
+                    "reply origin does not match ask target",
+                ));
+            }
+        }
+        if request.reply.is_some() {
+            return Err(ControlError::coded(
+                "duplicate_reply",
+                "ask request already has a terminal reply",
+            ));
+        }
+
+        let replied_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let reply = StructuredReply {
+            request_id: request.request_id.clone(),
+            status,
+            body: body.to_string(),
+            target_session_id: request.target_session_id.clone(),
+            source_session_id,
+            replied_at,
+        };
+        request.reply = Some(reply.clone());
+        reply
+    };
+
+    push_watch_event_for_agent(
+        state,
+        &reply.target_session_id,
+        "reply",
+        serde_json::json!({
+            "request_id": reply.request_id,
+            "status": reply.status,
+            "target_session_id": reply.target_session_id,
+            "source_session_id": reply.source_session_id,
+            "replied_at": reply.replied_at,
+        }),
+    )
+    .await?;
+    Ok(reply)
+}
+
+async fn wait_for_structured_reply(
+    state: &AppState,
+    request_id: &str,
+    timeout: Duration,
+) -> Result<StructuredReply, ControlError> {
+    let started = std::time::Instant::now();
+    loop {
+        let reply = {
+            let requests = state.ask_requests.lock().await;
+            let request = requests.get(request_id).ok_or_else(|| {
+                ControlError::not_found(format!("ask request not found: {request_id}"))
+            })?;
+            request.reply.clone()
+        };
+        if let Some(reply) = reply {
+            return Ok(reply);
+        }
+        if started.elapsed() >= timeout {
+            return Err(
+                ControlError::watch_timeout("structured reply timed out").with_details(
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "until": "reply",
+                    }),
+                ),
+            );
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+    }
+}
+
+async fn push_watch_event_for_agent(
+    state: &AppState,
+    session_id: &str,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<(), ControlError> {
+    let agents = state.agents.lock().await;
+    let agent = agents
+        .get(session_id)
+        .ok_or_else(|| ControlError::not_found(format!("agent not found: {session_id}")))?;
+    agent
+        .watch_state
+        .lock()
+        .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
+        .push_event(kind, payload);
+    Ok(())
+}
+
 async fn handle_agent_watch(
     app: &AppHandle,
     target: &str,
@@ -1099,8 +1356,12 @@ fn normalized_line_is_submitted_prompt_echo(
     token: &str,
 ) -> bool {
     prompt_echo_line_candidates(line).iter().any(|candidate| {
-        submitted_joined.contains(candidate.as_str())
+        if submitted_joined.contains(candidate.as_str())
             && !(candidate == token && submitted_joined != token)
+        {
+            return true;
+        }
+        candidate_contains_submitted_prompt_fragment(candidate, submitted_joined, token)
     })
 }
 
@@ -1116,6 +1377,51 @@ fn prompt_echo_line_candidates(line: &str) -> Vec<String> {
     candidates.sort();
     candidates.dedup();
     candidates
+}
+
+fn candidate_contains_submitted_prompt_fragment(
+    candidate: &str,
+    submitted_joined: &str,
+    token: &str,
+) -> bool {
+    if !candidate.contains(token) {
+        return false;
+    }
+
+    let candidate_words = normalized_prompt_words(candidate);
+    let submitted_words = normalized_prompt_words(submitted_joined);
+    if candidate_words.is_empty() || submitted_words.len() < 2 {
+        return false;
+    }
+
+    let min_phrase_words = submitted_words.len().min(3);
+    if candidate_words.len() < min_phrase_words {
+        return false;
+    }
+
+    let max_phrase_words = candidate_words.len().min(submitted_words.len());
+    (min_phrase_words..=max_phrase_words)
+        .rev()
+        .any(|phrase_words| {
+            candidate_words
+                .windows(phrase_words)
+                .any(|candidate_window| {
+                    candidate_window.iter().any(|word| word.contains(token))
+                        && submitted_words
+                            .windows(phrase_words)
+                            .any(|submitted_window| submitted_window == candidate_window)
+                })
+        })
+}
+
+fn normalized_prompt_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.trim_matches(|ch: char| ch.is_ascii_punctuation() && ch != '_' && ch != '-')
+        })
+        .filter(|word| !word.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn strip_origin_prefix(line: &str) -> &str {
@@ -2213,6 +2519,148 @@ mod tests {
     }
 
     #[test]
+    fn generated_ask_request_id_has_stable_shape() {
+        let request_id = new_ask_request_id();
+        let Some(suffix) = request_id.strip_prefix("ask_") else {
+            panic!("request id should use ask_ prefix: {request_id}");
+        };
+        assert_eq!(suffix.len(), 16);
+        assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn ask_request_lifecycle_accepts_matching_reply_and_emits_watch_event() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
+
+        let reply = submit_structured_reply(
+            &state,
+            &request_id,
+            wardian_core::control::ReplyStatus::Done,
+            "finished",
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "agent-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply.request_id, request_id);
+        assert_eq!(reply.status, wardian_core::control::ReplyStatus::Done);
+        assert_eq!(reply.body, "finished");
+        assert_eq!(reply.source_session_id.as_deref(), Some("agent-1"));
+
+        let agents = state.agents.lock().await;
+        let snapshot = agents
+            .get("agent-1")
+            .unwrap()
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, Some(4096))
+            .unwrap();
+        assert!(snapshot
+            .events
+            .iter()
+            .any(|event| { event.kind == "request" && event.payload["request_id"] == request_id }));
+        assert!(snapshot.events.iter().any(|event| {
+            event.kind == "reply"
+                && event.payload["request_id"] == request_id
+                && event.payload["status"] == "done"
+        }));
+    }
+
+    #[tokio::test]
+    async fn ask_reply_rejects_unknown_duplicate_and_foreign_request() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        insert_test_agent(&state, "agent-2", "CoderTwo", "Coder").await;
+
+        let unknown = submit_structured_reply(
+            &state,
+            "ask_deadbeefdeadbeef",
+            wardian_core::control::ReplyStatus::Done,
+            "finished",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.code(), "not_found");
+
+        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
+        let foreign = submit_structured_reply(
+            &state,
+            &request_id,
+            wardian_core::control::ReplyStatus::Done,
+            "finished",
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "agent-2".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(foreign.code(), "unauthorized");
+
+        submit_structured_reply(
+            &state,
+            &request_id,
+            wardian_core::control::ReplyStatus::Blocked,
+            "blocked on review",
+            None,
+        )
+        .await
+        .unwrap();
+        let duplicate = submit_structured_reply(
+            &state,
+            &request_id,
+            wardian_core::control::ReplyStatus::Done,
+            "finished",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate.code(), "duplicate_reply");
+    }
+
+    #[tokio::test]
+    async fn wait_for_structured_reply_times_out_without_terminal_status() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
+
+        let error =
+            wait_for_structured_reply(&state, &request_id, std::time::Duration::from_millis(10))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error.code(), "watch_timeout");
+    }
+
+    #[tokio::test]
+    async fn wait_for_structured_reply_returns_blocked_and_failed_statuses() {
+        for status in [
+            wardian_core::control::ReplyStatus::Blocked,
+            wardian_core::control::ReplyStatus::Failed,
+        ] {
+            let state = AppState::new();
+            insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+            let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
+            submit_structured_reply(&state, &request_id, status.clone(), "cannot continue", None)
+                .await
+                .unwrap();
+
+            let reply =
+                wait_for_structured_reply(&state, &request_id, std::time::Duration::from_secs(1))
+                    .await
+                    .unwrap();
+
+            assert_eq!(reply.status, status);
+            assert_eq!(reply.body, "cannot continue");
+        }
+    }
+
+    #[test]
     fn watch_target_rejects_multi_target_selectors() {
         assert_eq!(
             validate_watch_target("all").unwrap_err().code(),
@@ -2303,12 +2751,52 @@ mod tests {
     }
 
     #[test]
-    fn output_condition_with_ask_echo_guard_matches_exact_marker_response_after_echo() {
+    fn output_condition_with_ask_echo_guard_ignores_codex_repaint_prompt_fragment() {
         let snapshot = crate::state::agent_watch::WatchSnapshot {
             cursor: "agent-1:0000000000000003".to_string(),
             events: Vec::new(),
             output: wardian_core::control::WatchOutput {
                 cursor: "agent-1:0000000000000003".to_string(),
+                text: "\u{1b}[2J\u{1b}[H\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Capture the README demo GIF\r\n  and end exactly with DEMO_GIF_DONE  gpt-5.5 high · D:\\Development\\Wardian · 75% context left".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(!watch_condition_matches(
+            &WatchCondition::OutputContains("DEMO_GIF_DONE".to_string()),
+            &snapshot,
+            Some("Capture the README demo GIF and end exactly with DEMO_GIF_DONE"),
+        ));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_matches_response_after_codex_repaint_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000004".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000004".to_string(),
+                text: "\u{1b}[2J\u{1b}[H\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Capture the README demo GIF\r\n  and end exactly with DEMO_GIF_DONE  gpt-5.5 high · D:\\Development\\Wardian · 75% context left\r\nFinal response: DEMO_GIF_DONE".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        };
+
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("DEMO_GIF_DONE".to_string()),
+            &snapshot,
+            Some("Capture the README demo GIF and end exactly with DEMO_GIF_DONE"),
+        ));
+    }
+
+    #[test]
+    fn output_condition_with_ask_echo_guard_matches_exact_marker_response_after_echo() {
+        let snapshot = crate::state::agent_watch::WatchSnapshot {
+            cursor: "agent-1:0000000000000005".to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: "agent-1:0000000000000005".to_string(),
                 text:
                     "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\n  AUTO_TEST_2_DONE"
                         .to_string(),
@@ -2327,10 +2815,10 @@ mod tests {
     #[test]
     fn output_condition_with_ask_echo_guard_ignores_origin_prefixed_json_echo() {
         let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000004".to_string(),
+            cursor: "agent-1:0000000000000006".to_string(),
             events: Vec::new(),
             output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000004".to_string(),
+                cursor: "agent-1:0000000000000006".to_string(),
                 text: "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}".to_string(),
                 truncated: false,
                 omitted_bytes: 0,
@@ -2347,10 +2835,10 @@ mod tests {
     #[test]
     fn output_condition_with_ask_echo_guard_matches_origin_prefixed_response_after_echo() {
         let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000005".to_string(),
+            cursor: "agent-1:0000000000000007".to_string(),
             events: Vec::new(),
             output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000005".to_string(),
+                cursor: "agent-1:0000000000000007".to_string(),
                 text: "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}\r\nActual response after echo: From Wardian agent agent-1: AUTO_TEST_2_DONE".to_string(),
                 truncated: false,
                 omitted_bytes: 0,

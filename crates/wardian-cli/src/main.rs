@@ -7,8 +7,9 @@ mod output;
 use std::{io::Read as _, time::Duration};
 
 use args::{
-    AgentArgs, AgentCommand, AgentWorktreeCommand, AskArgs, Cli, Command, SendArgs, TeamArgs,
-    TeamCommand, WatchlistArgs, WatchlistCommand, WorkflowArgs, WorkflowCommand,
+    AgentArgs, AgentCommand, AgentWorktreeCommand, AskArgs, Cli, Command, ReplyArgs,
+    ReplyStatusArg, SendArgs, TeamArgs, TeamCommand, WatchlistArgs, WatchlistCommand, WorkflowArgs,
+    WorkflowCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
@@ -32,6 +33,7 @@ fn run() -> i32 {
         Command::Watchlist(args) => handle_watchlist(args),
         Command::Send(args) => handle_send(args),
         Command::Ask(args) => handle_ask(args),
+        Command::Reply(args) => handle_reply(args),
     };
 
     match result {
@@ -449,6 +451,32 @@ fn handle_ask(args: AskArgs) -> Result<String, CliError> {
     render_ask_response(&args.target, &condition, response)
 }
 
+fn handle_reply(args: ReplyArgs) -> Result<String, CliError> {
+    let body = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
+    let response = live::submit_reply(
+        &args.request_id,
+        reply_status_arg_to_control(args.status),
+        &body,
+    )
+    .map_err(control_error)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema": 1,
+        "ok": true,
+        "request_id": response.request_id,
+        "reply": response.reply,
+    }))
+    .map(|json| format!("{json}\n"))
+    .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn reply_status_arg_to_control(status: ReplyStatusArg) -> wardian_core::control::ReplyStatus {
+    match status {
+        ReplyStatusArg::Done => wardian_core::control::ReplyStatus::Done,
+        ReplyStatusArg::Blocked => wardian_core::control::ReplyStatus::Blocked,
+        ReplyStatusArg::Failed => wardian_core::control::ReplyStatus::Failed,
+    }
+}
+
 fn read_message_input(
     message: Option<&str>,
     stdin: bool,
@@ -503,7 +531,9 @@ fn validate_send_command_thread(thread: Option<&str>) -> Result<(), CliError> {
 }
 
 fn normalize_ask_condition(until: &str) -> Result<String, CliError> {
-    if until.starts_with("status:")
+    if until == "reply" {
+        Ok(until.to_string())
+    } else if until.starts_with("status:")
         || until.starts_with("output:")
         || until.starts_with("event:")
         || until.starts_with("delivery:")
@@ -531,6 +561,8 @@ fn render_ask_response(
         "ok": true,
         "target": target,
         "condition": condition,
+        "request_id": ask.request_id,
+        "reply": ask.reply,
         "agent": watch.agent,
         "cursor": watch.cursor,
         "delivery": ask.delivery,
@@ -885,6 +917,8 @@ mod tests {
     #[test]
     fn render_ask_response_uses_send_delivery() {
         let ask = live::AskAgentResponse {
+            request_id: None,
+            reply: None,
             delivery: vec![wardian_core::control::DeliveryDetail {
                 uuid: "agent-1".to_string(),
                 name: "reviewer-a1".to_string(),
@@ -921,6 +955,54 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(json["delivery"][0]["delivery_state"], "submitted");
         assert_eq!(json["output"]["text"], "done");
+    }
+
+    #[test]
+    fn render_ask_response_includes_structured_reply() {
+        let ask = live::AskAgentResponse {
+            request_id: Some("ask_0123456789abcdef".to_string()),
+            reply: Some(wardian_core::control::StructuredReply {
+                request_id: "ask_0123456789abcdef".to_string(),
+                status: wardian_core::control::ReplyStatus::Done,
+                body: "finished".to_string(),
+                target_session_id: "agent-1".to_string(),
+                source_session_id: Some("agent-1".to_string()),
+                replied_at: "2026-05-13T00:00:00.000Z".to_string(),
+            }),
+            delivery: Vec::new(),
+            watch: wardian_core::control::AgentWatchResponse {
+                schema: 1,
+                agent: wardian_core::control::WatchAgentSnapshot {
+                    uuid: "agent-1".to_string(),
+                    name: "reviewer-a1".to_string(),
+                    provider: "mock".to_string(),
+                    status: "idle".to_string(),
+                    last_status_at: None,
+                },
+                cursor: "agent-1:2".to_string(),
+                events: Vec::new(),
+                output: wardian_core::control::WatchOutput {
+                    cursor: "agent-1:2".to_string(),
+                    text: String::new(),
+                    truncated: false,
+                    omitted_bytes: 0,
+                },
+                delivery: wardian_core::control::WatchDeliverySnapshot {
+                    delivery: Vec::new(),
+                },
+            },
+        };
+
+        let rendered = render_ask_response("reviewer-a1", "reply", ask).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["request_id"], "ask_0123456789abcdef");
+        assert_eq!(json["reply"]["status"], "done");
+        assert_eq!(json["reply"]["body"], "finished");
+    }
+
+    #[test]
+    fn normalize_ask_condition_keeps_structured_reply_mode() {
+        assert_eq!(normalize_ask_condition("reply").unwrap(), "reply");
     }
 
     #[test]

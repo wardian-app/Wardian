@@ -93,7 +93,8 @@ wardian agent kill reviewer-a1
 wardian agent wait reviewer-a1 --until idle --timeout 10m
 wardian agent wait reviewer-a1 --until idle --next --timeout 10m
 wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output --timeout 10m
-wardian ask reviewer-a1 --stdin --until output:REVIEW_DONE --timeout 10m
+wardian ask reviewer-a1 --stdin --timeout 10m
+wardian reply ask_0123456789abcdef --status done --stdin
 ```
 
 `agent spawn` requires both `--provider` and `--class`; do not rely on implicit
@@ -118,20 +119,40 @@ after moving its workspace so the provider starts fresh in the new location.
 `disable` removes only the assignment; it does not delete the physical worktree
 folder.
 
-Use `wardian ask` for one-off peer tasks where you need both delivery evidence
-and the target's response output:
+Use `wardian ask` for one-off peer tasks where you need delivery evidence and a
+structured reply from the target:
 
 ```bash
-cat <<'EOF' | wardian ask reviewer-a1 --stdin --until output:REVIEW_DONE --timeout 10m
-Review this patch. End with REVIEW_DONE.
+cat <<'EOF' | wardian ask reviewer-a1 --stdin --timeout 10m
+Review this patch.
 EOF
 ```
 
 `ask` accepts one agent name or UUID, captures a pre-send watch cursor, sends
-the prompt, then returns output observed after that cursor. Its default
-completion condition is `status:idle`; use `output:<token>` for deterministic
-automation. Broadcasts, class selectors, and `--thread` are not supported by
-`ask` in this slice.
+the prompt with a backend-owned `request_id`, and waits for the target to run
+`wardian reply <request-id> --status done --stdin`. The response JSON includes
+`request_id`, `reply.status`, `reply.body`, `delivery`, watch `events`, and
+retained `output`. `reply.status` can be `done`, `blocked`, or `failed`;
+timeouts remain separate `watch_timeout` errors.
+
+Use `--until output:<token>` only when you explicitly need output-substring
+matching for manual compatibility. Other explicit watch conditions such as
+`status:<status>`, `event:<kind>`, and `delivery:<state>` also preserve the
+watch-based behavior. Broadcasts, class selectors, and `--thread` are not
+supported by `ask` in this slice.
+
+When responding to a structured ask from inside a Wardian-managed agent
+terminal, use:
+
+```bash
+cat <<'EOF' | wardian reply ask_0123456789abcdef --status done --stdin
+Reviewed the patch. No blocking findings.
+EOF
+```
+
+Wardian verifies the sender identity when `WARDIAN_SESSION_ID` is available.
+Replies from ordinary terminals are accepted in this first live-only slice so a
+human can unblock a request, but that caller identity is not authenticated.
 
 ## Sending Messages
 
