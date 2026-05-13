@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
-    DeployedSkillRef,
+    DeployedSkillRef, ProviderConfig,
 };
 
 #[derive(serde::Deserialize)]
@@ -192,14 +192,6 @@ fn clone_sanitize_config(
     if let Some(agent_class) = agent_class.filter(|value| !value.trim().is_empty()) {
         config.agent_class = agent_class;
     }
-    config.resume_session = None;
-    config.fresh_provider_session_id = None;
-    config
-        .codex_config_mut_preserve_encoding()
-        .cleared_provider_sessions
-        .clear();
-    config.codex_cleared_provider_sessions.clear();
-    config.system_include_directories = None;
     if config.provider != source_provider {
         config.reset_provider_config_for_provider();
         config.custom_args = None;
@@ -207,6 +199,10 @@ fn clone_sanitize_config(
         config.custom_args =
             clone_custom_args_without_provider_memory(config.custom_args.as_deref());
     }
+    config.resume_session = None;
+    config.fresh_provider_session_id = None;
+    clear_codex_cleared_provider_sessions(&mut config);
+    config.system_include_directories = None;
     config.opencode_port = None;
     if config.provider == "opencode" {
         if let wardian_core::models::ProviderConfig::OpenCode(opencode) =
@@ -1220,10 +1216,12 @@ fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
 }
 
 fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
-    config
-        .codex_config_mut_preserve_encoding()
-        .cleared_provider_sessions
-        .clear();
+    if config.provider == "codex" || matches!(config.provider_config, ProviderConfig::Codex(_)) {
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions
+            .clear();
+    }
     config.codex_cleared_provider_sessions.clear();
 }
 
@@ -1516,6 +1514,7 @@ pub async fn spawn_agent(
     config.folder = folder;
     config.resume_session = actual_resume.clone();
     config.is_off = is_off.unwrap_or(false);
+    config.normalize_provider_config_for_provider();
     config.mark_provider_config_nested_for_save();
     let registered = register_new_agent(
         config,
@@ -2441,8 +2440,8 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
     use wardian_core::models::{
-        AgentConfig, AgentSessionPersistenceOverride, CodexProviderConfig, DeployedSkillRef,
-        ProviderConfig,
+        AgentConfig, AgentSessionPersistenceOverride, ClaudeProviderConfig, CodexProviderConfig,
+        DeployedSkillRef, GeminiProviderConfig, OpenCodeProviderConfig, ProviderConfig,
     };
 
     struct WardianHomeGuard;
@@ -3457,6 +3456,71 @@ mod tests {
     }
 
     #[test]
+    fn clone_sanitize_config_preserves_same_provider_claude_config() {
+        let source = AgentConfig {
+            provider: "claude".to_string(),
+            provider_config: ProviderConfig::Claude(ClaudeProviderConfig {
+                permission_mode: Some("plan".to_string()),
+                ..Default::default()
+            }),
+            resume_session: Some("old-session".to_string()),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.provider, "claude");
+        assert_eq!(
+            clone.claude_config().permission_mode.as_deref(),
+            Some("plan")
+        );
+        assert!(matches!(clone.provider_config, ProviderConfig::Claude(_)));
+    }
+
+    #[test]
+    fn clone_sanitize_config_preserves_same_provider_gemini_config() {
+        let source = AgentConfig {
+            provider: "gemini".to_string(),
+            provider_config: ProviderConfig::Gemini(GeminiProviderConfig {
+                sandbox: Some(true),
+                ..Default::default()
+            }),
+            resume_session: Some("old-session".to_string()),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.provider, "gemini");
+        assert_eq!(clone.gemini_config().sandbox, Some(true));
+        assert!(matches!(clone.provider_config, ProviderConfig::Gemini(_)));
+    }
+
+    #[test]
+    fn clone_sanitize_config_preserves_same_provider_opencode_config_and_clears_port() {
+        let source = AgentConfig {
+            provider: "opencode".to_string(),
+            provider_config: ProviderConfig::OpenCode(OpenCodeProviderConfig {
+                agent: Some("build".to_string()),
+                port: Some(4096),
+            }),
+            resume_session: Some("ses_old".to_string()),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.provider, "opencode");
+        let opencode = clone.opencode_config();
+        assert_eq!(opencode.agent.as_deref(), Some("build"));
+        assert_eq!(opencode.port, None);
+        assert!(matches!(clone.provider_config, ProviderConfig::OpenCode(_)));
+    }
+
+    #[test]
     fn clone_sanitize_config_strips_custom_provider_session_args() {
         let source = AgentConfig {
             custom_args: Some(
@@ -4322,6 +4386,28 @@ mod tests {
             AgentSessionPersistenceOverride::Resume
         );
         assert!(config.fresh_provider_session_id.is_some());
+        assert!(!config.is_off);
+    }
+
+    #[test]
+    fn prepare_clear_config_preserves_non_codex_provider_config() {
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            provider_config: ProviderConfig::Gemini(GeminiProviderConfig {
+                sandbox: Some(true),
+                ..Default::default()
+            }),
+            resume_session: Some("old-gemini-session".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_clear_config(&mut config).expect("prepare clear config");
+
+        assert_eq!(config.provider, "gemini");
+        assert_eq!(config.gemini_config().sandbox, Some(true));
+        assert!(matches!(config.provider_config, ProviderConfig::Gemini(_)));
+        assert_eq!(config.resume_session, None);
         assert!(!config.is_off);
     }
 }

@@ -7,7 +7,7 @@ use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter};
-use wardian_core::models::{AgentConfig, AgentEvent};
+use wardian_core::models::{AgentConfig, AgentEvent, ProviderConfig};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
 use super::codex::{
@@ -26,10 +26,12 @@ fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
 }
 
 fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
-    config
-        .codex_config_mut_preserve_encoding()
-        .cleared_provider_sessions
-        .clear();
+    if config.provider == "codex" || matches!(config.provider_config, ProviderConfig::Codex(_)) {
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions
+            .clear();
+    }
     config.codex_cleared_provider_sessions.clear();
 }
 

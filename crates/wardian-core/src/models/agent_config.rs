@@ -18,6 +18,26 @@ fn provider_key(provider: &str) -> &str {
     }
 }
 
+fn provider_type_name(provider: &str) -> String {
+    match provider_key(provider) {
+        "claude" | "gemini" | "codex" | "opencode" | "mock" => {
+            provider_key(provider).to_string()
+        }
+        _ => {
+            let provider = provider.trim().to_ascii_lowercase();
+            if provider.is_empty() {
+                "claude".to_string()
+            } else {
+                provider
+            }
+        }
+    }
+}
+
+fn is_known_provider_type(provider: &str) -> bool {
+    matches!(provider, "claude" | "gemini" | "codex" | "opencode" | "mock")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProviderConfigEncoding {
     #[default]
@@ -142,7 +162,9 @@ impl ProviderConfig {
     }
 
     fn matches_provider(&self, provider: &str) -> bool {
-        self.type_name() == provider_key(provider) || matches!(self, Self::Unknown(_))
+        let provider_type = provider_type_name(provider);
+        self.type_name() == provider_type
+            || (matches!(self, Self::Unknown(_)) && !is_known_provider_type(&provider_type))
     }
 
     fn to_value_with_type<T: Serialize>(type_name: &str, config: &T) -> serde_json::Value {
@@ -447,13 +469,19 @@ impl AgentConfigCompat {
 
 impl From<AgentConfigCompat> for AgentConfig {
     fn from(compat: AgentConfigCompat) -> Self {
-        let mut provider_config = compat
-            .provider_config
-            .clone()
-            .unwrap_or_else(|| compat.legacy_provider_config());
-        if !provider_config.matches_provider(&compat.provider) {
-            provider_config = ProviderConfig::default_for_provider(&compat.provider);
-        }
+        let legacy_provider_config = compat.legacy_provider_config();
+        let provider_config = match compat.provider_config.clone() {
+            Some(provider_config) if provider_config.matches_provider(&compat.provider) => {
+                provider_config
+            }
+            Some(ProviderConfig::Unknown(_))
+                if legacy_provider_config != ProviderConfig::default_for_provider(&compat.provider) =>
+            {
+                legacy_provider_config
+            }
+            Some(_) => ProviderConfig::default_for_provider(&compat.provider),
+            None => legacy_provider_config,
+        };
 
         let mut config = Self {
             session_id: compat.session_id,
@@ -577,6 +605,12 @@ impl AgentConfig {
         self.provider_config = ProviderConfig::default_for_provider(&self.provider);
         self.provider_config_encoding = encoding;
         self.sync_legacy_fields_from_provider_config();
+    }
+
+    pub fn normalize_provider_config_for_provider(&mut self) {
+        if !self.provider_config.matches_provider(&self.provider) {
+            self.reset_provider_config_for_provider();
+        }
     }
 
     pub fn mark_provider_config_nested_for_save(&mut self) {
@@ -986,6 +1020,23 @@ mod tests {
               "provider":"codex",
               "codex_sandbox_mode":"read-only",
               "provider_config":{"type":"codex","sandbox_mode":"workspace-write"}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.codex_config().sandbox_mode.as_deref(),
+            Some("workspace-write")
+        );
+    }
+
+    #[test]
+    fn malformed_known_provider_config_falls_back_to_legacy_flat_fields() {
+        let config: AgentConfig = serde_json::from_str(
+            r#"{
+              "provider":"codex",
+              "codex_sandbox_mode":"workspace-write",
+              "provider_config":{"sandbox_mode":"read-only"}
             }"#,
         )
         .unwrap();
