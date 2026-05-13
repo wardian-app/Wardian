@@ -26,7 +26,7 @@ The default policy is autonomous:
 
 For current Codex CLI versions, Wardian maps `full_auto: true` to `--dangerously-bypass-approvals-and-sandbox`. On Windows, Wardian also passes `-c windows.sandbox="unelevated"` so a user-level `[windows].sandbox = "elevated"` Codex config cannot launch a UAC setup helper during tool execution. Wardian does not pass the older unsupported `--full-auto` flag.
 
-Agent-level `codex_sandbox_mode`, `codex_approval_policy`, and `codex_full_auto` remain compatibility overrides. If an agent explicitly sets sandbox or approval values, Wardian uses those values instead of the global full-auto default. If an agent explicitly enables full auto, Wardian uses the bypass flag.
+Agent-level Codex `provider_config.sandbox_mode`, `provider_config.approval_policy`, and `provider_config.full_auto` remain explicit overrides. Legacy flat fields such as `codex_sandbox_mode`, `codex_approval_policy`, and `codex_full_auto` still deserialize into the nested Codex provider config for compatibility. If an agent explicitly sets sandbox or approval values, Wardian uses those values instead of the global full-auto default. If an agent explicitly enables full auto, Wardian uses the bypass flag.
 
 ## Consequences
 

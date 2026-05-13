@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
-    DeployedSkillRef,
+    DeployedSkillRef, ProviderConfig,
 };
 
 #[derive(serde::Deserialize)]
@@ -181,6 +181,7 @@ fn clone_sanitize_config(
     start: bool,
 ) -> AgentConfig {
     let mut config = source.clone();
+    let source_provider = config.provider.clone();
     config.session_id.clear();
     config.session_name = session_name;
     if let Some(provider) = provider.filter(|value| !value.trim().is_empty()) {
@@ -192,13 +193,27 @@ fn clone_sanitize_config(
     if let Some(agent_class) = agent_class.filter(|value| !value.trim().is_empty()) {
         config.agent_class = agent_class;
     }
+    if config.provider != source_provider {
+        config.reset_provider_config_for_provider();
+        config.custom_args = None;
+    } else {
+        config.custom_args =
+            clone_custom_args_without_provider_memory(config.custom_args.as_deref());
+    }
     config.resume_session = None;
     config.fresh_provider_session_id = None;
-    config.codex_cleared_provider_sessions.clear();
+    clear_codex_cleared_provider_sessions(&mut config);
     config.system_include_directories = None;
     config.opencode_port = None;
-    config.custom_args = clone_custom_args_without_provider_memory(config.custom_args.as_deref());
+    if config.provider == "opencode" {
+        if let wardian_core::models::ProviderConfig::OpenCode(opencode) =
+            &mut config.provider_config
+        {
+            opencode.port = None;
+        }
+    }
     config.is_off = !start;
+    config.mark_provider_config_nested_for_save();
     config
 }
 
@@ -1197,6 +1212,20 @@ fn normalize_clone_folder_override(folder: Option<String>) -> Result<Option<Stri
     folder.as_deref().map(normalize_spawn_folder).transpose()
 }
 
+fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
+    config.codex_config().cleared_provider_sessions
+}
+
+fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
+    if config.provider == "codex" || matches!(config.provider_config, ProviderConfig::Codex(_)) {
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions
+            .clear();
+    }
+    config.codex_cleared_provider_sessions.clear();
+}
+
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
 
@@ -1228,9 +1257,10 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
         }
     } else if config.provider == "codex"
         && config.resume_session.as_deref().is_some_and(|rs| {
+            let cleared_provider_sessions = codex_cleared_provider_sessions(config);
             rs.trim().is_empty()
                 || rs == config.session_id
-                || !codex_provider_session_is_new(rs, &config.codex_cleared_provider_sessions)
+                || !codex_provider_session_is_new(rs, &cleared_provider_sessions)
                 || !manager::codex_session_exists_in_agent_home(&config.session_id, rs)
         })
     {
@@ -1242,16 +1272,15 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
             &config.session_id,
         )?
         .filter(|(provider_session_id, _updated_at)| {
-            codex_provider_session_is_new(
-                provider_session_id,
-                &config.codex_cleared_provider_sessions,
-            ) && manager::codex_session_exists_in_agent_home(
-                &config.session_id,
-                provider_session_id,
-            )
+            let cleared_provider_sessions = codex_cleared_provider_sessions(config);
+            codex_provider_session_is_new(provider_session_id, &cleared_provider_sessions)
+                && manager::codex_session_exists_in_agent_home(
+                    &config.session_id,
+                    provider_session_id,
+                )
         }) {
             config.resume_session = Some(provider_session_id);
-            config.codex_cleared_provider_sessions.clear();
+            clear_codex_cleared_provider_sessions(config);
         }
     }
 
@@ -1273,7 +1302,7 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
     config.fresh_provider_session_id = None;
-    config.codex_cleared_provider_sessions.clear();
+    clear_codex_cleared_provider_sessions(config);
     if config.provider == "claude" {
         config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
@@ -1328,7 +1357,7 @@ async fn register_new_agent(
                     value != &session_id
                         && codex_provider_session_is_new(
                             value,
-                            &config.codex_cleared_provider_sessions,
+                            &codex_cleared_provider_sessions(&config),
                         )
                 });
             let provider_session_id = if live_provider_session_id.is_some() {
@@ -1339,7 +1368,7 @@ async fn register_new_agent(
                     .filter(|value| {
                         codex_provider_session_is_new(
                             value,
-                            &config.codex_cleared_provider_sessions,
+                            &codex_cleared_provider_sessions(&config),
                         )
                     })
             };
@@ -1347,11 +1376,11 @@ async fn register_new_agent(
             if let Some(provider_session_id) = provider_session_id {
                 actual_resume = Some(provider_session_id.clone());
                 config.resume_session = Some(provider_session_id.clone());
-                config.codex_cleared_provider_sessions.clear();
+                clear_codex_cleared_provider_sessions(&mut config);
                 {
                     let mut cfg = active_agent.config.lock().unwrap();
                     cfg.resume_session = Some(provider_session_id.clone());
-                    cfg.codex_cleared_provider_sessions.clear();
+                    clear_codex_cleared_provider_sessions(&mut cfg);
                 }
                 manager::log_debug(&format!(
                     "[WARDIAN] Adopted live Codex session id {} for Wardian session {}",
@@ -1369,7 +1398,15 @@ async fn register_new_agent(
 
     {
         let mut cfg = active_agent.config.lock().unwrap();
-        config.opencode_port = cfg.opencode_port;
+        if config.provider == "opencode" {
+            let opencode = cfg.opencode_config();
+            config.opencode_port = opencode.port;
+            if let wardian_core::models::ProviderConfig::OpenCode(target) =
+                &mut config.provider_config
+            {
+                target.port = opencode.port;
+            }
+        }
         cfg.resume_session = persisted_resume;
     }
 
@@ -1478,6 +1515,8 @@ pub async fn spawn_agent(
     config.folder = folder;
     config.resume_session = actual_resume.clone();
     config.is_off = is_off.unwrap_or(false);
+    config.normalize_provider_config_for_provider();
+    config.mark_provider_config_nested_for_save();
     let registered = register_new_agent(
         config,
         actual_resume,
@@ -1942,7 +1981,7 @@ pub async fn clear_agent_session(
         // 2. Prepare fresh config (new provider session ID for Claude, clear resume IDs)
         let mut config = agent.config.lock().unwrap().clone();
         let previous_codex_provider_sessions = if config.provider == "codex" {
-            let mut sessions = config.codex_cleared_provider_sessions.clone();
+            let mut sessions = codex_cleared_provider_sessions(&config);
             if let Some(session_id) = config
                 .resume_session
                 .clone()
@@ -1968,6 +2007,9 @@ pub async fn clear_agent_session(
         };
         prepare_clear_config(&mut config)?;
         if config.provider == "codex" {
+            config
+                .codex_config_mut_preserve_encoding()
+                .cleared_provider_sessions = previous_codex_provider_sessions.clone();
             config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
         }
 
@@ -2161,6 +2203,8 @@ pub async fn update_agent_config(
         "[WARDIAN] update_agent_config called for session: {}",
         new_config.session_id
     ));
+    new_config.validate_provider_config_matches_provider()?;
+    new_config.mark_provider_config_nested_for_save();
     let mut agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
 
@@ -2600,7 +2644,10 @@ mod tests {
     use crate::utils::{ShellOption, ShellSettings};
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
-    use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, DeployedSkillRef};
+    use wardian_core::models::{
+        AgentConfig, AgentSessionPersistenceOverride, ClaudeProviderConfig, CodexProviderConfig,
+        DeployedSkillRef, GeminiProviderConfig, OpenCodeProviderConfig, ProviderConfig,
+    };
 
     struct WardianHomeGuard;
 
@@ -3768,8 +3815,10 @@ mod tests {
             resume_session: Some("provider-session".to_string()),
             git_worktree: Some(true),
             fresh_provider_session_id: Some("fresh-provider-session".to_string()),
-            codex_cleared_provider_sessions: vec!["old-provider-session".to_string()],
-            opencode_port: Some(41313),
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                cleared_provider_sessions: vec!["old-provider-session".to_string()],
+                ..Default::default()
+            }),
             is_off: true,
             custom_args: Some("--verbose".to_string()),
             ..Default::default()
@@ -3788,9 +3837,74 @@ mod tests {
         assert_eq!(clone.custom_args.as_deref(), Some("--verbose"));
         assert_eq!(clone.resume_session, None);
         assert_eq!(clone.fresh_provider_session_id, None);
-        assert!(clone.codex_cleared_provider_sessions.is_empty());
+        assert!(clone.codex_config().cleared_provider_sessions.is_empty());
         assert_eq!(clone.opencode_port, None);
         assert!(!clone.is_off);
+    }
+
+    #[test]
+    fn clone_sanitize_config_preserves_same_provider_claude_config() {
+        let source = AgentConfig {
+            provider: "claude".to_string(),
+            provider_config: ProviderConfig::Claude(ClaudeProviderConfig {
+                permission_mode: Some("plan".to_string()),
+                ..Default::default()
+            }),
+            resume_session: Some("old-session".to_string()),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.provider, "claude");
+        assert_eq!(
+            clone.claude_config().permission_mode.as_deref(),
+            Some("plan")
+        );
+        assert!(matches!(clone.provider_config, ProviderConfig::Claude(_)));
+    }
+
+    #[test]
+    fn clone_sanitize_config_preserves_same_provider_gemini_config() {
+        let source = AgentConfig {
+            provider: "gemini".to_string(),
+            provider_config: ProviderConfig::Gemini(GeminiProviderConfig {
+                sandbox: Some(true),
+                ..Default::default()
+            }),
+            resume_session: Some("old-session".to_string()),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.provider, "gemini");
+        assert_eq!(clone.gemini_config().sandbox, Some(true));
+        assert!(matches!(clone.provider_config, ProviderConfig::Gemini(_)));
+    }
+
+    #[test]
+    fn clone_sanitize_config_preserves_same_provider_opencode_config_and_clears_port() {
+        let source = AgentConfig {
+            provider: "opencode".to_string(),
+            provider_config: ProviderConfig::OpenCode(OpenCodeProviderConfig {
+                agent: Some("build".to_string()),
+                port: Some(4096),
+            }),
+            resume_session: Some("ses_old".to_string()),
+            ..Default::default()
+        };
+
+        let clone =
+            clone_sanitize_config(&source, "Alpha-copy".to_string(), None, None, None, true);
+
+        assert_eq!(clone.provider, "opencode");
+        let opencode = clone.opencode_config();
+        assert_eq!(opencode.agent.as_deref(), Some("build"));
+        assert_eq!(opencode.port, None);
+        assert!(matches!(clone.provider_config, ProviderConfig::OpenCode(_)));
     }
 
     #[test]
@@ -4439,7 +4553,10 @@ mod tests {
             provider: "codex".to_string(),
             session_id: session_id.to_string(),
             resume_session: None,
-            codex_cleared_provider_sessions: vec![old_provider_session_id.to_string()],
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                cleared_provider_sessions: vec![old_provider_session_id.to_string()],
+                ..Default::default()
+            }),
             is_off: true,
             ..Default::default()
         };
@@ -4448,7 +4565,7 @@ mod tests {
 
         assert_eq!(config.resume_session, None);
         assert_eq!(
-            config.codex_cleared_provider_sessions,
+            config.codex_config().cleared_provider_sessions,
             vec![old_provider_session_id.to_string()]
         );
         assert!(!config.is_off);
@@ -4493,7 +4610,10 @@ mod tests {
             provider: "codex".to_string(),
             session_id: session_id.to_string(),
             resume_session: None,
-            codex_cleared_provider_sessions: vec![old_provider_session_id.to_string()],
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                cleared_provider_sessions: vec![old_provider_session_id.to_string()],
+                ..Default::default()
+            }),
             is_off: true,
             ..Default::default()
         };
@@ -4504,7 +4624,7 @@ mod tests {
             config.resume_session.as_deref(),
             Some(new_provider_session_id)
         );
-        assert!(config.codex_cleared_provider_sessions.is_empty());
+        assert!(config.codex_config().cleared_provider_sessions.is_empty());
         assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
@@ -4655,6 +4775,28 @@ mod tests {
             AgentSessionPersistenceOverride::Resume
         );
         assert!(config.fresh_provider_session_id.is_some());
+        assert!(!config.is_off);
+    }
+
+    #[test]
+    fn prepare_clear_config_preserves_non_codex_provider_config() {
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            provider_config: ProviderConfig::Gemini(GeminiProviderConfig {
+                sandbox: Some(true),
+                ..Default::default()
+            }),
+            resume_session: Some("old-gemini-session".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_clear_config(&mut config).expect("prepare clear config");
+
+        assert_eq!(config.provider, "gemini");
+        assert_eq!(config.gemini_config().sandbox, Some(true));
+        assert!(matches!(config.provider_config, ProviderConfig::Gemini(_)));
+        assert_eq!(config.resume_session, None);
         assert!(!config.is_off);
     }
 }

@@ -30,7 +30,7 @@ Spawning an agent follows a deterministic sequence in `manager::spawn_agent`:
 
 1. **Open PTY**: Create a new master/slave pair.
 2. **Resolve Runtime Shell**: Select the configured shell profile (`Auto`, discovered shell, or `Custom`).
-3. **Build Provider Command**: Assemble the provider executable plus provider-specific flags from the `AgentConfig`.
+3. **Build Provider Command**: Assemble the provider executable plus provider-specific flags from the selected `AgentConfig.provider_config`.
 4. **Wrap for Host Shell**: Convert the provider command into a shell-hosted invocation that respects the selected shell family.
 5. **Spawn**: The PTY slave spawns the shell-hosted command.
 6. **Piping**:

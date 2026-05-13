@@ -94,6 +94,7 @@ impl AgentProvider for GeminiProvider {
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
+        let gemini = config.gemini_config();
 
         // Include directories (system + user-specified)
         let mut final_includes = config
@@ -119,43 +120,43 @@ impl AgentProvider for GeminiProvider {
             args.push("--model".into());
             args.push(model.clone());
         }
-        if config.sandbox.unwrap_or(false) {
+        if gemini.sandbox.unwrap_or(false) {
             args.push("--sandbox".into());
         }
-        if config.yolo.unwrap_or(false) {
+        if gemini.yolo.unwrap_or(false) {
             args.push("--yolo".into());
         }
-        if let Some(ref approval) = config.approval_mode {
+        if let Some(ref approval) = gemini.approval_mode {
             if !approval.trim().is_empty() {
                 args.push("--approval-mode".into());
                 args.push(approval.clone());
             }
         }
-        if let Some(ref policy) = config.policy {
+        if let Some(ref policy) = gemini.policy {
             if !policy.is_empty() {
                 args.push("--policy".into());
                 args.push(policy.join(","));
             }
         }
-        if config.experimental_acp.unwrap_or(false) {
+        if gemini.experimental_acp.unwrap_or(false) {
             args.push("--experimental-acp".into());
         }
-        if let Some(ref servers) = config.allowed_mcp_server_names {
+        if let Some(ref servers) = gemini.allowed_mcp_server_names {
             for s in servers {
                 args.push("--allowed-mcp-server-names".into());
                 args.push(s.clone());
             }
         }
-        if let Some(ref extensions) = config.extensions {
+        if let Some(ref extensions) = gemini.extensions {
             if !extensions.is_empty() {
                 args.push("--extensions".into());
                 args.push(extensions.join(","));
             }
         }
-        if config.screen_reader.unwrap_or(false) {
+        if gemini.screen_reader.unwrap_or(false) {
             args.push("--screen-reader".into());
         }
-        if let Some(ref format) = config.output_format {
+        if let Some(ref format) = gemini.output_format {
             args.push("--output-format".into());
             args.push(format.clone());
         }
@@ -235,9 +236,18 @@ impl AgentProvider for GeminiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wardian_core::models::{GeminiProviderConfig, ProviderConfig};
 
     fn make_provider() -> GeminiProvider {
         GeminiProvider::new()
+    }
+
+    fn make_gemini_config(gemini: GeminiProviderConfig) -> AgentConfig {
+        AgentConfig {
+            provider: "gemini".into(),
+            provider_config: ProviderConfig::Gemini(gemini),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -296,11 +306,11 @@ mod tests {
     #[test]
     fn spawn_args_sandbox_and_yolo() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             sandbox: Some(true),
             yolo: Some(true),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--sandbox".to_string()));
         assert!(args.contains(&"--yolo".to_string()));
@@ -345,10 +355,10 @@ mod tests {
     #[test]
     fn spawn_args_approval_mode() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             approval_mode: Some("auto".into()),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--approval-mode".to_string()));
         assert!(args.contains(&"auto".to_string()));
@@ -357,10 +367,10 @@ mod tests {
     #[test]
     fn spawn_args_empty_approval_mode_ignored() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             approval_mode: Some("  ".into()),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(!args.contains(&"--approval-mode".to_string()));
     }
@@ -368,10 +378,10 @@ mod tests {
     #[test]
     fn spawn_args_policy() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             policy: Some(vec!["policy1".into(), "policy2".into()]),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--policy".to_string()));
         let idx = args.iter().position(|a| a == "--policy").unwrap();
@@ -381,10 +391,10 @@ mod tests {
     #[test]
     fn spawn_args_mcp_server_names() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             allowed_mcp_server_names: Some(vec!["server1".into(), "server2".into()]),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         // Each server name gets its own --allowed-mcp-server-names flag
         let count = args
@@ -397,10 +407,10 @@ mod tests {
     #[test]
     fn spawn_args_extensions() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             extensions: Some(vec!["ext1".into(), "ext2".into()]),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--extensions".to_string()));
         let idx = args.iter().position(|a| a == "--extensions").unwrap();
@@ -423,11 +433,11 @@ mod tests {
     #[test]
     fn spawn_args_screen_reader_and_output_format() {
         let p = make_provider();
-        let config = AgentConfig {
+        let config = make_gemini_config(GeminiProviderConfig {
             screen_reader: Some(true),
             output_format: Some("json".into()),
             ..Default::default()
-        };
+        });
         let args = p.get_spawn_args(&config, false);
         assert!(args.contains(&"--screen-reader".to_string()));
         assert!(args.contains(&"--output-format".to_string()));

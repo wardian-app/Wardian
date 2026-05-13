@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "../../types";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { requiresRestart } from "./configUtils";
+import { normalizeAgentConfig, requiresRestart, toPersistedAgentConfig } from "./configUtils";
 import { AdvancedSettings } from '../../components/AdvancedSettings';
 import { ManageSkills } from '../library/ManageSkills';
 
@@ -33,7 +33,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
     const agent = agents.find(a => a.session_id === agentId);
     if (agent) {
       // Create a deep copy to avoid direct state mutation before save
-      setConfig(JSON.parse(JSON.stringify(agent)));
+      setConfig(normalizeAgentConfig(JSON.parse(JSON.stringify(agent))));
     }
   }, [agentId, agents]);
 
@@ -48,11 +48,14 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
     if (!config) return;
 
     const originalAgent = agents.find(a => a.session_id === agentId);
-    const needsRestart = originalAgent ? requiresRestart(originalAgent, config) : true;
+    const persistedConfig = toPersistedAgentConfig(config);
+    const needsRestart = originalAgent
+      ? requiresRestart(normalizeAgentConfig(originalAgent), persistedConfig)
+      : true;
 
     setIsSaving(true);
     try {
-      await invoke("update_agent_config", { newConfig: config });
+      await invoke("update_agent_config", { newConfig: persistedConfig });
       if (needsRestart) {
         alert("Configuration updated! Please restart the agent for all changes (CLI parameters/arguments) to take effect.");
       }

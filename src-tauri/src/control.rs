@@ -307,10 +307,11 @@ fn build_spawn_agent_request(
     name: Option<String>,
     workspace: Option<String>,
 ) -> crate::commands::agent::SpawnAgentRequest {
-    let config_override = wardian_core::models::AgentConfig {
+    let mut config_override = wardian_core::models::AgentConfig {
         provider,
         ..Default::default()
     };
+    config_override.reset_provider_config_for_provider();
     crate::commands::agent::SpawnAgentRequest {
         session_name: name.unwrap_or_default(),
         agent_class: class,
@@ -2075,6 +2076,12 @@ mod tests {
                 .map(|config| config.provider.as_str()),
             Some("codex")
         );
+        assert!(matches!(
+            req.config_override
+                .as_ref()
+                .map(|config| &config.provider_config),
+            Some(wardian_core::models::ProviderConfig::Codex(_))
+        ));
     }
 
     #[test]

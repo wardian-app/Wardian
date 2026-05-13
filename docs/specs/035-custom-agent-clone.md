@@ -54,10 +54,11 @@ existing Library or agent configuration UI.
 Changing provider preserves shared and still-applicable config fields. Runtime
 identity fields are still cleared by clone sanitization regardless of provider:
 `session_id`, `resume_session`, `fresh_provider_session_id`,
-`codex_cleared_provider_sessions`, `system_include_directories`, and
-`opencode_port`. Provider-specific preference fields such as model, sandbox,
-approval, profile, tool, or agent settings may remain persisted, but only the
-selected provider's runtime path should consume its own fields.
+`system_include_directories`, Codex `provider_config.cleared_provider_sessions`,
+and OpenCode `provider_config.port`. Provider-specific preference fields such
+as sandbox, approval, profile, tool, or agent settings live under
+`provider_config`; cross-provider clones reset that nested config to the target
+provider default.
 
 ### Backend Preview Command
 
@@ -229,8 +230,8 @@ Backend tests should cover:
   legacy copied skill fallback.
 - Provider, class, workspace, and name overrides still sanitize runtime session
   fields including `session_id`, `resume_session`, `fresh_provider_session_id`,
-  `codex_cleared_provider_sessions`, `system_include_directories`, and
-  `opencode_port`.
+  `system_include_directories`, Codex `provider_config.cleared_provider_sessions`,
+  and OpenCode `provider_config.port`.
 - Providers with discovered session IDs use provisional directories, final
   directories, and cleanup exactly as specified.
 - Failed custom clone does not register a partial agent and cleans created

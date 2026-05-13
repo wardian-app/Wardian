@@ -97,6 +97,69 @@ describe("SpawnAgentPanel", () => {
     expect(onSpawned).toHaveBeenCalled();
   });
 
+  it("initializes the config override with a matching provider config", async () => {
+    invokeMock.mockResolvedValue({
+      session_id: "agent-1",
+      session_name: "Generalist-1",
+      agent_class: "Generalist",
+      folder: "",
+      is_off: false,
+    });
+    const user = userEvent.setup();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    await user.selectOptions(screen.getByTestId("spawn-provider"), "codex");
+    await user.click(screen.getByTestId("spawn-submit"));
+
+    expect(invokeMock).toHaveBeenCalledWith("spawn_agent", {
+      req: expect.objectContaining({
+        configOverride: expect.objectContaining({
+          provider: "codex",
+          provider_config: { type: "codex" },
+        }),
+      }),
+    });
+  });
+
+  it("clears custom args when changing providers", async () => {
+    invokeMock.mockResolvedValue({
+      session_id: "agent-1",
+      session_name: "Generalist-1",
+      agent_class: "Generalist",
+      folder: "",
+      is_off: false,
+    });
+    const user = userEvent.setup();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Advanced Settings" }));
+    await user.type(screen.getByLabelText("Custom Arguments"), "--old-provider-flag");
+    await user.selectOptions(screen.getByTestId("spawn-provider"), "opencode");
+    await user.click(screen.getByTestId("spawn-submit"));
+
+    expect(invokeMock).toHaveBeenCalledWith("spawn_agent", {
+      req: expect.objectContaining({
+        configOverride: expect.objectContaining({
+          provider: "opencode",
+          provider_config: { type: "opencode" },
+          custom_args: undefined,
+        }),
+      }),
+    });
+  });
+
   it("blocks explicit names with spaces", async () => {
     const user = userEvent.setup();
 
