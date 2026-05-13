@@ -21,6 +21,18 @@ use super::{
 };
 use crate::providers::gemini::gemini_status_from_title;
 
+fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
+    config.codex_config().cleared_provider_sessions
+}
+
+fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
+    config
+        .codex_config_mut_preserve_encoding()
+        .cleared_provider_sessions
+        .clear();
+    config.codex_cleared_provider_sessions.clear();
+}
+
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
 #[cfg(windows)]
@@ -41,13 +53,13 @@ pub(super) fn capture_codex_init_resume_session(
             .resume_session
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-        || codex_provider_session_is_excluded(session_id, &config.codex_cleared_provider_sessions)
+        || codex_provider_session_is_excluded(session_id, &codex_cleared_provider_sessions(config))
     {
         return false;
     }
 
     config.resume_session = Some(session_id.to_string());
-    config.codex_cleared_provider_sessions.clear();
+    clear_codex_cleared_provider_sessions(config);
     true
 }
 
@@ -55,8 +67,9 @@ fn codex_status_log_session(
     config: &mut AgentConfig,
     latest_session: Option<String>,
 ) -> Option<String> {
+    let mut cleared_provider_sessions = codex_cleared_provider_sessions(config);
     if config.resume_session.as_deref().is_some_and(|value| {
-        codex_provider_session_is_excluded(value, &config.codex_cleared_provider_sessions)
+        codex_provider_session_is_excluded(value, &cleared_provider_sessions)
     }) {
         config.resume_session = None;
     }
@@ -69,7 +82,7 @@ fn codex_status_log_session(
 
     let candidate = candidate?;
 
-    if codex_provider_session_is_excluded(&candidate, &config.codex_cleared_provider_sessions) {
+    if codex_provider_session_is_excluded(&candidate, &cleared_provider_sessions) {
         return Some(candidate);
     }
 
@@ -79,11 +92,12 @@ fn codex_status_log_session(
         .is_none_or(|value| value.trim().is_empty())
     {
         config.resume_session = Some(candidate.clone());
-        config.codex_cleared_provider_sessions.clear();
+        clear_codex_cleared_provider_sessions(config);
+        cleared_provider_sessions.clear();
     } else if config.resume_session.as_deref() == Some(candidate.as_str())
-        && !config.codex_cleared_provider_sessions.is_empty()
+        && !cleared_provider_sessions.is_empty()
     {
-        config.codex_cleared_provider_sessions.clear();
+        clear_codex_cleared_provider_sessions(config);
     }
 
     Some(candidate)
@@ -680,10 +694,10 @@ pub async fn spawn_agent(
                         .map(|(session_id, _updated_at)| session_id);
                     let lookup_session = watcher_config.lock().ok().and_then(|mut cfg| {
                         let previous_resume = cfg.resume_session.clone();
-                        let previous_cleared = cfg.codex_cleared_provider_sessions.clone();
+                        let previous_cleared = codex_cleared_provider_sessions(&cfg);
                         let lookup = codex_status_log_session(&mut cfg, latest_session);
                         if cfg.resume_session != previous_resume
-                            || cfg.codex_cleared_provider_sessions != previous_cleared
+                            || codex_cleared_provider_sessions(&cfg) != previous_cleared
                         {
                             let _ = watcher_app.emit("agents-updated", ());
                         }
@@ -1084,13 +1098,17 @@ pub async fn resize_pty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wardian_core::models::{CodexProviderConfig, ProviderConfig};
 
     #[test]
     fn codex_status_log_session_tracks_excluded_latest_without_adopting_resume() {
         let mut config = AgentConfig {
             provider: "codex".to_string(),
             resume_session: None,
-            codex_cleared_provider_sessions: vec!["provider-session-1".to_string()],
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                cleared_provider_sessions: vec!["provider-session-1".to_string()],
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -1100,7 +1118,7 @@ mod tests {
         assert_eq!(log_session.as_deref(), Some("provider-session-1"));
         assert_eq!(config.resume_session, None);
         assert_eq!(
-            config.codex_cleared_provider_sessions,
+            config.codex_config().cleared_provider_sessions,
             vec!["provider-session-1".to_string()]
         );
     }

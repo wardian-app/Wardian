@@ -1014,6 +1014,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_flat_runtime_codex_mutation_preserves_flat_serialization() {
+        let mut config: AgentConfig = serde_json::from_str(
+            r#"{"provider":"codex","codex_cleared_provider_sessions":["old-thread"]}"#,
+        )
+        .unwrap();
+
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions
+            .push("new-thread".to_string());
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("provider_config").is_none());
+        assert_eq!(
+            value["codex_cleared_provider_sessions"],
+            serde_json::json!(["old-thread", "new-thread"])
+        );
+    }
+
+    #[test]
     fn mock_provider_config_roundtrips() {
         let config = AgentConfig {
             provider: "mock".into(),

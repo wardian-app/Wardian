@@ -1,4 +1,4 @@
-use wardian_core::models::{AgentConfig, AgentExecutionPolicy, WorkflowAgentMode};
+use wardian_core::models::{AgentConfig, AgentExecutionPolicy, ProviderConfig, WorkflowAgentMode};
 
 #[derive(Debug, Clone)]
 pub struct AgentExecutionContext {
@@ -62,9 +62,6 @@ pub fn resolve_agent_execution_context(
         }
     };
 
-    if let Some(output_format) = node_config.get("output_format").and_then(|v| v.as_str()) {
-        config.output_format = Some(output_format.to_string());
-    }
     if let Some(folder) = node_config.get("folder").and_then(|v| v.as_str()) {
         if !folder.trim().is_empty() {
             config.folder = folder.to_string();
@@ -72,7 +69,18 @@ pub fn resolve_agent_execution_context(
     }
     if let Some(provider) = node_config.get("provider").and_then(|v| v.as_str()) {
         if !provider.trim().is_empty() {
-            config.provider = provider.to_string();
+            if config.provider != provider {
+                config.provider = provider.to_string();
+                config.reset_provider_config_for_provider();
+            }
+        }
+    }
+    if let Some(output_format) = node_config.get("output_format").and_then(|v| v.as_str()) {
+        config.output_format = Some(output_format.to_string());
+        if config.provider == "gemini" {
+            if let ProviderConfig::Gemini(gemini) = &mut config.provider_config {
+                gemini.output_format = Some(output_format.to_string());
+            }
         }
     }
 
