@@ -7,6 +7,8 @@ import { useLayoutStore } from "../store/useLayoutStore";
 import { useGridResize } from "../features/grid/useGridResize";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
+const MIN_TERMINAL_CARD_WIDTH = 520;
+
 interface GridViewProps {
   filteredAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
@@ -126,17 +128,24 @@ export const GridView: React.FC<GridViewProps> = ({
   const isMobile = windowWidth < 1000;
   // While a stack-exit drag is in flight, render the multi-column preview even though gridStacked is still true.
   const renderStacked = (gridStacked || isMobile) && resizeType !== 'stack-exit';
+  const visibleColumnTracks = visibleAgents.length <= 1
+    ? [1]
+    : layout.column_tracks.slice(0, visibleAgents.length);
+  const gridMinWidth = visibleAgents.length > 0
+    ? `${(visibleColumnTracks.length * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, visibleColumnTracks.length - 1) * 8)}px`
+    : undefined;
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
     gridTemplateColumns: (isMaximized || renderStacked)
       ? '1fr'
-      : layout.column_tracks.map(t => `${t}fr`).join(' '),
+      : visibleColumnTracks.map(t => `${t}fr`).join(' '),
     gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
     gap: (isMaximized || renderStacked) ? '0' : '8px',
     background: 'transparent',
     padding: (isMaximized || renderStacked) ? '0' : '8px',
     height: isMaximized ? '100%' : 'auto',
+    minWidth: gridMinWidth,
   };
 
   const bgMenuItems: ContextMenuItem[] = [
@@ -280,9 +289,9 @@ export const GridView: React.FC<GridViewProps> = ({
       {!isMaximized && !isMobile && !gridStacked && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
-          {layout.column_tracks.slice(0, -1).map((_weight, i) => {
-            const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
-            const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
+          {visibleColumnTracks.slice(0, -1).map((_weight, i) => {
+            const leftWeight = visibleColumnTracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
+            const totalSpacing = 16 + (visibleColumnTracks.length - 1) * 8;
             return (
               <div
                 key={`gutter-h-${i}`}
@@ -302,7 +311,7 @@ export const GridView: React.FC<GridViewProps> = ({
           })}
 
           {/* Horizontal Gutters (Row Resizing) */}
-          {Array.from({ length: Math.ceil(visibleAgents.length / layout.column_tracks.length) - 1 }).map((_, i) => (
+          {Array.from({ length: Math.ceil(visibleAgents.length / visibleColumnTracks.length) - 1 }).map((_, i) => (
             <div 
               key={`gutter-v-${i}`}
               className="absolute left-0 right-0 z-30 group/gutter flex items-center"
@@ -311,7 +320,7 @@ export const GridView: React.FC<GridViewProps> = ({
                 height: '12px',
                 cursor: 'row-resize'
               }}
-              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * layout.column_tracks.length); }}
+              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * visibleColumnTracks.length); }}
             >
               {/* Visual Line */}
               <div className="h-[2px] w-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />

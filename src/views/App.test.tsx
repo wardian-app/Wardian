@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { EventCallback } from "@tauri-apps/api/event";
 import App from "./App";
 import type { AgentConfig, AgentClassDefinition, AgentClonePreview } from "../types";
@@ -24,6 +25,10 @@ Object.defineProperty(window, 'matchMedia', {
     dispatchEvent: vi.fn(),
   })),
 });
+
+const originalOuterWidth = window.outerWidth;
+const originalOuterHeight = window.outerHeight;
+const originalInnerWidth = window.innerWidth;
 
 vi.mock("../features/terminal/AgentTerminal", () => ({
   AgentTerminal: ({
@@ -61,6 +66,7 @@ vi.mock("../features/terminal/UserTerminalPanel", () => ({
 // Cast invoke to mock for test control
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
+const mockGetCurrentWindow = vi.mocked(getCurrentWindow);
 
 // Helper to set up mock return values for the initial load
 let currentAgents: AgentConfig[] = [];
@@ -274,8 +280,169 @@ beforeEach(() => {
   vi.clearAllMocks();
   useLayoutStore.getState().resetLayout();
   useQueueStore.setState({ items: [], _agentBuffers: {}, _workflowLastOutput: {} });
+  delete (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__;
+  delete (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  document.documentElement.style.removeProperty("--wardian-native-window-width");
+  document.documentElement.style.removeProperty("--wardian-native-window-height");
   // Mock window.confirm
   window.confirm = vi.fn(() => true);
+});
+
+afterEach(() => {
+  Object.defineProperty(window, "outerWidth", { configurable: true, value: originalOuterWidth });
+  Object.defineProperty(window, "outerHeight", { configurable: true, value: originalOuterHeight });
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+});
+
+describe("Native window layout bridge", () => {
+  it("publishes Tauri resize dimensions to the app shell and terminal layout listeners", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const resizeListeners: Array<(event: { payload: { width: number; height: number } }) => void> = [];
+    const unlisten = vi.fn();
+    const resizeEventSpy = vi.fn();
+    const wardianResizeEventSpy = vi.fn();
+    window.addEventListener("resize", resizeEventSpy);
+    window.addEventListener("wardian-native-window-resized", wardianResizeEventSpy);
+
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn((listener) => {
+        resizeListeners.push(listener as (event: { payload: { width: number; height: number } }) => void);
+        return Promise.resolve(unlisten);
+      }),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+
+    const shell = await screen.findByTestId("app-shell");
+    await waitFor(() => expect(resizeListeners).toHaveLength(1));
+
+    act(() => {
+      resizeListeners[0]({ payload: { width: 980, height: 680 } });
+    });
+
+    await waitFor(() => {
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
+      expect(resizeEventSpy).toHaveBeenCalled();
+      expect(wardianResizeEventSpy).toHaveBeenCalled();
+    });
+    expect(shell).toHaveStyle({
+      width: "var(--wardian-native-window-width, 100vw)",
+      height: "var(--wardian-native-window-height, 100dvh)",
+    });
+
+    window.removeEventListener("resize", resizeEventSpy);
+    window.removeEventListener("wardian-native-window-resized", wardianResizeEventSpy);
+  });
+
+  it("uses Tauri outer dimensions when the WebView inner viewport stays stale", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    (window as { __TAURI__?: unknown }).__TAURI__ = {};
+    Object.defineProperty(window, "outerWidth", { configurable: true, value: 980 });
+    Object.defineProperty(window, "outerHeight", { configurable: true, value: 680 });
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn(() => Promise.resolve(vi.fn())),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+
+    await screen.findByTestId("app-shell");
+
+    await waitFor(() => {
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
+    });
+  });
+
+  it("uses outer dimensions when the Tauri global appears after mount", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    Object.defineProperty(window, "outerWidth", { configurable: true, value: 980 });
+    Object.defineProperty(window, "outerHeight", { configurable: true, value: 680 });
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn(() => Promise.resolve(vi.fn())),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+
+    await screen.findByTestId("app-shell");
+    expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("");
+
+    (window as { __TAURI__?: unknown }).__TAURI__ = {};
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    await waitFor(() => {
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
+    });
+  });
+
+  it("does not collapse side panes when the native shell becomes compact", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    (window as { __TAURI__?: unknown }).__TAURI__ = {};
+    Object.defineProperty(window, "outerWidth", { configurable: true, value: 800 });
+    Object.defineProperty(window, "outerHeight", { configurable: true, value: 600 });
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn(() => Promise.resolve(vi.fn())),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+
+    expect(screen.getByTitle("Hide Left Sidebar")).toBeInTheDocument();
+    expect(screen.getByTitle("Hide Agent Roster")).toBeInTheDocument();
+  });
+
+  it("keeps authoritative Tauri resize payload dimensions over stale outer dimensions", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    (window as { __TAURI__?: unknown }).__TAURI__ = {};
+    Object.defineProperty(window, "outerWidth", { configurable: true, value: 800 });
+    Object.defineProperty(window, "outerHeight", { configurable: true, value: 600 });
+    const resizeListeners: Array<(event: { payload: { width: number; height: number } }) => void> = [];
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn((listener) => {
+        resizeListeners.push(listener as (event: { payload: { width: number; height: number } }) => void);
+        return Promise.resolve(vi.fn());
+      }),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+    await waitFor(() => expect(resizeListeners).toHaveLength(1));
+
+    act(() => {
+      resizeListeners[0]({ payload: { width: 980, height: 680 } });
+    });
+
+    await waitFor(() => {
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
+      expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
+    });
+  });
+
+  it("does not let a later outer-window fallback overwrite authoritative Tauri payload dimensions", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    (window as { __TAURI__?: unknown }).__TAURI__ = {};
+    Object.defineProperty(window, "outerWidth", { configurable: true, value: 800 });
+    Object.defineProperty(window, "outerHeight", { configurable: true, value: 600 });
+    const resizeListeners: Array<(event: { payload: { width: number; height: number } }) => void> = [];
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn((listener) => {
+        resizeListeners.push(listener as (event: { payload: { width: number; height: number } }) => void);
+        return Promise.resolve(vi.fn());
+      }),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+    await waitFor(() => expect(resizeListeners).toHaveLength(1));
+
+    act(() => {
+      resizeListeners[0]({ payload: { width: 980, height: 680 } });
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
+    expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
+  });
 });
 
 // ── List Management Tests ──────────────────────────────────────────────
