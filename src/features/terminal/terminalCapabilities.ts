@@ -12,10 +12,11 @@ const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
+const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
 const HOME_CURSOR = "\u001b[H";
-const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
+const TOP_CURSOR_ADDRESS = /\u001b\[(\d+);1H/;
 
 export type TerminalCapabilityContext = {
   cursorRow: number;
@@ -39,7 +40,7 @@ export type TerminalOutputState = {
   homeRedrawScrollbackSeen?: Set<string>;
   existingScrollbackLines?: Set<string>;
   transientHomeRedrawActive?: boolean;
-  pendingResizeRedrawSuppression?: boolean;
+  lastStableHomeRedrawOutput?: string;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -47,7 +48,19 @@ const CSI_SEQUENCE = /^\u001b\[([0-?]*)([ -/]*)([@-~])$/;
 
 function extractHomeRedrawLines(data: string) {
   const homeIndex = data.indexOf(HOME_CURSOR);
-  if (homeIndex < 0 || homeIndex > 80) {
+  if (homeIndex < 0) {
+    const cursorAddress = TOP_CURSOR_ADDRESS.exec(data);
+    const row = Number.parseInt(cursorAddress?.[1] ?? "", 10);
+    if (cursorAddress?.index !== undefined && cursorAddress.index <= 80 && Number.isFinite(row) && row <= 200) {
+      const lines = extractCursorAddressedHomeRedrawLines(data.slice(cursorAddress.index));
+      if (row <= 10 || lines?.some((line) => parseNumberedTail(line))) {
+        return lines;
+      }
+    }
+    return null;
+  }
+
+  if (homeIndex > 80) {
     return null;
   }
 
@@ -115,18 +128,6 @@ function normalizePlainLine(line: string) {
   return line.replace(/\s+/g, " ").trim();
 }
 
-function normalizeFullscreenClearByNewlines(data: string) {
-  return data.replace(
-    FULLSCREEN_CLEAR_BY_NEWLINES,
-    (_match, cursorShow: string | undefined) =>
-      `\u001b[?25l\u001b[2J\u001b[H${cursorShow ?? ""}`,
-  );
-}
-
-function stripCodexScrollbackErase(data: string, provider?: string) {
-  return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
-}
-
 export function shouldHomeCursorBeforeTransientResize(
   state: TerminalOutputState,
   currentRows: number,
@@ -135,27 +136,25 @@ export function shouldHomeCursorBeforeTransientResize(
   return Boolean(state.transientHomeRedrawActive && nextRows < currentRows);
 }
 
-export function shouldSuppressDuplicateResizeRedraw(data: string, existingLines: string[]) {
-  if (!data.includes("\u001b[?2026")) {
-    return false;
-  }
-
-  const redrawLines = extractHomeRedrawLines(data)
-    ?.map(normalizePlainLine)
-    .filter(Boolean);
-  if (!redrawLines || redrawLines.length < 8) {
-    return false;
-  }
-
-  const existingLineSet = new Set(
-    existingLines.map(normalizePlainLine).filter(Boolean),
+function normalizeFullscreenClearByNewlines(data: string) {
+  return data.replace(
+    FULLSCREEN_CLEAR_BY_NEWLINES,
+    (_match, cursorShow: string | undefined) =>
+      `\u001b[?25l\u001b[2J\u001b[H${cursorShow ?? ""}`,
   );
-  if (existingLineSet.size < 8) {
-    return false;
-  }
+}
 
-  const matchingLines = redrawLines.filter((line) => existingLineSet.has(line));
-  return matchingLines.length / redrawLines.length >= 0.75;
+function stripProviderScrollbackErase(data: string, provider?: string) {
+  return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
+}
+
+function parseNumberedTail(line: string) {
+  const match = normalizePlainLine(line).match(/^(.*?)(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  const value = Number.parseInt(match[2], 10);
+  return Number.isFinite(value) ? { prefix: match[1], value } : null;
 }
 
 function findDroppedHomeRedrawLines(previous: string[] | null, next: string[]) {
@@ -178,12 +177,66 @@ function findDroppedHomeRedrawLines(previous: string[] | null, next: string[]) {
   return previous.filter((line) => !next.includes(line));
 }
 
-function reconstructHomeRedrawScrollback(data: string, state?: TerminalOutputState) {
+function shouldReconstructProviderLine(provider: string | undefined) {
+  if (provider === "opencode") {
+    return true;
+  }
+
+  if (provider === "codex") {
+    return true;
+  }
+
+  return false;
+}
+
+function isCodexTransientUiLine(line: string) {
+  const normalizedLine = normalizePlainLine(line);
+  if (!normalizedLine) {
+    return true;
+  }
+
+  if (/^[›>]\s/.test(normalizedLine)) {
+    return true;
+  }
+
+  if (/^[╭╰│┌└┐┘─━┃]/.test(normalizedLine)) {
+    return true;
+  }
+
+  if (
+    /^[•●✦✻*]\s*(?:Working|Thinking|Running|Ran|Reading|Searching|Editing|Checking|Waiting|Bash|PowerShell)\b/i.test(
+      normalizedLine,
+    )
+  ) {
+    return true;
+  }
+
+  if (/\b(thinking|tokens?|esc to interrupt|ctrl\+c|press enter|approval)\b/i.test(normalizedLine)) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractNumberedLinesFromData(data: string) {
+  const lines = data
+    .replace(ANSI_SEQUENCE, "")
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => parseNumberedTail(line));
+  return lines.length >= 2 ? lines : null;
+}
+
+function reconstructHomeRedrawScrollback(
+  data: string,
+  state?: TerminalOutputState,
+  nextLines: string[] | null = extractHomeRedrawLines(data),
+  provider?: string,
+) {
   if (!state) {
     return data;
   }
 
-  const nextLines = extractHomeRedrawLines(data);
   if (!nextLines) {
     return data;
   }
@@ -194,15 +247,22 @@ function reconstructHomeRedrawScrollback(data: string, state?: TerminalOutputSta
   const seen = state.homeRedrawScrollbackSeen ?? new Set<string>();
   state.homeRedrawScrollbackSeen = seen;
   const newDroppedLines = droppedLines.filter((line) => {
+    if (!shouldReconstructProviderLine(provider)) {
+      return false;
+    }
+    if (provider === "codex" && isCodexTransientUiLine(line)) {
+      return false;
+    }
     const normalizedLine = normalizePlainLine(line);
     if (
-      seen.has(line) ||
+      seen.has(normalizedLine) ||
+      state.existingScrollbackLines?.has(normalizedLine) ||
       state.existingScrollbackLines?.has(line) ||
       (normalizedLine && state.existingScrollbackLines?.has(normalizedLine))
     ) {
       return false;
     }
-    seen.add(line);
+    seen.add(normalizedLine);
     return true;
   });
 
@@ -222,19 +282,30 @@ export function normalizeOpenCodeOutput(
     return data;
   }
 
+  const homeRedrawLines = state ? extractHomeRedrawLines(data) : null;
+  const detectedRedrawLines = homeRedrawLines ?? (provider === "opencode" ? extractNumberedLinesFromData(data) : null);
+
+  if (provider !== "opencode") {
+    if (state && isSynchronizedHomeRedraw(data)) {
+      state.transientHomeRedrawActive = true;
+    }
+    if (provider === "codex" && state && homeRedrawLines) {
+      data = reconstructHomeRedrawScrollback(data, state, homeRedrawLines, provider);
+    }
+    return stripProviderScrollbackErase(normalizeFullscreenClearByNewlines(data), provider);
+  }
+
   if (state && isSynchronizedHomeRedraw(data)) {
     state.transientHomeRedrawActive = true;
   }
 
-  if (provider === "codex" || provider === "opencode") {
-    data = reconstructHomeRedrawScrollback(data, state);
+  if (state && detectedRedrawLines) {
+    if (homeRedrawLines) {
+      data = reconstructHomeRedrawScrollback(data, state, detectedRedrawLines, provider);
+    }
   }
 
-  if (provider !== "opencode") {
-    data = normalizeFullscreenClearByNewlines(data);
-  }
-
-  data = stripCodexScrollbackErase(data, provider);
+  data = stripProviderScrollbackErase(data, provider);
 
   if (provider !== "opencode") {
     return data;
@@ -254,10 +325,10 @@ export function normalizeTerminalOutputBatch(
   const normalizedChunks = rawChunks
     .map((data) => normalizeOpenCodeOutput(data, provider, state))
     .join("");
-  const normalizedBatch = stripCodexScrollbackErase(normalizedChunks, provider);
+  const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
   return provider === "opencode"
-    ? normalizedBatch
-    : normalizeFullscreenClearByNewlines(normalizedBatch);
+    ? normalizedOutput
+    : normalizeFullscreenClearByNewlines(normalizedOutput);
 }
 
 export function planTerminalCapabilityResponses(
@@ -322,14 +393,14 @@ export function planTerminalCapabilityResponses(
     outgoingInputs.push(`\u001b]11;rgb:${context.backgroundRgb}\u001b\\`);
   }
 
-  if (!focusReported && data.includes("\u001b[?1004h")) {
+  if (provider === "opencode" && !focusReported && data.includes("\u001b[?1004h")) {
     focusReported = true;
     outgoingInputs.push("\u001b[I");
   }
 
   return {
     outgoingInputs,
-    normalizedOutput: normalizeOpenCodeOutput(data, provider),
+    normalizedOutput: provider === "opencode" ? normalizeOpenCodeOutput(data, provider) : data,
     focusReported,
   };
 }

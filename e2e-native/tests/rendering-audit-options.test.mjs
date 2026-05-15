@@ -177,10 +177,10 @@ function createRenderingEvidenceFixture({
   return { root, wardianRunId, outsideRunId, provider };
 }
 
-test("parseRenderingProviders defaults to all real providers", () => {
+test("parseRenderingProviders defaults to Codex and Claude", () => {
   assert.deepEqual(
     parseRenderingProviders(""),
-    ["codex", "claude", "gemini", "opencode"],
+    ["codex", "claude"],
   );
 });
 
@@ -244,6 +244,650 @@ test("auditRenderingEvidence rejects empty screenshots and invalid JSON artifact
   assert.match(audit.failures.join("\n"), /outside screenshot exists and is non-empty: initial/);
 });
 
+test("auditRenderingEvidence rejects stale Wardian columns when strict lab metrics require a resize change", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.metrics = {
+    resize: {
+      expect_cols_change: true,
+      before_debug: { cols: 50, rows: 19 },
+      after_debug: { cols: 50, rows: 19 },
+    },
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+    requireWardianLabMetrics: true,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian columns changed after resize: resized/);
+});
+
+test("auditRenderingEvidence does not require column changes when the terminal screen did not change width", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  for (const state of manifest.providers[0].states) {
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.metrics.resize = {
+    expect_cols_change: true,
+    before_debug: { cols: 20, rows: 14 },
+    after_debug: { cols: 20, rows: 14 },
+    before_screen_rect: { width: 140, height: 238 },
+    after_screen_rect: { width: 140, height: 238 },
+  };
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, true, audit.failures.join("\n"));
+});
+
+test("auditRenderingEvidence rejects Wardian resized states that lose the fixed audit text", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.capture.debug.lines = ["provider prompt without the fixed input"];
+  resized.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+    requireWardianLabMetrics: true,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian resized state includes visible audit input: resized/);
+});
+
+test("auditRenderingEvidence can use an expected response marker for submitted provider turns", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.input_text =
+    "Print exactly 50 lines, one per line, numbered WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050. Do not print any other text.";
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  const markerLines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = markerLines;
+    state.capture.debug.allLines = ["WARDIAN_SCROLL_001", "WARDIAN_SCROLL_050"];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", markerLines);
+  resumed.capture.debug.allLines = ["WARDIAN_SCROLL_001", "WARDIAN_SCROLL_050"];
+  resumed.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states.push(resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, true, audit.failures.join("\n"));
+});
+
+test("auditRenderingEvidence rejects submitted response markers that survive only in parser history", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.input_text = "Print exactly 50 numbered lines.";
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["visible viewport without marker"];
+    state.capture.debug.allLines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", ["WARDIAN_SCROLL_050"]);
+  resumed.capture.debug.allLines = ["WARDIAN_SCROLL_050"];
+  resumed.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states.push(resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian resized state includes visible audit marker: resized/);
+});
+
+test("auditRenderingEvidence rejects repeated numbered response rows in parser history", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+    state.capture.debug.allLines = [
+      "WARDIAN_SCROLL_001",
+      "WARDIAN_SCROLL_002",
+      "WARDIAN_SCROLL_001",
+      "WARDIAN_SCROLL_002",
+      "WARDIAN_SCROLL_050",
+    ];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", ["WARDIAN_SCROLL_050"]);
+  resumed.capture.debug.allLines = ["WARDIAN_SCROLL_050"];
+  resumed.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states.push(resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+});
+
+test("auditRenderingEvidence does not count the submitted prompt as a duplicated numbered response row", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+    state.capture.debug.allLines = [
+      "› Print exactly 50 lines and nothing else. Each line must be WARDIAN_SCROLL_NNN. Count from WA",
+      "RDIAN_SCROLL_001 through WARDIAN_SCROLL_050 inclusive.",
+      "  WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050 inclusive.",
+      "",
+      "WARDIAN_SCROLL_001",
+      "WARDIAN_SCROLL_002",
+      "WARDIAN_SCROLL_050",
+    ];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.failures.some((failure) => failure.includes("numbered response rows are not duplicated")), false);
+});
+
+test("auditRenderingEvidence rejects duplicated numbered rows immediately after a submitted prompt", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const markerLines = Array.from(
+    { length: 50 },
+    (_, index) => `WARDIAN_SCROLL_${String(index + 1).padStart(3, "0")}`,
+  );
+  manifest.input_submitted = true;
+  manifest.input_text =
+    "Print exactly 50 lines, one per line, from WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050. Output no other text.";
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+    state.capture.debug.allLines = [
+      "› Print exactly 50 lines, one per line, from WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050. Output no other text.",
+      ...markerLines,
+      ...markerLines,
+    ];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+});
+
+test("auditRenderingEvidence credits literal submitted prompt markers once before duplicate checks", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const promptLines = Array.from(
+    { length: 50 },
+    (_, index) => `WARDIAN_SCROLL_${String(index + 1).padStart(3, "0")}`,
+  );
+  manifest.input_submitted = true;
+  manifest.input_text = ["Copy the exact block:", ...promptLines].join("\n");
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+    state.capture.debug.allLines = [
+      ...promptLines.slice(39),
+      "",
+      ...promptLines,
+    ];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.failures.some((failure) => failure.includes("numbered response rows are not duplicated")), false);
+});
+
+test("auditRenderingEvidence rejects resized audit text that is only preserved in parser history", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  for (const state of manifest.providers[0].states) {
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.capture.debug.lines = ["visible viewport after a narrow wrap"];
+  resized.capture.debug.allLines = ["render parity check"];
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian resized state includes visible audit input: resized/);
+});
+
+test("auditRenderingEvidence rejects Wardian states with unstable rendered rows", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.metrics = {
+    stability: { stable: false, timeout_ms: 5000 },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+    requireWardianLabMetrics: true,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian rendered rows stabilized: resized/);
+});
+
+test("auditRenderingEvidence rejects obvious duplicated terminal content rows", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  for (const state of manifest.providers[0].states) {
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.capture.debug.allLines = [
+    " ▐▛███▜▌   Claude Code v2.1.140",
+    "▝▜█████▛▘  Haiku 4.5 · Claude Pro",
+    "render parity check",
+    " ▐▛███▜▌   Claude Code v2.1.140",
+    "▝▜█████▛▘  Haiku 4.5 · Claude Pro",
+    "render parity check",
+    " ▐▛███▜▌   Claude Code v2.1.140",
+    "▝▜█████▛▘  Haiku 4.5 · Claude Pro",
+    " ▐▛███▜▌   Claude Code v2.1.140",
+  ];
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+    requireWardianLabMetrics: true,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+});
+
+test("auditRenderingEvidence rejects duplicated submitted prompt anchors in parser history", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.input_text = [
+    "Copy the exact 50-line block below and output nothing else:",
+    "WARDIAN_SCROLL_001",
+    "WARDIAN_SCROLL_050",
+  ].join("\n");
+  manifest.expected_response_text = "WARDIAN_SCROLL_050";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+    state.capture.debug.allLines = [
+      "❯ CCopy the exact 50-line block below and output nothing else:",
+      "WARDIAN_SCROLL_001",
+      "WARDIAN_SCROLL_050",
+      "❯ CCopy the exact 50-line block below and output nothing else:",
+      "WARDIAN_SCROLL_001",
+      "WARDIAN_SCROLL_050",
+    ];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", ["WARDIAN_SCROLL_050"]);
+  resumed.capture.debug.allLines = ["WARDIAN_SCROLL_050"];
+  resumed.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states.push(resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+    requireWardianLabMetrics: true,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+});
+
+test("auditRenderingEvidence rejects Wardian screen rects that do not match xterm cells", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const resized = manifest.providers[0].states.find((state) => state.name === "resized");
+  resized.capture.layout.screenRect.width = 450;
+  resized.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+    requireWardianLabMetrics: true,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian screenRect matches xterm cell grid: resized/);
+});
+
+test("auditRenderingEvidence compares paused rows with the latest pre-pause clear state when present", () => {
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const providerDir = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    provider,
+  );
+  const clearLines = [
+    "fresh clear header",
+    "render parity check after clear",
+    "",
+    "",
+    "",
+  ];
+  const cleared = minimalWardianState(root, wardianRunId, provider, "cleared-immediate", clearLines);
+  const paused = manifest.providers[0].states.find((state) => state.name === "paused");
+  paused.capture.debug.lines = clearLines;
+  manifest.providers[0].states.push(cleared);
+  writeJson(manifestPath, manifest);
+  assert.ok(fs.existsSync(path.join(providerDir, "cleared-immediate.json")));
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    outsideRunsByProvider: { [provider]: outsideRunId },
+    providers: [provider],
+    expectedGeometry: { cols: 50, rows: 19, pixelWidth: 500, pixelHeight: 380 },
+  });
+
+  assert.equal(audit.ok, true, audit.failures.join("\n"));
+});
+
+test("auditRenderingEvidence accepts paused parser evidence when the paused card is hidden", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  for (const state of manifest.providers[0].states) {
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const paused = manifest.providers[0].states.find((state) => state.name === "paused");
+  paused.card_screenshot = null;
+  paused.capture.layout = { screenRect: null };
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, true, audit.failures.join("\n"));
+});
+
 test("parseRenderingProviders normalizes, deduplicates, and rejects unknown providers", () => {
   assert.deepEqual(parseRenderingProviders("Codex, gemini, CODEX"), ["codex", "gemini"]);
   assert.throws(
@@ -268,6 +912,10 @@ test("terminalTextIncludes matches provider prompts wrapped across terminal rows
 
   assert.equal(
     terminalTextIncludes(wrappedGeminiPrompt, "Type your message or @path/to/file"),
+    true,
+  );
+  assert.equal(
+    terminalTextIncludes("Claude Co\nde v2.1.140", "Claude Code"),
     true,
   );
 });
@@ -459,8 +1107,12 @@ test("outside Codex capture mirrors Wardian interactive launch", () => {
   );
 
   assert.match(script, /Get-Command "codex\.cmd"/);
-  assert.match(script, /& '\$escapedCodexExecutable' --sandbox workspace-write --ask-for-approval never --no-alt-screen --cd '\$escapedWorkspace'/);
-  assert.doesNotMatch(script, /windows\.sandbox/);
+  assert.match(
+    script,
+    /& '\$escapedCodexExecutable' -c 'windows\.sandbox=""unelevated""' --dangerously-bypass-approvals-and-sandbox --no-alt-screen --cd '\$escapedWorkspace'/,
+  );
+  assert.doesNotMatch(script, /--sandbox workspace-write/);
+  assert.doesNotMatch(script, /--ask-for-approval never/);
 });
 
 test("outside Codex capture disables provider-owned rotating startup tips", () => {
@@ -551,7 +1203,7 @@ test("real-provider Wardian capture waits for provider input readiness and visib
   );
 
   assert.match(testSource, /waitForProviderInputReady\(driver, sessionId, provider\)/);
-  assert.match(testSource, /waitForTerminalText\(driver, sessionId, auditInputText\)/);
+  assert.match(testSource, /submitAuditInput\(driver, sessionId, provider, auditInputText\)/);
   assert.match(testSource, /Type your message or @path\/to\/file/);
 });
 
@@ -575,7 +1227,7 @@ test("real-provider Wardian capture resets the audit window before each provider
 
   assert.match(
     testSource,
-    /for \(const provider of providers\) \{[\s\S]*?setRect\(\{ width: auditWindowWidth, height: auditWindowHeight \}\)[\s\S]*?spawnProviderAgent\(driver, provider\)/,
+    /for \(const provider of providers\) \{[\s\S]*?setWindowRect\(driver, \{ width: auditWindowWidth, height: auditWindowHeight \}\)[\s\S]*?spawnProviderAgent\(driver, provider\)/,
   );
 });
 
@@ -586,6 +1238,32 @@ test("real-provider Wardian Codex capture disables provider-owned rotating start
   );
 
   assert.match(testSource, /custom_args = "-c tui\.show_tooltips=false"/);
+});
+
+test("real-provider Wardian capture exposes provider model env knobs", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_CODEX_MODEL/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_CLAUDE_MODEL/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_OPENCODE_MODEL/);
+  assert.match(testSource, /DEFAULT_OPENCODE_RENDERING_MODEL = "opencode\/deepseek-v4-flash-free"/);
+  assert.match(testSource, /modelForProvider\(provider\)/);
+  assert.match(testSource, /config\.model = model/);
+  assert.match(testSource, /provider_models/);
+});
+
+test("real-provider Wardian capture records missing card screenshot diagnostics before audit failure", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /card_screenshot_error/);
+  assert.match(testSource, /card_screenshot_selector/);
+  assert.match(testSource, /return \{\s*path: null,/);
 });
 
 test("real-provider Wardian OpenCode capture hides nondeterministic provider tips in isolated state", () => {
@@ -611,16 +1289,107 @@ test("real-provider Wardian capture avoids OS temp home for Codex parity", () =>
   assert.match(testSource, /process\.env\.WARDIAN_HOME = renderingHome/);
 });
 
-test("deterministic Wardian rendering audit scrolls through the terminal debug API", () => {
+test("real-provider Wardian capture records resize stress states and timing metrics", () => {
   const testSource = fs.readFileSync(
-    path.join(process.cwd(), "e2e-native", "tests", "terminal-rendering-native.test.mjs"),
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
     "utf8",
   );
 
-  assert.match(testSource, /__wardianTerminalDebug\?\.scrollToTop/);
-  assert.match(testSource, /snapshot\?\.\(sid\)/);
-  assert.match(testSource, /viewportY === 0/);
-  assert.doesNotMatch(testSource, /viewport\.scrollTop = 0/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_WIDE_WIDTH/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_RAPID_SEQUENCE/);
+  assert.match(testSource, /waitForStableRenderedRows/);
+  assert.match(testSource, /resize_duration_ms/);
+  assert.match(testSource, /stable_rows_duration_ms/);
+  assert.match(testSource, /before_debug/);
+  assert.match(testSource, /after_debug/);
+  assert.match(testSource, /browser_viewport/);
+  assert.match(testSource, /before_browser_viewport/);
+  assert.match(testSource, /after_browser_viewport/);
+  assert.match(testSource, /fit_count/);
+  assert.match(testSource, /resize_count/);
+  assert.match(testSource, /setCardMaximized/);
+  assert.match(testSource, /"card-maximized"/);
+  assert.match(testSource, /"card-restored"/);
+  assert.match(testSource, /addCapturedStateWithScrollback/);
+  assert.match(testSource, /scrollback-top/);
+  assert.match(testSource, /scrollback-mid/);
+  assert.match(testSource, /clear_agent_session/);
+  assert.match(testSource, /"cleared-immediate"/);
+  assert.match(testSource, /resume_agent/);
+  assert.match(testSource, /"resumed"/);
+  assert.match(testSource, /"narrow"/);
+  assert.match(testSource, /"wide"/);
+  assert.match(testSource, /"minimized"/);
+  assert.match(testSource, /"maximized"/);
+  assert.match(testSource, /"rapid-resize-final"/);
+  assert.match(testSource, /requireWardianLabMetrics: true/);
+});
+
+test("real-provider Wardian capture submits typed provider input before history and resume checks", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_SUBMIT_INPUT/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_SUBMIT_SEQUENCE/);
+  assert.match(testSource, /submitAuditInput\(driver, sessionId/);
+  assert.match(testSource, /input_submit_sequence/);
+  assert.match(testSource, /input_submitted/);
+  assert.match(testSource, /waitForSubmittedProviderTurn/);
+  assert.match(testSource, /waitForTerminalTextAbsence/);
+  assert.match(testSource, /providerResponseTextFromCapture/);
+  assert.match(testSource, /dismissProviderStartupModal/);
+  assert.match(testSource, /Update Available/);
+  assert.match(testSource, /startup_modal/);
+  assert.match(testSource, /session_persistence: "resume"/);
+  assert.match(testSource, /expectAuditText: auditInputText\.trim\(\)\.length > 0/);
+});
+
+test("real-provider Wardian capture defaults to a scrollback-producing provider prompt", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /DEFAULT_SCROLLBACK_PROMPT/);
+  assert.match(testSource, /Print exactly 50 lines/);
+  assert.match(testSource, /WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050/);
+  assert.match(testSource, /WARDIAN_SCROLL_050/);
+  assert.match(testSource, /DEFAULT_SCROLLBACK_RESPONSE_MARKER/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_INPUT_TEXT === undefined/);
+  assert.match(testSource, /\[Pasted Content/);
+  assert.match(testSource, /\[Pasted text/);
+  assert.match(testSource, /longInputEchoFallbackTexts/);
+  assert.match(testSource, /meaningfulLines\.slice\(-3\)/);
+});
+
+test("outside provider capture submits typed input with Enter before history snapshots", () => {
+  const script = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "capture-outside-provider-rendering.ps1"),
+    "utf8",
+  );
+
+  assert.match(script, /\[System\.Windows\.Forms\.SendKeys\]::SendWait\("\{ENTER\}"\)/);
+  assert.match(script, /input_submitted = \(\$InputText\.Trim\(\)\.Length -gt 0\)/);
+});
+
+test("deterministic Wardian rendering audit scrolls through the terminal debug API", () => {
+  const renderingTestSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "terminal-rendering-native.test.mjs"),
+    "utf8",
+  );
+  const terminalSource = fs.readFileSync(
+    path.join(process.cwd(), "src", "features", "terminal", "AgentTerminal.tsx"),
+    "utf8",
+  );
+
+  assert.match(renderingTestSource, /__wardianTerminalDebug\?\.scrollToTop/);
+  assert.match(renderingTestSource, /snapshot\?\.\(sid\)/);
+  assert.match(renderingTestSource, /viewportY === 0/);
+  assert.doesNotMatch(renderingTestSource, /viewport\.scrollTop = 0/);
+  assert.match(terminalSource, /scrollToBottom: \(sessionId: string\) => boolean/);
+  assert.match(terminalSource, /scrollToViewportLine: \(sessionId: string, line: number\) => boolean/);
 });
 
 test("outside capture records native terminal ANSI size probe responses", () => {

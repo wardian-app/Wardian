@@ -66,5 +66,5 @@ This folder contains user guides, workflow references, developer architecture no
 ## Specs and Design
 
 - [Specs](./specs/)
-- [Design Context](./design.md)
+- [Design Context](../DESIGN.md)
 - [OS Support](./os-support.md)

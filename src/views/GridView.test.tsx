@@ -148,6 +148,22 @@ describe('GridView maximize behavior', () => {
     expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
+
+  it('gives a single visible agent the full grid width instead of a stale narrow track', () => {
+    act(() => useLayoutStore.getState().setColumnTracks([0.2, 0.8]));
+
+    const { container } = renderGrid(null, [agents[0]]);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.gridTemplateColumns).toBe('1fr');
+  });
+
+  it('keeps the grid wide enough for terminal input rows when the app shell is narrow', () => {
+    const { container } = renderGrid(null, [agents[0]]);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.minWidth).toBe('520px');
+  });
 });
 
 describe('GridView stacked mode', () => {

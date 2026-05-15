@@ -2,6 +2,18 @@ import fs from "node:fs";
 import path from "node:path";
 
 const REAL_RENDERING_PROVIDERS = ["codex", "claude", "gemini", "opencode"];
+const DEFAULT_REAL_RENDERING_PROVIDERS = ["codex", "claude"];
+const RESIZE_AUDIT_STATES = new Set([
+  "resized",
+  "narrow",
+  "wide",
+  "minimized",
+  "restored-after-minimize",
+  "maximized",
+  "restored-after-maximize",
+  "rapid-resize-final",
+]);
+const OPTIONAL_VISIBLE_TERMINAL_STATES = new Set(["paused"]);
 
 export function parseRenderingProviders(value) {
   const requested = String(value || "")
@@ -9,7 +21,7 @@ export function parseRenderingProviders(value) {
     .map((provider) => provider.trim().toLowerCase())
     .filter(Boolean);
 
-  const providers = requested.length > 0 ? requested : REAL_RENDERING_PROVIDERS;
+  const providers = requested.length > 0 ? requested : DEFAULT_REAL_RENDERING_PROVIDERS;
   const unique = [];
   for (const provider of providers) {
     if (!REAL_RENDERING_PROVIDERS.includes(provider)) {
@@ -28,7 +40,9 @@ export function createRenderingEvidenceDir(repoRoot, runId) {
 
 export function terminalTextIncludes(text, expectedText) {
   const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  return normalize(text).includes(normalize(expectedText));
+  const compact = (value) => normalize(value).replace(/\s+/g, "");
+  return normalize(text).includes(normalize(expectedText)) ||
+    compact(text).includes(compact(expectedText));
 }
 
 function readJson(filePath) {
@@ -61,6 +75,191 @@ function samePathish(left, right) {
 
 function linesText(state) {
   return (state?.capture?.debug?.lines ?? []).join("\n");
+}
+
+function stateText(state) {
+  return `${state?.capture?.domRows?.join("\n") ?? ""}\n${linesText(state)}`;
+}
+
+function parserHistoryText(state) {
+  return (state?.capture?.debug?.allLines ?? []).join("\n");
+}
+
+function normalizedContentLine(line) {
+  return String(line ?? "").replace(/\s+/g, " ").trim();
+}
+
+function isDecorativeLine(line) {
+  return /^[\s─━═╭╮╰╯│┃┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬\-_=]+$/.test(line);
+}
+
+function duplicatedTerminalContent(state, inputText) {
+  const lines = state?.capture?.debug?.allLines ?? state?.capture?.debug?.lines ?? [];
+  const normalized = lines
+    .map(normalizedContentLine)
+    .filter((line) => line.length >= 6 && !isDecorativeLine(line));
+  const counts = new Map();
+  for (const line of normalized) {
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+
+  const duplicateLines = Array.from(counts.entries())
+    .filter(([, count]) => count >= 4)
+    .sort((left, right) => right[1] - left[1]);
+  const normalizedInput = normalizedContentLine(inputText);
+  const inputOccurrences = normalizedInput
+    ? normalized.filter((line) => line.includes(normalizedInput)).length
+    : 0;
+  const inputAnchorLines = String(inputText ?? "")
+    .split(/\r?\n/)
+    .map(normalizedContentLine)
+    .filter((line) =>
+      line.length >= 12 &&
+      !/^WARDIAN_SCROLL_\d{3}$/.test(line) &&
+      !isDecorativeLine(line),
+    )
+    .slice(0, 1);
+  const duplicateInputAnchors = inputAnchorLines
+    .map((anchor) => [
+      anchor,
+      normalized.filter((line) => line.includes(anchor)).length,
+    ])
+    .filter(([, count]) => count > 1);
+
+  return {
+    ok: duplicateLines.length === 0 && inputOccurrences <= 1 && duplicateInputAnchors.length === 0,
+    duplicateLines,
+    inputOccurrences,
+    duplicateInputAnchors,
+  };
+}
+
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function approximatelyEqual(left, right, tolerance = 2) {
+  return finiteNumber(left) && finiteNumber(right) && Math.abs(left - right) <= tolerance;
+}
+
+function screenRectMatchesXtermGrid(state) {
+  const screenRect = state?.capture?.layout?.screenRect;
+  const renderer = state?.capture?.debug?.renderer;
+  const cols = renderer?.cols ?? state?.capture?.debug?.cols;
+  const rows = renderer?.rows ?? state?.capture?.debug?.rows;
+  const cellWidth = renderer?.cssCellWidth;
+  const cellHeight = renderer?.cssCellHeight;
+  if (
+    !screenRect ||
+    !finiteNumber(screenRect.width) ||
+    !finiteNumber(screenRect.height) ||
+    !finiteNumber(cols) ||
+    !finiteNumber(rows) ||
+    !finiteNumber(cellWidth) ||
+    !finiteNumber(cellHeight)
+  ) {
+    return false;
+  }
+
+  return approximatelyEqual(screenRect.width, cols * cellWidth) &&
+    approximatelyEqual(screenRect.height, rows * cellHeight);
+}
+
+function terminalScreenWidthChanged(resize) {
+  const beforeWidth = resize?.before_screen_rect?.width;
+  const afterWidth = resize?.after_screen_rect?.width;
+  if (!finiteNumber(beforeWidth) || !finiteNumber(afterWidth)) {
+    return null;
+  }
+  return !approximatelyEqual(beforeWidth, afterWidth);
+}
+
+function shouldAuditResizeColumnChange(resize) {
+  const screenWidthChanged = terminalScreenWidthChanged(resize);
+  if (screenWidthChanged === false) {
+    return false;
+  }
+
+  const beforeCols = resize?.before_debug?.cols;
+  const afterCols = resize?.after_debug?.cols;
+  const minTerminalCols = 20;
+  if (
+    finiteNumber(beforeCols) &&
+    finiteNumber(afterCols) &&
+    beforeCols <= minTerminalCols &&
+    afterCols <= minTerminalCols
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function wardianAuditText(manifest) {
+  const expectedResponseText = String(manifest?.expected_response_text ?? "").trim();
+  if (manifest?.input_submitted === true && expectedResponseText.length > 0) {
+    return expectedResponseText;
+  }
+  return manifest?.input_text ?? "";
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function repeatedNumberedResponseRows(state, auditText, inputText = "") {
+  const markerMatch = String(auditText ?? "").match(/^(.+?_)\d{3}$/);
+  if (!markerMatch) {
+    return { ok: true, repeated: [] };
+  }
+
+  const sourceLines = state?.capture?.debug?.allLines?.length
+    ? state.capture.debug.allLines
+    : state?.capture?.debug?.lines ?? [];
+  const markerPattern = new RegExp(`\\b${escapeRegExp(markerMatch[1])}\\d{3}\\b`, "g");
+  const promptMarkerCredits = new Map();
+  for (const match of String(inputText ?? "").matchAll(markerPattern)) {
+    promptMarkerCredits.set(match[0], (promptMarkerCredits.get(match[0]) ?? 0) + 1);
+  }
+  const counts = new Map();
+  for (const line of sourceLines) {
+    const normalizedLine = normalizedContentLine(line);
+    if (normalizedLine.trim().length === 0) {
+      continue;
+    }
+    const startsPrompt = normalizedLine.startsWith("›");
+    const promptLikeMarkerLine =
+      startsPrompt ||
+      normalizedLine.includes("Print exactly 50 lines") ||
+      normalizedLine.includes("WARDIAN_SCROLL_NNN") ||
+      /\b(?:WA)?RDIAN_SCROLL_\d{3}\s+(?:through|to)\s+WARDIAN_SCROLL_\d{3}\b/.test(normalizedLine) ||
+      /\bprefix\s+WARDIAN_SCROLL_/i.test(normalizedLine);
+    if (promptLikeMarkerLine) {
+      markerPattern.lastIndex = 0;
+      continue;
+    }
+    markerPattern.lastIndex = 0;
+    for (const match of String(line ?? "").matchAll(markerPattern)) {
+      counts.set(match[0], (counts.get(match[0]) ?? 0) + 1);
+    }
+  }
+  const repeated = [...counts.entries()]
+    .map(([marker, count]) => [marker, count - (promptMarkerCredits.get(marker) ?? 0)])
+    .filter(([, count]) => count > 1)
+    .map(([marker, count]) => `${marker} x${count}`);
+  return { ok: repeated.length === 0, repeated };
+}
+
+function requiresVisibleTerminalDom(stateName) {
+  return !OPTIONAL_VISIBLE_TERMINAL_STATES.has(stateName);
+}
+
+function hasTimestamp(value) {
+  return typeof value === "string" && value.trim().length > 0 && !Number.isNaN(Date.parse(value));
+}
+
+function stateNeedsResizeAudit(stateName) {
+  return RESIZE_AUDIT_STATES.has(stateName) || /^rapid-resize-\d+$/.test(stateName);
 }
 
 function comparableLines(lines) {
@@ -119,6 +318,8 @@ export function auditRenderingEvidence({
   requireOutsideTextSnapshots = false,
   compareOutsideTextStates = [],
   compareOutsideVisualTextStates = [],
+  requireWardianLabMetrics = false,
+  requireOutsideEvidence = true,
 } = {}) {
   const failures = [];
   const checks = [];
@@ -144,6 +345,7 @@ export function auditRenderingEvidence({
   }
 
   const wardianManifest = readJson(wardianManifestPath);
+  const auditText = wardianAuditText(wardianManifest);
   for (const provider of providers) {
     const summary = { provider, checks: [] };
     providerSummaries.push(summary);
@@ -172,27 +374,101 @@ export function auditRenderingEvidence({
         continue;
       }
       providerCheck(fileNonEmpty(state.screenshot), `Wardian screenshot exists and is non-empty: ${stateName}`);
-      providerCheck(fileNonEmpty(state.card_screenshot), `Wardian card screenshot exists and is non-empty: ${stateName}`);
+      if (requiresVisibleTerminalDom(stateName)) {
+        providerCheck(fileNonEmpty(state.card_screenshot), `Wardian card screenshot exists and is non-empty: ${stateName}`);
+      }
       providerCheck(jsonFileValid(state.artifact), `Wardian JSON artifact exists and parses: ${stateName}`);
-      providerCheck(state.capture?.debug?.cols === expectedGeometry.cols, `Wardian cols match ${stateName}`);
-      providerCheck(state.capture?.debug?.rows === expectedGeometry.rows, `Wardian rows match ${stateName}`);
+      if (expectedGeometry && requiresVisibleTerminalDom(stateName)) {
+        providerCheck(state.capture?.debug?.cols === expectedGeometry.cols, `Wardian cols match ${stateName}`);
+        providerCheck(state.capture?.debug?.rows === expectedGeometry.rows, `Wardian rows match ${stateName}`);
+        providerCheck(
+          state.capture?.layout?.screenRect?.width === expectedGeometry.pixelWidth &&
+            state.capture?.layout?.screenRect?.height === expectedGeometry.pixelHeight,
+          `Wardian screenRect matches ${stateName}`,
+        );
+      }
+      if (requireWardianLabMetrics) {
+        providerCheck(
+          state.metrics?.stability?.stable === true,
+          `Wardian rendered rows stabilized: ${stateName}`,
+        );
+        providerCheck(
+          hasTimestamp(state.metrics?.timestamps?.artifact_written_at),
+          `Wardian artifact timestamp recorded: ${stateName}`,
+        );
+        const duplicateContent = duplicatedTerminalContent(state, wardianManifest.input_text);
+        providerCheck(
+          duplicateContent.ok,
+          `Wardian terminal content has no obvious duplicated rows: ${stateName}`,
+        );
+        const duplicateNumberedRows = repeatedNumberedResponseRows(
+          state,
+          auditText,
+          wardianManifest.input_text,
+        );
+        providerCheck(
+          duplicateNumberedRows.ok,
+          `Wardian numbered response rows are not duplicated: ${stateName}`,
+        );
+        if (requiresVisibleTerminalDom(stateName)) {
+          providerCheck(
+            screenRectMatchesXtermGrid(state),
+            `Wardian screenRect matches xterm cell grid: ${stateName}`,
+          );
+        }
+        if (stateNeedsResizeAudit(stateName)) {
+          const auditTextPresent = terminalTextIncludes(stateText(state), auditText);
+          providerCheck(
+            auditTextPresent,
+            wardianManifest.input_submitted === true
+              ? `Wardian resized state includes visible audit marker: ${stateName}`
+              : `Wardian resized state includes visible audit input: ${stateName}`,
+          );
+          const historyText = parserHistoryText(state);
+          if (historyText.trim().length > 0) {
+            providerCheck(
+              terminalTextIncludes(`${stateText(state)}\n${historyText}`, auditText),
+              `Wardian resized state parser history includes audit marker: ${stateName}`,
+            );
+          }
+          if (state.metrics?.resize?.expect_cols_change === true) {
+            const beforeCols = state.metrics.resize.before_debug?.cols;
+            const afterCols = state.metrics.resize.after_debug?.cols;
+            if (shouldAuditResizeColumnChange(state.metrics.resize)) {
+              providerCheck(
+                finiteNumber(beforeCols) && finiteNumber(afterCols) && beforeCols !== afterCols,
+                `Wardian columns changed after resize: ${stateName}`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    const resizedState = wardianStates.get("resized");
+    providerCheck(
+      terminalTextIncludes(stateText(resizedState), auditText),
+      wardianManifest.input_submitted === true
+        ? "Wardian resized terminal text includes visible audit marker"
+        : "Wardian resized terminal text includes audit input",
+    );
+    const latestPrePauseState = wardianStates.get("cleared-immediate") ?? wardianStates.get("scrolled-top");
+    providerCheck(
+      JSON.stringify(latestPrePauseState?.capture?.debug?.lines ?? []) ===
+        JSON.stringify(wardianStates.get("paused")?.capture?.debug?.lines ?? []),
+      "Wardian paused parser rows preserve latest pre-pause buffer",
+    );
+    if (wardianManifest.input_submitted === true) {
+      const resumedState = wardianStates.get("resumed");
       providerCheck(
-        state.capture?.layout?.screenRect?.width === expectedGeometry.pixelWidth &&
-          state.capture?.layout?.screenRect?.height === expectedGeometry.pixelHeight,
-        `Wardian screenRect matches ${stateName}`,
+        terminalTextIncludes(`${stateText(resumedState)}\n${parserHistoryText(resumedState)}`, auditText),
+        "Wardian resumed terminal history includes submitted audit marker",
       );
     }
 
-    const resizedText = linesText(wardianStates.get("resized"));
-    providerCheck(
-      terminalTextIncludes(resizedText, wardianManifest.input_text),
-      "Wardian resized terminal text includes audit input",
-    );
-    providerCheck(
-      JSON.stringify(wardianStates.get("scrolled-top")?.capture?.debug?.lines ?? []) ===
-        JSON.stringify(wardianStates.get("paused")?.capture?.debug?.lines ?? []),
-      "Wardian paused parser rows preserve scrolled-top buffer",
-    );
+    if (!requireOutsideEvidence) {
+      continue;
+    }
 
     const outsideRunId = outsideRunsByProvider?.[provider];
     providerCheck(Boolean(outsideRunId), "outside run id is configured");

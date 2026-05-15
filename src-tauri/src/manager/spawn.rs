@@ -116,6 +116,10 @@ fn save_agent_state_after_session_capture(app: &AppHandle) {
     crate::manager::save_state(app, &agents, &order);
 }
 
+fn should_cleanup_stale_session_processes_before_spawn(is_restored: bool) -> bool {
+    !is_restored
+}
+
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
@@ -179,7 +183,9 @@ pub async fn spawn_agent(
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 
     #[cfg(windows)]
-    cleanup_stale_session_processes(&config.session_id, &config.provider);
+    if should_cleanup_stale_session_processes_before_spawn(is_restored) {
+        cleanup_stale_session_processes(&config.session_id, &config.provider);
+    }
 
     let pty_system = NativePtySystem::default();
 
@@ -1125,5 +1131,11 @@ mod tests {
             config.codex_config().cleared_provider_sessions,
             vec!["provider-session-1".to_string()]
         );
+    }
+
+    #[test]
+    fn restored_spawns_skip_stale_process_scan() {
+        assert!(!should_cleanup_stale_session_processes_before_spawn(true));
+        assert!(should_cleanup_stale_session_processes_before_spawn(false));
     }
 }

@@ -157,6 +157,7 @@ function Send-TerminalText {
     [System.Windows.Forms.Clipboard]::SetText($Text)
     [System.Windows.Forms.SendKeys]::SendWait("^v")
   }
+  [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
   Start-Sleep -Seconds 1
 }
 
@@ -354,7 +355,7 @@ if ($Provider -eq "opencode" -and $WardianHome.Trim().Length -gt 0 -and $Session
 }
 $escapedOpenCodeProviderSessionId = $openCodeProviderSessionId.Replace("'", "''")
 $providerInvocation = if ($Provider -eq "codex") {
-  "& '$escapedCodexExecutable' --sandbox workspace-write --ask-for-approval never --no-alt-screen --cd '$escapedWorkspace' -c tui.show_tooltips=false"
+  "& '$escapedCodexExecutable' -c 'windows.sandbox=""unelevated""' --dangerously-bypass-approvals-and-sandbox --no-alt-screen --cd '$escapedWorkspace' -c tui.show_tooltips=false"
 } elseif ($Provider -eq "claude") {
   $claudeSettingsInvocationArg = if ($escapedClaudeSettingsFile.Trim().Length -gt 0) { " --settings '$escapedClaudeSettingsFile'" } else { "" }
   $claudeAddDirInvocationArg = ""
@@ -564,6 +565,7 @@ try {
     }
     resized_geometry_note = "The outside resized state is captured as screenshot/text evidence only. This script does not inject ANSI geometry queries into a live provider session because those bytes would be delivered to the provider."
     input_text = $InputText
+    input_submitted = ($InputText.Trim().Length -gt 0)
     text_snapshots = @("initial.txt", "resized.txt", "scrolled-top.txt", "paused.txt", "interrupted.txt")
     states = @("initial", "resized", "scrolled-top", "paused", "interrupted")
     note = "External non-Wardian rendering capture. The scrolled-top state uses Ctrl+Home plus repeated mouse-wheel input against Windows Terminal to capture user-visible scrollback. Text snapshots use Windows Terminal select-all/copy after each screenshot; they are machine-readable text evidence but may include scrollback beyond the visible viewport. The paused state captures the unchanged visible buffer before any interrupt input, matching Wardian pause's preserved-terminal-buffer behavior. The interrupted state uses Ctrl+C as a separate provider interruption artifact."
