@@ -24,6 +24,141 @@ fn bytes_to_mib(bytes: u64) -> f64 {
     bytes as f64 / 1_048_576.0
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct GeminiLogMetrics {
+    query_count: usize,
+    init_timestamp: Option<String>,
+    status: Option<&'static str>,
+}
+
+fn gemini_message_kind(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("role").and_then(|v| v.as_str()))
+}
+
+fn gemini_status_from_last_kind(kind: Option<&str>) -> Option<&'static str> {
+    match kind {
+        Some("user") => Some("Processing..."),
+        Some("gemini") | Some("assistant") | Some("model") => Some("Idle"),
+        _ => None,
+    }
+}
+
+fn gemini_jsonl_completed_message(value: &serde_json::Value) -> bool {
+    value.get("tokens").is_some()
+        || value.get("usage").is_some()
+        || value.get("finishReason").is_some()
+        || value.get("finish_reason").is_some()
+}
+
+fn gemini_jsonl_record_status(value: &serde_json::Value) -> Option<&'static str> {
+    match gemini_message_kind(value) {
+        Some("user") => Some("Processing..."),
+        Some("result") => Some("Idle"),
+        Some("gemini") | Some("assistant") | Some("model")
+            if gemini_jsonl_completed_message(value) =>
+        {
+            Some("Idle")
+        }
+        _ => None,
+    }
+}
+
+fn gemini_log_matches_session(content: &str, target_id: &str) -> bool {
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        return false;
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+        if parsed.get("sessionId").and_then(|v| v.as_str()) == Some(target_id) {
+            return true;
+        }
+    }
+
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .is_some_and(|value| value.get("sessionId").and_then(|v| v.as_str()) == Some(target_id))
+    })
+}
+
+fn parse_gemini_log_metrics(content: &str) -> Option<GeminiLogMetrics> {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(messages) = parsed.get("messages").and_then(|v| v.as_array()) {
+            let query_count = messages
+                .iter()
+                .filter(|message| gemini_message_kind(message) == Some("user"))
+                .count();
+            let status =
+                gemini_status_from_last_kind(messages.last().and_then(gemini_message_kind));
+            return Some(GeminiLogMetrics {
+                query_count,
+                init_timestamp: parsed
+                    .get("startTime")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                status,
+            });
+        }
+    }
+
+    let mut query_count = 0usize;
+    let mut init_timestamp = None;
+    let mut status = None;
+    let mut saw_gemini_record = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+
+        if init_timestamp.is_none() {
+            init_timestamp = record
+                .get("startTime")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+
+        if let Some(kind) = gemini_message_kind(&record) {
+            match kind {
+                "user" => {
+                    query_count += 1;
+                    status = Some("Processing...");
+                    saw_gemini_record = true;
+                }
+                "gemini" | "assistant" | "model" | "result" => {
+                    if let Some(record_status) = gemini_jsonl_record_status(&record) {
+                        status = Some(record_status);
+                    }
+                    saw_gemini_record = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !saw_gemini_record && init_timestamp.is_none() {
+        return None;
+    }
+
+    Some(GeminiLogMetrics {
+        query_count,
+        init_timestamp,
+        status,
+    })
+}
+
 struct AgentSnapshot {
     session_id: String,
     provider: String,
@@ -223,6 +358,21 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .as_deref()
                 .filter(|value| value.starts_with("ses_"))
                 .unwrap_or(&snap.session_id);
+            let gemini_session_id = snap.resume_session.as_deref().unwrap_or(&snap.session_id);
+
+            if snap.provider == "gemini" {
+                let stale_gemini_log = log_path_lock.as_ref().is_some_and(|path| {
+                    std::fs::read_to_string(path).ok().is_none_or(|content| {
+                        !gemini_log_matches_session(&content, gemini_session_id)
+                    })
+                });
+                if stale_gemini_log {
+                    *log_path_lock = None;
+                    if let Ok(mut last_modified) = snap.log_last_modified.lock() {
+                        *last_modified = None;
+                    }
+                }
+            }
 
             // Provider-aware log discovery
             if snap.provider == "opencode" {
@@ -301,21 +451,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                             if let Ok(content) =
                                                 std::fs::read_to_string(chat_file.path())
                                             {
-                                                if let Ok(p) =
-                                                    serde_json::from_str::<serde_json::Value>(
-                                                        &content,
-                                                    )
-                                                {
-                                                    let target_id = snap
-                                                        .resume_session
-                                                        .as_deref()
-                                                        .unwrap_or(&snap.session_id);
-                                                    if p.get("sessionId").and_then(|v| v.as_str())
-                                                        == Some(target_id)
-                                                    {
-                                                        *log_path_lock = Some(chat_file.path());
-                                                        break;
-                                                    }
+                                                if gemini_log_matches_session(
+                                                    &content,
+                                                    gemini_session_id,
+                                                ) {
+                                                    *log_path_lock = Some(chat_file.path());
+                                                    break;
                                                 }
                                             }
                                         }
@@ -455,46 +596,17 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 set_snapshot_status_from_log(snap, &status, is_initial_log_replay);
                             }
                             _ => {
-                                // Gemini logs are a single JSON object with a messages array
-                                if let Ok(p) = serde_json::from_str::<serde_json::Value>(&content) {
-                                    if let Some(msgs) = p.get("messages").and_then(|v| v.as_array())
-                                    {
-                                        q_count = msgs
-                                            .iter()
-                                            .filter(|m| {
-                                                m.get("type").and_then(|v| v.as_str())
-                                                    == Some("user")
-                                                    || m.get("role").and_then(|v| v.as_str())
-                                                        == Some("user")
-                                            })
-                                            .count();
-
-                                        if let Some(last_msg) = msgs.last() {
-                                            let msg_type = last_msg
-                                                .get("type")
-                                                .and_then(|v| v.as_str())
-                                                .or_else(|| {
-                                                    last_msg.get("role").and_then(|v| v.as_str())
-                                                });
-                                            if msg_type == Some("user") {
-                                                set_snapshot_status_from_log(
-                                                    snap,
-                                                    "Processing...",
-                                                    is_initial_log_replay,
-                                                );
-                                            } else if msg_type == Some("gemini")
-                                                || msg_type == Some("assistant")
-                                            {
-                                                set_snapshot_status_from_log(
-                                                    snap,
-                                                    "Idle",
-                                                    is_initial_log_replay,
-                                                );
-                                            }
-                                        }
+                                if let Some(metrics) = parse_gemini_log_metrics(&content) {
+                                    q_count = metrics.query_count;
+                                    if let Some(status) = metrics.status {
+                                        set_snapshot_status_from_log(
+                                            snap,
+                                            status,
+                                            is_initial_log_replay,
+                                        );
                                     }
-                                    if let Some(st) = p.get("startTime").and_then(|v| v.as_str()) {
-                                        i_ts = Some(st.to_string());
+                                    if let Some(start_time) = metrics.init_timestamp {
+                                        i_ts = Some(start_time);
                                     }
                                 }
                             }
@@ -755,5 +867,130 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("idle")
         );
+    }
+
+    #[test]
+    fn gemini_log_matches_legacy_json_session_id() {
+        let content = r#"{
+          "sessionId": "gemini-session-1",
+          "messages": []
+        }"#;
+
+        assert!(super::gemini_log_matches_session(
+            content,
+            "gemini-session-1"
+        ));
+        assert!(!super::gemini_log_matches_session(content, "other-session"));
+    }
+
+    #[test]
+    fn gemini_log_matches_jsonl_metadata_session_id() {
+        let content = concat!(
+            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
+            "\n"
+        );
+
+        assert!(super::gemini_log_matches_session(
+            content,
+            "gemini-session-1"
+        ));
+        assert!(!super::gemini_log_matches_session(content, "other-session"));
+    }
+
+    #[test]
+    fn gemini_log_metrics_parse_legacy_json() {
+        let content = r#"{
+          "sessionId": "gemini-session-1",
+          "startTime": "2026-05-14T12:00:00.000Z",
+          "messages": [
+            { "type": "user", "content": "hello" },
+            { "type": "gemini", "content": "hi" }
+          ]
+        }"#;
+
+        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
+
+        assert_eq!(metrics.query_count, 1);
+        assert_eq!(
+            metrics.init_timestamp.as_deref(),
+            Some("2026-05-14T12:00:00.000Z")
+        );
+        assert_eq!(metrics.status, Some("Idle"));
+    }
+
+    #[test]
+    fn gemini_log_metrics_parse_jsonl_completed_message_record() {
+        let content = concat!(
+            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
+            "\n",
+            r#"{"$set":{"lastUpdated":"2026-05-14T12:00:02.000Z"}}"#,
+            "\n",
+            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"gemini","content":"hi","tokens":{"input":10,"output":1,"total":11}}"#,
+            "\n"
+        );
+
+        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
+
+        assert_eq!(metrics.query_count, 1);
+        assert_eq!(
+            metrics.init_timestamp.as_deref(),
+            Some("2026-05-14T12:00:00.000Z")
+        );
+        assert_eq!(metrics.status, Some("Idle"));
+    }
+
+    #[test]
+    fn gemini_log_metrics_jsonl_model_chunk_without_completion_stays_processing() {
+        let content = concat!(
+            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
+            "\n",
+            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"model","content":"partial"}"#,
+            "\n"
+        );
+
+        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
+
+        assert_eq!(metrics.query_count, 1);
+        assert_eq!(metrics.status, Some("Processing..."));
+    }
+
+    #[test]
+    fn gemini_log_metrics_jsonl_result_marks_idle() {
+        let content = concat!(
+            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
+            "\n",
+            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"model","content":"partial"}"#,
+            "\n",
+            r#"{"type":"result"}"#,
+            "\n"
+        );
+
+        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
+
+        assert_eq!(metrics.query_count, 1);
+        assert_eq!(metrics.status, Some("Idle"));
+    }
+
+    #[test]
+    fn gemini_log_metrics_jsonl_last_user_is_processing() {
+        let content = concat!(
+            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
+            "\n"
+        );
+
+        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
+
+        assert_eq!(metrics.query_count, 1);
+        assert_eq!(metrics.status, Some("Processing..."));
     }
 }

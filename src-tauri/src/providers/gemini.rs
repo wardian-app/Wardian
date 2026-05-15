@@ -173,6 +173,16 @@ impl AgentProvider for GeminiProvider {
         if is_resume && !resume_id.is_empty() {
             args.push("--resume".into());
             args.push(resume_id.to_string());
+        } else {
+            let session_id = config
+                .fresh_provider_session_id
+                .as_deref()
+                .unwrap_or(config.session_id.as_str())
+                .trim();
+            if !session_id.is_empty() {
+                args.push("--session-id".into());
+                args.push(session_id.to_string());
+            }
         }
 
         args
@@ -332,6 +342,53 @@ mod tests {
         let args_resume = p.get_spawn_args(&config, true);
         assert!(args_resume.contains(&"--resume".to_string()));
         assert!(args_resume.contains(&"session-abc".to_string()));
+    }
+
+    #[test]
+    fn fresh_spawn_uses_explicit_session_id() {
+        let p = make_provider();
+        let config = AgentConfig {
+            session_id: "wardian-session".into(),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(args.contains(&"wardian-session".to_string()));
+    }
+
+    #[test]
+    fn fresh_spawn_prefers_transient_provider_session_id() {
+        let p = make_provider();
+        let config = AgentConfig {
+            session_id: "wardian-session".into(),
+            fresh_provider_session_id: Some("fresh-gemini-session".into()),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(args.contains(&"fresh-gemini-session".to_string()));
+        assert!(!args.contains(&"wardian-session".to_string()));
+    }
+
+    #[test]
+    fn resume_spawn_omits_manual_session_id() {
+        let p = make_provider();
+        let config = AgentConfig {
+            session_id: "wardian-session".into(),
+            resume_session: Some("provider-session".into()),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, true);
+
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"provider-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"wardian-session".to_string()));
     }
 
     #[test]
