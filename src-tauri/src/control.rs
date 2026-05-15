@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use std::{
     fmt,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -14,6 +15,9 @@ use wardian_core::control::{
     WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
+
+const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
+const STRUCTURED_ASK_REQUESTS_DIR: &str = "requests";
 
 pub fn spawn_control_server(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -890,7 +894,13 @@ async fn wait_for_terminal_output(
 }
 
 fn codex_output_has_ready_prompt(output: &str) -> bool {
-    output.contains("\n›") || output.contains("\r\n›")
+    strip_ansi_controls(output)
+        .replace('\r', "\n")
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with('›'))
 }
 
 async fn mark_delivered_agents_prompt_started(
@@ -939,12 +949,23 @@ async fn handle_structured_ask(
         .lock()
         .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
         .latest_cursor();
-    let request_id = create_pending_ask_request(&state, &target_uuid).await?;
+    let request_id = new_ask_request_id();
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
+    let structured_delivery =
+        build_structured_ask_delivery_message(&wardian_home, &target_uuid, message, &request_id)?;
+    create_pending_ask_request_with_id(
+        &state,
+        &target_uuid,
+        request_id.clone(),
+        structured_delivery.body_file.as_deref(),
+    )
+    .await?;
     let delivery = deliver_message_to_target(
         Some(app),
         &state,
         target,
-        &message_with_structured_reply_instruction(message, &request_id),
+        &structured_delivery.prompt,
         thread,
         MessageInputMode::Message,
         origin,
@@ -983,6 +1004,52 @@ fn message_with_structured_reply_instruction(message: &str, request_id: &str) ->
     )
 }
 
+#[derive(Debug)]
+struct StructuredAskDeliveryMessage {
+    prompt: String,
+    body_file: Option<PathBuf>,
+}
+
+fn build_structured_ask_delivery_message(
+    wardian_home: &Path,
+    target_session_id: &str,
+    message: &str,
+    request_id: &str,
+) -> Result<StructuredAskDeliveryMessage, ControlError> {
+    if message.len() <= STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES {
+        return Ok(StructuredAskDeliveryMessage {
+            prompt: message_with_structured_reply_instruction(message, request_id),
+            body_file: None,
+        });
+    }
+
+    let body_file = wardian_home
+        .join("agents")
+        .join(target_session_id)
+        .join("habitat")
+        .join(STRUCTURED_ASK_REQUESTS_DIR)
+        .join(format!("{request_id}.md"));
+    if let Some(parent) = body_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ControlError::request_failed(format!("failed to create ask request directory: {error}"))
+        })?;
+    }
+    std::fs::write(&body_file, message).map_err(|error| {
+        ControlError::request_failed(format!("failed to write ask request body: {error}"))
+    })?;
+
+    Ok(StructuredAskDeliveryMessage {
+        prompt: message_with_structured_reply_instruction(
+            &format!(
+                "Wardian structured request {request_id} is too large to paste safely.\nRead the full request body from:\n{}",
+                body_file.display()
+            ),
+            request_id,
+        ),
+        body_file: Some(body_file),
+    })
+}
+
 fn new_ask_request_id() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -993,17 +1060,28 @@ fn new_ask_request_id() -> String {
     format!("ask_{:016x}", nanos ^ counter)
 }
 
+#[cfg(test)]
 async fn create_pending_ask_request(
     state: &AppState,
     target_session_id: &str,
 ) -> Result<String, ControlError> {
+    let request_id = new_ask_request_id();
+    create_pending_ask_request_with_id(state, target_session_id, request_id.clone(), None).await?;
+    Ok(request_id)
+}
+
+async fn create_pending_ask_request_with_id(
+    state: &AppState,
+    target_session_id: &str,
+    request_id: String,
+    body_file: Option<&Path>,
+) -> Result<(), ControlError> {
     if !state.agents.lock().await.contains_key(target_session_id) {
         return Err(ControlError::not_found(format!(
             "agent not found: {target_session_id}"
         )));
     }
 
-    let request_id = new_ask_request_id();
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     state.ask_requests.lock().await.insert(
         request_id.clone(),
@@ -1014,19 +1092,22 @@ async fn create_pending_ask_request(
             reply: None,
         },
     );
-    push_watch_event_for_agent(
-        state,
-        target_session_id,
-        "request",
-        serde_json::json!({
-            "request_id": request_id,
-            "target_session_id": target_session_id,
-            "status": "pending",
-            "created_at": created_at,
-        }),
-    )
-    .await?;
-    Ok(request_id)
+    let mut payload = serde_json::json!({
+        "request_id": request_id,
+        "target_session_id": target_session_id,
+        "status": "pending",
+        "created_at": created_at,
+    });
+    if let Some(body_file) = body_file {
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert(
+                "body_file".to_string(),
+                serde_json::Value::String(body_file.display().to_string()),
+            );
+        }
+    }
+    push_watch_event_for_agent(state, target_session_id, "request", payload).await?;
+    Ok(())
 }
 
 async fn submit_structured_reply(
@@ -1941,6 +2022,13 @@ mod tests {
         assert!(!codex_output_has_ready_prompt("Booting MCP server"));
     }
 
+    #[test]
+    fn codex_ready_prompt_ignores_stale_prompt_marker_when_latest_screen_is_busy() {
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\nProcessing request\r\nWorking...\r\n"
+        ));
+    }
+
     #[tokio::test]
     async fn opencode_control_send_waits_for_open_code_title() {
         let state = AppState::new();
@@ -2535,6 +2623,42 @@ mod tests {
         assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
+    #[test]
+    fn long_structured_ask_materializes_body_file_and_sends_short_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let request_id = "ask_testrequest01";
+        let message = "investigate this line\n".repeat(STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES);
+
+        let delivery =
+            build_structured_ask_delivery_message(temp.path(), "agent-1", &message, request_id)
+                .unwrap();
+
+        let body_file = delivery
+            .body_file
+            .expect("long ask body should be materialized");
+        assert_eq!(
+            body_file,
+            temp.path()
+                .join("agents")
+                .join("agent-1")
+                .join("habitat")
+                .join("requests")
+                .join(format!("{request_id}.md"))
+        );
+        assert_eq!(std::fs::read_to_string(&body_file).unwrap(), message);
+        assert!(delivery.prompt.contains(request_id));
+        assert!(delivery.prompt.contains("Read the full request body from:"));
+        assert!(delivery
+            .prompt
+            .contains(&format!("wardian reply {request_id} --status done --stdin")));
+        assert!(
+            !delivery
+                .prompt
+                .contains("investigate this line\ninvestigate this line"),
+            "large body should not be pasted into the terminal prompt"
+        );
+    }
+
     #[tokio::test]
     async fn ask_request_lifecycle_accepts_matching_reply_and_emits_watch_event() {
         let state = AppState::new();
@@ -2575,6 +2699,37 @@ mod tests {
             event.kind == "reply"
                 && event.payload["request_id"] == request_id
                 && event.payload["status"] == "done"
+        }));
+    }
+
+    #[tokio::test]
+    async fn ask_request_event_records_materialized_body_file() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let body_file = PathBuf::from("agents/agent-1/habitat/requests/ask_test.md");
+
+        create_pending_ask_request_with_id(
+            &state,
+            "agent-1",
+            "ask_testrequest02".to_string(),
+            Some(&body_file),
+        )
+        .await
+        .unwrap();
+
+        let agents = state.agents.lock().await;
+        let snapshot = agents
+            .get("agent-1")
+            .unwrap()
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, Some(4096))
+            .unwrap();
+        assert!(snapshot.events.iter().any(|event| {
+            event.kind == "request"
+                && event.payload["request_id"] == "ask_testrequest02"
+                && event.payload["body_file"] == body_file.display().to_string()
         }));
     }
 
