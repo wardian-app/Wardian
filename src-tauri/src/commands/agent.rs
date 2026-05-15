@@ -736,12 +736,16 @@ fn persisted_resume_session_for_provider(
     session_id: &str,
 ) -> Option<String> {
     actual_resume.or_else(|| {
-        if provider_name == "claude" && !session_id.trim().is_empty() {
+        if provider_uses_manual_session_id(provider_name) && !session_id.trim().is_empty() {
             Some(session_id.to_string())
         } else {
             None
         }
     })
+}
+
+fn provider_uses_manual_session_id(provider_name: &str) -> bool {
+    matches!(provider_name, "claude" | "gemini")
 }
 
 fn provider_uses_generated_session_id(provider_name: &str) -> bool {
@@ -776,13 +780,27 @@ fn promote_fresh_provider_session_after_resume(
     provider: &str,
     new_active: &mut crate::state::ActiveAgent,
 ) {
-    if provider != "claude" {
+    if !provider_uses_manual_session_id(provider) {
         return;
     }
 
-    let mut new_config = new_active.config.lock().unwrap();
-    if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
-        new_config.resume_session = Some(fresh_provider_session_id);
+    let promoted = {
+        let mut new_config = new_active.config.lock().unwrap();
+        if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
+            new_config.resume_session = Some(fresh_provider_session_id);
+            true
+        } else {
+            false
+        }
+    };
+
+    if promoted {
+        if let Ok(mut log_path) = new_active.log_path.lock() {
+            *log_path = None;
+        }
+        if let Ok(mut log_last_modified) = new_active.log_last_modified.lock() {
+            *log_last_modified = None;
+        }
     }
 }
 
@@ -1239,7 +1257,7 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     config.fresh_provider_session_id = None;
     if resolved_persistence == AgentSessionPersistence::Fresh {
         config.resume_session = None;
-        if config.provider == "claude" {
+        if provider_uses_manual_session_id(&config.provider) {
             config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
         }
         return Ok(());
@@ -1287,7 +1305,7 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     if config.resume_session.is_none() {
         let should_fallback = match config.provider.as_str() {
             "opencode" => config.session_id.starts_with("ses_"),
-            "codex" | "gemini" => false,
+            "codex" => false,
             _ => true,
         };
         if should_fallback {
@@ -1303,7 +1321,7 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.resume_session = None;
     config.fresh_provider_session_id = None;
     clear_codex_cleared_provider_sessions(config);
-    if config.provider == "claude" {
+    if provider_uses_manual_session_id(&config.provider) {
         config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
     Ok(())
@@ -2074,7 +2092,7 @@ pub async fn clear_agent_session(
         {
             let mut new_config = new_active.config.lock().unwrap();
             let mut old_config = agent.config.lock().unwrap();
-            if old_config.provider == "claude" {
+            if provider_uses_manual_session_id(&old_config.provider) {
                 if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take()
                 {
                     new_config.resume_session = Some(fresh_provider_session_id);
@@ -2618,7 +2636,6 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
         agent_status_update_payload, assign_worktree_config,
         build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
         build_agent_clone_preview, capture_opencode_pause_resume_session,
@@ -2637,13 +2654,16 @@ mod tests {
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, terminal_cleared_payload,
+        sync_resumed_input_sender, terminal_cleared_payload, AgentOrderPlacement,
+        CloneProfileCopyPlan, CloneProfileSelection,
     };
+    use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
     use crate::utils::fs::create_directory_link;
     use crate::utils::{ShellOption, ShellSettings};
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
+    use wardian_core::models::provider::AgentProvider;
     use wardian_core::models::{
         AgentConfig, AgentSessionPersistenceOverride, ClaudeProviderConfig, CodexProviderConfig,
         DeployedSkillRef, GeminiProviderConfig, OpenCodeProviderConfig, ProviderConfig,
@@ -2899,13 +2919,11 @@ mod tests {
             preview.default_selected_files,
             vec!["AGENTS.md".to_string()]
         );
-        assert!(
-            preview
-                .files
-                .children
-                .iter()
-                .any(|node| node.path() == "notes.md")
-        );
+        assert!(preview
+            .files
+            .children
+            .iter()
+            .any(|node| node.path() == "notes.md"));
     }
 
     #[test]
@@ -3017,14 +3035,12 @@ mod tests {
         )
         .expect("permission log");
 
-        assert!(
-            clone_validate_selected_profile_files(
-                home,
-                "source-agent",
-                &["claude/permission-requests.jsonl".to_string()]
-            )
-            .is_err()
-        );
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["claude/permission-requests.jsonl".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
@@ -3081,22 +3097,18 @@ mod tests {
         std::fs::create_dir_all(&source).expect("source");
         std::fs::write(source.join("AGENTS.md"), "# Agent\n").expect("agents");
 
-        assert!(
-            clone_validate_selected_profile_files(
-                home,
-                "source-agent",
-                &["../secret.md".to_string()]
-            )
-            .is_err()
-        );
-        assert!(
-            clone_validate_selected_profile_files(
-                home,
-                "source-agent",
-                &["C:/secret.md".to_string()]
-            )
-            .is_err()
-        );
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["../secret.md".to_string()]
+        )
+        .is_err());
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["C:/secret.md".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
@@ -3115,14 +3127,12 @@ mod tests {
             return;
         }
 
-        assert!(
-            clone_validate_selected_profile_files(
-                home,
-                "source-agent",
-                &["linked/secret.md".to_string()]
-            )
-            .is_err()
-        );
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &["linked/secret.md".to_string()]
+        )
+        .is_err());
     }
 
     #[test]
@@ -3164,17 +3174,14 @@ mod tests {
         )
         .expect("copy selected skills");
 
-        assert!(
-            temp.path()
-                .join("agents/dest-agent/.agents/skills/planner/SKILL.md")
-                .is_file()
-        );
-        assert!(
-            !temp
-                .path()
-                .join("agents/dest-agent/.agents/skills/ignored")
-                .exists()
-        );
+        assert!(temp
+            .path()
+            .join("agents/dest-agent/.agents/skills/planner/SKILL.md")
+            .is_file());
+        assert!(!temp
+            .path()
+            .join("agents/dest-agent/.agents/skills/ignored")
+            .exists());
     }
 
     #[test]
@@ -4018,12 +4025,10 @@ mod tests {
             "# Skill\n"
         );
         assert!(!dest.join("habitat").exists());
-        assert!(
-            !dest
-                .join("claude")
-                .join("permission-requests.jsonl")
-                .exists()
-        );
+        assert!(!dest
+            .join("claude")
+            .join("permission-requests.jsonl")
+            .exists());
     }
 
     #[test]
@@ -4144,26 +4149,30 @@ mod tests {
     }
 
     #[test]
-    fn claude_resume_promotes_fresh_provider_session_to_resume_session() {
+    fn manual_session_provider_resume_promotes_fresh_provider_session_to_resume_session() {
         let mut new_active = make_test_agent();
         {
             let mut config = new_active.config.lock().unwrap();
-            config.fresh_provider_session_id = Some("claude-fresh-session".to_string());
+            config.fresh_provider_session_id = Some("gemini-fresh-session".to_string());
             config.resume_session = None;
         }
+        *new_active.log_path.lock().unwrap() = Some(std::path::PathBuf::from("C:/tmp/old.jsonl"));
+        *new_active.log_last_modified.lock().unwrap() = Some(std::time::SystemTime::now());
 
-        promote_fresh_provider_session_after_resume("claude", &mut new_active);
+        promote_fresh_provider_session_after_resume("gemini", &mut new_active);
 
         let config = new_active.config.lock().unwrap();
         assert_eq!(
             config.resume_session.as_deref(),
-            Some("claude-fresh-session")
+            Some("gemini-fresh-session")
         );
         assert_eq!(config.fresh_provider_session_id, None);
+        assert_eq!(*new_active.log_path.lock().unwrap(), None);
+        assert_eq!(*new_active.log_last_modified.lock().unwrap(), None);
     }
 
     #[test]
-    fn non_claude_resume_keeps_fresh_provider_session_field() {
+    fn non_manual_session_provider_resume_keeps_fresh_provider_session_field() {
         let mut new_active = make_test_agent();
         {
             let mut config = new_active.config.lock().unwrap();
@@ -4308,7 +4317,15 @@ mod tests {
     }
 
     #[test]
-    fn non_claude_providers_leave_resume_session_unchanged() {
+    fn gemini_persists_resume_session_after_initial_spawn() {
+        assert_eq!(
+            persisted_resume_session_for_provider("gemini", None, "gemini-session-1"),
+            Some("gemini-session-1".to_string())
+        );
+    }
+
+    #[test]
+    fn non_manual_session_providers_leave_resume_session_unchanged() {
         assert_eq!(
             persisted_resume_session_for_provider("codex", None, "codex-session-1"),
             None
@@ -4386,6 +4403,24 @@ mod tests {
         prepare_resume_config(&mut config).expect("prepare resume config");
 
         assert_eq!(config.resume_session.as_deref(), Some("claude-session"));
+        assert!(!config.is_off);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn gemini_resume_without_recorded_resume_session_uses_manual_session_id() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
         assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
@@ -4756,6 +4791,58 @@ mod tests {
     }
 
     #[test]
+    fn gemini_pause_resume_config_builds_resume_spawn_args() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn gemini_fresh_resume_uses_new_provider_session_without_changing_wardian_id() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            agent_session_persistence: wardian_core::models::AgentSessionPersistence::Fresh,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "wardian-agent-id".to_string(),
+            resume_session: Some("old-gemini-session".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.session_id, "wardian-agent-id");
+        assert_eq!(config.resume_session, None);
+        assert_ne!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("wardian-agent-id")
+        );
+        assert!(config.fresh_provider_session_id.is_some());
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
     fn prepare_clear_config_forces_fresh_resume_and_clears_runtime_fields() {
         let mut config = AgentConfig {
             provider: "claude".to_string(),
@@ -4797,6 +4884,7 @@ mod tests {
         assert_eq!(config.gemini_config().sandbox, Some(true));
         assert!(matches!(config.provider_config, ProviderConfig::Gemini(_)));
         assert_eq!(config.resume_session, None);
+        assert!(config.fresh_provider_session_id.is_some());
         assert!(!config.is_off);
     }
 }
