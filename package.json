@@ -23,6 +23,9 @@
     "stage-cli": "node scripts/stage-cli.mjs",
     "lint": "tsc --noEmit",
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
     "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
     "docs:demo-gif": "node scripts/capture-readme-demo.mjs",
     "test": "vitest run",
@@ -62,6 +65,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.8.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
@@ -75,6 +79,7 @@
     "terser": "^5.46.1",
     "typescript": "~5.8.3",
     "vite": "^6.0.0",
+    "vitepress": "^1.6.4",
     "vitest": "^3.2.4"
   }
 }

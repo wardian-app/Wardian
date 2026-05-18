@@ -69,12 +69,12 @@ npm run dev
 
 For complete user and developer docs, start here:
 
-- [Documentation Index](docs/index.md)
-- [User Guide Index](docs/guide/index.md)
-- [Wardian CLI](docs/guide/cli.md)
-- [Queue](docs/guide/queue.md)
-- [Workflow Reference](docs/workflows/index.md)
-- [Developer Index](docs/developer/index.md)
+- [Public Documentation](https://docs.wardian.org/)
+- [User Guide Index](https://docs.wardian.org/guide/)
+- [Wardian CLI](https://docs.wardian.org/guide/cli)
+- [Queue](https://docs.wardian.org/guide/queue)
+- [Workflow Reference](https://docs.wardian.org/workflows/)
+- [Developer Index](https://docs.wardian.org/developer/)
 
 ---
 
