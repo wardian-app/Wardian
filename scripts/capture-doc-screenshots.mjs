@@ -204,6 +204,19 @@ const workflows = [
   },
 ];
 
+const queueItems = [
+  {
+    id: "docs-first-run-result",
+    type: "agent_completed",
+    timestamp: 1778590740000,
+    read: false,
+    agent_session_id: "docs-codex",
+    agent_name: "Docs-Codex",
+    summary:
+      "Completed the first read-only workspace pass. The agent identified the guide, docs, and source folders and suggested reviewing Queue before assigning follow-up edits.",
+  },
+];
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function isUrlReady(url = baseUrl) {
@@ -290,7 +303,7 @@ async function capture(page, relativePath, locator) {
 }
 
 async function installTauriDocsMock(page) {
-  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory }) => {
+  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory }) => {
     const fixedNow = 1778590800000;
     const RealDate = Date;
 
@@ -378,7 +391,7 @@ async function installTauriDocsMock(page) {
             "docs-reviewer": "2026-05-12T10:16:00.000Z",
           };
         }
-        if (command === "load_queue_items") return [];
+        if (command === "load_queue_items") return queueItems;
         if (command === "get_explorer_root") return repoRoot;
         if (command === "get_directory_tree") return directoryTree[args.path] || [];
         if (command === "read_file_preview") {
@@ -472,7 +485,7 @@ async function installTauriDocsMock(page) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory });
+  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory });
 }
 
 async function main() {
@@ -507,6 +520,12 @@ async function main() {
 
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
     await capture(page, "grid/app-shell.png");
+    await capture(page, "grid/active-agent-state.png", page.locator("main"));
+
+    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await page.getByTestId("queue-item-summary-docs-first-run-result").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "queue/completed-result.png", page.locator("main"));
 
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
@@ -543,7 +562,9 @@ async function main() {
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.getByRole("heading", { name: "Agent Runtime" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(500);
-    await capture(page, "settings/runtime-settings.png");
+    await page.locator('[data-testid="shell-select"]').scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
+    await capture(page, "settings/runtime-settings.png", page.locator('[data-testid="settings-panel"]'));
 
     await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
     await page.locator('[data-testid="sidebar-tab-workflows"]').click();

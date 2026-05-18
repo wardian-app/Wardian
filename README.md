@@ -54,7 +54,13 @@ Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are ava
 
 ## Quick Start
 
-Ensure you have Rust, Node.js (v18+), and at least one supported provider CLI installed, such as `@google/gemini-cli`, `@anthropic-ai/claude-code`, `@openai/codex`, or the OpenCode `opencode` command.
+New users should start with the public first-run guide:
+
+- [First-Time Install and First Run](https://docs.wardian.org/guide/getting-started)
+
+That guide covers download, launch, provider CLI setup, authentication, the first agent spawn, and Queue review.
+
+For local development, clone the repository and run the dev app:
 
 ```bash
 git clone https://github.com/tangemicioglu/Wardian.git
