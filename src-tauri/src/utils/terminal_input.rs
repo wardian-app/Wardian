@@ -1,7 +1,8 @@
-use tokio::sync::mpsc::Sender;
-
 const TERMINAL_SUBMIT_DELAY_MS: u64 = 1000;
 const TERMINAL_SUBMIT_KEY: &[u8] = b"\r";
+const OPENCODE_SUBMIT_KEY: &[u8] = b"\x1b[13u";
+
+use tokio::sync::mpsc::Sender;
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
     prompt
@@ -11,13 +12,18 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
         .to_string()
 }
 
-pub fn provider_submit_chunks(_provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
+pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
 
-    Ok(vec![normalized.into_bytes(), TERMINAL_SUBMIT_KEY.to_vec()])
+    let submit_key = if provider_name.eq_ignore_ascii_case("opencode") {
+        OPENCODE_SUBMIT_KEY
+    } else {
+        TERMINAL_SUBMIT_KEY
+    };
+    Ok(vec![normalized.into_bytes(), submit_key.to_vec()])
 }
 
 pub async fn submit_prompt_chunks_via_sender(
@@ -58,7 +64,9 @@ pub async fn submit_prompt_via_sender(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_prompt_for_terminal_submit, submit_prompt_via_sender};
+    use super::{
+        normalize_prompt_for_terminal_submit, provider_submit_chunks, submit_prompt_via_sender,
+    };
 
     #[test]
     fn normalize_prompt_flattens_newlines_and_trims() {
@@ -81,5 +89,12 @@ mod tests {
 
         assert_eq!(String::from_utf8(first).expect("utf8"), "hello world");
         assert_eq!(second, b"\r".to_vec());
+    }
+
+    #[test]
+    fn opencode_submit_uses_kitty_protocol_return_key() {
+        let chunks = provider_submit_chunks("opencode", "hello").expect("chunks");
+
+        assert_eq!(chunks, vec![b"hello".to_vec(), b"\x1b[13u".to_vec()]);
     }
 }

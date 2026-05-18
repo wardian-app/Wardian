@@ -19,6 +19,7 @@
  *   multi_turn    — init → [user → generating → model_response → turn_completed] × 3
  *   interactive_multi_turn — init → action_required → stdin-driven responses × 2
  *   interactive_echo_then_response — init → action_required → prompt echo → response
+ *   ansi_output   — init → ANSI terminal output → model_response → turn_completed
  */
 
 "use strict";
@@ -209,6 +210,18 @@ async function runInteractiveEchoThenResponse() {
   emit(events.turnCompleted());
 }
 
+async function runAnsiOutput() {
+  emit(events.init());
+  await sleep(delay);
+  emit(events.user());
+  await sleep(delay);
+  process.stdout.write("\x1b[31mANSI_TERMINAL_LINE\x1b[0m\n");
+  await sleep(delay);
+  emit(events.modelResponse("ANSI readable answer."));
+  await sleep(delay);
+  emit(events.turnCompleted());
+}
+
 async function main() {
   // Headless mode: --print flag overrides scenario
   if (isPrint) {
@@ -226,6 +239,7 @@ async function main() {
     multi_turn: runMultiTurn,
     interactive_multi_turn: runInteractiveMultiTurn,
     interactive_echo_then_response: runInteractiveEchoThenResponse,
+    ansi_output: runAnsiOutput,
   };
 
   const runner = scenarios[scenario];

@@ -52,7 +52,8 @@ wardian agent worktree join <name-or-uuid> --worktree <absolute-worktree-path-or
 wardian agent worktree disable <name-or-uuid>
 wardian agent wait reviewer-a1 --until idle --timeout 10m
 wardian agent wait reviewer-a1 --until idle --next --timeout 10m
-wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output,delivery --timeout 10m
+wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include transcript,output,delivery --timeout 10m
+wardian agent watch reviewer-a1 --include raw_output --raw
 wardian team list
 wardian team show <team-name-or-id>
 wardian watchlist list
@@ -89,10 +90,26 @@ Send a prompt to an existing agent and wait for the next Idle transition:
 wardian send --file prompt.md --to coder-a1 --wait-until idle --timeout 10m
 ```
 
-Watch retained output for a deterministic marker:
+Watch retained readable output for a deterministic marker:
 
 ```bash
-wardian agent watch coder-a1 --until output:READY_FOR_REVIEW --include status,output,delivery --timeout 10m
+wardian agent watch coder-a1 --until output:READY_FOR_REVIEW --include transcript,output,delivery --timeout 10m
+```
+
+Inspect provider-adapted transcript text, sanitized terminal fallback, or raw PTY evidence:
+
+```bash
+wardian agent watch Librarian --include transcript
+wardian agent watch Librarian --include output
+wardian agent watch Librarian --include raw_output --raw
+```
+
+PowerShell:
+
+```powershell
+wardian agent watch Librarian --include transcript
+wardian agent watch Librarian --include output
+wardian agent watch Librarian --include raw_output --raw
 ```
 
 Run a saved workflow through the app-owned backend:
@@ -114,7 +131,11 @@ Mutating commands use Wardian's local control endpoint and require the desktop a
 
 `agent wait <target> --until <status>` blocks inside the CLI process until a single agent name or UUID reaches a normalized status such as `idle`, `processing`, `action_required`, `off`, or `error`. Plain `wait` returns immediately when the target is already in the requested status. Add `--next` to wait for a newer matching observation. Use `--timeout` with `ms`, `s`, or `m` units.
 
-`agent watch <target>` returns a live snapshot with agent status, retained output, recent events, delivery details, and a cursor. Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
+`agent watch <target>` returns a live snapshot with agent status, a provider-adapted `transcript`, sanitized retained terminal `output`, delivery details, and a cursor. Raw PTY text is not returned by default. Add `--raw` or `--include raw_output` only when debugging terminal rendering, ANSI/control sequences, or PTY transport behavior. `raw_output.text` may contain escape sequences and prompt repaint fragments.
+
+`transcript` is extracted from structured provider lines when Wardian has a provider adapter. This slice covers Codex, Claude, Gemini, OpenCode, and the mock provider. Gemini can backfill completed assistant text from Gemini chat logs, and OpenCode can backfill assistant text from its session database when the live TUI does not expose a clean structured line. Ambiguous provider lines fall back to sanitized terminal `output` until provider-specific transcript adapters are added. `output` is the compatibility surface for `--until output:<substring>` and is cleaned of common ANSI, OSC, cursor, and clear-line controls. Internally, marker matching also checks transcript text and the raw PTY tap so existing token-based automation keeps working without returning raw text by default.
+
+Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
 
 `ask <target>` sends one prompt to one live Wardian-managed agent and creates a live structured request id. By default, Wardian appends reply instructions to the delivered prompt and waits for the target to answer with `wardian reply <request-id> --status done --stdin`. The JSON response includes `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. `reply.status` can be `done`, `blocked`, or `failed`; timeout remains a separate `watch_timeout` error.
 

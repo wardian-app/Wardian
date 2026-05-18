@@ -2789,6 +2789,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn full_agent_command_loads_saved_config_from_state() {
         let _lock = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");

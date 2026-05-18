@@ -924,11 +924,10 @@ fn is_windows_cmd_shim(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodexRuntimePolicy, ShellOption, ShellSettings,
         build_interactive_shell_launch_with_settings, build_program_launch_with_settings,
         build_shell_cd_command, build_shell_command_with_settings, default_shell_args,
         load_shell_settings_from_path, save_shell_settings_to_path, shell_id_from_executable,
-        shell_option,
+        shell_option, CodexRuntimePolicy, ShellOption, ShellSettings,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;

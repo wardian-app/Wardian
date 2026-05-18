@@ -24,12 +24,23 @@ impl MockProvider {
             return None;
         }
 
-        Some(
-            std::fs::canonicalize(&path)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string(),
-        )
+        Some(Self::node_compatible_script_path(
+            std::fs::canonicalize(&path).unwrap_or(path),
+        ))
+    }
+
+    fn node_compatible_script_path(path: std::path::PathBuf) -> String {
+        let text = path.to_string_lossy();
+        #[cfg(windows)]
+        {
+            if let Some(stripped) = text.strip_prefix("\\\\?\\UNC\\") {
+                return format!("\\\\{stripped}");
+            }
+            if let Some(stripped) = text.strip_prefix("\\\\?\\") {
+                return stripped.to_string();
+            }
+        }
+        text.to_string()
     }
 
     /// Resolves the path to `scripts/mock-agent.cjs`.
@@ -216,10 +227,14 @@ mod tests {
         std::fs::write(&script, "console.log('mock');").expect("write script");
 
         let resolved = MockProvider::existing_script_path(script.clone()).unwrap();
+        let expected =
+            MockProvider::node_compatible_script_path(std::fs::canonicalize(script).unwrap());
 
-        assert_eq!(
-            std::path::PathBuf::from(resolved),
-            std::fs::canonicalize(script).expect("canonical script path")
+        assert_eq!(resolved, expected);
+        #[cfg(windows)]
+        assert!(
+            !resolved.starts_with(r"\\?\"),
+            "Node rejects verbatim Windows script paths: {resolved}"
         );
     }
 
@@ -239,11 +254,10 @@ mod tests {
         std::env::set_var("WARDIAN_MOCK_SCRIPT", &script);
 
         let resolved = MockProvider::resolve_mock_script_path();
+        let expected =
+            MockProvider::node_compatible_script_path(std::fs::canonicalize(&script).unwrap());
 
-        assert_eq!(
-            std::path::PathBuf::from(resolved),
-            std::fs::canonicalize(&script).expect("canonical script path")
-        );
+        assert_eq!(resolved, expected);
         std::env::remove_var("WARDIAN_MOCK_SCRIPT");
     }
 

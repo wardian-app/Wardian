@@ -4,6 +4,7 @@ pub mod factory;
 pub mod gemini;
 pub mod mock;
 pub mod opencode;
+pub mod transcript;
 pub use codex::CodexProvider;
 pub use factory::ProviderFactory;
 pub use gemini::GeminiProvider;
