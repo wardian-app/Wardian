@@ -6,7 +6,7 @@
 
 ## Context and Problem Statement
 
-2026-04-21 Wardian CLI and Agent Command gave agents a CLI surface for introspection, and 2026-05-07 CLI Agent Control added live control commands such as `wardian send` and `wardian agent wait`. That first control slice is useful, but it is still too narrow for reliable agent-to-agent work.
+[Wardian CLI and `wardian agent` Command](./2026-04-21-wardian-cli-and-agent-command.md) gave agents a CLI surface for introspection, and [CLI Agent Control and Communication](./2026-05-07-cli-agent-control.md) added live control commands such as `wardian send` and `wardian agent wait`. That first control slice is useful, but it is still too narrow for reliable agent-to-agent work.
 
 The current communication path is mostly a one-way PTY injection. A caller can send text and optionally wait for a target status, but it cannot directly observe what the target saw, whether output changed, whether a response was produced, or why a delivery path was unavailable. This makes failures ambiguous. During provider probes on 2026-05-07:
 
@@ -235,7 +235,7 @@ Delivery responses should report per-target details:
 }
 ```
 
-CLI output follows the existing 2026-04-21 Wardian CLI and Agent Command error contract. If any matched target fails, the command exits nonzero, stdout is empty, and stderr contains the standard error envelope with `details.delivery[]`. If every matched target is submitted successfully, stdout contains the success envelope with `delivery[]` and stderr is empty.
+CLI output follows the existing [Wardian CLI and `wardian agent` Command](./2026-04-21-wardian-cli-and-agent-command.md) error contract. If any matched target fails, the command exits nonzero, stdout is empty, and stderr contains the standard error envelope with `details.delivery[]`. If every matched target is submitted successfully, stdout contains the success envelope with `delivery[]` and stderr is empty.
 
 ### Error Semantics
 

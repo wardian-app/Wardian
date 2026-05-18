@@ -8,7 +8,7 @@
 
 Wardian has no command-line interface. Every interaction — spawning agents, inspecting state, running workflows — goes through the Tauri GUI. This forces a specific problem: the primary users of Wardian are *agents*, not humans, and agents cannot usefully drive a graphical app. They need a textual surface to introspect themselves, discover peers, and (eventually) act on the system they live inside.
 
-2026-04-20 Agent Identity and Status Tracking already lays the groundwork for this by making the Rust backend the source of truth for agent identity and status via `~/.wardian/state.db`, and by injecting `WARDIAN_SESSION_ID` into every spawned agent's environment. 2026-04-19 Release System reserves a slot for a `wardian-cli` binary in the release pipeline and documents its intended bundle location. What is missing is the CLI itself.
+[Agent Identity and Status Tracking](./2026-04-20-agent-identity-and-status-tracking.md) already lays the groundwork for this by making the Rust backend the source of truth for agent identity and status via `~/.wardian/state.db`, and by injecting `WARDIAN_SESSION_ID` into every spawned agent's environment. [Release System](./2026-04-19-release-system.md) reserves a slot for a `wardian-cli` binary in the release pipeline and documents its intended bundle location. What is missing is the CLI itself.
 
 This spec defines the first slice: a `wardian` command distributed alongside the GUI, sharing Rust code with the Tauri app through a workspace refactor, always on the user's `PATH`, and exposing one noun — `wardian agent` — for self- and peer-introspection. Mutating commands (`spawn`, `send`, `kill`), auto-update, and distribution wrappers (npm/pip/cargo) are explicitly deferred to follow-up specs. The command surface is designed so those follow-ups slot in without restructuring.
 
@@ -61,14 +61,14 @@ The refactor is mechanical: move files, adjust `use` paths, update `Cargo.toml` 
 
 ### Component 2 — Binary, Distribution, Install
 
-**Binary names:** the implementation binary is `wardian-cli` / `wardian-cli.exe` so it can coexist with the desktop app's `Wardian.exe` on Windows. The user-facing command remains `wardian`: macOS/Linux install a `wardian` shell launcher, and Windows installs both `wardian.cmd` and an extensionless `wardian` POSIX shell launcher, all delegating to the adjacent `wardian-cli` binary.
+**Binary names:** the implementation binary is `wardian-cli` / `wardian-cli.exe` so it can coexist with the desktop app's `Wardian.exe` on Windows. The user-facing command remains `wardian`: macOS/Linux install a `wardian` shell launcher, and Windows installs `wardian.cmd`, both delegating to the adjacent `wardian-cli` binary.
 
 **Build outputs:**
 
-- Bundled inside the Tauri app under `resources/bin/wardian-cli[.exe]` via `src-tauri/tauri.conf.json` -> `bundle.resources`. 2026-04-19 Release System already reserves this slot.
-- Per-platform release assets on GitHub Releases: `wardian-cli-{arch}-{os}[.exe]`. 2026-04-19 Release System's stubbed CLI matrix job is enabled as part of this spec.
+- Bundled inside the Tauri app under `resources/bin/wardian-cli[.exe]` via `src-tauri/tauri.conf.json` -> `bundle.resources`. [Release System](./2026-04-19-release-system.md) already reserves this slot.
+- Per-platform release assets on GitHub Releases: `wardian-cli-{arch}-{os}[.exe]`. The [Release System](./2026-04-19-release-system.md) stubbed CLI matrix job is enabled as part of this spec.
 
-**Install location:** `~/.wardian/bin/wardian` on macOS/Linux; `%USERPROFILE%\.wardian\bin\wardian.cmd`, `%USERPROFILE%\.wardian\bin\wardian`, and `%USERPROFILE%\.wardian\bin\wardian-cli.exe` on Windows. Per-user, no elevation required, inside the Wardian-owned tree alongside `state.db`, `agents/`, `classes/`.
+**Install location:** `~/.wardian/bin/wardian` on macOS/Linux, `%USERPROFILE%\.wardian\bin\wardian.cmd` on Windows, with the implementation binary beside it. Per-user, no elevation required, inside the Wardian-owned tree alongside `state.db`, `agents/`, `classes/`.
 
 **Install-time behavior:**
 
@@ -78,7 +78,7 @@ The refactor is mechanical: move files, adjust `use` paths, update `Cargo.toml` 
 2. If either step fails (read-only FS, no profile file, etc.), the GUI surfaces a dismissible notification with a copy-pasteable fallback command. The app continues to function; only the CLI is unreachable from user shells.
 3. The binary inside the app bundle is a *source* artifact. The live binary is whatever is in `~/.wardian/bin/`. This separation is deliberate: the forthcoming updater swaps the live binary, not the bundled one, so GUI and CLI update paths decouple cleanly.
 
-**Agent subterminal guarantee:** user shells normally find `wardian` because `~/.wardian/bin` is on the user's real `PATH`. On Windows, Wardian also prepends the managed CLI `bin` directory to managed provider processes so agent shell tools are not dependent on global shell startup propagation. This is especially important for Claude tools that may run through either PowerShell/cmd semantics or Git Bash-compatible POSIX shell lookup.
+**Agent subterminal guarantee:** because `~/.wardian/bin` is on the user's real `PATH`, any shell an agent spawns — including nested shells, tmux panes, and provider-invoked subprocesses — finds `wardian` without needing environment injection. The CLI is reliably available, not dependent on the parent process propagating env correctly.
 
 ### Component 3 — State Access Model
 
@@ -90,7 +90,7 @@ The live control endpoint is not Tauri command IPC. It is a local OS endpoint ke
 
 ### Component 4 — Self-Resolution via `WARDIAN_SESSION_ID`
 
-2026-04-20 Agent Identity and Status Tracking injects `WARDIAN_SESSION_ID=<uuid>` into the environment of every spawned agent. The CLI uses this as its "who am I?" signal:
+[Agent Identity and Status Tracking](./2026-04-20-agent-identity-and-status-tracking.md) injects `WARDIAN_SESSION_ID=<uuid>` into the environment of every spawned agent. The CLI uses this as its "who am I?" signal:
 
 1. `wardian agent` (no args) reads `$WARDIAN_SESSION_ID`.
 2. If set, looks up the matching row in `state.db` and returns it.
