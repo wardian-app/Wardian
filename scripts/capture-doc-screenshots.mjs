@@ -14,7 +14,7 @@ const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
 const agents = [
   {
     session_id: "docs-codex",
-    session_name: "Docs-Codex",
+    session_name: "docs-demo",
     agent_class: "Coder",
     folder: "<absolute-workspace-path>",
     provider: "codex",
@@ -85,6 +85,37 @@ const terminalOutput = {
   "docs-reviewer": "\x1b]0;Ready\x07Review complete. No blocking findings.\n",
   "docs-designer": "\x1b]0;Action Required\x07Approval needed before replacing the current hero capture.\n",
 };
+
+const fixedNow = 1778590800000;
+
+const queueItems = [
+  {
+    id: "docs-queue-agent-completed",
+    type: "agent_completed",
+    timestamp: fixedNow - 120_000,
+    read: false,
+    agent_session_id: "docs-codex",
+    agent_name: "docs-demo",
+    summary: [
+      "Completed first onboarding check.",
+      "",
+      "- Provider command resolved from the app environment",
+      "- Safe workspace placeholder verified",
+      "- Summary ready for review in Queue",
+    ].join("\n"),
+  },
+  {
+    id: "docs-queue-workflow-completed",
+    type: "workflow_completed",
+    timestamp: fixedNow - 360_000,
+    read: true,
+    workflow_id: "docs-workflow",
+    workflow_run_id: "docs-run-1",
+    workflow_name: "Docs Screenshot Refresh",
+    status: "completed",
+    summary: "Workflow completed with sanitized screenshot evidence.",
+  },
+];
 
 const repoRoot = "<absolute-workspace-path>";
 
@@ -290,8 +321,7 @@ async function capture(page, relativePath, locator) {
 }
 
 async function installTauriDocsMock(page) {
-  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory }) => {
-    const fixedNow = 1778590800000;
+  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, queueItems, fixedNow, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory }) => {
     const RealDate = Date;
 
     class FixedDate extends RealDate {
@@ -378,7 +408,7 @@ async function installTauriDocsMock(page) {
             "docs-reviewer": "2026-05-12T10:16:00.000Z",
           };
         }
-        if (command === "load_queue_items") return [];
+        if (command === "load_queue_items") return queueItems;
         if (command === "get_explorer_root") return repoRoot;
         if (command === "get_directory_tree") return directoryTree[args.path] || [];
         if (command === "read_file_preview") {
@@ -472,7 +502,7 @@ async function installTauriDocsMock(page) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory });
+  }, { agents, agentClasses, telemetry, terminalOutput, queueItems, fixedNow, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory });
 }
 
 async function main() {
@@ -507,6 +537,10 @@ async function main() {
 
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
     await capture(page, "grid/app-shell.png");
+
+    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "grid/active-agent-state.png", page.locator("#agent-card-docs-codex"));
 
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
@@ -543,7 +577,23 @@ async function main() {
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.getByRole("heading", { name: "Agent Runtime" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(500);
-    await capture(page, "settings/runtime-settings.png");
+    await capture(page, "settings/runtime-settings.png", page.locator('[data-testid="settings-panel"]'));
+    const settingsScroll = page.locator('[data-testid="settings-panel"] .overflow-y-auto');
+    await settingsScroll.evaluate((element) => {
+      element.scrollTop = 360;
+    });
+    await page.locator('[data-testid="shell-select"]').waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(300);
+    await capture(page, "settings/provider-readiness.png", page.locator('[data-testid="settings-panel"]'));
+    await settingsScroll.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+
+    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await page.getByRole("heading", { name: "Queue" }).waitFor({ timeout: 10_000 });
+    await page.getByText("Completed first onboarding check").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await capture(page, "queue/completed-result.png", page.locator("main"));
 
     await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
     await page.locator('[data-testid="sidebar-tab-workflows"]').click();

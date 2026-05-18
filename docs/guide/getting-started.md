@@ -9,6 +9,8 @@ Wardian is an integrated habitat for managing multiple autonomous agents. This g
 
 Authenticate each provider in a normal terminal before spawning it through Wardian.
 
+![Wardian Settings panel showing runtime and shell readiness controls for first-run setup](../assets/screenshots/settings/provider-readiness.png)
+
 ## 2. Understanding Blueprints
 Before spawning an agent, you must understand **Classes**. A Class is a "Blueprint" that defines an agent's base instructions and capabilities.
 1. Click **LIBRARY** in the top bar view-switcher.
@@ -26,6 +28,8 @@ Before spawning an agent, you must understand **Classes**. A Class is a "Bluepri
 5. Click **Spawn Instance**.
 6. Your new agent will appear in the **Right Sidebar (Roster)** and automatically take up a slot in the **Grid View**.
 
+![Wardian Grid card showing the first active docs-demo agent with seeded terminal output](../assets/screenshots/grid/active-agent-state.png)
+
 ## 4. Basic Agent Management
 From the **Roster (Right Sidebar)**, you can monitor and control your agents:
 - **Status Lights**: 
@@ -38,6 +42,8 @@ From the **Roster (Right Sidebar)**, you can monitor and control your agents:
 ## 5. Review Completed Work in the Queue
 
 Click **Queue** in the top bar to review completed agent tasks and workflow runs. Wardian adds unread items when an active agent settles back to Idle, or when a workflow reports completion or failure. Use the unread badge to spot new work, expand long summaries when needed, mark items read after triage, and clear read items when they are no longer useful.
+
+![Wardian Queue showing a completed onboarding example item and a sanitized workflow completion](../assets/screenshots/queue/completed-result.png)
 
 ## 6. Understand the Wardian CLI
 

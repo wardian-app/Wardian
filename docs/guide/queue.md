@@ -15,6 +15,8 @@ The Queue is not yet the full human-in-the-loop approval system from the roadmap
 
 Open **Queue** from the top workspace tabs. Unread items appear at the top and increment the Queue tab badge.
 
+![Wardian Queue showing completed agent and workflow examples with sanitized summary text](../assets/screenshots/queue/completed-result.png)
+
 Each item shows:
 
 - source type and status

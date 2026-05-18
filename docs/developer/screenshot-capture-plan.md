@@ -20,15 +20,18 @@ docs/assets/screenshots/<feature-or-window>/<state>.png
 | P0 | Dashboard | `docs/guide/ui-overview.md` | `docs/assets/screenshots/dashboard/system-summary.png` | Browser E2E | Dashboard cards and telemetry summary |
 | P0 | Agent roster / Watchlists | `docs/guide/watchlists.md` | `docs/assets/screenshots/watchlists/agent-roster.png` | Browser E2E | Searchable right roster with agent rows and status indicators |
 | P0 | Spawn Agent | `docs/guide/getting-started.md` | `docs/assets/screenshots/spawn-agent/spawn-form.png` | Browser E2E | Agent configuration form with name, class, workspace, and provider controls |
+| P0 | First active agent | `docs/guide/getting-started.md` | `docs/assets/screenshots/grid/active-agent-state.png` | Browser E2E | Seeded first-run agent card with sanitized terminal output |
+| P0 | Queue | `docs/guide/queue.md` | `docs/assets/screenshots/queue/completed-result.png` | Browser E2E | Completed agent and workflow items with sanitized summaries |
 | P0 | Command Panel | `docs/guide/command-panel.md` | `docs/assets/screenshots/command-panel/broadcast-prompt.png` | Browser E2E | Broadcast textarea and target controls |
 | P0 | Library | `docs/guide/library.md` | `docs/assets/screenshots/library/library-view.png` | Browser E2E | Prompt, skill, or class library browser |
 | P0 | Workflows | `docs/guide/workflows.md` | `docs/assets/screenshots/workflows/builder-canvas.png` | Browser E2E | Workflow sidebar and builder canvas |
 | P0 | Settings | `docs/guide/settings.md` | `docs/assets/screenshots/settings/runtime-settings.png` | Browser E2E | Theme, shell, and runtime settings controls |
+| P0 | Runtime and shell readiness | `docs/guide/getting-started.md` and `docs/guide/settings.md` | `docs/assets/screenshots/settings/provider-readiness.png` | Browser E2E | First-run runtime defaults and shell detection controls |
 | P0 | Explorer | `docs/guide/explorer.md` | `docs/assets/screenshots/explorer/workspace-tree.png` | Browser E2E | File tree rooted in a seeded workspace |
 | P0 | Source Control | `docs/guide/source-control.md` | `docs/assets/screenshots/source-control/status-panel.png` | Browser E2E | Git branch bar, staged/unstaged groups, and commit box |
 | P1 | Source Control diff | `docs/guide/source-control.md` | `docs/assets/screenshots/source-control/diff-modal.png` | Native E2E | Inline diff modal with hunk markers |
 | P1 | User Terminal | future user guide or `docs/specs/2026-05-04-user-terminal-panel-design.md` | `docs/assets/screenshots/user-terminal/open-terminal.png` | Native E2E | User terminal panel with workspace context |
-| P2 | Agent lifecycle | `docs/guide/ui-overview.md` or `docs/guide/watchlists.md` | `docs/assets/screenshots/grid/active-agent-card.png` | Native E2E | Running agent card with terminal output |
+| P2 | Real provider lifecycle | `docs/guide/ui-overview.md` or `docs/guide/watchlists.md` | `docs/assets/screenshots/grid/active-agent-card.png` | Native E2E | Running real-provider agent card with terminal output |
 | P2 | Workflow run state | `docs/workflows/index.md` | `docs/assets/screenshots/workflows/run-state.png` | Native E2E | Workflow block status while running |
 
 ## First Pass Scope

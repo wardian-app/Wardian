@@ -4,6 +4,8 @@ The Settings tab controls theme behavior, runtime shell selection, session polic
 
 ![Wardian Settings tab showing theme, session persistence, and shell selection controls](../assets/screenshots/settings/runtime-settings.png)
 
+![Wardian Settings panel showing first-run runtime defaults and shell detection controls](../assets/screenshots/settings/provider-readiness.png)
+
 ## Theme
 
 Theme options:

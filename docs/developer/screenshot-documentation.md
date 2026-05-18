@@ -21,6 +21,7 @@ Use kebab-case for folders and filenames. Match the folder to the feature guide 
 - `docs/assets/screenshots/library/`
 - `docs/assets/screenshots/workflows/`
 - `docs/assets/screenshots/source-control/`
+- `docs/assets/screenshots/queue/`
 - `docs/assets/screenshots/settings/`
 - `docs/assets/screenshots/user-terminal/`
 
