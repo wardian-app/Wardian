@@ -1042,6 +1042,8 @@ function AppBody() {
         setLeftCollapsed={setLeftCollapsed}
         rightCollapsed={rightCollapsed}
         setRightCollapsed={setRightCollapsed}
+        leftSidebarWidth={leftSidebarWidth}
+        rightSidebarWidth={rightSidebarWidth}
         telemetry={telemetry}
         appTelemetry={appTelemetry}
         agents={agents}

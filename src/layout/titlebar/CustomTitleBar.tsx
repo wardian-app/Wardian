@@ -10,6 +10,7 @@ export type { ViewMode };
 
 const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
 const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+const DEFAULT_LEFT_RAIL_WIDTH = 48;
 
 interface CustomTitleBarProps {
   viewMode: ViewMode;
@@ -18,6 +19,8 @@ interface CustomTitleBarProps {
   setLeftCollapsed: (collapsed: boolean) => void;
   rightCollapsed: boolean;
   setRightCollapsed: (collapsed: boolean) => void;
+  leftSidebarWidth: number;
+  rightSidebarWidth: number;
   telemetry: Record<string, AgentTelemetry>;
   appTelemetry: AppTelemetry;
   agents: AgentConfig[];
@@ -25,8 +28,8 @@ interface CustomTitleBarProps {
 }
 
 export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
-  const leftWidth = 64 + (props.leftCollapsed ? 0 : 260);
-  const rightWidth = props.rightCollapsed ? 0 : 240;
+  const leftWidth = DEFAULT_LEFT_RAIL_WIDTH + (props.leftCollapsed ? 0 : props.leftSidebarWidth);
+  const rightWidth = props.rightCollapsed ? 0 : props.rightSidebarWidth;
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isMac || !isTauri) return;
