@@ -75,6 +75,20 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude depends heavily on the permission-hook path being writable and stable.
 - Bugs here are usually about hook setup, `CLAUDE.md` discovery, or resume/session flags.
+- On Windows, Claude sessions may invoke tools through either PowerShell/cmd semantics or a Git Bash-compatible `bash`. Wardian prepends its managed CLI `bin` directory to Claude child process `PATH` and installs both `wardian.cmd` and an extensionless POSIX shell launcher so `wardian` resolves in both shell families.
+- To smoke-test the launcher pair on Windows, use an isolated `WARDIAN_HOME`, launch Wardian once so the CLI is installed, then verify both shells:
+
+```bash
+command -v wardian
+wardian --version
+```
+
+PowerShell:
+
+```powershell
+(Get-Command wardian).Source
+wardian --version
+```
 
 ## Codex
 

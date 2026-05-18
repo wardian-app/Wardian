@@ -197,6 +197,7 @@ pub async fn run_headless_with_options(
         cmd.arg(arg);
     }
     apply_headless_identity_env(&mut cmd, wardian_session_id);
+    super::apply_managed_cli_path_to_process(&mut cmd);
     if provider_name == "codex" {
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
@@ -466,6 +467,7 @@ pub async fn obtain_session_id(
     if let Some(bootstrap_session_id) = bootstrap_session_id {
         apply_headless_identity_env(&mut cmd, bootstrap_session_id);
     }
+    super::apply_managed_cli_path_to_process(&mut cmd);
 
     if provider_name == "codex" {
         if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {

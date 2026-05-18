@@ -513,6 +513,30 @@ pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
 }
 
 #[cfg(windows)]
+pub(crate) fn apply_managed_cli_path_to_pty(cmd: &mut CommandBuilder) {
+    if let Some(path) =
+        crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
+    {
+        cmd.env("PATH", path);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn apply_managed_cli_path_to_pty(_cmd: &mut CommandBuilder) {}
+
+#[cfg(windows)]
+pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Command) {
+    if let Some(path) =
+        crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
+    {
+        cmd.env("PATH", path);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn apply_managed_cli_path_to_process(_cmd: &mut tokio::process::Command) {}
+
+#[cfg(windows)]
 pub(crate) fn quote_cmd_arg(value: &str) -> String {
     let escaped = value.replace('"', r#"\""#);
     if escaped.is_empty()
@@ -546,6 +570,72 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_cli_path_is_applied_to_pty_commands() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_path = std::env::var_os("PATH");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var("PATH", r"C:\Windows\System32");
+
+        let mut cmd = CommandBuilder::new("claude");
+        apply_managed_cli_path_to_pty(&mut cmd);
+
+        let path = cmd
+            .get_env("PATH")
+            .expect("PATH env")
+            .to_string_lossy()
+            .to_string();
+        assert!(path.starts_with(&home.path().join("bin").display().to_string()));
+        assert!(path.ends_with(r"C:\Windows\System32"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_cli_path_is_applied_to_headless_processes() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_path = std::env::var_os("PATH");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var("PATH", r"C:\Windows\System32");
+
+        let mut cmd = tokio::process::Command::new("claude");
+        apply_managed_cli_path_to_process(&mut cmd);
+
+        let path = cmd
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+                    .then(|| value.expect("PATH value").to_string_lossy().to_string())
+            })
+            .expect("PATH env");
+        assert!(path.starts_with(&home.path().join("bin").display().to_string()));
+        assert!(path.ends_with(r"C:\Windows\System32"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
     #[test]
     fn extract_terminal_titles_reads_bel_and_st_sequences() {
         let chunk = "\u{1b}]0;OpenCode\u{7}x\u{1b}]2;OC | Working\u{1b}\\";
