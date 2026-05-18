@@ -50,3 +50,4 @@ Wardian specs capture design decisions, implementation boundaries, rollout notes
 - [040 Dense Three-Column UI](./040-dense-three-column-ui.md)
 - [040 Real Provider PTY Rendering Lab](./040-real-provider-pty-rendering-lab.md)
 - [041 Agent Watch Readable Output](./041-agent-watch-readable-output.md)
+- [042 Agent ID Display](./042-agent-id-display.md)
