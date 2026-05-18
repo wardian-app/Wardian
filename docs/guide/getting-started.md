@@ -5,7 +5,9 @@ Wardian is an integrated habitat for managing multiple autonomous agents. This g
 ## 1. Prerequisites
 - **Node.js** (v18+)
 - **Rust** (v1.75+)
-- **Gemini CLI**: Install globally via `npm install -g @google/gemini-cli`.
+- **At least one supported provider CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`@google/gemini-cli`), [Claude Code](https://github.com/anthropics/claude-code) (`@anthropic-ai/claude-code`), [Codex](https://github.com/openai/codex) (`@openai/codex`), or [OpenCode](https://github.com/anomalyco/opencode) (`opencode` command, commonly installed from `opencode-ai`).
+
+Authenticate each provider in a normal terminal before spawning it through Wardian.
 
 ## 2. Understanding Blueprints
 Before spawning an agent, you must understand **Classes**. A Class is a "Blueprint" that defines an agent's base instructions and capabilities.
@@ -19,9 +21,10 @@ Before spawning an agent, you must understand **Classes**. A Class is a "Bluepri
 
 1. Navigate to the **Left Sidebar (Agent Configuration tab)**.
 2. Select an **Agent Class** from the dropdown.
-3. Give your agent a unique name (e.g., "Main Researcher").
-4. Click **Spawn Instance**.
-5. Your new agent will appear in the **Right Sidebar (Roster)** and automatically take up a slot in the **Grid View**.
+3. Choose the provider CLI that should run the agent: Gemini, Claude, Codex, or OpenCode.
+4. Give your agent a unique name (e.g., "Main Researcher").
+5. Click **Spawn Instance**.
+6. Your new agent will appear in the **Right Sidebar (Roster)** and automatically take up a slot in the **Grid View**.
 
 ## 4. Basic Agent Management
 From the **Roster (Right Sidebar)**, you can monitor and control your agents:
@@ -63,4 +66,5 @@ Click **GRID** in the top bar to see all active agents in a high-density termina
 - Triage completed work in the [Queue](./queue.md).
 - Manage per-agent Git operations in [Source Control](./source-control.md).
 - Configure runtime behavior and shell defaults in [Settings](./settings.md).
+- Compare provider runtime behavior in [Provider Runtimes](../providers.md).
 - Automate complex tasks with [Visual Workflows](./workflows.md).

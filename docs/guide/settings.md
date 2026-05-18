@@ -1,6 +1,6 @@
 # Settings
 
-The Settings tab controls theme behavior, runtime shell selection, session policy defaults, and Gemini patch utilities.
+The Settings tab controls theme behavior, runtime shell selection, session policy defaults, and provider-specific runtime utilities.
 
 ![Wardian Settings tab showing theme, session persistence, and shell selection controls](../assets/screenshots/settings/runtime-settings.png)
 
@@ -12,7 +12,7 @@ Theme options:
 - **Dark**
 - **Light**
 
-Wardian applies the selected mode to the app UI and syncs the OpenCode theme preference through backend settings.
+Wardian applies the selected mode to the app UI. For OpenCode agents, Wardian also syncs the provider theme preference through backend settings.
 
 ## Agent Runtime: Regular Agent Sessions
 
@@ -41,6 +41,15 @@ Typical uses:
 
 After changing shell settings, use **Save Shell**.
 
+## Provider Runtime Utilities
+
+Provider-specific settings apply only to providers that need them:
+
+- **Gemini**: skill discovery patch controls.
+- **Codex**: runtime policy controls for sandbox mode, approval policy, and full-auto behavior.
+- **OpenCode**: theme preference sync.
+- **Claude**: permission and session behavior are configured per agent rather than from this global settings panel.
+
 ## Advanced: Gemini Patch
 
 Controls:
@@ -48,13 +57,15 @@ Controls:
 - **Auto-patch Gemini CLI** toggle
 - **Run Patch Now** button
 
-Use this when Gemini skill discovery requires Wardian's patch flow.
+Use this when Gemini skill discovery requires Wardian's patch flow. Other providers use their own discovery paths; see [Provider Runtimes](../providers.md) for the full comparison.
 
 ## Troubleshooting
 
 - If shell options are empty, verify shell binaries are installed and visible in your OS PATH.
 - If resume behavior is not what you expect, verify both the global runtime policy and any per-agent override.
-- If Gemini skills are missing, run patch manually and restart the app session.
+- If Gemini skills are missing, run the Gemini patch manually and restart the app session.
+- If OpenCode skills or instructions are missing, inspect the generated provider config and config directory described in Provider Runtimes.
+- If Codex skills are missing, inspect the agent habitat skill projection before changing repository files.
 
 ## Related References
 

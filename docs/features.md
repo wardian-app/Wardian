@@ -92,7 +92,7 @@ Related docs:
 
 - Default shell selection (`auto`, discovered shell, or custom executable)
 - Per-installation regular-agent session persistence policy (`resume` vs `fresh`)
-- Theme sync support and Gemini patch actions from settings
+- Provider-specific runtime utilities, including Gemini skill patching, Codex runtime policy, and OpenCode theme sync
 
 Related docs:
 

@@ -1,80 +1,89 @@
-# Provider Runtimes & Nuances
+# Provider Runtimes
 
-Wardian provides a unified orchestration layer over multiple, disparate AI agent CLIs. Each provider has unique requirements for session management, skill discovery, and status reporting.
+Wardian provides one orchestration layer over four supported CLI providers: Gemini CLI, Claude Code, Codex, and OpenCode. Each provider keeps its native command-line behavior, while Wardian adapts session identity, working roots, skill discovery, status tracking, and workflow execution into a consistent app model.
 
 ## Overview
 
-| Provider        | Status  | Primary Communication                      | Skill Mechanism                          |
-| :-------------- | :------ | :----------------------------------------- | :--------------------------------------- |
-| **Gemini CLI**  | Stable  | JSON Events over PTY                       | `--include-directories`                  |
-| **Claude Code** | Stable  | Permission Hooks + PTY                     | `.claude/skills` symlinks                |
-| **Codex**       | Beta    | Thread Logs + PTY                          | Habitat Injection                        |
-| **OpenCode**    | Beta    | JSON Events over PTY / headless run output | Injected `instructions` + `skills.paths` |
-| **OpenClaw**    | Planned | To be determined                           | To be determined                         |
+| Provider | Support | Working Root | Instruction Source | Skill and Context Model | Session Identity |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Supported | Real target workspace | `GEMINI.md` | Wardian include roots passed through `--include-directories`; Gemini patch enables multi-root skill discovery | Discovered from provider output |
+| **[Claude Code](https://github.com/anthropics/claude-code)** | Supported | Real target workspace | `CLAUDE.md` | `--add-dir` instruction roots plus `.claude/skills` links to Wardian-managed skills | Wardian assigns fresh session IDs and resumes explicitly |
+| **[Codex](https://github.com/openai/codex)** | Supported | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME` habitat with scoped skill projection | Discovered during bootstrap, then adopted into the final habitat |
+| **[OpenCode](https://github.com/anomalyco/opencode)** | Supported | Real target workspace | `AGENTS.md` plus injected runtime config | `OPENCODE_CONFIG` adds Wardian instructions; `OPENCODE_CONFIG_DIR` exposes projected skills | Discovered from JSON events and resumed with `--session` |
 
----
+## Shared Runtime Model
+
+- The Rust backend is the source of truth for process lifecycle, provider session IDs, PTY ownership, and status telemetry.
+- Regular visible agents use the global session policy unless the agent has an explicit override.
+- Workflow Agent nodes choose one run mode: `ephemeral`, `inherit_fresh`, or `inherit_resume`.
+- Wardian keeps user repositories clean by adapting provider-native discovery instead of copying agent-specific instruction and skill files into the project root.
 
 ## Gemini CLI (`@google/gemini-cli`)
 
-Gemini is integrated as a high-performance, stream-oriented provider.
+Gemini runs directly in the real target workspace.
 
-### Implementation Nuance: Turn Completion
+### Instruction and Skill Discovery
 
-Unlike primitive terminal wrappers, Wardian doesn't wait for a "Done" string. It parses the underlying provider stream for formal `AgentEvent::TurnCompleted` signals to ensure the workflow engine moves to the next node immediately.
+Gemini reads `GEMINI.md`. Wardian passes common, class, and agent include roots through `--include-directories`. The Gemini skill patch lets the CLI discover skills from those additional roots rather than only from the global or project-local Gemini skill folders.
 
-### Skill Discovery
+### Session and Status Handling
 
-Wardian patches the Gemini CLI's discovery logic to respect multiple `--include-directories`. This allows skills to be injected from the global common library, the agent's specific class, or the individual session's local folder.
+Wardian learns Gemini session identity from provider output and parses Gemini stream events into lifecycle states such as initialization, user input, generation, and turn completion. Workflow execution uses these structured turn-completion signals instead of waiting for fragile terminal text.
 
----
+### Debug First
+
+If Gemini misses Wardian-managed skills, check the Gemini patch state and include roots before changing workspace or workflow logic.
 
 ## Claude Code (`@anthropic-ai/claude-code`)
 
-Claude is integrated with a focus on governance and human-in-the-loop (HITL) precision.
+Claude runs directly in the real target workspace.
 
-### Implementation Nuance: Permission Hooks
+### Instruction and Skill Discovery
 
-Claude often requests user approval for filesystem or network actions. Wardian implements a custom hook that writes these requests to a JSONL file under `.wardian/agents/<session_id>/claude/`. The UI monitors this file to transition the agent state to `Action Needed` and surface the specific request.
+Claude reads `CLAUDE.md`. Wardian enables additional-directory discovery and maintains `.claude/skills` links where needed so Claude can see Wardian-managed common, class, and agent skills without those files living in the repository root.
 
-### Workspace Isolation
+### Session and Status Handling
 
-Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, allowing Claude to read instruction files (`CLAUDE.md`) from assigned skill roots without them being physically present in the root of your project.
+Wardian assigns fresh Claude session IDs up front and uses explicit resume flags for resumed provider sessions. Claude permission requests are captured through a generated hook under the Wardian agent directory, which lets the UI surface `Action Needed` with request details.
 
----
+### Debug First
 
-## Codex
+If Claude appears blocked, inspect the permission hook output, `CLAUDE.md` discovery, and resume flags before treating the issue as a generic PTY failure.
 
-Codex uses a "Habitat" model for maximum isolation.
+## Codex (`@openai/codex`)
 
-### Implementation Nuance: Bootstrap Migration
+Codex executes against the real target workspace while Wardian keeps mutable provider state in an agent habitat.
 
-Codex session IDs are discovered after launch. Wardian starts Codex in a temporary `.wardian/provider-bootstrap` directory to discover its ID, then migrates the entire session state into a permanent final habitat.
+### Instruction and Skill Discovery
 
-### Trust Binding
+Codex reads `AGENTS.md`. Wardian passes the real project root with `--cd <absolute-workspace-path>` and projects assigned skills into the agent-specific `CODEX_HOME/skills` tree. This keeps skill scope per agent while preserving Codex trust and command execution against the actual repository path.
 
-Wardian ensures that even though state is isolated, the "trust" and execution root remain bound to the real project workspace via the `--cd` flag, preventing agents from getting lost in a virtualized path.
+### Session and Status Handling
 
----
+Codex session IDs are discovered after launch. Wardian starts fresh sessions with a temporary bootstrap `CODEX_HOME`, parses the provider session ID, creates the final per-agent habitat, and migrates session artifacts there. Status tracking uses Codex thread and turn events, approval requests, command events, and completion markers.
 
-## OpenCode
+### Debug First
+
+If Codex behaves unexpectedly, separate the checks: did it discover the skill, did it trust the real workspace, and did the sandbox allow the command to run?
+
+## OpenCode (`opencode`)
 
 OpenCode runs directly in the real target workspace and consumes `AGENTS.md` natively.
 
-### Implementation Nuance: Runtime Config Injection
+### Instruction and Skill Discovery
 
-Instead of projecting a fake workspace, Wardian injects extra instruction files and skill roots through `OPENCODE_CONFIG_CONTENT`. This lets OpenCode see:
+Wardian injects provider runtime configuration through a generated `OPENCODE_CONFIG` file and runtime config directory. The config adds extra Wardian instruction files to `instructions`, and `OPENCODE_CONFIG_DIR` exposes projected common, class, and agent skills without repository-local copies.
 
-- `AGENTS.md` files from Wardian common/class/agent roots
-- `.agents/skills` directories from those same roots
+### Session and Status Handling
 
-without forcing those files into the repository itself.
+Wardian discovers OpenCode session IDs from JSON events emitted by `opencode run --format json`, then uses `--session <session_id>` for resumes and headless follow-up runs. Interactive terminal telemetry is supported, with provider-specific output cleanup for TUI rendering behavior.
 
-### Session Model
+### Debug First
 
-OpenCode session IDs are discovered from JSON events emitted by `opencode run --format json`. Wardian captures the first `sessionID` from the provider output, then reuses it with `--session` for later resumes and headless follow-up runs.
+If OpenCode misses instructions or skills, inspect the generated `OPENCODE_CONFIG` file and `OPENCODE_CONFIG_DIR` skill projection. On Windows, also verify whether Wardian resolved a native executable or correctly wrapped a command shim through the host shell.
 
-## Planned: OpenClaw
+## Related References
 
-Wardian is expanding its orchestration capabilities by integrating two emerging industry standards:
-
-- **OpenClaw**: A self-hosted orchestration gateway. Wardian will use OpenClaw nodes for persistent, 24/7 background agents that handle long-running monitoring tasks, scheduled workflows, and cross-platform notification routing.
+- [Developer Provider Runtime Notes](./developer/provider-runtimes.md)
+- [Settings](./guide/settings.md)
+- [Agent Roles and Responsibilities](./agents/roles.md)
