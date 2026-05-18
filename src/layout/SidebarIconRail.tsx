@@ -24,7 +24,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
   };
 
   return (
-    <aside data-testid="sidebar-icon-rail" className="w-[64px] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-4 z-30">
+    <aside data-testid="sidebar-icon-rail" className="w-[var(--sidebar-primary-width)] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-3 z-30">
       <button
         data-testid="sidebar-tab-explorer"
         onClick={() => handleTabClick("explorer")}
@@ -104,7 +104,7 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
         <svg className="w-6 h-6 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
       </button>
 
-      <div className="mt-auto flex flex-col gap-4">
+      <div className="mt-auto flex flex-col gap-3">
         <button
           data-testid="sidebar-tab-terminal"
           onClick={onToggleUserTerminal}

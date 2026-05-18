@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { GridLayout } from '../types';
 
-const DEFAULT_LEFT_SIDEBAR_WIDTH = 260;
+const DEFAULT_LEFT_SIDEBAR_WIDTH = 240;
 const DEFAULT_RIGHT_SIDEBAR_WIDTH = 240;
 const MIN_SIDEBAR_WIDTH = 200;
 const MAX_SIDEBAR_FRACTION = 0.4;

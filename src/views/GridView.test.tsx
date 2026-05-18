@@ -166,6 +166,29 @@ describe('GridView maximize behavior', () => {
   });
 });
 
+describe('GridView density', () => {
+  it('renders compact single-row card headers with visible agent class', () => {
+    renderGrid(null);
+
+    const header = screen.getByTestId('agent-card-header-agent-1');
+    const agentName = screen.getByRole('heading', { name: 'Alpha (Coder)' });
+    expect(header).toHaveAttribute('data-density', 'compact');
+    expect(agentName).toHaveClass('text-[15px]');
+    expect(agentName).toHaveClass('leading-5');
+    expect(screen.getByText('(Coder)')).toBeInTheDocument();
+  });
+
+  it('keeps dense UI proportions roomy enough for VSCode-style scanning', async () => {
+    const { readFileSync } = await import("node:fs");
+    const { cwd } = await import("node:process");
+    const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
+
+    expect(appStyles).toContain("--sidebar-primary-width: 48px;");
+    expect(appStyles).toContain("--density-grid-header-min-height: 44px;");
+    expect(appStyles).toContain("--density-grid-header-padding-y: 8px;");
+  });
+});
+
 describe('GridView stacked mode', () => {
   beforeEach(() => {
     localStorage.clear();

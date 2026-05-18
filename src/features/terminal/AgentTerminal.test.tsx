@@ -332,9 +332,7 @@ describe("AgentTerminal scrollback", () => {
   });
 
   it("keeps the OpenCode xterm viewport scrollable while hiding terminal scroll chrome", async () => {
-    // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
     const { readFileSync } = await import("node:fs");
-    // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
     const { cwd } = await import("node:process");
     const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
     const selector = ".wardian-terminal--tui-owned-scroll .xterm-viewport";

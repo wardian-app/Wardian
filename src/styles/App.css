@@ -37,12 +37,21 @@
   --color-wardian-overlay: rgba(0, 0, 0, 0.4);
 
   /* Sidebar Widths */
-  --sidebar-primary-width: 64px;
-  --sidebar-content-width: 260px;
+  --sidebar-primary-width: 48px;
+  --sidebar-content-width: 240px;
   --sidebar-secondary-width: 240px;
 
   /* TopBar */
-  --topbar-height: 40px;
+  --topbar-height: 36px;
+
+  /* Density */
+  --density-panel-padding-x: 12px;
+  --density-panel-padding-y: 12px;
+  --density-grid-gap: 6px;
+  --density-card-radius: 8px;
+  --density-grid-header-min-height: 44px;
+  --density-grid-header-padding-x: 12px;
+  --density-grid-header-padding-y: 8px;
 
   /* Global Shadows */
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 85%);
@@ -73,7 +82,6 @@
   width: var(--titlebar-left-width);
   padding: 0 12px;
   justify-content: flex-start;
-  border-right: 1px solid var(--color-wardian-border);
   flex-shrink: 0;
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -105,16 +113,10 @@
   width: var(--titlebar-right-width, 240px);
   min-width: 180px; /* Persistent area for window controls */
   padding: 0;
-  border-left: 1px solid transparent;
   flex-shrink: 0;
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   justify-content: flex-end;
-}
-
-/* Show border only when not collapsed */
-.titlebar-right:not([style*="--titlebar-right-width: 0px"]) {
-  border-left: 1px solid var(--color-wardian-border);
 }
 
 .titlebar-right-content {
