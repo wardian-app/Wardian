@@ -39,6 +39,7 @@ export default defineConfig({
           text: "First-Time Setup",
           items: [
             { text: "Getting Started", link: "/guide/getting-started" },
+            { text: "Provider Readiness", link: "/guide/provider-readiness" },
             { text: "UI Overview", link: "/guide/ui-overview" },
           ],
         },

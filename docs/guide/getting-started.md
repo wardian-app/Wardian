@@ -9,6 +9,8 @@ Wardian is an integrated habitat for managing multiple autonomous agents. This g
 
 Authenticate each provider in a normal terminal before spawning it through Wardian.
 
+Before the first spawn, verify the provider command, authentication, and shell `PATH` using [Provider Readiness](./provider-readiness.md).
+
 ## 2. Understanding Blueprints
 Before spawning an agent, you must understand **Classes**. A Class is a "Blueprint" that defines an agent's base instructions and capabilities.
 1. Click **LIBRARY** in the top bar view-switcher.
@@ -66,5 +68,6 @@ Click **GRID** in the top bar to see all active agents in a high-density termina
 - Triage completed work in the [Queue](./queue.md).
 - Manage per-agent Git operations in [Source Control](./source-control.md).
 - Configure runtime behavior and shell defaults in [Settings](./settings.md).
+- Verify provider commands and authentication in [Provider Readiness](./provider-readiness.md).
 - Compare provider runtime behavior in [Provider Runtimes](../providers.md).
 - Automate complex tasks with [Visual Workflows](./workflows.md).
