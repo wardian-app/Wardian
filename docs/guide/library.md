@@ -48,9 +48,16 @@ To run a prompt from the Library:
 2. Find the prompt in the **Library**.
 3. Click the **Run** icon (Play button). The prompt text will be flattened into a single line and sent to the selected terminals automatically.
 
-## 🚀 Advanced: Skill Auto-Patching
+## 🚀 Advanced: Provider Skill Discovery
 
-If you use custom modular skills, ensure the **"Auto-patch Gemini CLI"** setting is enabled in the **Settings** panel. This ensures the underlying CLI is patched at launch to recognize the physical skill folders in your agent directories.
+Wardian adapts the same assigned skills to each provider's native discovery model:
+
+- Gemini uses Wardian's Gemini patch so `--include-directories` can expose common, class, and agent skill roots.
+- Claude uses additional instruction roots and `.claude/skills` links where provider-native discovery requires them.
+- Codex receives scoped skills in the agent-specific `CODEX_HOME/skills` habitat.
+- OpenCode receives scoped skills through Wardian's generated OpenCode config directory.
+
+If Gemini skills are missing, ensure **Auto-patch Gemini CLI** is enabled in the **Settings** panel or run the patch manually. For other providers, start with the provider comparison in [Provider Runtimes](../providers.md).
 
 ## Related Research
 

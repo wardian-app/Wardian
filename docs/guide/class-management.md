@@ -19,7 +19,7 @@ Each class is governed by a markdown file. This is where you define:
 
 ### 2. Pre-Assigned Skills
 You can pre-load a class with specific modular skills. 
-- When you assign a skill to a class, every agent spawned from that blueprint will automatically have a physical link to those skills in its local directory.
+- When you assign a skill to a class, every agent spawned from that blueprint receives the skill through its provider's discovery path. Wardian may use directory links, provider home projection, generated config, or provider-native include roots depending on the selected CLI.
 - This ensures your `Coder` class always starts with `github-cli` and `typescript-tools` ready to go.
 
 ### 3. Registry Persistence
