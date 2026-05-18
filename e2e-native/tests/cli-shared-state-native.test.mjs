@@ -23,6 +23,7 @@ const CONTROL_SESSION_NAME = `E2E-CLI-CONTROL-${RUN_ID}`;
 const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
 const ASK_SESSION_NAME = `E2E-CLI-ASK-${RUN_ID}`;
 const ASK_ECHO_SESSION_NAME = `E2E-CLI-ASK-ECHO-${RUN_ID}`;
+const WATCH_READABLE_SESSION_NAME = `E2E-CLI-WATCH-READABLE-${RUN_ID}`;
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -373,7 +374,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
       "--until",
       "output:Action approved",
       "--include",
-      "status,output,delivery",
+      "status,events,output,delivery",
       "--timeout",
       "30s",
     ]);
@@ -609,6 +610,89 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
     assert.ok(Array.isArray(askJson.delivery));
     assert.equal(askJson.delivery[0].delivery_state, "submitted");
   });
+});
+
+test("native CLI watch returns readable output by default and raw output on opt-in", { timeout: 180000 }, async (t) => {
+  const harness = await createNativeHarness();
+  assert.ok(harness.appPath);
+
+  try {
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
+    }
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  prepareIsolatedHome(harness);
+
+  const cliPath = buildCli(harness);
+  const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+  let session;
+  try {
+    session = await startNativeSession(harness);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  t.after(async () => {
+    await session.close();
+  });
+
+  await waitForAppShell(session.driver, 20000);
+  await watchStep(harness, "Wardian app shell is ready for readable watch smoke");
+
+  const agent = await createMockAgent(session.driver, workspacePath, {
+    sessionId: `e2e-cli-watch-readable-${RUN_ID}`,
+    sessionName: WATCH_READABLE_SESSION_NAME,
+    isOff: true,
+  });
+
+  const seeded = await session.driver.executeAsyncScript((sessionId, done) => {
+    window.__TAURI_INTERNALS__.invoke("debug_push_agent_watch_output", {
+      sessionId,
+      output: "\u001b[31mANSI_TERMINAL_LINE\u001b[0m\r\n",
+      transcriptText: "ANSI readable answer.",
+      provider: "mock",
+    }).then(
+      () => done({ ok: true }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, agent.session_id);
+  assert.equal(seeded.ok, true, `debug_push_agent_watch_output failed: ${seeded.error}`);
+
+  const readableResult = runCliOk(cliPath, harness, [
+    "agent",
+    "watch",
+    WATCH_READABLE_SESSION_NAME,
+    "--until",
+    "output:ANSI readable answer",
+    "--include",
+    "output,transcript",
+    "--timeout",
+    "30s",
+  ]);
+  const readable = JSON.parse(readableResult.stdout);
+  assert.doesNotMatch(readable.output.text, /\x1b/);
+  assert.match(readable.output.text, /ANSI_TERMINAL_LINE/);
+  assert.match(readable.transcript.latest_text, /ANSI readable answer/);
+  assert.equal(readable.raw_output, undefined);
+
+  const rawResult = runCliOk(cliPath, harness, [
+    "agent",
+    "watch",
+    WATCH_READABLE_SESSION_NAME,
+    "--include",
+    "raw_output",
+    "--raw",
+    "--timeout",
+    "30s",
+  ]);
+  const raw = JSON.parse(rawResult.stdout);
+  assert.match(raw.raw_output.text, /\x1b\[31mANSI_TERMINAL_LINE\x1b\[0m/);
 });
 
 test.skip("real Codex CLI send submits without leaving residual prompt text", () => {

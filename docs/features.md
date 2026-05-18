@@ -59,7 +59,7 @@ Related docs:
 Related docs:
 
 - [Source Control](./guide/source-control.md)
-- [Spec 018: Source Control Panel](./specs/018-source-control-panel.md)
+- [2026-04-17 Source Control Panel](./specs/2026-04-17-source-control-panel.md)
 
 ## Workflow Builder and Runtime
 
@@ -92,13 +92,13 @@ Related docs:
 
 - Default shell selection (`auto`, discovered shell, or custom executable)
 - Per-installation regular-agent session persistence policy (`resume` vs `fresh`)
-- Theme sync support and Gemini patch actions from settings
+- Provider-specific runtime utilities, including Gemini skill patching, Codex runtime policy, and OpenCode theme sync
 
 Related docs:
 
 - [Settings](./guide/settings.md)
-- [Spec 010: Runtime Shell Selection](./specs/010-runtime-shell-selection.md)
-- [Spec 019: Session Persistence Policy](./specs/019-session-persistence-policy.md)
+- [2026-03-30 Runtime Shell Selection](./specs/2026-03-30-runtime-shell-selection.md)
+- [2026-04-17 Session Persistence Policy](./specs/2026-04-17-session-persistence-policy.md)
 
 ## Provider-Aware Orchestration
 

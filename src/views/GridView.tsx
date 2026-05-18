@@ -7,6 +7,8 @@ import { useLayoutStore } from "../store/useLayoutStore";
 import { useGridResize } from "../features/grid/useGridResize";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
+const MIN_TERMINAL_CARD_WIDTH = 520;
+
 interface GridViewProps {
   filteredAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
@@ -126,17 +128,24 @@ export const GridView: React.FC<GridViewProps> = ({
   const isMobile = windowWidth < 1000;
   // While a stack-exit drag is in flight, render the multi-column preview even though gridStacked is still true.
   const renderStacked = (gridStacked || isMobile) && resizeType !== 'stack-exit';
+  const visibleColumnTracks = visibleAgents.length <= 1
+    ? [1]
+    : layout.column_tracks.slice(0, visibleAgents.length);
+  const gridMinWidth = visibleAgents.length > 0
+    ? `${(visibleColumnTracks.length * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, visibleColumnTracks.length - 1) * 8)}px`
+    : undefined;
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
     gridTemplateColumns: (isMaximized || renderStacked)
       ? '1fr'
-      : layout.column_tracks.map(t => `${t}fr`).join(' '),
+      : visibleColumnTracks.map(t => `${t}fr`).join(' '),
     gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
-    gap: (isMaximized || renderStacked) ? '0' : '8px',
+    gap: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
     background: 'transparent',
-    padding: (isMaximized || renderStacked) ? '0' : '8px',
+    padding: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
     height: isMaximized ? '100%' : 'auto',
+    minWidth: gridMinWidth,
   };
 
   const bgMenuItems: ContextMenuItem[] = [
@@ -181,17 +190,19 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'h-full w-full rounded-none border-none transition-none z-10' : 'transition-all rounded-xl border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative ${isAgentMaximized ? 'h-full w-full rounded-none border-none transition-none z-10' : 'transition-all rounded-[var(--density-card-radius)] border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
           >
-            <div 
+            <div
+              data-testid={`agent-card-header-${agentId}`}
+              data-density="compact"
               onMouseEnter={() => onMouseEnterCard(agentId)}
               onMouseDown={(e) => { if (e.button === 0) onMouseDown(agentId); }}
               onClick={(e) => { e.stopPropagation(); if (!isAgentMaximized) onCardClick(e, agentId); }}
               onContextMenu={(e) => handleContextMenu(e, agentId)}
-              className={`p-4 border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none flex ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
+              className={`px-[var(--density-grid-header-padding-x)] py-[var(--density-grid-header-padding-y)] min-h-[var(--density-grid-header-min-height)] border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none flex ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
             >
-              <div className="flex items-center gap-3">
-                <div className={`w-3 h-3 rounded-full transition-colors ${statusColorClass}`}></div>
+              <div className="flex items-center gap-2 min-w-0">
+                <div className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${statusColorClass}`}></div>
                 {editingAgentId === agentId ? (
                   <input
                     className="inline-edit-input"
@@ -204,28 +215,28 @@ export const GridView: React.FC<GridViewProps> = ({
                   />
                 ) : (
                   <h3 
-                    className="font-bold text-lg text-primary cursor-pointer hover:text-[var(--color-wardian-accent)] transition-colors"
+                    className="font-semibold text-[15px] leading-5 text-primary cursor-pointer hover:text-[var(--color-wardian-accent)] transition-colors truncate"
                     onDoubleClick={(e) => { e.stopPropagation(); setEditingAgentId(agentId); setTempName(agent.session_name); }}
                   >
-                    {agent.session_name} <span className="text-sm text-muted-neutral font-normal">({agent.agent_class})</span>
+                    {agent.session_name} <span className="text-xs leading-4 text-muted-neutral font-normal">({agent.agent_class})</span>
                   </h3>
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 flex-shrink-0">
                  {isAgentMaximized ? (
                    <button 
                      onClick={(e) => { e.stopPropagation(); onMaximize(null); }}
-                     className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary px-3 py-1 rounded text-[10px] font-bold transition-all flex items-center gap-1"
+                     className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary h-6 px-2 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                    >
                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                      Minimize
                    </button>
                  ) : (
-                   <button onClick={(e) => { e.stopPropagation(); onMaximize(agentId); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 p-1">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
+                   <button onClick={(e) => { e.stopPropagation(); onMaximize(agentId); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 h-6 w-6 p-1 flex items-center justify-center">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                    </button>
                  )}
-                  <button onClick={(e) => { e.stopPropagation(); onDelete(agentId); }} className="text-bright-neutral hover:text-wardian-error transition-colors opacity-0 group-hover:opacity-100 p-1"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                  <button onClick={(e) => { e.stopPropagation(); onDelete(agentId); }} className="text-bright-neutral hover:text-wardian-error transition-colors opacity-0 group-hover:opacity-100 h-6 w-6 p-1 flex items-center justify-center"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                </div>
             </div>
 
@@ -280,9 +291,9 @@ export const GridView: React.FC<GridViewProps> = ({
       {!isMaximized && !isMobile && !gridStacked && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
-          {layout.column_tracks.slice(0, -1).map((_weight, i) => {
-            const leftWeight = layout.column_tracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
-            const totalSpacing = 16 + (layout.column_tracks.length - 1) * 8;
+          {visibleColumnTracks.slice(0, -1).map((_weight, i) => {
+            const leftWeight = visibleColumnTracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
+            const totalSpacing = 16 + (visibleColumnTracks.length - 1) * 8;
             return (
               <div
                 key={`gutter-h-${i}`}
@@ -302,7 +313,7 @@ export const GridView: React.FC<GridViewProps> = ({
           })}
 
           {/* Horizontal Gutters (Row Resizing) */}
-          {Array.from({ length: Math.ceil(visibleAgents.length / layout.column_tracks.length) - 1 }).map((_, i) => (
+          {Array.from({ length: Math.ceil(visibleAgents.length / visibleColumnTracks.length) - 1 }).map((_, i) => (
             <div 
               key={`gutter-v-${i}`}
               className="absolute left-0 right-0 z-30 group/gutter flex items-center"
@@ -311,7 +322,7 @@ export const GridView: React.FC<GridViewProps> = ({
                 height: '12px',
                 cursor: 'row-resize'
               }}
-              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * layout.column_tracks.length); }}
+              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * visibleColumnTracks.length); }}
             >
               {/* Visual Line */}
               <div className="h-[2px] w-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />

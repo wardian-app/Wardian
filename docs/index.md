@@ -38,6 +38,7 @@ This folder contains user guides, workflow references, developer architecture no
 ## Developer Guides
 
 - [Developer Index](./developer/index.md)
+- [Public Docs Site](./developer/docs-site.md)
 - [Architecture](./developer/architecture.md)
 - [State Management](./developer/state-management.md)
 - [PTY Lifecycle](./developer/pty-lifecycle.md)
@@ -66,5 +67,5 @@ This folder contains user guides, workflow references, developer architecture no
 ## Specs and Design
 
 - [Specs](./specs/)
-- [Design Context](./design.md)
+- [Design Context](https://github.com/tangemicioglu/Wardian/blob/main/DESIGN.md)
 - [OS Support](./os-support.md)

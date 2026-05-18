@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::Notify;
-use wardian_core::control::{WatchEvent, WatchOutput};
+use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
+
+use super::terminal_text::strip_terminal_controls;
 
 #[derive(Debug)]
 pub struct AgentWatchState {
@@ -55,6 +57,10 @@ impl AgentWatchState {
         self.push_record(WatchRecordKind::Delivery { payload })
     }
 
+    pub fn push_transcript(&mut self, message: WatchTranscriptMessage) -> WatchCursor {
+        self.push_record(WatchRecordKind::Transcript { message })
+    }
+
     pub fn snapshot_since(
         &self,
         since: Option<&str>,
@@ -78,6 +84,7 @@ impl AgentWatchState {
             .filter(|record| record.sequence > since_sequence);
         let mut events = Vec::new();
         let mut output = Vec::new();
+        let mut transcript_messages = Vec::new();
         for record in records {
             match &record.kind {
                 WatchRecordKind::Event { kind, payload } => events.push(WatchEvent {
@@ -91,15 +98,53 @@ impl AgentWatchState {
                     payload: payload.clone(),
                 }),
                 WatchRecordKind::Output { bytes } => output.extend(bytes),
+                WatchRecordKind::Transcript { message } => {
+                    transcript_messages.push(message.clone());
+                }
             }
         }
 
-        let output = self.snapshot_output(output, tail_bytes);
+        let raw_output = self.snapshot_output(output.clone(), tail_bytes, false);
+        let output = self.snapshot_output(output, tail_bytes, true);
+        let transcript = self.snapshot_transcript(transcript_messages, tail_bytes);
         Ok(WatchSnapshot {
             cursor: self.latest_cursor(),
             events,
             output,
+            raw_output,
+            transcript,
         })
+    }
+
+    pub fn raw_snapshot_since(
+        &self,
+        since: Option<&str>,
+        tail_bytes: Option<usize>,
+    ) -> Result<WatchOutput, WatchStateError> {
+        let since_sequence = self.parse_since_sequence(since)?;
+        let oldest = self.oldest_available_sequence();
+        if since_sequence.saturating_add(1) < oldest {
+            return Err(WatchStateError::new(
+                "cursor_expired",
+                serde_json::json!({
+                    "oldest_available_cursor": self.oldest_available_cursor(),
+                    "requested_cursor": since,
+                }),
+            ));
+        }
+
+        let mut output = Vec::new();
+        for record in self
+            .records
+            .iter()
+            .filter(|record| record.sequence > since_sequence)
+        {
+            if let WatchRecordKind::Output { bytes } = &record.kind {
+                output.extend(bytes);
+            }
+        }
+
+        Ok(self.snapshot_output(output, tail_bytes, false))
     }
 
     fn push_record(&mut self, kind: WatchRecordKind) -> WatchCursor {
@@ -145,14 +190,69 @@ impl AgentWatchState {
             .sum()
     }
 
-    fn snapshot_output(&self, bytes: Vec<u8>, tail_bytes: Option<usize>) -> WatchOutput {
+    fn snapshot_output(
+        &self,
+        bytes: Vec<u8>,
+        tail_bytes: Option<usize>,
+        sanitize: bool,
+    ) -> WatchOutput {
         let limit = tail_bytes.unwrap_or(bytes.len()).min(bytes.len());
         let start = utf8_tail_start(&bytes, limit);
         let omitted_bytes = start;
         let text = String::from_utf8_lossy(&bytes[start..]).to_string();
+        let text = if sanitize {
+            strip_terminal_controls(&text)
+        } else {
+            text
+        };
         WatchOutput {
             cursor: self.latest_cursor(),
             text,
+            truncated: omitted_bytes > 0,
+            omitted_bytes,
+        }
+    }
+
+    fn snapshot_transcript(
+        &self,
+        messages: Vec<WatchTranscriptMessage>,
+        tail_bytes: Option<usize>,
+    ) -> WatchTranscript {
+        let limit = tail_bytes.unwrap_or(self.max_output_bytes);
+        let mut remaining = limit;
+        let mut omitted_bytes = 0usize;
+        let mut retained = Vec::new();
+
+        for mut message in messages.into_iter().rev() {
+            let bytes = message.text.as_bytes();
+            if bytes.len() <= remaining {
+                remaining = remaining.saturating_sub(bytes.len());
+                retained.push(message);
+                continue;
+            }
+
+            if remaining > 0 {
+                let start = utf8_tail_start(bytes, remaining);
+                omitted_bytes = omitted_bytes.saturating_add(start);
+                message.text = String::from_utf8_lossy(&bytes[start..]).to_string();
+                retained.push(message);
+                remaining = 0;
+            } else {
+                omitted_bytes = omitted_bytes.saturating_add(bytes.len());
+            }
+        }
+
+        retained.reverse();
+        let latest_text = retained
+            .iter()
+            .rev()
+            .find(|message| !message.text.trim().is_empty())
+            .map(|message| message.text.clone())
+            .unwrap_or_default();
+        WatchTranscript {
+            cursor: self.latest_cursor(),
+            messages: retained,
+            latest_text,
             truncated: omitted_bytes > 0,
             omitted_bytes,
         }
@@ -208,6 +308,8 @@ pub struct WatchSnapshot {
     pub cursor: String,
     pub events: Vec<WatchEvent>,
     pub output: WatchOutput,
+    pub raw_output: WatchOutput,
+    pub transcript: WatchTranscript,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -245,6 +347,9 @@ enum WatchRecordKind {
     Output {
         bytes: Vec<u8>,
     },
+    Transcript {
+        message: WatchTranscriptMessage,
+    },
     Delivery {
         payload: serde_json::Value,
     },
@@ -277,6 +382,72 @@ mod tests {
 
         assert_eq!(first.output.text, "hello");
         assert_eq!(second.output.text, "hello");
+    }
+
+    #[test]
+    fn watch_state_sanitizes_default_output_and_keeps_raw_snapshot_opt_in() {
+        let mut state = AgentWatchState::new("agent-1".to_string(), 16, 1024);
+        state.push_output("\u{1b}[31mred\u{1b}[0m".as_bytes());
+
+        let snapshot = state.snapshot_since(None, Some(1024)).unwrap();
+        let raw = state.raw_snapshot_since(None, Some(1024)).unwrap();
+
+        assert_eq!(snapshot.output.text, "red");
+        assert_eq!(raw.text, "\u{1b}[31mred\u{1b}[0m");
+    }
+
+    #[test]
+    fn watch_state_returns_transcript_messages_since_cursor() {
+        let mut state = AgentWatchState::new("agent-1".to_string(), 16, 1024);
+        let start = state.latest_cursor();
+        state.push_transcript(wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "final answer".to_string(),
+            provider: "mock".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            source: Some("model".to_string()),
+        });
+
+        let snapshot = state.snapshot_since(Some(&start), Some(1024)).unwrap();
+
+        assert_eq!(snapshot.transcript.messages.len(), 1);
+        assert_eq!(snapshot.transcript.latest_text, "final answer");
+    }
+
+    #[test]
+    fn watch_state_tail_bounds_transcript_text() {
+        let mut state = AgentWatchState::new("agent-1".to_string(), 16, 1024);
+        state.push_transcript(wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "alpha beta gamma".to_string(),
+            provider: "mock".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            source: Some("model".to_string()),
+        });
+
+        let snapshot = state.snapshot_since(None, Some(5)).unwrap();
+
+        assert_eq!(snapshot.transcript.messages.len(), 1);
+        assert_eq!(snapshot.transcript.latest_text, "gamma");
+        assert!(snapshot.transcript.truncated);
+        assert!(snapshot.transcript.omitted_bytes > 0);
+    }
+
+    #[test]
+    fn watch_state_default_transcript_uses_retention_byte_limit() {
+        let mut state = AgentWatchState::new("agent-1".to_string(), 16, 6);
+        state.push_transcript(wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "alpha beta".to_string(),
+            provider: "mock".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            source: Some("model".to_string()),
+        });
+
+        let snapshot = state.snapshot_since(None, None).unwrap();
+
+        assert_eq!(snapshot.transcript.latest_text, "a beta");
+        assert!(snapshot.transcript.truncated);
     }
 
     #[test]
@@ -320,10 +491,18 @@ mod tests {
 
         let status = state.push_event("status", serde_json::json!({"status":"processing"}));
         let output = state.push_output("hello".as_bytes());
+        let transcript = state.push_transcript(wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "hello".to_string(),
+            provider: "mock".to_string(),
+            turn_id: None,
+            source: None,
+        });
         let delivery = state.push_delivery(serde_json::json!({"delivery_state":"submitted"}));
 
         assert!(status.sequence() < output.sequence());
-        assert!(output.sequence() < delivery.sequence());
+        assert!(output.sequence() < transcript.sequence());
+        assert!(transcript.sequence() < delivery.sequence());
     }
 
     #[test]

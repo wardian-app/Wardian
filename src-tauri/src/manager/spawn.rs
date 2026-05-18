@@ -1,4 +1,5 @@
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
+use crate::providers::transcript::extract_transcript_message;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
@@ -116,6 +117,10 @@ fn save_agent_state_after_session_capture(app: &AppHandle) {
     crate::manager::save_state(app, &agents, &order);
 }
 
+fn should_cleanup_stale_session_processes_before_spawn(is_restored: bool) -> bool {
+    !is_restored
+}
+
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
@@ -179,7 +184,9 @@ pub async fn spawn_agent(
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 
     #[cfg(windows)]
-    cleanup_stale_session_processes(&config.session_id, &config.provider);
+    if should_cleanup_stale_session_processes_before_spawn(is_restored) {
+        cleanup_stale_session_processes(&config.session_id, &config.provider);
+    }
 
     let pty_system = NativePtySystem::default();
 
@@ -243,6 +250,7 @@ pub async fn spawn_agent(
     }
     cmd.cwd(&provider_cwd);
     apply_terminal_identity_env(&mut cmd);
+    super::apply_managed_cli_path_to_pty(&mut cmd);
     cmd.env("WARDIAN_SESSION_ID", &config.session_id);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
@@ -570,6 +578,14 @@ pub async fn spawn_agent(
                                 Some(Ok(parsed)) => {
                                     // Use provider to classify the raw JSON into an AgentEvent
                                     let raw_line = parsed.to_string();
+                                    if let Some(message) = extract_transcript_message(
+                                        &provider_name_for_pty,
+                                        &raw_line,
+                                    ) {
+                                        if let Ok(mut watch_state) = watch_state_clone.lock() {
+                                            watch_state.push_transcript(message);
+                                        }
+                                    }
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
                                         if let AgentEvent::Init {
                                             ref session_id,
@@ -672,6 +688,7 @@ pub async fn spawn_agent(
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
         let watcher_config = config_lock.clone();
+        let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let wardian_agent_dir = get_wardian_home()
             .map(|home| home.join("agents").join(&watcher_session))
@@ -758,6 +775,13 @@ pub async fn spawn_agent(
                                     serde_json::from_str::<serde_json::Value>(line.trim())
                                 {
                                     let raw_line = parsed.to_string();
+                                    if let Some(message) =
+                                        extract_transcript_message("codex", &raw_line)
+                                    {
+                                        if let Ok(mut watch_state) = watcher_watch_state.lock() {
+                                            watch_state.push_transcript(message);
+                                        }
+                                    }
                                     if let Some(event) = watcher_provider.parse_output(&raw_line) {
                                         apply_agent_event(
                                             &watcher_app,
@@ -788,6 +812,7 @@ pub async fn spawn_agent(
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
         let watcher_folder = expected_folder.clone();
+        let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let hook_event_log = claude_hook.as_ref().map(|hook| hook.event_log_path.clone());
         let waiting_for_permission = std::sync::Arc::new(std::sync::Mutex::new(false));
@@ -847,6 +872,13 @@ pub async fn spawn_agent(
                                     break;
                                 }
                                 offset += read as u64;
+                                if let Some(message) =
+                                    extract_transcript_message("claude", line.trim())
+                                {
+                                    if let Ok(mut watch_state) = watcher_watch_state.lock() {
+                                        watch_state.push_transcript(message);
+                                    }
+                                }
                                 if let Some(event) = watcher_provider.parse_output(line.trim()) {
                                     let mut waiting = log_waiting_for_permission
                                         .lock()
@@ -1125,5 +1157,11 @@ mod tests {
             config.codex_config().cleared_provider_sessions,
             vec!["provider-session-1".to_string()]
         );
+    }
+
+    #[test]
+    fn restored_spawns_skip_stale_process_scan() {
+        assert!(!should_cleanup_stale_session_processes_before_spawn(true));
+        assert!(should_cleanup_stale_session_processes_before_spawn(false));
     }
 }

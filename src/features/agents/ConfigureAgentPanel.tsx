@@ -146,7 +146,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           </div>
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-[10px] font-bold text-muted-neutral">Session ID</label>
+              <label className="block text-[10px] font-bold text-muted-neutral">Agent ID</label>
               <button 
                 type="button"
                 onClick={async () => {
@@ -166,7 +166,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             <input
               readOnly
               className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded px-3 py-2 text-xs text-muted-neutral font-mono focus:outline-none select-text cursor-text"
-              value={config.resume_session || config.session_id}
+              value={config.session_id}
             />
           </div>
           <div>

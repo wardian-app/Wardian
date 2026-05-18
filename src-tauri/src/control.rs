@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use std::{
     fmt,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -14,6 +15,9 @@ use wardian_core::control::{
     WatchDeliverySnapshot, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
+
+const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
+const STRUCTURED_ASK_REQUESTS_DIR: &str = "requests";
 
 pub fn spawn_control_server(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -278,7 +282,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             target,
             since,
             until,
-            include: _,
+            include,
             tail_bytes,
             follow,
             timeout_ms,
@@ -290,6 +294,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 AgentWatchControlOptions {
                     since,
                     until,
+                    include,
                     tail_bytes,
                     follow,
                     timeout_ms,
@@ -890,7 +895,13 @@ async fn wait_for_terminal_output(
 }
 
 fn codex_output_has_ready_prompt(output: &str) -> bool {
-    output.contains("\n›") || output.contains("\r\n›")
+    strip_ansi_controls(output)
+        .replace('\r', "\n")
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with('›'))
 }
 
 async fn mark_delivered_agents_prompt_started(
@@ -939,12 +950,23 @@ async fn handle_structured_ask(
         .lock()
         .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
         .latest_cursor();
-    let request_id = create_pending_ask_request(&state, &target_uuid).await?;
+    let request_id = new_ask_request_id();
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
+    let structured_delivery =
+        build_structured_ask_delivery_message(&wardian_home, &target_uuid, message, &request_id)?;
+    create_pending_ask_request_with_id(
+        &state,
+        &target_uuid,
+        request_id.clone(),
+        structured_delivery.body_file.as_deref(),
+    )
+    .await?;
     let delivery = deliver_message_to_target(
         Some(app),
         &state,
         target,
-        &message_with_structured_reply_instruction(message, &request_id),
+        &structured_delivery.prompt,
         thread,
         MessageInputMode::Message,
         origin,
@@ -958,7 +980,16 @@ async fn handle_structured_ask(
         .map_err(control_error_from_watch_state)?;
     let agent = watch_agent_snapshot(&state, &target_uuid).await?;
 
-    let delivery_snapshot = delivery_snapshot_from_events(&snapshot.events);
+    let watch = build_agent_watch_response(
+        agent,
+        snapshot,
+        &WatchIncludes::from_values(&[
+            "events".to_string(),
+            "transcript".to_string(),
+            "output".to_string(),
+            "delivery".to_string(),
+        ]),
+    );
     ok_json(&AskResponse {
         schema: wardian_core::control::CONTROL_SCHEMA,
         ok: true,
@@ -966,14 +997,7 @@ async fn handle_structured_ask(
         target: target.to_string(),
         delivery,
         reply,
-        watch: AgentWatchResponse {
-            schema: wardian_core::control::CONTROL_SCHEMA,
-            agent,
-            cursor: snapshot.cursor,
-            events: snapshot.events,
-            output: snapshot.output,
-            delivery: delivery_snapshot,
-        },
+        watch,
     })
 }
 
@@ -981,6 +1005,52 @@ fn message_with_structured_reply_instruction(message: &str, request_id: &str) ->
     format!(
         "{message}\n\nWardian request id: {request_id}\nRespond to this request with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the reply body on stdin."
     )
+}
+
+#[derive(Debug)]
+struct StructuredAskDeliveryMessage {
+    prompt: String,
+    body_file: Option<PathBuf>,
+}
+
+fn build_structured_ask_delivery_message(
+    wardian_home: &Path,
+    target_session_id: &str,
+    message: &str,
+    request_id: &str,
+) -> Result<StructuredAskDeliveryMessage, ControlError> {
+    if message.len() <= STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES {
+        return Ok(StructuredAskDeliveryMessage {
+            prompt: message_with_structured_reply_instruction(message, request_id),
+            body_file: None,
+        });
+    }
+
+    let body_file = wardian_home
+        .join("agents")
+        .join(target_session_id)
+        .join("habitat")
+        .join(STRUCTURED_ASK_REQUESTS_DIR)
+        .join(format!("{request_id}.md"));
+    if let Some(parent) = body_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ControlError::request_failed(format!("failed to create ask request directory: {error}"))
+        })?;
+    }
+    std::fs::write(&body_file, message).map_err(|error| {
+        ControlError::request_failed(format!("failed to write ask request body: {error}"))
+    })?;
+
+    Ok(StructuredAskDeliveryMessage {
+        prompt: message_with_structured_reply_instruction(
+            &format!(
+                "Wardian structured request {request_id} is too large to paste safely.\nRead the full request body from:\n{}",
+                body_file.display()
+            ),
+            request_id,
+        ),
+        body_file: Some(body_file),
+    })
 }
 
 fn new_ask_request_id() -> String {
@@ -993,17 +1063,28 @@ fn new_ask_request_id() -> String {
     format!("ask_{:016x}", nanos ^ counter)
 }
 
+#[cfg(test)]
 async fn create_pending_ask_request(
     state: &AppState,
     target_session_id: &str,
 ) -> Result<String, ControlError> {
+    let request_id = new_ask_request_id();
+    create_pending_ask_request_with_id(state, target_session_id, request_id.clone(), None).await?;
+    Ok(request_id)
+}
+
+async fn create_pending_ask_request_with_id(
+    state: &AppState,
+    target_session_id: &str,
+    request_id: String,
+    body_file: Option<&Path>,
+) -> Result<(), ControlError> {
     if !state.agents.lock().await.contains_key(target_session_id) {
         return Err(ControlError::not_found(format!(
             "agent not found: {target_session_id}"
         )));
     }
 
-    let request_id = new_ask_request_id();
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     state.ask_requests.lock().await.insert(
         request_id.clone(),
@@ -1014,19 +1095,22 @@ async fn create_pending_ask_request(
             reply: None,
         },
     );
-    push_watch_event_for_agent(
-        state,
-        target_session_id,
-        "request",
-        serde_json::json!({
-            "request_id": request_id,
-            "target_session_id": target_session_id,
-            "status": "pending",
-            "created_at": created_at,
-        }),
-    )
-    .await?;
-    Ok(request_id)
+    let mut payload = serde_json::json!({
+        "request_id": request_id,
+        "target_session_id": target_session_id,
+        "status": "pending",
+        "created_at": created_at,
+    });
+    if let Some(body_file) = body_file {
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert(
+                "body_file".to_string(),
+                serde_json::Value::String(body_file.display().to_string()),
+            );
+        }
+    }
+    push_watch_event_for_agent(state, target_session_id, "request", payload).await?;
+    Ok(())
 }
 
 async fn submit_structured_reply(
@@ -1173,25 +1257,91 @@ async fn handle_agent_watch(
             .map_err(control_error_from_watch_state)?
     };
     let agent = watch_agent_snapshot(&state, &uuid).await?;
-    let delivery = delivery_snapshot_from_events(&snapshot.events);
+    let includes = WatchIncludes::from_values(&options.include);
 
-    ok_json(&AgentWatchResponse {
-        schema: wardian_core::control::CONTROL_SCHEMA,
-        agent,
-        cursor: snapshot.cursor,
-        events: snapshot.events,
-        output: snapshot.output,
-        delivery,
-    })
+    ok_json(&build_agent_watch_response(agent, snapshot, &includes))
 }
 
 struct AgentWatchControlOptions {
     since: Option<String>,
     until: Option<String>,
+    include: Vec<String>,
     tail_bytes: Option<usize>,
     follow: bool,
     timeout_ms: Option<u64>,
     output_echo_guard: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WatchIncludes {
+    events: bool,
+    output: bool,
+    transcript: bool,
+    raw_output: bool,
+    delivery: bool,
+}
+
+impl WatchIncludes {
+    fn from_values(values: &[String]) -> Self {
+        let values = if values.is_empty() {
+            vec![
+                "status".to_string(),
+                "transcript".to_string(),
+                "output".to_string(),
+                "delivery".to_string(),
+            ]
+        } else {
+            values.to_vec()
+        };
+
+        Self {
+            events: values.iter().any(|value| value == "events"),
+            output: values.iter().any(|value| value == "output"),
+            transcript: values.iter().any(|value| value == "transcript"),
+            raw_output: values.iter().any(|value| value == "raw_output"),
+            delivery: values.iter().any(|value| value == "delivery"),
+        }
+    }
+}
+
+fn build_agent_watch_response(
+    agent: WatchAgentSnapshot,
+    snapshot: crate::state::agent_watch::WatchSnapshot,
+    includes: &WatchIncludes,
+) -> AgentWatchResponse {
+    let cursor = snapshot.cursor.clone();
+    let events = if includes.events {
+        snapshot.events.clone()
+    } else {
+        Vec::new()
+    };
+    let delivery = if includes.delivery {
+        delivery_snapshot_from_events(&snapshot.events)
+    } else {
+        WatchDeliverySnapshot {
+            delivery: Vec::new(),
+        }
+    };
+    let empty_output = || wardian_core::control::WatchOutput {
+        cursor: cursor.clone(),
+        text: String::new(),
+        truncated: false,
+        omitted_bytes: 0,
+    };
+    AgentWatchResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        agent,
+        cursor: cursor.clone(),
+        events,
+        output: if includes.output {
+            snapshot.output
+        } else {
+            empty_output()
+        },
+        transcript: includes.transcript.then_some(snapshot.transcript),
+        raw_output: includes.raw_output.then_some(snapshot.raw_output),
+        delivery,
+    }
 }
 
 fn validate_watch_target(target: &str) -> Result<(), ControlError> {
@@ -1301,14 +1451,14 @@ fn watch_condition_matches(
                     .and_then(|value| value.as_str())
                     .is_some_and(|value| normalize_status(value) == *status)
         }),
-        WatchCondition::OutputContains(token) => {
-            snapshot.output.text.contains(token)
-                && !output_match_is_prompt_echo_only(
-                    token,
-                    &snapshot.output.text,
-                    output_echo_guard,
-                )
-        }
+        WatchCondition::OutputContains(token) => [
+            snapshot.transcript.latest_text.as_str(),
+            snapshot.output.text.as_str(),
+            snapshot.raw_output.text.as_str(),
+        ]
+        .into_iter()
+        .filter(|text| text.contains(token))
+        .any(|text| !output_match_is_prompt_echo_only(token, text, output_echo_guard)),
         WatchCondition::EventKind(kind) => snapshot.events.iter().any(|event| &event.kind == kind),
         WatchCondition::DeliveryState(state) => snapshot.events.iter().any(|event| {
             event.kind == "delivery"
@@ -1941,6 +2091,13 @@ mod tests {
         assert!(!codex_output_has_ready_prompt("Booting MCP server"));
     }
 
+    #[test]
+    fn codex_ready_prompt_ignores_stale_prompt_marker_when_latest_screen_is_busy() {
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\nProcessing request\r\nWorking...\r\n"
+        ));
+    }
+
     #[tokio::test]
     async fn opencode_control_send_waits_for_open_code_title() {
         let state = AppState::new();
@@ -2014,7 +2171,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\x1b[13u".to_vec());
     }
 
     #[test]
@@ -2535,6 +2692,42 @@ mod tests {
         assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
+    #[test]
+    fn long_structured_ask_materializes_body_file_and_sends_short_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let request_id = "ask_testrequest01";
+        let message = "investigate this line\n".repeat(STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES);
+
+        let delivery =
+            build_structured_ask_delivery_message(temp.path(), "agent-1", &message, request_id)
+                .unwrap();
+
+        let body_file = delivery
+            .body_file
+            .expect("long ask body should be materialized");
+        assert_eq!(
+            body_file,
+            temp.path()
+                .join("agents")
+                .join("agent-1")
+                .join("habitat")
+                .join("requests")
+                .join(format!("{request_id}.md"))
+        );
+        assert_eq!(std::fs::read_to_string(&body_file).unwrap(), message);
+        assert!(delivery.prompt.contains(request_id));
+        assert!(delivery.prompt.contains("Read the full request body from:"));
+        assert!(delivery
+            .prompt
+            .contains(&format!("wardian reply {request_id} --status done --stdin")));
+        assert!(
+            !delivery
+                .prompt
+                .contains("investigate this line\ninvestigate this line"),
+            "large body should not be pasted into the terminal prompt"
+        );
+    }
+
     #[tokio::test]
     async fn ask_request_lifecycle_accepts_matching_reply_and_emits_watch_event() {
         let state = AppState::new();
@@ -2575,6 +2768,37 @@ mod tests {
             event.kind == "reply"
                 && event.payload["request_id"] == request_id
                 && event.payload["status"] == "done"
+        }));
+    }
+
+    #[tokio::test]
+    async fn ask_request_event_records_materialized_body_file() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let body_file = PathBuf::from("agents/agent-1/habitat/requests/ask_test.md");
+
+        create_pending_ask_request_with_id(
+            &state,
+            "agent-1",
+            "ask_testrequest02".to_string(),
+            Some(&body_file),
+        )
+        .await
+        .unwrap();
+
+        let agents = state.agents.lock().await;
+        let snapshot = agents
+            .get("agent-1")
+            .unwrap()
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, Some(4096))
+            .unwrap();
+        assert!(snapshot.events.iter().any(|event| {
+            event.kind == "request"
+                && event.payload["request_id"] == "ask_testrequest02"
+                && event.payload["body_file"] == body_file.display().to_string()
         }));
     }
 
@@ -2688,6 +2912,117 @@ mod tests {
         assert_eq!(error.code(), "not_supported");
     }
 
+    fn snapshot_with_output(cursor: &str, text: &str) -> crate::state::agent_watch::WatchSnapshot {
+        crate::state::agent_watch::WatchSnapshot {
+            cursor: cursor.to_string(),
+            events: Vec::new(),
+            output: wardian_core::control::WatchOutput {
+                cursor: cursor.to_string(),
+                text: text.to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+            raw_output: wardian_core::control::WatchOutput {
+                cursor: cursor.to_string(),
+                text: text.to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+            transcript: wardian_core::control::WatchTranscript {
+                cursor: cursor.to_string(),
+                messages: Vec::new(),
+                latest_text: String::new(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+        }
+    }
+
+    fn test_watch_agent() -> WatchAgentSnapshot {
+        WatchAgentSnapshot {
+            uuid: "agent-1".to_string(),
+            name: "CoderOne".to_string(),
+            provider: "mock".to_string(),
+            status: "idle".to_string(),
+            last_status_at: None,
+        }
+    }
+
+    #[test]
+    fn watch_response_default_includes_readable_output_without_raw_output() {
+        let mut state = crate::state::AgentWatchState::new("agent-1".to_string(), 16, 1024);
+        state.push_output("\u{1b}[31mreadable\u{1b}[0m".as_bytes());
+        let snapshot = state.snapshot_since(None, Some(1024)).unwrap();
+        let response = build_agent_watch_response(
+            test_watch_agent(),
+            snapshot,
+            &WatchIncludes::from_values(&[]),
+        );
+
+        assert_eq!(response.output.text, "readable");
+        assert!(response.raw_output.is_none());
+        assert!(response.transcript.is_some());
+    }
+
+    #[test]
+    fn watch_response_raw_include_preserves_raw_terminal_text() {
+        let mut state = crate::state::AgentWatchState::new("agent-1".to_string(), 16, 1024);
+        state.push_output("\u{1b}[31mreadable\u{1b}[0m".as_bytes());
+        let snapshot = state.snapshot_since(None, Some(1024)).unwrap();
+        let response = build_agent_watch_response(
+            test_watch_agent(),
+            snapshot,
+            &WatchIncludes::from_values(&["raw_output".to_string(), "output".to_string()]),
+        );
+
+        assert_eq!(response.output.text, "readable");
+        assert_eq!(
+            response.raw_output.as_ref().unwrap().text,
+            "\u{1b}[31mreadable\u{1b}[0m"
+        );
+    }
+
+    #[test]
+    fn output_condition_matches_transcript_clean_output_and_raw_fallback() {
+        let mut transcript_snapshot = snapshot_with_output("agent-1:1", "");
+        transcript_snapshot.transcript.latest_text = "Final REVIEW_DONE".to_string();
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("REVIEW_DONE".to_string()),
+            &transcript_snapshot,
+            None,
+        ));
+
+        let clean_snapshot = snapshot_with_output("agent-1:2", "Final REVIEW_DONE");
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("REVIEW_DONE".to_string()),
+            &clean_snapshot,
+            None,
+        ));
+
+        let mut raw_snapshot = snapshot_with_output("agent-1:3", "");
+        raw_snapshot.raw_output.text = "Final \u{1b}[31mREVIEW_DONE\u{1b}[0m".to_string();
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("REVIEW_DONE".to_string()),
+            &raw_snapshot,
+            None,
+        ));
+    }
+
+    #[test]
+    fn output_condition_checks_later_surfaces_after_echo_match() {
+        let mut snapshot = snapshot_with_output(
+            "agent-1:4",
+            "\u{1b}[1m›\u{1b}[22m Say REVIEW_DONE when finished\r\nActual response: REVIEW_DONE",
+        );
+        snapshot.transcript.latest_text = "Say REVIEW_DONE when finished".to_string();
+
+        assert!(watch_condition_matches(
+            &WatchCondition::OutputContains("REVIEW_DONE".to_string()),
+            &snapshot,
+            Some("Say REVIEW_DONE when finished"),
+        ));
+    }
+
     #[tokio::test]
     async fn blocking_watch_wakes_when_output_arrives() {
         let state = std::sync::Arc::new(std::sync::Mutex::new(crate::state::AgentWatchState::new(
@@ -2719,16 +3054,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_ignores_submitted_prompt_echo() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000001".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000001".to_string(),
-                text: "\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Say AUTO_TEST_2_DONE when finished\r\n  gpt-5.5 high · D:\\Development\\Wardian".to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000001",
+            "\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Say AUTO_TEST_2_DONE when finished\r\n  gpt-5.5 high · D:\\Development\\Wardian",
+        );
 
         assert!(!watch_condition_matches(
             &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
@@ -2739,16 +3068,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_matches_provider_response_after_echo() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000002".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000002".to_string(),
-                text: "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\nActual response: AUTO_TEST_2_DONE".to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000002",
+            "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\nActual response: AUTO_TEST_2_DONE",
+        );
 
         assert!(watch_condition_matches(
             &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
@@ -2759,16 +3082,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_ignores_codex_repaint_prompt_fragment() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000003".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000003".to_string(),
-                text: "\u{1b}[2J\u{1b}[H\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Capture the README demo GIF\r\n  and end exactly with DEMO_GIF_DONE  gpt-5.5 high · D:\\Development\\Wardian · 75% context left".to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000003",
+            "\u{1b}[2J\u{1b}[H\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Capture the README demo GIF\r\n  and end exactly with DEMO_GIF_DONE  gpt-5.5 high · D:\\Development\\Wardian · 75% context left",
+        );
 
         assert!(!watch_condition_matches(
             &WatchCondition::OutputContains("DEMO_GIF_DONE".to_string()),
@@ -2779,16 +3096,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_matches_response_after_codex_repaint_echo() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000004".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000004".to_string(),
-                text: "\u{1b}[2J\u{1b}[H\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Capture the README demo GIF\r\n  and end exactly with DEMO_GIF_DONE  gpt-5.5 high · D:\\Development\\Wardian · 75% context left\r\nFinal response: DEMO_GIF_DONE".to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000004",
+            "\u{1b}[2J\u{1b}[H\u{1b}[1m›\u{1b}[22m From Wardian-Arch: Capture the README demo GIF\r\n  and end exactly with DEMO_GIF_DONE  gpt-5.5 high · D:\\Development\\Wardian · 75% context left\r\nFinal response: DEMO_GIF_DONE",
+        );
 
         assert!(watch_condition_matches(
             &WatchCondition::OutputContains("DEMO_GIF_DONE".to_string()),
@@ -2799,18 +3110,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_matches_exact_marker_response_after_echo() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000005".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000005".to_string(),
-                text:
-                    "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\n  AUTO_TEST_2_DONE"
-                        .to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000005",
+            "\u{1b}[1m›\u{1b}[22m Say AUTO_TEST_2_DONE when finished\r\n  AUTO_TEST_2_DONE",
+        );
 
         assert!(watch_condition_matches(
             &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
@@ -2821,16 +3124,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_ignores_origin_prefixed_json_echo() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000006".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000006".to_string(),
-                text: "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}".to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000006",
+            "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}",
+        );
 
         assert!(!watch_condition_matches(
             &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),
@@ -2841,16 +3138,10 @@ mod tests {
 
     #[test]
     fn output_condition_with_ask_echo_guard_matches_origin_prefixed_response_after_echo() {
-        let snapshot = crate::state::agent_watch::WatchSnapshot {
-            cursor: "agent-1:0000000000000007".to_string(),
-            events: Vec::new(),
-            output: wardian_core::control::WatchOutput {
-                cursor: "agent-1:0000000000000007".to_string(),
-                text: "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}\r\nActual response after echo: From Wardian agent agent-1: AUTO_TEST_2_DONE".to_string(),
-                truncated: false,
-                omitted_bytes: 0,
-            },
-        };
+        let snapshot = snapshot_with_output(
+            "agent-1:0000000000000007",
+            "From Wardian agent agent-1: AUTO_TEST_2_DONE\r\n{\"type\":\"model\",\"content\":\"From Wardian agent agent-1: AUTO_TEST_2_DONE\"}\r\nActual response after echo: From Wardian agent agent-1: AUTO_TEST_2_DONE",
+        );
 
         assert!(watch_condition_matches(
             &WatchCondition::OutputContains("AUTO_TEST_2_DONE".to_string()),

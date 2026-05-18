@@ -148,6 +148,45 @@ describe('GridView maximize behavior', () => {
     expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
+
+  it('gives a single visible agent the full grid width instead of a stale narrow track', () => {
+    act(() => useLayoutStore.getState().setColumnTracks([0.2, 0.8]));
+
+    const { container } = renderGrid(null, [agents[0]]);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.gridTemplateColumns).toBe('1fr');
+  });
+
+  it('keeps the grid wide enough for terminal input rows when the app shell is narrow', () => {
+    const { container } = renderGrid(null, [agents[0]]);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.minWidth).toBe('520px');
+  });
+});
+
+describe('GridView density', () => {
+  it('renders compact single-row card headers with visible agent class', () => {
+    renderGrid(null);
+
+    const header = screen.getByTestId('agent-card-header-agent-1');
+    const agentName = screen.getByRole('heading', { name: 'Alpha (Coder)' });
+    expect(header).toHaveAttribute('data-density', 'compact');
+    expect(agentName).toHaveClass('text-[15px]');
+    expect(agentName).toHaveClass('leading-5');
+    expect(screen.getByText('(Coder)')).toBeInTheDocument();
+  });
+
+  it('keeps dense UI proportions roomy enough for VSCode-style scanning', async () => {
+    const { readFileSync } = await import("node:fs");
+    const { cwd } = await import("node:process");
+    const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
+
+    expect(appStyles).toContain("--sidebar-primary-width: 48px;");
+    expect(appStyles).toContain("--density-grid-header-min-height: 44px;");
+    expect(appStyles).toContain("--density-grid-header-padding-y: 8px;");
+  });
 });
 
 describe('GridView stacked mode', () => {

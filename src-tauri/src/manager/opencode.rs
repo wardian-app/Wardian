@@ -265,8 +265,7 @@ fn opencode_log_timestamp_to_rfc3339(timestamp: &str) -> Option<String> {
 ///
 /// Returns the file with the highest mtime among all qualifying candidates so
 /// that the server log (newer) wins over the parent log (older).
-#[cfg(test)]
-fn opencode_log_path_after(
+pub(crate) fn opencode_log_path_after(
     base: &std::path::Path,
     spawn_time: std::time::SystemTime,
 ) -> Option<std::path::PathBuf> {

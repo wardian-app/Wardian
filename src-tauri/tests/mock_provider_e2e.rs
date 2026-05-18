@@ -163,6 +163,29 @@ fn long_output_scenario_emits_many_lines() {
 }
 
 #[test]
+fn ansi_output_scenario_preserves_terminal_escape_bytes() {
+    let script = mock_script_path();
+
+    let output = Command::new("node")
+        .arg(&script)
+        .env("WARDIAN_MOCK_SCENARIO", "ansi_output")
+        .env("WARDIAN_MOCK_DELAY_MS", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to spawn mock-agent.cjs");
+
+    assert!(
+        output.status.success(),
+        "mock agent should exit successfully"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\u{1b}[31mANSI_TERMINAL_LINE\u{1b}[0m"));
+    assert!(stdout.contains("ANSI readable answer."));
+}
+
+#[test]
 fn interactive_multi_turn_echoes_each_submitted_input() {
     let script = mock_script_path();
 

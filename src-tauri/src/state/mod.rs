@@ -1,6 +1,7 @@
 pub mod active_agent;
 pub mod agent_watch;
 pub mod app_state;
+pub mod terminal_text;
 pub mod user_terminal;
 
 pub use active_agent::ActiveAgent;

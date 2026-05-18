@@ -775,7 +775,7 @@ export default function AgentWatchlist({
       data-testid="agent-watchlist"
       className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)] border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col z-10 select-none ${collapsed ? "w-0" : "w-[var(--sidebar-secondary-width)]"}`}
     >
-      <div className="p-4 h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
+      <div className="px-[var(--density-panel-padding-x)] py-[var(--density-panel-padding-y)] h-full flex flex-col min-w-[var(--sidebar-secondary-width)] overflow-hidden">
         {/* ── Header ─────────────────────────────────────── */}
         <div className="flex justify-between items-center mb-3">
           <h2 className="text-sm font-bold text-primary tracking-tight truncate">

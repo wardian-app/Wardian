@@ -16,7 +16,7 @@ describe('useLayoutStore — sidebar widths', () => {
 
   it('exposes default sidebar widths', () => {
     const s = useLayoutStore.getState();
-    expect(s.leftSidebarWidth).toBe(260);
+    expect(s.leftSidebarWidth).toBe(240);
     expect(s.rightSidebarWidth).toBe(240);
   });
 
@@ -45,7 +45,7 @@ describe('useLayoutStore — sidebar widths', () => {
       useLayoutStore.getState().setRightSidebarWidth(320);
     });
     act(() => useLayoutStore.getState().resetLayout());
-    expect(useLayoutStore.getState().leftSidebarWidth).toBe(260);
+    expect(useLayoutStore.getState().leftSidebarWidth).toBe(240);
     expect(useLayoutStore.getState().rightSidebarWidth).toBe(240);
   });
 });

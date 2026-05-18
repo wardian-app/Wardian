@@ -153,7 +153,7 @@ pub async fn submit_prompt_to_agent(
     state: State<'_, AppState>,
     _app: AppHandle,
 ) -> Result<(), String> {
-    let (provider_name, config, tx) = {
+    let (provider_name, tx) = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&session_id)
@@ -165,7 +165,7 @@ pub async fn submit_prompt_to_agent(
             .map_err(|_| "Input channel temporarily locked".to_string())?
             .get(&session_id)
             .cloned();
-        (config.provider.clone(), config, tx)
+        (config.provider.clone(), tx)
     };
 
     let tx = match tx {
@@ -175,96 +175,6 @@ pub async fn submit_prompt_to_agent(
 
     if provider_name == "opencode" {
         wait_for_opencode_terminal_ready(&session_id, &state, 15000).await?;
-
-        {
-            let agents = state.agents.lock().await;
-            if let Some(agent) = agents.get(&session_id) {
-                if manager::mark_agent_prompt_started(agent) {
-                    manager::set_agent_status(
-                        &_app,
-                        &session_id,
-                        &agent.current_status,
-                        "Processing...",
-                    );
-                }
-            }
-        }
-
-        let habitat_cwd = crate::utils::fs::get_wardian_home()
-            .map(|home| home.join("agents").join(&session_id).join("habitat"))
-            .filter(|path| path.exists())
-            .unwrap_or_else(|| crate::utils::fs::resolve_cwd(&config.folder, &session_id));
-
-        let result = match manager::run_headless_with_config(
-            &habitat_cwd,
-            &prompt,
-            &session_id,
-            "text",
-            &provider_name,
-            Some(&config),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                {
-                    let agents = state.agents.lock().await;
-                    if let Some(agent) = agents.get(&session_id) {
-                        manager::set_agent_status(
-                            &_app,
-                            &session_id,
-                            &agent.current_status,
-                            "Error",
-                        );
-                    }
-                }
-
-                return Err(error);
-            }
-        };
-
-        let response_text = result
-            .get("text")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("");
-
-        manager::log_debug(&format!(
-            "[Wardian] OpenCode headless submit response for session {}: {}",
-            session_id,
-            if response_text.is_empty() {
-                "<empty>"
-            } else {
-                response_text
-            }
-        ));
-
-        if !response_text.is_empty() {
-            let agents = state.agents.lock().await;
-            if let Some(agent) = agents.get(&session_id) {
-                if let Ok(mut buf) = agent.output_buffer.lock() {
-                    if !buf.is_empty() && !buf.ends_with('\n') {
-                        buf.push_str("\r\n");
-                    }
-                    buf.push_str(response_text);
-                    buf.push_str("\r\n");
-                }
-            }
-            let _ = _app.emit(
-                "agent-pty-output-ready",
-                serde_json::json!({ "session_id": session_id }),
-            );
-        }
-
-        {
-            let agents = state.agents.lock().await;
-            if let Some(agent) = agents.get(&session_id) {
-                manager::set_agent_status(&_app, &session_id, &agent.current_status, "Idle");
-            }
-        }
-
-        return Ok(());
     }
 
     {

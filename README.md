@@ -54,7 +54,7 @@ Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are ava
 
 ## Quick Start
 
-Ensure you have Rust, Node.js (v18+), and at least one supported provider CLI installed, such as `@google/gemini-cli`, `@anthropic-ai/claude-code`, `@openai/codex`, or `opencode`.
+Ensure you have Rust, Node.js (v18+), and at least one supported provider CLI installed, such as `@google/gemini-cli`, `@anthropic-ai/claude-code`, `@openai/codex`, or the OpenCode `opencode` command.
 
 ```bash
 git clone https://github.com/tangemicioglu/Wardian.git
@@ -69,25 +69,25 @@ npm run dev
 
 For complete user and developer docs, start here:
 
-- [Documentation Index](docs/index.md)
-- [User Guide Index](docs/guide/index.md)
-- [Wardian CLI](docs/guide/cli.md)
-- [Queue](docs/guide/queue.md)
-- [Workflow Reference](docs/workflows/index.md)
-- [Developer Index](docs/developer/index.md)
+- [Public Documentation](https://docs.wardian.org/)
+- [User Guide Index](https://docs.wardian.org/guide/)
+- [Wardian CLI](https://docs.wardian.org/guide/cli)
+- [Queue](https://docs.wardian.org/guide/queue)
+- [Workflow Reference](https://docs.wardian.org/workflows/)
+- [Developer Index](https://docs.wardian.org/developer/)
 
 ---
 
 ## Supported Providers
 
-Wardian abstracts the differences between varied agent runtimes into a unified interface.
+Wardian supports four provider CLIs today and adapts each runtime into the same agent lifecycle, telemetry, skill, and workflow model.
 
-| Provider        | Status     | Implementation Nuance                                    |
-| :-------------- | :--------- | :------------------------------------------------------- |
-| **Gemini CLI**  | ✅ Stable  | Patched skill discovery; stream-based turn detection.    |
-| **Claude Code** | ✅ Stable  | Custom permission hooks; explicit session ID management. |
-| **Codex**       | 🧪 Beta    | Habitat-based state migration; bootstrap isolation.      |
-| **OpenCode**    | 🧪 Beta    | Real-workspace runtime config injection.                |
+| Provider        | Support       | Runtime Model                                              |
+| :-------------- | :------------ | :--------------------------------------------------------- |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)**  | ✅ Supported  | Real-workspace runtime with patched skill discovery and stream-based turn detection. |
+| **[Claude Code](https://github.com/anthropics/claude-code)** | ✅ Supported  | Real-workspace runtime with explicit session IDs and permission hooks. |
+| **[Codex](https://github.com/openai/codex)**       | ✅ Supported  | Real-workspace execution via `--cd` with per-agent `CODEX_HOME` habitat state. |
+| **[OpenCode](https://github.com/anomalyco/opencode)**    | ✅ Supported  | Real-workspace runtime with native `AGENTS.md` discovery and injected config for Wardian scope. |
 
 > See [Provider Runtime Notes](docs/providers.md) for a deep dive into provider-specific discovery and lifecycle management.
 
@@ -199,7 +199,7 @@ Wardian is built with a focus on modularity, thread safety, and separation of co
 
 1. **Rust**: Install [rustup.rs](https://rustup.rs/) (latest stable).
 2. **Node.js**: Ensure Node.js (v18+) is installed.
-3. **Agent CLIs**: Install supported providers globally (e.g., `npm install -g @google/gemini-cli @anthropic-ai/claude-code @openai/codex`) and install the OpenCode CLI separately if you plan to use that beta provider. Ensure each provider is successfully authenticated in your terminal first.
+3. **Agent CLIs**: Install at least one supported provider CLI before spawning agents: [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`@google/gemini-cli`), [Claude Code](https://github.com/anthropics/claude-code) (`@anthropic-ai/claude-code`), [Codex](https://github.com/openai/codex) (`@openai/codex`), or [OpenCode](https://github.com/anomalyco/opencode) (`opencode` command, commonly installed from `opencode-ai`). Ensure each provider is authenticated successfully in your terminal first.
 4. **Clone & Install**:
    ```bash
    git clone https://github.com/tangemicioglu/Wardian.git

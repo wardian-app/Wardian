@@ -5,7 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { AgentTerminal } from "./AgentTerminal";
+import { AgentTerminal, shouldExposeTerminalDebug } from "./AgentTerminal";
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 
@@ -63,7 +63,10 @@ describe("AgentTerminal scrollback", () => {
       let resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined;
       let scrollHandler: ((position: number) => void) | undefined;
       const terminal = {
-        open: vi.fn(),
+        element: undefined as HTMLElement | undefined,
+        open: vi.fn((element: HTMLElement) => {
+          terminal.element = element;
+        }),
         write: vi.fn((data: string, callback?: () => void) => {
           state.serializedState += data;
           callback?.();
@@ -87,6 +90,9 @@ describe("AgentTerminal scrollback", () => {
         dispose: vi.fn(),
         focus: vi.fn(),
         scrollToBottom: vi.fn(),
+        scrollToLine: vi.fn((line: number) => {
+          terminal.buffer.active.viewportY = line;
+        }),
         scrollToTop: vi.fn(() => {
           terminal.buffer.active.viewportY = 0;
         }),
@@ -136,6 +142,12 @@ describe("AgentTerminal scrollback", () => {
   afterEach(() => {
     rectSpy.mockRestore();
     cleanup();
+  });
+
+  it("only exposes terminal debug hooks in dev or with an explicit debug flag", () => {
+    expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(false);
+    expect(shouldExposeTerminalDebug({ DEV: true, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(true);
+    expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
   });
 
   it("reuses the live xterm instance on remount while preserving prior session state", async () => {
@@ -320,9 +332,7 @@ describe("AgentTerminal scrollback", () => {
   });
 
   it("keeps the OpenCode xterm viewport scrollable while hiding terminal scroll chrome", async () => {
-    // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
     const { readFileSync } = await import("node:fs");
-    // @ts-expect-error Vitest runs in Node, but the frontend tsconfig intentionally omits Node types.
     const { cwd } = await import("node:process");
     const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
     const selector = ".wardian-terminal--tui-owned-scroll .xterm-viewport";
@@ -353,7 +363,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("keeps xterm erase-in-display behavior at the default terminal semantics", async () => {
+  it("preserves Codex primary-buffer clears into scrollback", async () => {
     render(<AgentTerminal sessionId="codex-3" provider="codex" theme="dark" />);
 
     await waitFor(() => {
@@ -365,7 +375,22 @@ describe("AgentTerminal scrollback", () => {
       unknown
     >;
     expect(terminalOptions.reflowCursorLine).toBe(false);
-    expect("scrollOnEraseInDisplay" in terminalOptions).toBe(false);
+    expect(terminalOptions.scrollOnEraseInDisplay).toBe(true);
+  });
+
+  it("keeps non-Codex erase-in-display behavior at xterm defaults", async () => {
+    render(<AgentTerminal sessionId="claude-erase" provider="claude" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(terminalOptions.reflowCursorLine).toBe(false);
+    expect(terminalOptions.scrollOnEraseInDisplay).toBe(false);
   });
 
   it("applies the configured terminal font size and refits when it changes", async () => {
@@ -462,6 +487,32 @@ describe("AgentTerminal scrollback", () => {
     const instance = getLatestTerminalInstance();
     const webglAddon = mockWebglAddon.mock.results[0]?.value;
     expect(instance.loadAddon).toHaveBeenCalledWith(webglAddon);
+  });
+
+  it("does not retry WebGL activation after a startup failure", async () => {
+    const webglAddon = {
+      onContextLoss: vi.fn(),
+      clearTextureAtlas: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockWebglAddon
+      .mockImplementationOnce(() => {
+        throw new Error("temporary webgl failure");
+      })
+      .mockImplementationOnce(() => webglAddon as never);
+
+    try {
+      render(<AgentTerminal sessionId="claude-webgl-retry" provider="claude" theme="dark" />);
+
+      await waitFor(() => {
+        expect(mockWebglAddon).toHaveBeenCalledTimes(1);
+      });
+      const instance = getLatestTerminalInstance();
+      expect(instance.loadAddon).not.toHaveBeenCalledWith(webglAddon);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("strips Codex scrollback erase while preserving surrounding PTY output", async () => {
@@ -605,6 +656,37 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("re-reports the current PTY size after a backend terminal clear even when the card size did not change", async () => {
+    const listeners = new Map<string, (event: { payload: { session_id: string } }) => void>();
+
+    mockListen.mockImplementation(async (eventName, handler) => {
+      listeners.set(eventName, handler as (event: { payload: { session_id: string } }) => void);
+      return () => {};
+    });
+
+    render(<AgentTerminal sessionId="gemini-clear-size" provider="gemini" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(listeners.has("agent-terminal-cleared")).toBe(true);
+    });
+    mockInvoke.mockClear();
+
+    act(() => {
+      listeners.get("agent-terminal-cleared")?.({ payload: { session_id: "gemini-clear-size" } });
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+        sessionId: "gemini-clear-size",
+        cols: 80,
+        rows: 24,
+      });
+    });
+  });
+
   it("does not write stale PTY output that resolves after a terminal clear", async () => {
     const listeners = new Map<string, (event: { payload: { session_id: string } }) => void>();
     let readCount = 0;
@@ -672,6 +754,8 @@ describe("AgentTerminal scrollback", () => {
           rows: 24,
           fontFamily: defaultTerminalFontFamily(),
           fontSize: 14,
+          webglActive: true,
+          webglAttempted: true,
           cssCellWidth: null,
           cssCellHeight: null,
           deviceCellWidth: null,
@@ -696,6 +780,26 @@ describe("AgentTerminal scrollback", () => {
     expect(instance.refresh).toHaveBeenCalledWith(0, 23);
   });
 
+  it("exposes debug scroll actions for rendering audit history capture", async () => {
+    render(<AgentTerminal sessionId="debug-scroll-history" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.baseY = 80;
+    instance.buffer.active.viewportY = 0;
+    vi.mocked(instance.scrollToBottom).mockClear();
+
+    expect(window.__wardianTerminalDebug?.scrollToViewportLine("debug-scroll-history", 40)).toBe(true);
+    expect(instance.scrollToLine).toHaveBeenCalledWith(40);
+    expect(instance.refresh).toHaveBeenCalledWith(0, 23);
+
+    expect(window.__wardianTerminalDebug?.scrollToBottom("debug-scroll-history")).toBe(true);
+    expect(instance.scrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
   it("does not resize repeatedly when ResizeObserver fires without a real size change", async () => {
     const originalResizeObserver = globalThis.ResizeObserver;
     let resizeCallback: ResizeObserverCallback | undefined;
@@ -715,7 +819,7 @@ describe("AgentTerminal scrollback", () => {
       await waitFor(() => {
         expect(mockFitAddon).toHaveBeenCalled();
       });
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await new Promise((resolve) => setTimeout(resolve, 320));
 
       const terminalInstance = getLatestTerminalInstance();
       const baselineCalls = terminalInstance.resize.mock.calls.length;
@@ -731,7 +835,228 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
-  it("homes transient TUI redraws before shrinking rows so resize does not promote the old frame", async () => {
+  it("coalesces bursty ResizeObserver fits before resizing the xterm grid", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="codex-bursty-fit" provider="codex" theme="dark" />);
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+
+      const instance = getLatestTerminalInstance();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      instance.resize.mockClear();
+      mockInvoke.mockClear();
+
+      let hostRect = {
+        width: 630,
+        height: 340,
+        top: 0,
+        left: 0,
+        right: 630,
+        bottom: 340,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+      rectSpy.mockImplementation(() => hostRect);
+
+      fitDimensions = { cols: 90, rows: 20 };
+      hostRect = { ...hostRect, width: 640, height: 350, right: 640, bottom: 350 };
+      resizeCallback!([], {} as ResizeObserver);
+      fitDimensions = { cols: 100, rows: 24 };
+      hostRect = { ...hostRect, width: 720, height: 410, right: 720, bottom: 410 };
+      resizeCallback!([], {} as ResizeObserver);
+      fitDimensions = { cols: 110, rows: 28 };
+      hostRect = { ...hostRect, width: 800, height: 480, right: 800, bottom: 480 };
+      resizeCallback!([], {} as ResizeObserver);
+
+      await waitFor(() => {
+        expect(instance.resize).toHaveBeenCalledWith(110, 28);
+      });
+      expect(instance.resize).not.toHaveBeenCalledWith(90, 20);
+      expect(instance.resize).not.toHaveBeenCalledWith(100, 24);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("re-reports the PTY size when host pixels change but fitted columns stay the same", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="codex-same-grid-refit" provider="codex" theme="dark" />);
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      mockInvoke.mockClear();
+
+      fitDimensions = { cols: 80, rows: 24 };
+      rectSpy.mockReturnValue({
+        width: 812,
+        height: 420,
+        top: 0,
+        left: 0,
+        right: 812,
+        bottom: 420,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      resizeCallback!([], {} as ResizeObserver);
+
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+          sessionId: "codex-same-grid-refit",
+          cols: 80,
+          rows: 24,
+        });
+      });
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("does not report the stale terminal grid before a ResizeObserver refit", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="claude-no-stale-grid-report" provider="claude" theme="dark" />);
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      mockInvoke.mockClear();
+
+      fitDimensions = { cols: 100, rows: 30 };
+      rectSpy.mockReturnValue({
+        width: 720,
+        height: 420,
+        top: 0,
+        left: 0,
+        right: 720,
+        bottom: 420,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      expect(resizeCallback).toBeDefined();
+      resizeCallback!([], {} as ResizeObserver);
+
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+          sessionId: "claude-no-stale-grid-report",
+          cols: 100,
+          rows: 30,
+        });
+      });
+
+      const resizeCalls = mockInvoke.mock.calls.filter(
+        ([command, payload]) =>
+          command === "resize_agent_terminal" &&
+          (payload as { sessionId?: string })?.sessionId === "claude-no-stale-grid-report",
+      );
+      expect(resizeCalls.map(([, payload]) => payload)).toEqual([
+        { sessionId: "claude-no-stale-grid-report", cols: 100, rows: 30 },
+      ]);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("floors fitted terminal columns and rows to a reportable PTY size", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="codex-min-size" provider="codex" theme="dark" />);
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+
+      const instance = getLatestTerminalInstance();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      instance.resize.mockClear();
+      mockInvoke.mockClear();
+      fitDimensions = { cols: 7, rows: 4 };
+      rectSpy.mockReturnValue({
+        width: 64,
+        height: 80,
+        top: 0,
+        left: 0,
+        right: 64,
+        bottom: 80,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      expect(resizeCallback).toBeDefined();
+      resizeCallback!([], {} as ResizeObserver);
+
+      await waitFor(() => {
+        expect(instance.resize).toHaveBeenCalledWith(20, 8);
+      });
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+          sessionId: "codex-min-size",
+          cols: 20,
+          rows: 8,
+        });
+      });
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("homes transient TUI redraws before shrinking rows so complex glyph rows do not reflow", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {
       switch (cmd) {
@@ -798,7 +1123,7 @@ describe("AgentTerminal scrollback", () => {
     expect(homeWriteOrder).toBeLessThan(shrinkOrder);
   });
 
-  it("debounces backend PTY resize reports during bursty terminal resize events", async () => {
+  it("reports each distinct backend PTY row resize during bursty terminal resize events", async () => {
     render(<AgentTerminal sessionId="claude-resize" provider="claude" theme="dark" />);
 
     await waitFor(() => {
@@ -812,25 +1137,187 @@ describe("AgentTerminal scrollback", () => {
     onResize({ cols: 121, rows: 41 });
     onResize({ cols: 122, rows: 42 });
 
-    await waitFor(
-      () => {
-        const resizeCalls = mockInvoke.mock.calls.filter(
-          ([command, payload]) =>
-            command === "resize_agent_terminal" &&
-            (payload as { sessionId?: string })?.sessionId === "claude-resize",
-        );
-        expect(resizeCalls).toHaveLength(1);
-        expect(resizeCalls[0]?.[1]).toMatchObject({
-          sessionId: "claude-resize",
-          cols: 122,
-          rows: 42,
-        });
-      },
-      { timeout: 400 },
-    );
+    await waitFor(() => {
+      const resizeCalls = mockInvoke.mock.calls.filter(
+        ([command, payload]) =>
+          command === "resize_agent_terminal" &&
+          (payload as { sessionId?: string })?.sessionId === "claude-resize",
+      );
+      expect(resizeCalls.map(([, payload]) => payload)).toEqual([
+        { sessionId: "claude-resize", cols: 120, rows: 40 },
+        { sessionId: "claude-resize", cols: 121, rows: 41 },
+        { sessionId: "claude-resize", cols: 122, rows: 42 },
+      ]);
+    });
   });
 
-  it("defers backend PTY resize reports while the user is inspecting scrollback", async () => {
+  it.each(["codex", "claude"] as const)(
+    "does not blank %s during resize while waiting for the provider to repaint",
+    async (provider) => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return readCount++ === 0 ? "\u001b[Hheader\u001b[K\r\nprompt\u001b[K" : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    try {
+      render(<AgentTerminal sessionId={`${provider}-visible-resize`} provider={provider} theme="dark" />);
+
+      await waitFor(() => {
+        const instance = getLatestTerminalInstance();
+        expect(instance.write).toHaveBeenCalledWith(
+          expect.stringContaining("header"),
+          expect.any(Function),
+        );
+      });
+
+      const instance = getLatestTerminalInstance();
+      instance.write.mockClear();
+      fitDimensions = { cols: 100, rows: 30 };
+      rectSpy.mockReturnValue({
+        width: 720,
+        height: 420,
+        top: 0,
+        left: 0,
+        right: 720,
+        bottom: 420,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      expect(resizeCallback).toBeDefined();
+      resizeCallback!([], {} as ResizeObserver);
+
+      await waitFor(() => {
+        expect(instance.resize).toHaveBeenCalledWith(100, 30);
+      });
+      expect(instance.write).not.toHaveBeenCalledWith("\u001b[2J\u001b[H", expect.any(Function));
+      expect(instance.write).not.toHaveBeenCalledWith(expect.stringContaining("\u001b[3J"), expect.anything());
+      } finally {
+        globalThis.ResizeObserver = originalResizeObserver;
+      }
+    },
+  );
+
+  it("does not blank Gemini during resize while waiting for the provider to repaint", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return readCount++ === 0 ? "\u001b[Hheader\u001b[K\r\nprompt\u001b[K" : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    try {
+      render(<AgentTerminal sessionId="gemini-visible-resize" provider="gemini" theme="dark" />);
+
+      await waitFor(() => {
+        const instance = getLatestTerminalInstance();
+        expect(instance.write).toHaveBeenCalledWith(
+          expect.stringContaining("header"),
+          expect.any(Function),
+        );
+      });
+
+      const instance = getLatestTerminalInstance();
+      instance.write.mockClear();
+      fitDimensions = { cols: 100, rows: 30 };
+      rectSpy.mockReturnValue({
+        width: 720,
+        height: 420,
+        top: 0,
+        left: 0,
+        right: 720,
+        bottom: 420,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      expect(resizeCallback).toBeDefined();
+      resizeCallback!([], {} as ResizeObserver);
+
+      await waitFor(() => {
+        expect(instance.resize).toHaveBeenCalledWith(100, 30);
+      });
+      expect(instance.write).not.toHaveBeenCalledWith("\u001b[2J\u001b[H", expect.any(Function));
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("reports each distinct backend PTY column-only resize", async () => {
+    render(<AgentTerminal sessionId="claude-column-resize" provider="claude" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    const onResize = instance.onResize.mock.calls[0]?.[0] as ((size: { cols: number; rows: number }) => void);
+
+    onResize({ cols: 120, rows: 24 });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
+        sessionId: "claude-column-resize",
+        cols: 120,
+        rows: 24,
+      });
+    });
+    mockInvoke.mockClear();
+
+    onResize({ cols: 121, rows: 24 });
+    onResize({ cols: 122, rows: 24 });
+
+    await waitFor(() => {
+      const resizeCalls = mockInvoke.mock.calls.filter(
+        ([command, payload]) =>
+          command === "resize_agent_terminal" &&
+          (payload as { sessionId?: string })?.sessionId === "claude-column-resize",
+      );
+      expect(resizeCalls.map(([, payload]) => payload)).toEqual([
+        { sessionId: "claude-column-resize", cols: 121, rows: 24 },
+        { sessionId: "claude-column-resize", cols: 122, rows: 24 },
+      ]);
+    });
+  });
+
+  it("reports backend PTY resize while the user is inspecting scrollback", async () => {
     render(<AgentTerminal sessionId="codex-scrollback-resize" provider="codex" theme="dark" />);
 
     await waitFor(() => {
@@ -845,12 +1332,6 @@ describe("AgentTerminal scrollback", () => {
 
     onResize({ cols: 100, rows: 30 });
 
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    expect(mockInvoke.mock.calls.some(([command]) => command === "resize_agent_terminal")).toBe(false);
-
-    instance.buffer.active.viewportY = 50;
-    instance.__emitScroll(50);
-
     await waitFor(
       () => {
         expect(mockInvoke).toHaveBeenCalledWith("resize_agent_terminal", {
@@ -863,7 +1344,26 @@ describe("AgentTerminal scrollback", () => {
     );
   });
 
-  it("defers frontend xterm resize while the user is inspecting scrollback", async () => {
+  it("does not force the viewport to the bottom during resize while the user is inspecting scrollback", async () => {
+    render(<AgentTerminal sessionId="codex-scroll-position-resize" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    const onResize = instance.onResize.mock.calls[0]?.[0] as ((size: { cols: number; rows: number }) => void);
+    instance.buffer.active.baseY = 50;
+    instance.buffer.active.viewportY = 12;
+    instance.scrollToBottom.mockClear();
+
+    onResize({ cols: 100, rows: 30 });
+
+    expect(instance.scrollToBottom).not.toHaveBeenCalled();
+    expect(instance.buffer.active.viewportY).toBe(12);
+  });
+
+  it("resizes frontend xterm while the user is inspecting scrollback", async () => {
     const originalResizeObserver = globalThis.ResizeObserver;
     let resizeCallback: ResizeObserverCallback | undefined;
 
@@ -905,13 +1405,6 @@ describe("AgentTerminal scrollback", () => {
       expect(resizeCallback).toBeDefined();
       resizeCallback!([], {} as ResizeObserver);
 
-      await new Promise((resolve) => setTimeout(resolve, 180));
-      expect(instance.resize).not.toHaveBeenCalled();
-      expect(mockInvoke.mock.calls.some(([command]) => command === "resize_agent_terminal")).toBe(false);
-
-      instance.buffer.active.viewportY = 50;
-      instance.__emitScroll(50);
-
       await waitFor(() => {
         expect(instance.resize).toHaveBeenCalledWith(100, 30);
       });
@@ -925,6 +1418,11 @@ describe("AgentTerminal scrollback", () => {
         },
         { timeout: 500 },
       );
+
+      const snapshot = window.__wardianTerminalDebug?.snapshot("codex-frontend-scroll-resize");
+      expect(snapshot?.fitCount).toBeGreaterThan(0);
+      expect(snapshot?.resizeCount).toBeGreaterThan(0);
+      expect(snapshot?.lastReportedSize).toEqual({ cols: 100, rows: 30 });
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }

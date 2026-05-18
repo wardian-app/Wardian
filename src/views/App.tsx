@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
 import type { CloneMode } from "../types";
 import "../styles/App.css";
@@ -67,6 +68,79 @@ declare global {
 
 const ACTIVE_STATUSES = new Set(["Processing...", "Headless", "Action Needed"]);
 
+const NATIVE_WINDOW_WIDTH_VAR = "--wardian-native-window-width";
+const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
+const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
+
+type NativeWindowResizePayload = {
+  width?: number;
+  height?: number;
+};
+
+type NativeWindowCssSize = {
+  width: string;
+  height: string;
+};
+
+let syntheticNativeResizeDepth = 0;
+let lastNativeResizePayloadAtMs = 0;
+
+function toCssPixelLength(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  const deviceScale = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  return `${Math.max(1, Math.round(value / deviceScale))}px`;
+}
+
+function hasTauriGlobal() {
+  const tauriWindow = window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
+  return Boolean(tauriWindow.__TAURI__ || tauriWindow.__TAURI_INTERNALS__);
+}
+
+function setNativeWindowCssSize(size: NativeWindowCssSize) {
+  const root = document.documentElement;
+  const currentWidth = root.style.getPropertyValue(NATIVE_WINDOW_WIDTH_VAR);
+  const currentHeight = root.style.getPropertyValue(NATIVE_WINDOW_HEIGHT_VAR);
+  if (currentWidth === size.width && currentHeight === size.height) return;
+
+  root.style.setProperty(NATIVE_WINDOW_WIDTH_VAR, size.width);
+  root.style.setProperty(NATIVE_WINDOW_HEIGHT_VAR, size.height);
+
+  syntheticNativeResizeDepth += 1;
+  try {
+    window.dispatchEvent(new Event("resize"));
+  } finally {
+    syntheticNativeResizeDepth -= 1;
+  }
+  window.dispatchEvent(new CustomEvent("wardian-native-window-resized", {
+    detail: size,
+  }));
+}
+
+function applyNativeWindowSizeFromPayload(payload: NativeWindowResizePayload | undefined) {
+  const width = toCssPixelLength(payload?.width);
+  const height = toCssPixelLength(payload?.height);
+  if (!width || !height) return false;
+
+  lastNativeResizePayloadAtMs = Date.now();
+  setNativeWindowCssSize({ width, height });
+  return true;
+}
+
+function applyNativeWindowSizeFromOuterWindow() {
+  if (syntheticNativeResizeDepth > 0) return;
+  if (Date.now() - lastNativeResizePayloadAtMs < OUTER_WINDOW_FALLBACK_COOLDOWN_MS) return;
+  if (!hasTauriGlobal()) return;
+
+  const width = window.outerWidth;
+  const height = window.outerHeight;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+
+  setNativeWindowCssSize({
+    width: `${Math.max(1, Math.round(width))}px`,
+    height: `${Math.max(1, Math.round(height))}px`,
+  });
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -98,6 +172,48 @@ function AppBody() {
   const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
   const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let outerPollId: number | undefined;
+
+    try {
+      getCurrentWindow().onResized((event) => {
+        const appliedPayload = applyNativeWindowSizeFromPayload(event.payload as NativeWindowResizePayload | undefined);
+        if (!appliedPayload) {
+          applyNativeWindowSizeFromOuterWindow();
+        }
+      }).then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      }).catch((error) => {
+        console.warn("Failed to listen for native window resize", error);
+      });
+    } catch (error) {
+      console.warn("Failed to listen for native window resize", error);
+    }
+
+    applyNativeWindowSizeFromOuterWindow();
+    window.addEventListener("resize", applyNativeWindowSizeFromOuterWindow);
+    outerPollId = window.setInterval(applyNativeWindowSizeFromOuterWindow, 250);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.removeEventListener("resize", applyNativeWindowSizeFromOuterWindow);
+      if (outerPollId !== undefined) {
+        window.clearInterval(outerPollId);
+      }
+      lastNativeResizePayloadAtMs = 0;
+      document.documentElement.style.removeProperty(NATIVE_WINDOW_WIDTH_VAR);
+      document.documentElement.style.removeProperty(NATIVE_WINDOW_HEIGHT_VAR);
+    };
+  }, []);
+
   const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
     const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
     if (currentStatus === "Idle" && wasActive) {
@@ -911,7 +1027,14 @@ function AppBody() {
     : null;
 
   return (
-    <div data-testid="app-shell" className="flex flex-col h-screen w-full bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none">
+    <div
+      data-testid="app-shell"
+      className="flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
+      style={{
+        width: `var(${NATIVE_WINDOW_WIDTH_VAR}, 100vw)`,
+        height: `var(${NATIVE_WINDOW_HEIGHT_VAR}, 100dvh)`,
+      }}
+    >
       <CustomTitleBar
         viewMode={viewMode}
         setViewMode={setViewMode}
@@ -919,6 +1042,8 @@ function AppBody() {
         setLeftCollapsed={setLeftCollapsed}
         rightCollapsed={rightCollapsed}
         setRightCollapsed={setRightCollapsed}
+        leftSidebarWidth={leftSidebarWidth}
+        rightSidebarWidth={rightSidebarWidth}
         telemetry={telemetry}
         appTelemetry={appTelemetry}
         agents={agents}

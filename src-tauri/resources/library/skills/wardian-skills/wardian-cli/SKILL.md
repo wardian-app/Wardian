@@ -108,9 +108,13 @@ reaches a normalized status such as `idle`, `processing`, `action_required`,
 in the requested status. Use `--next` to wait for a newer matching observation.
 Use `--timeout` with `ms`, `s`, or `m` units.
 
-`agent watch <target>` returns status, retained output, events, delivery
-details, and a cursor. Use `--until output:<token>` when you need the response
-text itself. `--follow` is reserved and currently returns `not_supported`.
+`agent watch <target>` returns status, provider-adapted transcript text,
+sanitized terminal output, delivery details, and a cursor by default. Raw PTY
+text is opt-in with `--raw` or `--include raw_output`; use it only when you need
+terminal escape bytes or repaint evidence. Use `--until output:<token>` when you
+need output-substring compatibility; marker matching checks transcript text,
+sanitized output, and the internal raw PTY fallback. `--follow` is reserved and
+currently returns `not_supported`.
 
 `agent worktree` commands require the desktop app for the same `WARDIAN_HOME`.
 They route through Wardian's live control endpoint and reuse the GUI/backend

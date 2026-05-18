@@ -49,7 +49,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
 }) => {
   return (
     <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
-      <div className="px-4 py-6 flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)] flex flex-col min-h-0 h-full">
+      <div className="px-[var(--density-panel-padding-x)] py-[var(--density-panel-padding-y)] flex-1 overflow-y-auto no-scrollbar min-w-[var(--sidebar-content-width)] flex flex-col min-h-0 h-full">
         {activeTab === "explorer" && (
           <ExplorerPanel selectedAgentIds={selectedAgentIds} agents={agents} />
         )}
@@ -127,7 +127,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
           baseWidth={useLayoutStore.getState().leftSidebarWidth}
           edge="right"
           onResize={(px) => useLayoutStore.getState().setLeftSidebarWidth(px)}
-          onReset={() => useLayoutStore.getState().setLeftSidebarWidth(260)}
+          onReset={() => useLayoutStore.getState().setLeftSidebarWidth(240)}
         />
       )}
     </aside>

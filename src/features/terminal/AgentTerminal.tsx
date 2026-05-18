@@ -12,7 +12,6 @@ import {
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
   shouldHomeCursorBeforeTransientResize,
-  shouldSuppressDuplicateResizeRedraw,
   type TerminalOutputState,
 } from "./terminalCapabilities";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
@@ -33,6 +32,9 @@ const LIGHT_TERM_THEME = {
 };
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
+const MIN_TERMINAL_COLS = 20;
+const MIN_TERMINAL_ROWS = 8;
+const RESIZE_FIT_DEBOUNCE_MS = 250;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type TitleHandlerRef = {
@@ -41,6 +43,7 @@ type TitleHandlerRef = {
 
 type TerminalRendererEntry = {
   resizeTimeout: ReturnType<typeof setTimeout> | null;
+  fitTimeout: ReturnType<typeof setTimeout> | null;
   term: Terminal;
   fitAddon: FitAddon;
   serializeAddon: SerializeAddon;
@@ -51,10 +54,11 @@ type TerminalRendererEntry = {
 
 type TerminalSessionEntry = {
   lastReportedSize: { cols: number; rows: number } | null;
-  pendingBackendResize: { cols: number; rows: number } | null;
-  pendingFrontendFit: boolean;
+  fitCount: number;
+  resizeCount: number;
   lastMeasuredHostSize: { width: number; height: number } | null;
   recentWritePreviews: string[];
+  recentNormalizedWritePreviews: string[];
   opencodeFocusReported: boolean;
   outputReadyUnlisten: (() => void) | null;
   terminalClearedUnlisten: (() => void) | null;
@@ -73,11 +77,33 @@ type TerminalSessionEntry = {
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
 
+type TerminalOptionTarget = {
+  options: {
+    scrollOnUserInput?: boolean;
+    scrollOnEraseInDisplay?: boolean;
+  };
+};
+
+function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: string) {
+  term.options.scrollOnEraseInDisplay = provider === "codex";
+}
+
+type TerminalDebugEnv = {
+  DEV?: boolean;
+  VITE_WARDIAN_TERMINAL_DEBUG?: string;
+};
+
+export function shouldExposeTerminalDebug(env: TerminalDebugEnv = import.meta.env) {
+  return env.DEV === true || env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
+}
+
 declare global {
   interface Window {
     __wardianTerminalDebug?: {
       sessionIds: () => string[];
       scrollToTop: (sessionId: string) => boolean;
+      scrollToBottom: (sessionId: string) => boolean;
+      scrollToViewportLine: (sessionId: string, line: number) => boolean;
       snapshot: (sessionId: string) => {
         cols: number;
         rows: number;
@@ -86,27 +112,32 @@ declare global {
         baseY: number;
         bufferLength: number;
         viewportY: number;
+        fitCount: number;
+        resizeCount: number;
+        lastReportedSize: { cols: number; rows: number } | null;
         renderer: {
           cols: number;
           rows: number;
           fontFamily: string;
           fontSize: number | null;
+          webglActive: boolean;
+          webglAttempted: boolean;
           cssCellWidth: number | null;
           cssCellHeight: number | null;
           deviceCellWidth: number | null;
           deviceCellHeight: number | null;
         } | null;
         lines: string[];
+        allLines: string[];
         recentWritePreviews: string[];
+        recentNormalizedWritePreviews: string[];
+        lastStableHomeRedrawPreview: string | null;
       } | null;
     };
   }
 }
 
-const shouldExposeTerminalDebug =
-  import.meta.env.DEV || import.meta.env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
-
-if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
+if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
   Object.defineProperty(window, "__wardianTerminalDebug", {
     configurable: true,
     value: Object.freeze({
@@ -121,6 +152,30 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
         entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
         return true;
       },
+      scrollToBottom: (sessionId: string) => {
+        const entry = terminalSessionMap.get(sessionId);
+        if (!entry) {
+          return false;
+        }
+        (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
+        entry.renderer?.term.scrollToBottom();
+        entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+        return true;
+      },
+      scrollToViewportLine: (sessionId: string, line: number) => {
+        const entry = terminalSessionMap.get(sessionId);
+        if (!entry) {
+          return false;
+        }
+        const buffer = entry.parser.buffer.active;
+        const rendererBuffer = entry.renderer?.term.buffer.active;
+        const maxLine = Math.max(0, buffer.baseY ?? 0, rendererBuffer?.baseY ?? 0);
+        const targetLine = Math.max(0, Math.min(Math.floor(line), maxLine));
+        (entry.parser as unknown as { scrollToLine?: (line: number) => void }).scrollToLine?.(targetLine);
+        entry.renderer?.term.scrollToLine(targetLine);
+        entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+        return true;
+      },
       snapshot: (sessionId: string) => {
         const entry = terminalSessionMap.get(sessionId);
         const term = entry?.parser;
@@ -128,7 +183,7 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
         if (!entry || !term || !buffer) {
           return null;
         }
-        const lineCount = Math.min(term.rows, 24);
+        const lineCount = term.rows;
         const getLine =
           typeof buffer.getLine === "function"
             ? (index: number) => buffer.getLine(index)?.translateToString(true) || ""
@@ -136,6 +191,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
         const lines = Array.from({ length: lineCount }, (_, index) =>
           getLine(index + (buffer.viewportY ?? 0)),
         );
+        const allLineCount = Math.min(buffer.length ?? lineCount, TERMINAL_SCROLLBACK_LINES + term.rows);
+        const allLines = Array.from({ length: allLineCount }, (_, index) => getLine(index));
         const renderer = entry.renderer;
         const rendererTerm = renderer?.term;
         const renderDimensions = (rendererTerm as unknown as {
@@ -158,12 +215,17 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
           baseY: buffer.baseY ?? 0,
           bufferLength: buffer.length ?? term.rows,
           viewportY: buffer.viewportY,
+          fitCount: entry.fitCount,
+          resizeCount: entry.resizeCount,
+          lastReportedSize: entry.lastReportedSize,
           renderer: rendererTerm
             ? {
                 cols: rendererTerm.cols,
                 rows: rendererTerm.rows,
                 fontFamily: String(rendererTerm.options.fontFamily ?? ""),
                 fontSize: nullableNumber(rendererTerm.options.fontSize),
+                webglActive: renderer.webglAddon !== null,
+                webglAttempted: renderer.webglAttempted,
                 cssCellWidth: nullableNumber(renderDimensions?.css?.cell?.width),
                 cssCellHeight: nullableNumber(renderDimensions?.css?.cell?.height),
                 deviceCellWidth: nullableNumber(renderDimensions?.device?.cell?.width),
@@ -171,8 +233,17 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug) {
               }
             : null,
           lines,
-          recentWritePreviews: [...entry.recentWritePreviews],
-        };
+          allLines,
+        recentWritePreviews: [...entry.recentWritePreviews],
+        recentNormalizedWritePreviews: [...entry.recentNormalizedWritePreviews],
+        lastStableHomeRedrawPreview: entry.lastStableHomeRedrawOutput
+          ? entry.lastStableHomeRedrawOutput
+              .replace(/\u001b/g, "\\x1b")
+              .replace(/\r/g, "\\r")
+              .replace(/\n/g, "\\n")
+              .slice(0, 300)
+          : null,
+      };
       },
     }),
   });
@@ -199,13 +270,6 @@ function terminalCursorPositionReply(entry: TerminalSessionEntry) {
   return { row, col };
 }
 
-function readParserLines(entry: TerminalSessionEntry) {
-  const buffer = entry.parser.buffer.active;
-  return Array.from({ length: buffer.length }, (_, index) =>
-    buffer.getLine(index)?.translateToString(true) || "",
-  );
-}
-
 function readParserScrollbackLineSet(entry: TerminalSessionEntry) {
   const buffer = entry.parser.buffer.active;
   const scrollbackLineCount = Math.max(0, buffer.baseY ?? 0);
@@ -216,7 +280,7 @@ function readParserScrollbackLineSet(entry: TerminalSessionEntry) {
   );
 }
 
-function queueOpenCodeCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
+function queueTerminalCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
   if (!data) {
     return;
   }
@@ -265,6 +329,9 @@ function disposeTerminalSession(sessionId: string) {
   if (renderer?.resizeTimeout) {
     clearTimeout(renderer.resizeTimeout);
   }
+  if (renderer?.fitTimeout) {
+    clearTimeout(renderer.fitTimeout);
+  }
   renderer?.serializeAddon.dispose();
   renderer?.webglAddon?.dispose();
   renderer?.term.dispose();
@@ -279,17 +346,18 @@ function clearTerminalSession(sessionId: string) {
   }
 
   entry.recentWritePreviews = [];
+  entry.recentNormalizedWritePreviews = [];
   entry.generation += 1;
   entry.latestTitle = null;
   entry.lastReportedSize = null;
-  entry.pendingBackendResize = null;
-  entry.pendingFrontendFit = false;
+  entry.fitCount = 0;
+  entry.resizeCount = 0;
   entry.lastMeasuredHostSize = null;
   entry.lastHomeRedrawLines = null;
   entry.homeRedrawScrollbackSeen?.clear();
   entry.transientHomeRedrawActive = false;
-  entry.pendingResizeRedrawSuppression = false;
   entry.existingScrollbackLines = undefined;
+  entry.lastStableHomeRedrawOutput = undefined;
 
   const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
   if (typeof parserWithReset.reset === "function") {
@@ -303,39 +371,34 @@ function clearTerminalSession(sessionId: string) {
     entry.renderer.term.reset();
     entry.renderer.term.scrollToBottom();
     entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+    void reportTerminalSize(sessionId, entry, entry.renderer.term.cols, entry.renderer.term.rows);
   }
   
   entry.titleHandlerRef.current?.("");
 }
 
-function isRendererViewingScrollback(entry: TerminalSessionEntry) {
-  const buffer = entry.renderer?.term.buffer.active;
-  return Boolean(buffer && (buffer.viewportY ?? 0) < (buffer.baseY ?? 0));
-}
-
-async function reportTerminalSize(sessionId: string, entry: TerminalSessionEntry, cols: number, rows: number) {
-  if (cols < 10 || rows < 2) {
-    return;
-  }
-
-  if (isRendererViewingScrollback(entry)) {
-    entry.pendingBackendResize = { cols, rows };
+async function reportTerminalSize(
+  sessionId: string,
+  entry: TerminalSessionEntry,
+  cols: number,
+  rows: number,
+  options?: { force?: boolean },
+) {
+  if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) {
     return;
   }
 
   const last = entry.lastReportedSize;
-  if (last && last.cols === cols && last.rows === rows) {
-    entry.pendingBackendResize = null;
+  if (!options?.force && last && last.cols === cols && last.rows === rows) {
     return;
   }
 
-  entry.pendingBackendResize = null;
   entry.lastReportedSize = { cols, rows };
   await invoke("resize_agent_terminal", { sessionId, cols, rows }).catch(() => {});
 }
 
 async function fitTerminalToContainer(
-  _sessionId: string,
+  sessionId: string,
   entry: TerminalSessionEntry,
   container: HTMLDivElement,
   options?: { force?: boolean },
@@ -353,38 +416,32 @@ async function fitTerminalToContainer(
   }
 
   const force = options?.force ?? false;
-  if (!force && isRendererViewingScrollback(entry)) {
-    entry.pendingFrontendFit = true;
-    return;
-  }
 
   const lastMeasured = entry.lastMeasuredHostSize;
   if (!force && lastMeasured && lastMeasured.width === width && lastMeasured.height === height) {
     return;
   }
 
-  entry.pendingFrontendFit = false;
   entry.lastMeasuredHostSize = { width, height };
 
   try {
     const proposedDimensions = renderer.fitAddon.proposeDimensions();
+    entry.fitCount += 1;
     if (!proposedDimensions) {
       return;
     }
-    if (
-      shouldHomeCursorBeforeTransientResize(entry, renderer.term.rows, proposedDimensions.rows)
-    ) {
+    const nextCols = Math.max(MIN_TERMINAL_COLS, proposedDimensions.cols);
+    const nextRows = Math.max(MIN_TERMINAL_ROWS, proposedDimensions.rows);
+    if (shouldHomeCursorBeforeTransientResize(entry, renderer.term.rows, nextRows)) {
       await Promise.all([
         new Promise<void>((resolve) => renderer.term.write("\u001b[H", () => resolve())),
         new Promise<void>((resolve) => entry.parser.write("\u001b[H", () => resolve())),
       ]);
     }
-    if (
-      renderer.term.cols !== proposedDimensions.cols ||
-      renderer.term.rows !== proposedDimensions.rows
-    ) {
-      entry.pendingResizeRedrawSuppression = true;
-      renderer.term.resize(proposedDimensions.cols, proposedDimensions.rows);
+    if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
+      renderer.term.resize(nextCols, nextRows);
+    } else {
+      void reportTerminalSize(sessionId, entry, nextCols, nextRows, { force: true });
     }
   } catch {
     // Ignore fit errors during transient layout churn.
@@ -414,15 +471,13 @@ async function drainPty(sessionId: string) {
           break;
         }
 
-        if (entry.provider === "opencode") {
-          queueOpenCodeCapabilityResponses(sessionId, data, entry);
-        }
+        queueTerminalCapabilityResponses(sessionId, data, entry);
         entry.recentWritePreviews.push(
           data
             .replace(/\u001b/g, "\\x1b")
             .replace(/\r/g, "\\r")
             .replace(/\n/g, "\\n")
-            .slice(0, 200),
+            .slice(0, 2000),
         );
         if (entry.recentWritePreviews.length > 12) {
           entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
@@ -435,25 +490,30 @@ async function drainPty(sessionId: string) {
       }
 
       if (rawChunks.length > 0) {
-        const rawBatch = rawChunks.join("");
-        if (
-          entry.pendingResizeRedrawSuppression &&
-          shouldSuppressDuplicateResizeRedraw(rawBatch, readParserLines(entry))
-        ) {
-          entry.pendingResizeRedrawSuppression = false;
-          continue;
-        }
-        if (rawBatch.includes("\u001b[H")) {
-          entry.pendingResizeRedrawSuppression = false;
-        }
-
         entry.existingScrollbackLines = readParserScrollbackLineSet(entry);
         const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
+        const rendererWasAtBottom = entry.renderer
+          ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
+          : false;
+        entry.recentNormalizedWritePreviews.push(
+          batchedWrite
+            .replace(/\u001b/g, "\\x1b")
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n")
+            .slice(0, 2000),
+        );
+        if (entry.recentNormalizedWritePreviews.length > 12) {
+          entry.recentNormalizedWritePreviews.splice(0, entry.recentNormalizedWritePreviews.length - 12);
+        }
         useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
         entry.existingScrollbackLines = undefined;
         entry.parser.write(batchedWrite);
         if (entry.renderer) {
-          entry.renderer.term.write(batchedWrite, () => {});
+          entry.renderer.term.write(batchedWrite, () => {
+            if (!entry.disposed && rendererWasAtBottom) {
+              entry.renderer?.term.scrollToBottom();
+            }
+          });
         }
       }
     } while (!entry.disposed && entry.drainQueued);
@@ -478,22 +538,29 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   const existing = terminalSessionMap.get(sessionId);
   if (existing) {
     existing.provider = provider;
+    applyProviderTerminalOptions(existing.parser, provider);
+    if (existing.renderer) {
+      applyProviderTerminalOptions(existing.renderer.term, provider);
+    }
     return existing;
   }
 
   const parser = new HeadlessTerminal({
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
+    scrollOnEraseInDisplay: provider === "codex",
   });
+  applyProviderTerminalOptions(parser, provider);
   const parserSerializeAddon = new SerializeAddon();
   parser.loadAddon(parserSerializeAddon);
 
   const entry: TerminalSessionEntry = {
     lastReportedSize: null,
-    pendingBackendResize: null,
-    pendingFrontendFit: false,
+    fitCount: 0,
+    resizeCount: 0,
     lastMeasuredHostSize: null,
     recentWritePreviews: [],
+    recentNormalizedWritePreviews: [],
     opencodeFocusReported: false,
     outputReadyUnlisten: null,
     terminalClearedUnlisten: null,
@@ -511,7 +578,6 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     lastHomeRedrawLines: null,
     homeRedrawScrollbackSeen: new Set(),
     transientHomeRedrawActive: false,
-    pendingResizeRedrawSuppression: false,
   };
 
   terminalSessionMap.set(sessionId, entry);
@@ -554,6 +620,16 @@ function clearRendererTimers(renderer: TerminalRendererEntry) {
     clearTimeout(renderer.resizeTimeout);
     renderer.resizeTimeout = null;
   }
+  if (renderer.fitTimeout) {
+    clearTimeout(renderer.fitTimeout);
+    renderer.fitTimeout = null;
+  }
+}
+
+function resizeParser(entry: TerminalSessionEntry, cols: number, rows: number) {
+  if (entry.parser.cols !== cols || entry.parser.rows !== rows) {
+    entry.parser.resize(cols, rows);
+  }
 }
 
 function applyTerminalAppearance(
@@ -580,6 +656,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     convertEol: false,
     disableStdin: false,
     reflowCursorLine: false,
+    scrollOnEraseInDisplay: entry.provider === "codex",
     windowsPty: IS_WINDOWS ? { backend: "conpty", buildNumber: 22621 } : undefined,
     windowOptions: {
       getCellSizePixels: true,
@@ -589,6 +666,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   });
   if (term.options) {
     term.options.scrollOnUserInput = false;
+    applyProviderTerminalOptions(term, entry.provider);
   }
 
   const fitAddon = new FitAddon();
@@ -608,6 +686,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
 
   const renderer: TerminalRendererEntry = {
     resizeTimeout: null,
+    fitTimeout: null,
     term,
     fitAddon,
     serializeAddon,
@@ -640,37 +719,23 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   });
 
   term.onResize((size) => {
-    if (entry.parser.cols !== size.cols || entry.parser.rows !== size.rows) {
-      entry.parser.resize(size.cols, size.rows);
-    }
+    entry.resizeCount += 1;
+    resizeParser(entry, size.cols, size.rows);
+    void reportTerminalSize(sessionId, entry, size.cols, size.rows);
     if (renderer.resizeTimeout) {
       clearTimeout(renderer.resizeTimeout);
+      renderer.resizeTimeout = null;
     }
     renderer.resizeTimeout = setTimeout(() => {
       void reportTerminalSize(sessionId, entry, size.cols, size.rows);
     }, 120);
   });
 
-  term.onScroll(() => {
-    if (entry.pendingFrontendFit && !isRendererViewingScrollback(entry)) {
-      const container = renderer.host.parentElement as HTMLDivElement | null;
-      if (container) {
-        void fitTerminalToContainer(sessionId, entry, container, { force: true });
-      }
-    }
-
-    const pendingResize = entry.pendingBackendResize;
-    if (!pendingResize || isRendererViewingScrollback(entry)) {
-      return;
-    }
-    void reportTerminalSize(sessionId, entry, pendingResize.cols, pendingResize.rows);
-  });
-
   return renderer;
 }
 
 function activateWebglRenderer(renderer: TerminalRendererEntry) {
-  if (renderer.webglAttempted) {
+  if (renderer.webglAttempted || !renderer.term.element) {
     return;
   }
 
@@ -686,6 +751,7 @@ function activateWebglRenderer(renderer: TerminalRendererEntry) {
     });
     renderer.term.loadAddon(webglAddon);
     renderer.webglAddon = webglAddon;
+    renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   } catch (error) {
     renderer.webglAddon = null;
     console.warn("WebGL terminal renderer unavailable; using DOM renderer.", error);
@@ -734,6 +800,7 @@ function mountRenderer(
     activateWebglRenderer(renderer);
   }
   attachRendererHost(session, container);
+  activateWebglRenderer(renderer);
 
   return renderer;
 }
@@ -817,6 +884,10 @@ export const AgentTerminal = memo(function AgentTerminal({
 
         entry = session;
         session.provider = provider;
+        applyProviderTerminalOptions(session.parser, provider);
+        if (session.renderer) {
+          applyProviderTerminalOptions(session.renderer.term, provider);
+        }
         session.titleHandlerRef.current = onTitleChangeRef.current;
         session.currentTheme = termTheme;
 
@@ -853,8 +924,14 @@ export const AgentTerminal = memo(function AgentTerminal({
             return;
           }
 
-          checkSizing();
-          requestAnimationFrame(() => performFit());
+          if (renderer.fitTimeout) {
+            clearTimeout(renderer.fitTimeout);
+          }
+          renderer.fitTimeout = setTimeout(() => {
+            renderer.fitTimeout = null;
+            checkSizing();
+            requestAnimationFrame(() => performFit());
+          }, RESIZE_FIT_DEBOUNCE_MS);
         });
         resizeObserver.observe(terminalRef.current);
       } catch (error) {

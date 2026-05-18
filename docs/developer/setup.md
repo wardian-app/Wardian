@@ -22,6 +22,17 @@ cargo install cargo-llvm-cov --locked
 
 This generates `coverage/rust-lcov.info` which is uploaded to Codecov in CI. The `--locked` flag ensures the version matches CI.
 
+### Agent Provider CLIs
+
+Install and authenticate at least one supported provider CLI before running real agents. Native and real-provider E2E work may require the specific provider under test.
+
+| Provider | GitHub Project | Common CLI Command |
+|---|---|---|
+| Gemini CLI | [google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli) | `gemini` |
+| Claude Code | [anthropics/claude-code](https://github.com/anthropics/claude-code) | `claude` |
+| Codex | [openai/codex](https://github.com/openai/codex) | `codex` |
+| OpenCode | [anomalyco/opencode](https://github.com/anomalyco/opencode) | `opencode` |
+
 ## Optional Tools
 
 ### Playwright browsers
