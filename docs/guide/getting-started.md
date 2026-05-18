@@ -2,12 +2,16 @@
 
 Wardian is an integrated habitat for managing multiple autonomous agents. This guide will help you spawn your first agent, monitor completed work in the Queue, and understand how the `wardian` CLI lets agents coordinate and control Wardian from inside their own terminals.
 
+If any first-run step fails, use [First-Run Troubleshooting](./first-run-troubleshooting.md) to recover without switching to developer-only diagnostics.
+
 ## 1. Prerequisites
 - **Node.js** (v18+)
 - **Rust** (v1.75+)
 - **At least one supported provider CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`@google/gemini-cli`), [Claude Code](https://github.com/anthropics/claude-code) (`@anthropic-ai/claude-code`), [Codex](https://github.com/openai/codex) (`@openai/codex`), or [OpenCode](https://github.com/anomalyco/opencode) (`opencode` command, commonly installed from `opencode-ai`).
 
 Authenticate each provider in a normal terminal before spawning it through Wardian.
+
+If Wardian will not launch or your operating system blocks the app, see [App Launch Warnings](./first-run-troubleshooting.md#app-launch-warnings). If a provider is not detected after installation, see [Provider Is Not Detected](./first-run-troubleshooting.md#provider-is-not-detected).
 
 ## 2. Understanding Blueprints
 Before spawning an agent, you must understand **Classes**. A Class is a "Blueprint" that defines an agent's base instructions and capabilities.
@@ -26,6 +30,8 @@ Before spawning an agent, you must understand **Classes**. A Class is a "Bluepri
 5. Click **Spawn Instance**.
 6. Your new agent will appear in the **Right Sidebar (Roster)** and automatically take up a slot in the **Grid View**.
 
+If the agent terminal stays blank, exits immediately, or asks for provider authentication, use the [terminal startup checklist](./first-run-troubleshooting.md#terminal-does-not-start).
+
 ## 4. Basic Agent Management
 From the **Roster (Right Sidebar)**, you can monitor and control your agents:
 - **Status Lights**: 
@@ -35,9 +41,13 @@ From the **Roster (Right Sidebar)**, you can monitor and control your agents:
     - **Red**: Error (crashed or encountered a fatal bug).
 - **Control Icons**: Hover over an agent in the Roster to reveal icons for **Pause**, **Restart**, or **Delete**.
 
+If the first agent remains stuck in Processing, switches to Off, or shows Action Required, see [Frozen, Off, or Action-Required Agents](./first-run-troubleshooting.md#frozen-off-or-action-required-agents).
+
 ## 5. Review Completed Work in the Queue
 
 Click **Queue** in the top bar to review completed agent tasks and workflow runs. Wardian adds unread items when an active agent settles back to Idle, or when a workflow reports completion or failure. Use the unread badge to spot new work, expand long summaries when needed, mark items read after triage, and clear read items when they are no longer useful.
+
+If Queue is empty after the first spawn, see [Queue Looks Empty](./first-run-troubleshooting.md#queue-looks-empty) before assuming the run failed.
 
 ## 6. Understand the Wardian CLI
 
@@ -50,7 +60,9 @@ wardian send --file prompt.md --to reviewer-a1 --wait-until idle --timeout 10m
 wardian workflow list
 ```
 
-Live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, `workflow run`, and `workflow stop` require the desktop app to be running for the same `WARDIAN_HOME`.
+Live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, `workflow run`, and `workflow stop` require the desktop app to be running.
+
+If your terminal cannot find `wardian`, or CLI status does not match the app, see [Wardian CLI Is Not Visible](./first-run-troubleshooting.md#wardian-cli-is-not-visible).
 
 ## 7. Interacting with the Grid
 Click **GRID** in the top bar to see all active agents in a high-density terminal grid.
@@ -60,6 +72,7 @@ Click **GRID** in the top bar to see all active agents in a high-density termina
 
 ## Next Steps
 - Learn how to manage reusable prompts in the [Library System](./library.md).
+- Recover from first-run launch, provider, terminal, Queue, and CLI failures in [First-Run Troubleshooting](./first-run-troubleshooting.md).
 - Browse your agent's local files in the [Explorer](./explorer.md).
 - Coordinate multi-agent instructions in the [Command Panel](./command-panel.md).
 - Let agents and automation control Wardian with the [Wardian CLI](./cli.md).
