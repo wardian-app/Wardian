@@ -1316,6 +1316,14 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Result<(), String> {
+    if config.is_off {
+        return Ok(());
+    }
+
+    prepare_resume_config(config)
+}
+
 fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
@@ -2649,7 +2657,8 @@ mod tests {
         collect_agent_worktrees, disable_worktree_config, enable_worktree_config,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        persisted_resume_session_for_provider, prepare_clear_config,
+        prepare_restored_config_for_spawn, prepare_resume_config,
         promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
@@ -4809,6 +4818,45 @@ mod tests {
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"gemini-session".to_string()));
         assert!(!args.contains(&"--session-id".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn restored_gemini_startup_config_uses_resume_spawn_args() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: false,
+            ..Default::default()
+        };
+
+        prepare_restored_config_for_spawn(&mut config).expect("prepare restored config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn restored_off_gemini_startup_config_stays_off() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_restored_config_for_spawn(&mut config).expect("prepare restored config");
+
+        assert!(config.is_off);
+        assert_eq!(config.resume_session, None);
         std::env::remove_var("WARDIAN_HOME");
     }
 
