@@ -53,9 +53,16 @@ where
         .map_err(|err| format!("Failed to create {}: {err}", target_dir.display()))?;
 
     let should_copy_binary = binary_needs_update(&source, &target)?;
-    let should_write_launcher = launcher_needs_update(&launcher);
+    let should_write_launcher = launcher_needs_update(&launcher, &launcher_contents());
+    #[cfg(windows)]
+    let posix_launcher = target_dir.join("wardian");
+    #[cfg(windows)]
+    let should_write_posix_launcher =
+        launcher_needs_update(&posix_launcher, &windows_posix_launcher_contents());
+    #[cfg(not(windows))]
+    let should_write_posix_launcher = false;
 
-    let outcome = if should_copy_binary || should_write_launcher {
+    let outcome = if should_copy_binary || should_write_launcher || should_write_posix_launcher {
         if should_copy_binary {
             std::fs::copy(&source, &target).map_err(|err| {
                 format!(
@@ -69,6 +76,11 @@ where
 
         write_launcher(&launcher)?;
         make_executable(&launcher)?;
+        #[cfg(windows)]
+        {
+            write_launcher_contents(&posix_launcher, &windows_posix_launcher_contents())?;
+            make_executable(&posix_launcher)?;
+        }
         InstallOutcome::Installed(launcher)
     } else {
         InstallOutcome::AlreadyInstalled(launcher)
@@ -92,9 +104,9 @@ fn bundled_cli_source_path(resources_dir: &Path) -> PathBuf {
         .join(bundled_cli_file_name())
 }
 
-fn launcher_needs_update(path: &Path) -> bool {
+fn launcher_needs_update(path: &Path, expected_contents: &str) -> bool {
     match std::fs::read_to_string(path) {
-        Ok(existing) => normalize_line_endings(&existing) != launcher_contents(),
+        Ok(existing) => normalize_line_endings(&existing) != expected_contents,
         Err(_) => true,
     }
 }
@@ -122,6 +134,11 @@ fn write_launcher(path: &Path) -> Result<(), String> {
         .map_err(|err| format!("Failed to write CLI launcher {}: {err}", path.display()))
 }
 
+fn write_launcher_contents(path: &Path, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents)
+        .map_err(|err| format!("Failed to write CLI launcher {}: {err}", path.display()))
+}
+
 fn normalize_line_endings(value: &str) -> String {
     value.replace("\r\n", "\n")
 }
@@ -132,6 +149,11 @@ fn launcher_contents() -> String {
     } else {
         "#!/usr/bin/env sh\nexec \"$(dirname \"$0\")/wardian-cli\" \"$@\"\n".to_string()
     }
+}
+
+#[cfg(windows)]
+fn windows_posix_launcher_contents() -> String {
+    "#!/usr/bin/env sh\nexec \"$(dirname \"$0\")/wardian-cli.exe\" \"$@\"\n".to_string()
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -153,6 +175,23 @@ fn path_contains_dir(path_value: &str, dir: &Path) -> bool {
     path_value
         .split(';')
         .any(|segment| !segment.trim().is_empty() && normalize_windows_path_text(segment) == target)
+}
+
+#[cfg(windows)]
+pub(crate) fn child_path_with_cli_bin(current_path: Option<&str>) -> Option<String> {
+    let bin_dir = wardian_core::paths::cli_bin_dir()?;
+    let bin_value = bin_dir.display().to_string();
+    let current_path = current_path.unwrap_or("");
+
+    if path_contains_dir(current_path, &bin_dir) {
+        return Some(current_path.to_string());
+    }
+
+    if current_path.trim().is_empty() {
+        Some(bin_value)
+    } else {
+        Some(format!("{bin_value};{current_path}"))
+    }
 }
 
 #[cfg(unix)]
@@ -425,6 +464,12 @@ mod tests {
             launcher_contents().replace('\n', "\r\n"),
         )
         .unwrap();
+        #[cfg(windows)]
+        std::fs::write(
+            target_dir.join("wardian"),
+            windows_posix_launcher_contents(),
+        )
+        .unwrap();
         std::env::set_var("WARDIAN_HOME", home.path());
 
         let outcome =
@@ -484,6 +529,49 @@ mod tests {
         let value = r"C:\Windows\System32;c:\users\alice\.WARDIAN\BIN";
 
         assert!(path_contains_dir(value, &dir));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_installer_writes_cmd_and_posix_launchers() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = TempDir::new().unwrap();
+        let resources = TempDir::new().unwrap();
+        let source_dir = resources.path().join("bin");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        install_cli_from_resources_with_path_update(resources.path(), |_bin_dir| Ok(())).unwrap();
+
+        let target_dir = home.path().join("bin");
+        let cmd_launcher = std::fs::read_to_string(target_dir.join("wardian.cmd")).unwrap();
+        let posix_launcher = std::fs::read_to_string(target_dir.join("wardian")).unwrap();
+
+        assert!(cmd_launcher.contains("wardian-cli.exe"));
+        assert!(posix_launcher.contains("#!/usr/bin/env sh"));
+        assert!(posix_launcher.contains("wardian-cli.exe"));
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_path_prepends_cli_bin_once() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = TempDir::new().unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+        let bin_dir = home.path().join("bin");
+        let existing = r"C:\Windows\System32".to_string();
+
+        let first = child_path_with_cli_bin(Some(&existing)).unwrap();
+        let second = child_path_with_cli_bin(Some(&first)).unwrap();
+
+        assert!(first.starts_with(&bin_dir.display().to_string()));
+        assert_eq!(first.matches(&bin_dir.display().to_string()).count(), 1);
+        assert_eq!(second, first);
+
+        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[cfg(unix)]

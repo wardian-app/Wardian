@@ -1,8 +1,10 @@
-# Spec [ID]: [Title]
+# [Title]
 
 - **Status:** Proposed | Implemented | Deprecated
 - **Date:** [YYYY-MM-DD]
 - **Decider:** [Role/User]
+
+Filename: `YYYY-MM-DD-short-slug.md`
 
 ## Context and Problem Statement
 

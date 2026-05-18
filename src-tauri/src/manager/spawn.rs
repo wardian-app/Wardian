@@ -250,6 +250,7 @@ pub async fn spawn_agent(
     }
     cmd.cwd(&provider_cwd);
     apply_terminal_identity_env(&mut cmd);
+    super::apply_managed_cli_path_to_pty(&mut cmd);
     cmd.env("WARDIAN_SESSION_ID", &config.session_id);
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
