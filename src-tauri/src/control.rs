@@ -895,13 +895,30 @@ async fn wait_for_terminal_output(
 }
 
 fn codex_output_has_ready_prompt(output: &str) -> bool {
-    strip_ansi_controls(output)
-        .replace('\r', "\n")
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .is_some_and(|line| line.starts_with('›'))
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    let mut trailing_metadata_lines = 0usize;
+    for line in cleaned.lines().rev().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('›') {
+            return true;
+        }
+        if trailing_metadata_lines < 3 && codex_ready_prompt_trailing_metadata_line(line) {
+            trailing_metadata_lines += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn codex_ready_prompt_trailing_metadata_line(line: &str) -> bool {
+    if line.contains('•') {
+        return false;
+    }
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("gpt-") && (line.contains('·') || lower.contains("context"))
 }
 
 async fn mark_delivered_agents_prompt_started(
@@ -2088,6 +2105,15 @@ mod tests {
         assert!(codex_output_has_ready_prompt(
             "\r\n›\u{1b}[22m Write tests for @filename"
         ));
+        assert!(codex_output_has_ready_prompt(
+            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · D:\\Trading\\trident\r\n"
+        ));
+        assert!(codex_output_has_ready_prompt(
+            "\r\n› Working on test coverage\r\n"
+        ));
+        assert!(codex_output_has_ready_prompt(
+            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · D:\\Processing\\trident\r\n"
+        ));
         assert!(!codex_output_has_ready_prompt("Booting MCP server"));
     }
 
@@ -2095,6 +2121,21 @@ mod tests {
     fn codex_ready_prompt_ignores_stale_prompt_marker_when_latest_screen_is_busy() {
         assert!(!codex_output_has_ready_prompt(
             "\r\n› Previous prompt\r\nProcessing request\r\nWorking...\r\n"
+        ));
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\nThinking about the request\r\n"
+        ));
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\nFinal response: complete\r\n"
+        ));
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\nFinal response: Codex context is initialized\r\n"
+        ));
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\nFinal response: gpt-5 · context window\r\n"
+        ));
+        assert!(!codex_output_has_ready_prompt(
+            "\r\n› Previous prompt\r\n  gpt-5.5 high · Context 100% left · D:\\Development\\Wardian• Working...\r\n"
         ));
     }
 
