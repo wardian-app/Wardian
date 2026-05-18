@@ -178,6 +178,15 @@ pub fn run() {
                                         &config.agent_class,
                                         &config.session_id,
                                     ));
+                                if let Err(error) =
+                                    commands::agent::prepare_restored_config_for_spawn(&mut config)
+                                {
+                                    eprintln!(
+                                        "Failed to prepare restored agent {}: {}",
+                                        config.session_id, error
+                                    );
+                                    continue;
+                                }
 
                                 let (last_status, last_pid, last_born) = db_status_map
                                     .get(&config.session_id)
