@@ -38,6 +38,7 @@ This folder contains user guides, workflow references, developer architecture no
 ## Developer Guides
 
 - [Developer Index](./developer/index.md)
+- [Documentation Maintenance](./developer/docs-maintenance.md)
 - [Public Docs Site](./developer/docs-site.md)
 - [Architecture](./developer/architecture.md)
 - [State Management](./developer/state-management.md)
