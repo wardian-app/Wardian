@@ -2,14 +2,27 @@
 
 In Wardian, a **Class** is more than just a label—it is a functional blueprint that defines the core identity, intelligence, and equipment of your agents.
 
-## 🏛️ The Class Library
-Class management has been relocated from the sidebar to the **Library** view to provide a spacious, professional editor for your blueprints.
+Use Class Management when you want future agents to start with consistent instructions, provider-ready skills, and a recognizable role.
 
-1. Click **LIBRARY** in the top bar.
-2. Select the **Classes** tab.
-3. Browse the list of available classes or click **Create New Class**.
+![Wardian Classes panel showing class creation, available classes, and class-level skill management](../assets/screenshots/classes/class-management.png)
 
-## 🔧 Configuring a Blueprint
+## When to Use It
+
+- Create a repeatable role such as `Coder`, `Reviewer`, or `Researcher`.
+- Tune an existing role before spawning more agents from it.
+- Assign skills at the class level so every new instance starts with the same capabilities.
+
+## Basic Workflow
+
+Class management lives in the **Classes** tab on the left control rail.
+
+1. Click the **Classes** icon in the left control rail.
+2. Browse the list of available classes or create a new class.
+3. Enter the class name, description, and instructions.
+4. Assign class-level skills from the class card.
+5. Spawn a new agent from the class in the left **Agent Configuration** tab.
+
+## Configuring a Blueprint
 
 ### 1. Instruction Set (AGENTS.md)
 Each class is governed by a markdown file. This is where you define:
@@ -23,11 +36,24 @@ You can pre-load a class with specific modular skills.
 - This ensures your `Coder` class always starts with `github-cli` and `typescript-tools` ready to go.
 
 ### 3. Registry Persistence
-All your custom classes are stored in `~/.wardian/classes.json`. This single file is the source of truth for the Rust backend when spawning new sessions.
+All your custom classes are stored in `<wardian-home>/classes.json`. This single file is the source of truth for the Rust backend when spawning new sessions.
 
-## 🚀 Spawning from a Class
+## Spawning from a Class
 To use your blueprint:
 1. Navigate to the **Agent Configuration** tab in the Left Sidebar.
 2. Select your class from the dropdown.
-3. Click **Spawn Instance**.
-The agent will inherit all instructions and skills defined in the Library for that class.
+3. Click **Initialize**.
+The agent will inherit the selected class instructions and class-level skill assignments.
+
+## Important Limits
+
+- Editing a class changes future spawns; it does not rewrite instructions inside already-running provider sessions.
+- Class skills are adapted to each provider's discovery model. Check [Provider Runtimes](../providers.md) when a provider does not expose a skill as expected.
+- Keep class instructions durable and general. Put task-specific instructions in prompts, broadcasts, workflows, or direct terminal messages.
+
+## Related Links
+
+- [Getting Started](./getting-started.md)
+- [Library](./library.md)
+- [Grid](./grid.md)
+- [Provider Runtimes](../providers.md)

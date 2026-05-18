@@ -11,9 +11,9 @@ Authenticate each provider in a normal terminal before spawning it through Wardi
 
 ## 2. Understanding Blueprints
 Before spawning an agent, you must understand **Classes**. A Class is a "Blueprint" that defines an agent's base instructions and capabilities.
-1. Click **LIBRARY** in the top bar view-switcher.
-2. Select the **Classes** tab.
-3. Browse the default classes (e.g., `Architect`, `Coder`, `Researcher`). Each class has its own `AGENTS.md` instruction set.
+1. Click the **Classes** icon in the left control rail.
+2. Browse the default classes (e.g., `Architect`, `Coder`, `Researcher`).
+3. Open a class card when you need to inspect its `AGENTS.md` instruction set or assigned skills.
 
 ## 3. Spawning Your First Agent
 
@@ -23,7 +23,7 @@ Before spawning an agent, you must understand **Classes**. A Class is a "Bluepri
 2. Select an **Agent Class** from the dropdown.
 3. Choose the provider CLI that should run the agent: Gemini, Claude, Codex, or OpenCode.
 4. Give your agent a unique name (e.g., "Main Researcher").
-5. Click **Spawn Instance**.
+5. Click **Initialize**.
 6. Your new agent will appear in the **Right Sidebar (Roster)** and automatically take up a slot in the **Grid View**.
 
 ## 4. Basic Agent Management

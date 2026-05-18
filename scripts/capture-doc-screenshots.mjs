@@ -10,6 +10,7 @@ const explicitBaseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL;
 const screenshotPort = Number.parseInt(process.env.WARDIAN_DOCS_SCREENSHOT_PORT ?? "1420", 10);
 const baseUrl = explicitBaseUrl ?? `http://127.0.0.1:${screenshotPort}`;
 const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
+const fixedNow = 1778590800000;
 
 const agents = [
   {
@@ -115,7 +116,7 @@ const directoryTree = {
 };
 
 const gitStatus = {
-  branch: "docs/core-feature-screenshots",
+  branch: "docs/task-oriented-feature-guides",
   ahead: 1,
   behind: 0,
   files: [
@@ -201,6 +202,29 @@ const workflows = [
         position: { x: 420, y: 160 },
       },
     ],
+  },
+];
+
+const queueItems = [
+  {
+    id: "docs-agent-completion",
+    type: "agent_completed",
+    timestamp: fixedNow - 1000 * 60 * 42,
+    read: true,
+    agent_session_id: "docs-codex",
+    agent_name: "Docs-Codex",
+    summary: "Updated the guide structure and verified the public docs build.",
+  },
+  {
+    id: "docs-workflow-completion",
+    type: "workflow_completed",
+    timestamp: fixedNow - 1000 * 60 * 95,
+    read: true,
+    workflow_id: "docs-workflow",
+    workflow_run_id: "docs-run-1",
+    workflow_name: "Docs Screenshot Refresh",
+    status: "completed",
+    summary: "Captured feature screenshots for the guide refresh.",
   },
 ];
 
@@ -290,8 +314,7 @@ async function capture(page, relativePath, locator) {
 }
 
 async function installTauriDocsMock(page) {
-  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory }) => {
-    const fixedNow = 1778590800000;
+  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, fixedNow, repoRoot, directoryTree, gitStatus, gitHistory }) => {
     const RealDate = Date;
 
     class FixedDate extends RealDate {
@@ -378,7 +401,7 @@ async function installTauriDocsMock(page) {
             "docs-reviewer": "2026-05-12T10:16:00.000Z",
           };
         }
-        if (command === "load_queue_items") return [];
+        if (command === "load_queue_items") return queueItems;
         if (command === "get_explorer_root") return repoRoot;
         if (command === "get_directory_tree") return directoryTree[args.path] || [];
         if (command === "read_file_preview") {
@@ -472,7 +495,7 @@ async function installTauriDocsMock(page) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory });
+  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, fixedNow, repoRoot, directoryTree, gitStatus, gitHistory });
 }
 
 async function main() {
@@ -516,6 +539,11 @@ async function main() {
     await page.waitForTimeout(700);
     await capture(page, "dashboard/system-summary.png");
 
+    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await page.getByText("Workflow completed").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "queue/queue-view.png");
+
     await page.evaluate(() => {
       document.documentElement.style.setProperty("--sidebar-content-width", "360px");
     });
@@ -527,6 +555,11 @@ async function main() {
     await page.locator('[data-testid="spawn-agent-name"]').waitFor({ timeout: 10_000 });
     await page.locator('[data-testid="spawn-workspace-path"]').blur();
     await capture(page, "spawn-agent/spawn-form.png");
+
+    await page.locator('[data-testid="sidebar-tab-classes"]').click();
+    await page.getByRole("heading", { name: "Classes", exact: true }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "classes/class-management.png", page.locator('[data-testid="class-manager-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
@@ -563,7 +596,7 @@ async function main() {
     await capture(page, "explorer/workspace-tree.png", page.locator('[data-testid="explorer-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-git"]').click();
-    await page.getByText("docs/core-feature-screenshots").waitFor({ timeout: 10_000 });
+    await page.getByText("docs/task-oriented-feature-guides").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
 

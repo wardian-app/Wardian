@@ -2,7 +2,25 @@
 
 Wardian's Source Control tab lets you work with Git directly from the sidebar for the currently selected agent workspace.
 
+Use it when an agent has changed repository files and you want to inspect, stage, commit, sync, or isolate those changes without leaving the app.
+
 ![Source Control panel showing branch state, commit box, staged changes, unstaged changes, and history](../assets/screenshots/source-control/status-panel.png)
+
+## When to Use It
+
+- Review agent changes after a [Queue](./queue.md) item or terminal report.
+- Stage and commit a small patch from the selected workspace.
+- Check branch divergence before pushing or pulling.
+- Put an agent into worktree mode when it needs isolated branch work.
+
+## Basic Workflow
+
+1. Select exactly one agent in the right roster.
+2. Open the **Source Control** tab in the left sidebar.
+3. Review the branch bar and file sections.
+4. Open diffs before staging files.
+5. Stage intended changes, write a commit message, and commit.
+6. Pull or push only after checking local branch state and credentials.
 
 ## Scope and Context
 
@@ -80,8 +98,9 @@ wardian agent worktree disable <agent-name-or-id>
 - Removing a worktree assignment does not delete the physical worktree immediately; the provider may still have files or cwd handles open during the transition.
 - If pull/push fails, check local credentials and remote permissions in your terminal environment.
 
-## Related References
+## Related Links
 
 - [Explorer](./explorer.md)
 - [Watchlists](./watchlists.md)
+- [Queue](./queue.md)
 - [2026-04-17 Source Control Panel](../specs/2026-04-17-source-control-panel.md)
