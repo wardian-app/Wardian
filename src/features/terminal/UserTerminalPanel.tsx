@@ -7,6 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { FolderOpen, RefreshCcw, X } from "lucide-react";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
+import { DocsLink } from "../../components/DocsLink";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -297,6 +298,12 @@ export function UserTerminalPanel({
         )}
         {exited && !statusMessage && <span className="text-xs text-muted">Shell exited</span>}
         <div className="ml-auto flex items-center gap-1">
+          <DocsLink
+            path="/guide/cli"
+            className="mr-1 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-semibold text-muted-neutral hover:bg-wardian-card-bg-muted hover:text-bright-neutral transition-colors"
+          >
+            CLI guide
+          </DocsLink>
           <button
             type="button"
             className="p-1.5 rounded-md text-muted-neutral hover:text-bright-neutral hover:bg-wardian-card-bg-muted disabled:opacity-40 disabled:cursor-not-allowed"

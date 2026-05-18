@@ -27,6 +27,25 @@ describe("SpawnAgentPanel", () => {
     expect(providerSelect).toHaveTextContent("OpenCode");
   });
 
+  it("shows dismissible provider and first-run help before spawning", () => {
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("First agent checklist")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /first-run guide/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/getting-started",
+    );
+    expect(screen.getByRole("link", { name: /provider runtimes/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/providers",
+    );
+  });
+
   it("sets the workspace path from the native folder picker", async () => {
     openMock.mockResolvedValue("C:\\projects\\picked-app");
     invokeMock.mockResolvedValue(true);

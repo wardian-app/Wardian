@@ -86,6 +86,11 @@ describe("UserTerminalPanel", () => {
         rows: expect.any(Number),
       }));
     });
+
+    expect(screen.getByRole("link", { name: /cli guide/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/cli",
+    );
   });
 
   it("disables workspace jump when no single workspace is selected", () => {
