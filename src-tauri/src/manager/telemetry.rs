@@ -4,6 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use wardian_core::models::{AgentTelemetry, AppTelemetry};
 
+use crate::providers::transcript::extract_transcript_message;
+
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
 use super::codex::{
     codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log,
@@ -11,8 +13,9 @@ use super::codex::{
 };
 use super::display_log_path;
 use super::opencode::{
-    apply_opencode_log_metrics, opencode_log_dirs, opencode_log_path_in,
-    opencode_session_diff_path, opencode_should_fallback_to_idle,
+    apply_opencode_log_metrics, opencode_extract_created_session_id, opencode_last_assistant_text,
+    opencode_log_dirs, opencode_log_path_after, opencode_log_path_in, opencode_session_diff_path,
+    opencode_should_fallback_to_idle,
 };
 
 fn normalize_cpu_usage(raw_cpu_usage: f32, logical_cpu_count: usize) -> f32 {
@@ -206,6 +209,103 @@ fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_init
     set_snapshot_status(snap, next_status);
 }
 
+fn record_opencode_assistant_text(snap: &AgentSnapshot, session_id: &str, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    if let Ok(mut watch_state) = snap.watch_state.lock() {
+        let latest = watch_state
+            .snapshot_since(None, Some(4096))
+            .ok()
+            .map(|snapshot| snapshot.transcript.latest_text)
+            .unwrap_or_default();
+        if latest == text {
+            return;
+        }
+        watch_state.push_output(format!("{text}\r\n").as_bytes());
+        watch_state.push_transcript(wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: text.to_string(),
+            provider: "opencode".to_string(),
+            turn_id: Some(session_id.to_string()),
+            source: Some("opencode_db".to_string()),
+        });
+    }
+
+    if let Ok(mut stamp) = snap.last_output_at.lock() {
+        *stamp = Some(std::time::SystemTime::now());
+    }
+}
+
+fn record_latest_opencode_assistant_text(snap: &AgentSnapshot, session_id: &str) {
+    match opencode_last_assistant_text(session_id) {
+        Ok(Some(text)) => record_opencode_assistant_text(snap, session_id, &text),
+        Ok(None) => {}
+        Err(error) => crate::utils::logging::log_debug(&format!(
+            "[Wardian] Failed to read OpenCode assistant text for {session_id}: {error}"
+        )),
+    }
+}
+
+fn latest_gemini_assistant_message(
+    content: &str,
+) -> Option<wardian_core::control::WatchTranscriptMessage> {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(messages) = parsed.get("messages").and_then(|value| value.as_array()) {
+            return messages
+                .iter()
+                .rev()
+                .find_map(|message| extract_transcript_message("gemini", &message.to_string()));
+        }
+    }
+
+    content
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .find_map(|line| extract_transcript_message("gemini", line))
+}
+
+fn record_latest_gemini_assistant_text(snap: &AgentSnapshot, content: &str) {
+    let Some(message) = latest_gemini_assistant_message(content) else {
+        return;
+    };
+
+    if let Ok(mut watch_state) = snap.watch_state.lock() {
+        let latest = watch_state
+            .snapshot_since(None, Some(4096))
+            .ok()
+            .and_then(|snapshot| snapshot.transcript.messages.last().cloned());
+        if latest.as_ref().is_some_and(|latest| {
+            latest.provider == message.provider
+                && latest.turn_id == message.turn_id
+                && latest.text == message.text
+        }) {
+            return;
+        }
+        watch_state.push_transcript(message);
+    }
+
+    if let Ok(mut stamp) = snap.last_output_at.lock() {
+        *stamp = Some(std::time::SystemTime::now());
+    }
+}
+
+fn timestamp_to_system_time(timestamp: Option<&str>) -> Option<std::time::SystemTime> {
+    let timestamp = timestamp?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let millis = parsed.timestamp_millis();
+    if millis < 0 {
+        return None;
+    }
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64))
+}
+
 fn collect_descendant_pids(
     pid: u32,
     children_map: &HashMap<u32, Vec<u32>>,
@@ -382,6 +482,26 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
                         discovered_log = Some(path);
                         break;
+                    }
+                }
+                if discovered_log.is_none()
+                    && snap
+                        .resume_session
+                        .as_deref()
+                        .is_none_or(|value| !value.starts_with("ses_"))
+                {
+                    let spawn_time = snap
+                        .init_timestamp
+                        .lock()
+                        .ok()
+                        .and_then(|timestamp| timestamp_to_system_time(timestamp.as_deref()));
+                    if let Some(spawn_time) = spawn_time {
+                        for dir in &log_dirs {
+                            if let Some(path) = opencode_log_path_after(dir, spawn_time) {
+                                discovered_log = Some(path);
+                                break;
+                            }
+                        }
                     }
                 }
                 *log_path_lock = discovered_log
@@ -586,13 +706,22 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             }
                             "opencode" => {
                                 let mut status = snap.current_status.lock().unwrap().clone();
+                                let effective_session_id =
+                                    opencode_extract_created_session_id(path)
+                                        .unwrap_or_else(|| opencode_session_id.to_string());
                                 apply_opencode_log_metrics(
                                     &content,
-                                    opencode_session_id,
+                                    &effective_session_id,
                                     &mut q_count,
                                     &mut i_ts,
                                     &mut status,
                                 );
+                                if wardian_core::identity::normalize_status(&status) == "idle" {
+                                    record_latest_opencode_assistant_text(
+                                        snap,
+                                        &effective_session_id,
+                                    );
+                                }
                                 set_snapshot_status_from_log(snap, &status, is_initial_log_replay);
                             }
                             _ => {
@@ -608,6 +737,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     if let Some(start_time) = metrics.init_timestamp {
                                         i_ts = Some(start_time);
                                     }
+                                }
+                                if snap.provider == "gemini" {
+                                    record_latest_gemini_assistant_text(snap, &content);
                                 }
                             }
                         }
@@ -866,6 +998,55 @@ mod tests {
                 .get("status")
                 .and_then(|value| value.as_str()),
             Some("idle")
+        );
+    }
+
+    #[test]
+    fn opencode_assistant_text_records_watch_output_and_transcript() {
+        let snap = test_snapshot("Processing...");
+
+        super::record_opencode_assistant_text(&snap, "ses_test", "OC_DONE");
+
+        let snapshot = snap
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, Some(4096))
+            .unwrap();
+        assert!(snapshot.output.text.contains("OC_DONE"));
+        assert_eq!(snapshot.transcript.latest_text, "OC_DONE");
+        assert_eq!(snapshot.transcript.messages[0].provider, "opencode");
+        assert_eq!(
+            snapshot.transcript.messages[0].turn_id.as_deref(),
+            Some("ses_test")
+        );
+    }
+
+    #[test]
+    fn gemini_assistant_text_records_watch_transcript() {
+        let snap = test_snapshot("Processing...");
+        let content = concat!(
+            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
+            "\n",
+            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
+            "\n",
+            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"model","content":"Gemini answer","tokens":{"input":10,"output":2,"total":12}}"#,
+            "\n"
+        );
+
+        super::record_latest_gemini_assistant_text(&snap, content);
+
+        let snapshot = snap
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, Some(4096))
+            .unwrap();
+        assert_eq!(snapshot.transcript.latest_text, "Gemini answer");
+        assert_eq!(snapshot.transcript.messages[0].provider, "gemini");
+        assert_eq!(
+            snapshot.transcript.messages[0].turn_id.as_deref(),
+            Some("m2")
         );
     }
 

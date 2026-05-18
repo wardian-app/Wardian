@@ -164,17 +164,21 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             since,
             until,
             include,
+            raw,
             tail,
             timeout,
             follow,
         }) => handle_agent_watch(
             target,
-            since.as_deref(),
-            until.as_deref(),
-            include.as_deref(),
-            *tail,
-            timeout,
-            *follow,
+            AgentWatchCliOptions {
+                since: since.as_deref(),
+                until: until.as_deref(),
+                include: include.as_deref(),
+                raw: *raw,
+                tail: *tail,
+                timeout,
+                follow: *follow,
+            },
         ),
         Some(AgentCommand::Wait {
             target,
@@ -294,27 +298,40 @@ fn handle_agent_wait(
 
 fn handle_agent_watch(
     target: &str,
-    since: Option<&str>,
-    until: Option<&str>,
-    include: Option<&str>,
-    tail: Option<usize>,
-    timeout: &str,
-    follow: bool,
+    options: AgentWatchCliOptions<'_>,
 ) -> Result<String, CliError> {
-    if follow {
+    if options.follow {
         return Err(CliError::backend(
             ExitCode::Generic,
             "not_supported",
             "agent watch --follow is reserved for a future streaming implementation",
         ));
     }
-    let timeout = parse_timeout(timeout)?;
-    let include = parse_include(include);
-    let response = live::agent_watch(target, since, until, include, tail, follow, timeout)
-        .map_err(control_error)?;
+    let timeout = parse_timeout(options.timeout)?;
+    let include = parse_watch_include(options.include, options.raw);
+    let response = live::agent_watch(
+        target,
+        options.since,
+        options.until,
+        include,
+        options.tail,
+        options.follow,
+        timeout,
+    )
+    .map_err(control_error)?;
     serde_json::to_string_pretty(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|e| CliError::generic(e.to_string()))
+}
+
+struct AgentWatchCliOptions<'a> {
+    since: Option<&'a str>,
+    until: Option<&'a str>,
+    include: Option<&'a str>,
+    raw: bool,
+    tail: Option<usize>,
+    timeout: &'a str,
+    follow: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +583,7 @@ fn render_ask_response(
         "cursor": watch.cursor,
         "delivery": ask.delivery,
         "output": watch.output,
+        "transcript": watch.transcript,
         "events": watch.events,
     });
     serde_json::to_string_pretty(&response)
@@ -575,12 +593,20 @@ fn render_ask_response(
 
 fn parse_include(include: Option<&str>) -> Vec<String> {
     include
-        .unwrap_or("status,output,delivery")
+        .unwrap_or("status,transcript,output,delivery")
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn parse_watch_include(include: Option<&str>, raw: bool) -> Vec<String> {
+    let mut values = parse_include(include);
+    if raw && !values.iter().any(|value| value == "raw_output") {
+        values.push("raw_output".to_string());
+    }
+    values
 }
 
 // ---------------------------------------------------------------------------
@@ -944,6 +970,8 @@ mod tests {
                     truncated: false,
                     omitted_bytes: 0,
                 },
+                transcript: None,
+                raw_output: None,
                 delivery: wardian_core::control::WatchDeliverySnapshot {
                     delivery: Vec::new(),
                 },
@@ -986,6 +1014,8 @@ mod tests {
                     truncated: false,
                     omitted_bytes: 0,
                 },
+                transcript: None,
+                raw_output: None,
                 delivery: wardian_core::control::WatchDeliverySnapshot {
                     delivery: Vec::new(),
                 },
@@ -1000,8 +1030,77 @@ mod tests {
     }
 
     #[test]
+    fn render_ask_response_includes_transcript_when_watch_has_it() {
+        let ask = live::AskAgentResponse {
+            request_id: None,
+            reply: None,
+            delivery: Vec::new(),
+            watch: wardian_core::control::AgentWatchResponse {
+                schema: 1,
+                agent: wardian_core::control::WatchAgentSnapshot {
+                    uuid: "agent-1".to_string(),
+                    name: "reviewer-a1".to_string(),
+                    provider: "gemini".to_string(),
+                    status: "idle".to_string(),
+                    last_status_at: None,
+                },
+                cursor: "agent-1:2".to_string(),
+                events: Vec::new(),
+                output: wardian_core::control::WatchOutput {
+                    cursor: "agent-1:2".to_string(),
+                    text: String::new(),
+                    truncated: false,
+                    omitted_bytes: 0,
+                },
+                transcript: Some(wardian_core::control::WatchTranscript {
+                    cursor: "agent-1:2".to_string(),
+                    messages: vec![wardian_core::control::WatchTranscriptMessage {
+                        role: "assistant".to_string(),
+                        text: "Gemini answer".to_string(),
+                        provider: "gemini".to_string(),
+                        turn_id: Some("m2".to_string()),
+                        source: Some("gemini_log".to_string()),
+                    }],
+                    latest_text: "Gemini answer".to_string(),
+                    truncated: false,
+                    omitted_bytes: 0,
+                }),
+                raw_output: None,
+                delivery: wardian_core::control::WatchDeliverySnapshot {
+                    delivery: Vec::new(),
+                },
+            },
+        };
+
+        let rendered = render_ask_response("reviewer-a1", "output:Gemini answer", ask).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["transcript"]["latest_text"], "Gemini answer");
+    }
+
+    #[test]
     fn normalize_ask_condition_keeps_structured_reply_mode() {
         assert_eq!(normalize_ask_condition("reply").unwrap(), "reply");
+    }
+
+    #[test]
+    fn parse_include_defaults_to_readable_watch_surfaces() {
+        assert_eq!(
+            parse_include(None),
+            vec![
+                "status".to_string(),
+                "transcript".to_string(),
+                "output".to_string(),
+                "delivery".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_include_adds_raw_output_when_raw_flag_is_set() {
+        assert_eq!(
+            parse_watch_include(Some("output"), true),
+            vec!["output".to_string(), "raw_output".to_string()]
+        );
     }
 
     #[test]

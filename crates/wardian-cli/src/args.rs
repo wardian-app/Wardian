@@ -245,6 +245,8 @@ pub enum AgentCommand {
         until: Option<String>,
         #[arg(long)]
         include: Option<String>,
+        #[arg(long)]
+        raw: bool,
         #[arg(long = "tail")]
         tail: Option<usize>,
         #[arg(long, default_value = "10m")]
@@ -503,7 +505,7 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            Some(AgentCommand::Watch { ref target, ref since, ref until, ref include, tail, ref timeout, follow })
+            Some(AgentCommand::Watch { ref target, ref since, ref until, ref include, raw: false, tail, ref timeout, follow })
                 if target == "Wardian-Codex"
                     && since.as_deref() == Some("agent-1:0001")
                     && until.as_deref() == Some("output:OK")
@@ -511,6 +513,29 @@ mod tests {
                     && tail == Some(4096)
                     && timeout == "30s"
                     && !follow
+        ));
+    }
+
+    #[test]
+    fn parses_agent_watch_readable_and_raw_options() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "watch",
+            "Wardian-Codex",
+            "--include",
+            "transcript,output,raw_output",
+            "--raw",
+        ])
+        .unwrap();
+
+        let Command::Agent(args) = cli.command else {
+            panic!("agent")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Watch { ref include, raw: true, .. })
+                if include.as_deref() == Some("transcript,output,raw_output")
         ));
     }
 

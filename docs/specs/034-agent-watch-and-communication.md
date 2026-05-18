@@ -34,7 +34,7 @@ Supported options:
 - `--since <cursor>`: return only events and output after a prior cursor.
 - `--until <condition>`: block until a condition is reached or timeout expires.
 - `--timeout <duration>`: maximum wait time, using the existing `ms`, `s`, and `m` syntax.
-- `--include <fields>`: comma-separated data classes. Initial values: `status`, `output`, `events`, `delivery`, `agent`.
+- `--include <fields>`: comma-separated data classes. Initial values: `status`, `transcript`, `output`, `events`, `delivery`, `agent`, `raw_output`.
 - `--tail <bytes>`: cap returned terminal output. Default should be conservative enough for model context.
 
 `watch` accepts only a single agent name or UUID in the first implementation. Selectors that can resolve to multiple agents, such as `class:<ClassName>` and `all`, return `not_supported` with a hint to choose a single target. This keeps the first response schema unambiguous and avoids hiding partial observation gaps behind a list response.
@@ -95,8 +95,23 @@ Non-following `watch` returns one JSON envelope:
       "status": "processing"
     }
   ],
+  "transcript": {
+    "cursor": "57244fa9-2b9c-4b45-ba32-6919d2786c29:0000000000000042",
+    "messages": [
+      {
+        "role": "assistant",
+        "text": "WARDIAN_PROBE_CODEX_OK",
+        "provider": "codex",
+        "turn_id": "turn-1",
+        "source": "response_item"
+      }
+    ],
+    "latest_text": "WARDIAN_PROBE_CODEX_OK",
+    "truncated": false,
+    "omitted_bytes": 0
+  },
   "output": {
-    "text": "WARDIAN_PROBE_CODEX_OK\r\n",
+    "text": "WARDIAN_PROBE_CODEX_OK\n",
     "truncated": false
   },
   "delivery": {
@@ -107,6 +122,8 @@ Non-following `watch` returns one JSON envelope:
 }
 ```
 
+`output.text` is a sanitized terminal fallback suitable for agents. Raw PTY text is available only through explicit `--include raw_output` or `--raw`; it may contain ANSI/control sequences and repaint fragments. `transcript` is provider-adapted and provider-neutral in shape. Issue #273 changed the default watch surface from raw terminal bytes to transcript plus sanitized output while retaining the internal raw PTY tap for debugging.
+
 Cursors are opaque strings. Callers must compare them only for equality or pass them back through `--since`.
 
 Cursor semantics:
@@ -115,7 +132,7 @@ Cursor semantics:
 - Events and output batches share one monotonically increasing cursor sequence per agent, so a cursor represents a total order across status, delivery, provider events, and output tap updates.
 - If `--since` is older than the retained event/output ring, the command fails with `cursor_expired` and includes the oldest available cursor in error details. Silent gaps are not allowed.
 - If retention is lost during a blocking `--until`, the command fails with `gap_detected` rather than continuing against incomplete evidence.
-- `--tail <bytes>` truncates on valid UTF-8 character boundaries after ANSI/control bytes are preserved as text. The response includes `truncated: true`, `omitted_bytes`, and `oldest_available_cursor` when output is trimmed.
+- `--tail <bytes>` truncates on valid UTF-8 character boundaries. Sanitized `output` reports truncation relative to the retained terminal bytes. Explicit `raw_output` preserves ANSI/control bytes as decoded text. The response includes `truncated: true`, `omitted_bytes`, and `oldest_available_cursor` when output is trimmed.
 
 ### Backend State Model
 
@@ -124,6 +141,7 @@ Extend `ActiveAgent` with live observation state:
 - `last_status_at`: timestamp updated whenever the normalized status changes.
 - `watch_events`: bounded in-memory event ring for status changes, delivery attempts, and provider parser events.
 - `output_tap`: bounded, non-draining terminal output ring independent from the UI's drain-on-read `output_buffer`.
+- `transcript`: bounded provider-neutral transcript messages extracted from structured provider output when an adapter exists.
 - `delivery_state`: latest structured delivery result per target session.
 
 The terminal reader writes to both:
@@ -243,10 +261,12 @@ The first slice is live-only. `watch` does not fall back to SQLite because persi
 
 Unit tests:
 
-- CLI argument parsing for `agent watch`, `--since`, `--until`, `--include`, and `--tail`.
+- CLI argument parsing for `agent watch`, `--since`, `--until`, `--include`, `--raw`, and `--tail`.
 - Reserved `--follow` behavior: the flag parses and returns `not_supported` until the streaming transport slice is implemented.
-- Watch response serialization in `wardian-core`.
+- Watch response serialization in `wardian-core`, including `transcript` and opt-in `raw_output`.
 - Event ring cursor behavior and truncation behavior.
+- Terminal sanitizer behavior for ANSI SGR, CSI cursor/clear controls, OSC titles, CRLF normalization, and UTF-8 tailing.
+- Provider transcript extraction for Codex, Claude, and mock output.
 - `agent wait` immediate readiness behavior when the target already starts in the requested status.
 - `agent wait --next` and `send --wait-until` behavior when the target begins in the desired status and later produces a newer completion event.
 - Provider-aware send byte sequences for Codex, Gemini, Claude, and mock.
@@ -256,6 +276,7 @@ Unit tests:
 Native E2E tests:
 
 - Mock provider: `send -> watch --until output:<token>` captures the response without relying on frontend terminal reads.
+- Mock provider: ANSI terminal output is removed from default `output.text`, provider transcript text is returned when requested, and `raw_output.text` preserves escape sequences only after explicit opt-in.
 - Mock provider: `send --wait-until idle` succeeds when the target starts idle and completes a fast turn.
 - Off target: `send` reports `target_off` or `no_input_channel` with per-target details.
 - Multi-target partial delivery: `class:<ClassName>` returns nonzero with stderr `details.delivery[]` when one target cannot receive input.

@@ -224,6 +224,26 @@ pub struct WatchOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchTranscriptMessage {
+    pub role: String,
+    pub text: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchTranscript {
+    pub cursor: String,
+    pub messages: Vec<WatchTranscriptMessage>,
+    pub latest_text: String,
+    pub truncated: bool,
+    pub omitted_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WatchDeliverySnapshot {
     pub delivery: Vec<DeliveryDetail>,
 }
@@ -244,6 +264,10 @@ pub struct AgentWatchResponse {
     pub cursor: String,
     pub events: Vec<WatchEvent>,
     pub output: WatchOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<WatchTranscript>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<WatchOutput>,
     pub delivery: WatchDeliverySnapshot,
 }
 
@@ -520,6 +544,88 @@ mod tests {
 
         assert!(json.contains(r#""output_echo_guard":"Say AUTO_TEST_2_DONE""#));
         assert_eq!(roundtrip, req);
+    }
+
+    #[test]
+    fn agent_watch_response_serializes_clean_output_without_raw_output_by_default() {
+        let response = AgentWatchResponse {
+            schema: CONTROL_SCHEMA,
+            agent: WatchAgentSnapshot {
+                uuid: "agent-1".to_string(),
+                name: "CoderOne".to_string(),
+                provider: "codex".to_string(),
+                status: "idle".to_string(),
+                last_status_at: None,
+            },
+            cursor: "agent-1:0000000000000002".to_string(),
+            events: Vec::new(),
+            output: WatchOutput {
+                cursor: "agent-1:0000000000000002".to_string(),
+                text: "clean answer".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+            transcript: Some(WatchTranscript {
+                cursor: "agent-1:0000000000000002".to_string(),
+                messages: vec![WatchTranscriptMessage {
+                    role: "assistant".to_string(),
+                    text: "clean answer".to_string(),
+                    provider: "codex".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    source: Some("response_item".to_string()),
+                }],
+                latest_text: "clean answer".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            }),
+            raw_output: None,
+            delivery: WatchDeliverySnapshot {
+                delivery: Vec::new(),
+            },
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(json["output"]["text"], "clean answer");
+        assert_eq!(json["transcript"]["latest_text"], "clean answer");
+        assert!(json.get("raw_output").is_none());
+    }
+
+    #[test]
+    fn agent_watch_response_serializes_raw_output_when_requested() {
+        let response = AgentWatchResponse {
+            schema: CONTROL_SCHEMA,
+            agent: WatchAgentSnapshot {
+                uuid: "agent-1".to_string(),
+                name: "CoderOne".to_string(),
+                provider: "codex".to_string(),
+                status: "idle".to_string(),
+                last_status_at: None,
+            },
+            cursor: "agent-1:0000000000000002".to_string(),
+            events: Vec::new(),
+            output: WatchOutput {
+                cursor: "agent-1:0000000000000002".to_string(),
+                text: "red".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            },
+            transcript: None,
+            raw_output: Some(WatchOutput {
+                cursor: "agent-1:0000000000000002".to_string(),
+                text: "\u{1b}[31mred\u{1b}[0m".to_string(),
+                truncated: false,
+                omitted_bytes: 0,
+            }),
+            delivery: WatchDeliverySnapshot {
+                delivery: Vec::new(),
+            },
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(json["output"]["text"], "red");
+        assert_eq!(json["raw_output"]["text"], "\u{1b}[31mred\u{1b}[0m");
     }
 
     #[test]

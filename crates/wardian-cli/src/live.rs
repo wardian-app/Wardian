@@ -619,6 +619,7 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         None,
         vec![
             "status".to_string(),
+            "transcript".to_string(),
             "output".to_string(),
             "delivery".to_string(),
         ],
@@ -638,6 +639,7 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         until: Some(request.condition),
         include: vec![
             "status".to_string(),
+            "transcript".to_string(),
             "output".to_string(),
             "delivery".to_string(),
         ],
