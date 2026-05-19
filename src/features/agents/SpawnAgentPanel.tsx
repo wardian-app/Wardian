@@ -285,9 +285,6 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
               </option>
             ))}
           </select>
-          <p className="mt-1 text-[10px] text-muted-neutral">
-            Only provider CLIs found on this machine are selectable.
-          </p>
           {providerNote && (
             <p className="mt-1 text-[10px] text-wardian-warning">{providerNote}</p>
           )}

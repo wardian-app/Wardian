@@ -287,9 +287,6 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
                       </option>
                     ))}
                   </select>
-                  <span className="mt-1 block text-[10px] font-normal text-muted-neutral">
-                    Only provider CLIs found on this machine are selectable.
-                  </span>
                   {providerNote && (
                     <span className="mt-1 block text-[10px] font-normal text-wardian-warning">{providerNote}</span>
                   )}

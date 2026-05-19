@@ -176,9 +176,6 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[10px] text-muted-neutral">
-              Only provider CLIs found on this machine are selectable.
-            </p>
             {!selectedProviderAvailable && (
               <p className="mt-1 text-[10px] text-wardian-warning">
                 Choose an installed provider before saving this agent.
