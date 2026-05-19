@@ -84,4 +84,3 @@ wardian agent worktree disable <agent-name-or-id>
 
 - [Explorer](./explorer.md)
 - [Watchlists](./watchlists.md)
-- [Source Control Panel](../specs/2026-04-17-source-control-panel.md)

@@ -96,6 +96,27 @@ where
     }
 }
 
+fn record_restore_spawn_result<T>(
+    agent_id: &str,
+    result: Result<T, String>,
+    node_error: &mut Option<String>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            let message = format!(
+                "Failed to restore agent {} after headless run: {}",
+                agent_id, error
+            );
+            log_debug(&format!("[Wardian] {}", message));
+            if node_error.is_none() {
+                *node_error = Some(message);
+            }
+            None
+        }
+    }
+}
+
 async fn run_command_headless(
     executable: &str,
     args: Vec<String>,
@@ -1348,8 +1369,8 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        parse_optional_timeout_ms, record_scheduled_run_outcome, resolve_command_node_launch,
-        scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
+        parse_optional_timeout_ms, record_restore_spawn_result, record_scheduled_run_outcome,
+        resolve_command_node_launch, scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
     };
     use crate::utils::ShellLaunchSpec;
     use chrono::Local;
@@ -1444,6 +1465,22 @@ mod tests {
             .expect_err("empty commands should fail");
 
         assert_eq!(err, "Missing command string");
+    }
+
+    #[test]
+    fn record_restore_spawn_result_surfaces_failed_re_spawn() {
+        let mut node_error = None;
+        let restored = record_restore_spawn_result::<()>(
+            "agent-1",
+            Err("Codex provider unavailable".to_string()),
+            &mut node_error,
+        );
+
+        assert!(restored.is_none());
+        assert_eq!(
+            node_error.as_deref(),
+            Some("Failed to restore agent agent-1 after headless run: Codex provider unavailable")
+        );
     }
 
     #[test]
@@ -2208,14 +2245,17 @@ pub async fn run_workflow(
                                             let mut cfg = cfg;
                                             cfg.is_off = false;
                                             log_debug(&format!("[Wardian] Restoring agent {} to Online state after headless run", agent_id));
-                                            if let Ok(new_agent) = crate::manager::spawn_agent(
-                                                app.clone(),
-                                                cfg,
-                                                false,
-                                                born,
-                                            )
-                                            .await
-                                            {
+                                            if let Some(new_agent) = record_restore_spawn_result(
+                                                agent_id,
+                                                crate::manager::spawn_agent(
+                                                    app.clone(),
+                                                    cfg,
+                                                    false,
+                                                    born,
+                                                )
+                                                .await,
+                                                &mut node_error,
+                                            ) {
                                                 let mut agents_map = state.agents.lock().await;
                                                 if let Some(ref tx) = new_agent.stdin_tx {
                                                     if let Ok(mut senders) =

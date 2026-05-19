@@ -31,7 +31,3 @@ Located in `src-tauri/src/state/active_agent.rs`, this struct represents a singl
 4. **Live Terminal Host**: The frontend keeps a long-lived xterm instance per session and only detaches or reattaches its DOM host when panes remount, preserving parser and buffer state in memory.
 5. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.
 6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Queue completions and CLI `watch --until status:*` evidence come from live transitions after hydration.
-
-## Related Research
-
-- [Local-First State References](../research/local-first-state-references.md)

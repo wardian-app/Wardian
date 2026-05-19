@@ -24,7 +24,7 @@ Choose the smallest docs surface that matches the change:
 - `docs/workflows/` for workflow concepts, node behavior, and execution semantics
 - `docs/providers.md` and `docs/developer/provider-runtimes.md` for provider runtime behavior
 - `docs/developer/` for implementation, testing, publishing, and contributor workflows
-- `docs/specs/` for strategic decisions or behavior that needs design history
+- `docs/specs/` for strategic decisions or behavior that needs design history; specs are repository-internal and excluded from the public docs site
 - `README.md` only when the public overview, installation path, or top-level links change
 
 Keep cross-platform examples POSIX-first with a labeled PowerShell variant when commands differ. Use placeholders such as `<absolute-workspace-path>` instead of personal paths.
@@ -51,7 +51,7 @@ Before merging user-facing work, check:
 - Any affected screenshots were refreshed or intentionally left unchanged.
 - The PR body links the issue and lists verification evidence.
 - Release-impacting changes use a Conventional Commit type and scope that Release Please can place in `CHANGELOG.md`.
-- Public overview links in `README.md` and `docs/index.md` still point to the right guide pages.
+- Public overview links in `README.md` and `docs/index.md` still point to the right guide pages and do not point into `docs/specs/` or `docs/research/`.
 - `npm run docs:build` passes after docs changes.
 
 ## Docs Publication Policy

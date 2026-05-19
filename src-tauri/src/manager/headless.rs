@@ -159,6 +159,7 @@ pub async fn run_headless_with_options(
     let provider_name = options.provider_name;
     let config_override = options.config_override;
     let provider = ProviderFactory::resolve(provider_name)?;
+    crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
     let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(wardian_session_id))?;
     let provider_cwd = cwd.to_path_buf();
     let persisted_opencode_config = if provider_name == "opencode" {
@@ -383,6 +384,7 @@ pub async fn obtain_session_id(
     use tokio::io::{AsyncBufReadExt, BufReader};
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
+    crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
     let (bin, mut provider_args) = provider.get_executable();
     let class_name = agent_class
         .filter(|name| !name.trim().is_empty())

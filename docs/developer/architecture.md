@@ -30,7 +30,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Continuity vs Memory**: Provider-native resume state is not the same thing as long-term memory. Session IDs, PTY ownership, approval hooks, and provider trust remain runtime concerns.
 - **Evidence-First Memory**: Wardian's memory direction is to preserve raw evidence, index it for retrieval, and build prompt context selectively rather than replaying prior sessions wholesale.
 - **Promoted Knowledge**: Curated atoms remain useful, but as promoted knowledge with provenance back to retrieved evidence rather than as the primary memory substrate.
-- See [Evidence-First Memory](../specs/2026-04-17-evidence-first-memory.md) for the target architecture.
+- The internal evidence-first memory spec records the design history for this direction.
 
 ### 3. The UI Layer (React Frontend)
 

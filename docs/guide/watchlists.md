@@ -65,7 +65,3 @@ Hover over any agent in the Roster to access instant control icons:
 - **Pause/Resume**: Suspend the PTY process to save CPU.
 - **Restart**: Re-spawn the agent with its initial instructions.
 - **Quick-Jump**: Double-click an agent to center the main Grid view on that agent's terminal.
-
-## Related Research
-
-- [Dashboard Observability References](../research/dashboard-observability-references.md)

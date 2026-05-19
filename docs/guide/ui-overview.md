@@ -70,9 +70,3 @@ Wardian preserves terminal state across grid remounts so interactive TUIs, inclu
 - [Command Panel](./command-panel.md)
 - [Source Control](./source-control.md)
 - [Settings](./settings.md)
-
-## Related Research
-
-- [Dashboard Observability References](../research/dashboard-observability-references.md)
-- [Graph Visualization References](../research/graph-visualization-references.md)
-- [Multi-Agent Orchestrator References](../research/multi-agent-orchestrator-references.md)

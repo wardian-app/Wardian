@@ -63,7 +63,3 @@ Performs `get`, `set`, or `delete` operations on the `shared_storage.json` file.
 ## 🔒 Security & Isolation
 - **Headless Execution**: Uses `tokio::process::Command` with strictly limited `current_dir` validation via `validate_workspace_path`.
 - **Interpolation**: All strings (prompts, paths, commands) are safely interpolated using `\{\{nodes.id.output.path\}\}` syntax before execution.
-
-## Related Research
-
-- [Workflow Design References](../research/workflow-design-references.md)

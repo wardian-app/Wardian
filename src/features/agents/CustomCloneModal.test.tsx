@@ -3,9 +3,27 @@ import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CustomCloneModal } from "./CustomCloneModal";
-import type { AgentClonePreview } from "../../types";
+import type { AgentClonePreview, ProviderReadiness, UserFacingProviderName } from "../../types";
 
 const invokeMock = vi.mocked(invoke);
+
+const readiness = (
+  provider: UserFacingProviderName,
+  available: boolean,
+): ProviderReadiness => ({
+  provider,
+  display_name: provider === "opencode" ? "OpenCode" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
+  available,
+  executable: available ? provider : null,
+  reason: available ? null : `The ${provider} command was not found.`,
+});
+
+const allProvidersReady: ProviderReadiness[] = [
+  readiness("claude", true),
+  readiness("codex", true),
+  readiness("gemini", true),
+  readiness("opencode", true),
+];
 
 const preview: AgentClonePreview = {
   source_session_id: "agent-1",
@@ -33,14 +51,25 @@ const classes = [
   { name: "Reviewer", description: "", is_default: true },
 ];
 
+const mockCloneInvokes = (
+  providerReadiness = allProvidersReady,
+  clonePreview: AgentClonePreview = preview,
+) => {
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "list_provider_readiness") return providerReadiness;
+    if (command === "get_agent_clone_preview") return clonePreview;
+    if (command === "clone_agent") return { session_id: "clone-1" };
+    return null;
+  });
+};
+
 describe("CustomCloneModal", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    mockCloneInvokes();
   });
 
   it("loads preview when opened", async () => {
-    invokeMock.mockResolvedValue(preview);
-
     render(
       <CustomCloneModal
         sourceSessionId="agent-1"
@@ -58,7 +87,11 @@ describe("CustomCloneModal", () => {
   });
 
   it("shows a blocking error when preview fails", async () => {
-    invokeMock.mockRejectedValue(new Error("preview failed"));
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") return allProvidersReady;
+      if (command === "get_agent_clone_preview") throw new Error("preview failed");
+      return null;
+    });
 
     render(
       <CustomCloneModal
@@ -74,14 +107,45 @@ describe("CustomCloneModal", () => {
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
 
-  it("submits edited identity fields and selected profile items", async () => {
+  it("still loads preview and allows clone when provider readiness cannot be checked", async () => {
     const user = userEvent.setup();
     const onCloned = vi.fn();
     invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") throw new Error("readiness unavailable");
       if (command === "get_agent_clone_preview") return preview;
       if (command === "clone_agent") return { session_id: "clone-1" };
       return null;
     });
+
+    render(
+      <CustomCloneModal
+        sourceSessionId="agent-1"
+        agentClasses={classes}
+        isOpen
+        onClose={() => {}}
+        onCloned={onCloned}
+      />,
+    );
+
+    expect(await screen.findByDisplayValue("Alpha-copy")).toBeInTheDocument();
+    expect(screen.getByText("Unable to check provider readiness.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Claude" })).toBeInTheDocument();
+    const submit = screen.getByTestId("custom-clone-submit");
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+
+    expect(invokeMock).toHaveBeenCalledWith("clone_agent", {
+      req: expect.objectContaining({
+        provider: "claude",
+      }),
+    });
+    expect(onCloned).toHaveBeenCalled();
+  });
+
+  it("submits edited identity fields and selected profile items", async () => {
+    const user = userEvent.setup();
+    const onCloned = vi.fn();
 
     render(
       <CustomCloneModal
@@ -121,7 +185,6 @@ describe("CustomCloneModal", () => {
 
   it("rejects a blank clone name without submitting", async () => {
     const user = userEvent.setup();
-    invokeMock.mockResolvedValue(preview);
 
     render(
       <CustomCloneModal
@@ -144,6 +207,7 @@ describe("CustomCloneModal", () => {
   it("keeps the modal open when submit fails", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") return allProvidersReady;
       if (command === "get_agent_clone_preview") return preview;
       if (command === "clone_agent") throw new Error("clone failed");
       return null;
@@ -166,5 +230,53 @@ describe("CustomCloneModal", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Custom Clone" })).toBeInTheDocument();
     });
+  });
+
+  it("disables missing provider options in the clone form", async () => {
+    mockCloneInvokes([
+      readiness("claude", true),
+      readiness("codex", false),
+      readiness("gemini", false),
+      readiness("opencode", true),
+    ]);
+
+    render(
+      <CustomCloneModal
+        sourceSessionId="agent-1"
+        agentClasses={classes}
+        isOpen
+        onClose={() => {}}
+        onCloned={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("option", { name: "Codex - not installed" })).toBeDisabled();
+    expect(screen.queryByText(/Only provider CLIs found on this machine are selectable/i)).not.toBeInTheDocument();
+  });
+
+  it("blocks clone submission when no provider CLI is available", async () => {
+    const user = userEvent.setup();
+    mockCloneInvokes([
+      readiness("claude", false),
+      readiness("codex", false),
+      readiness("gemini", false),
+      readiness("opencode", false),
+    ]);
+
+    render(
+      <CustomCloneModal
+        sourceSessionId="agent-1"
+        agentClasses={classes}
+        isOpen
+        onClose={() => {}}
+        onCloned={() => {}}
+      />,
+    );
+
+    const submit = await screen.findByTestId("custom-clone-submit");
+    expect(submit).toBeDisabled();
+    await user.click(submit);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("clone_agent", expect.anything());
   });
 });

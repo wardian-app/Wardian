@@ -58,7 +58,3 @@ Wardian adapts the same assigned skills to each provider's native discovery mode
 - OpenCode receives scoped skills through Wardian's generated OpenCode config directory.
 
 If Gemini skills are missing, ensure **Auto-patch Gemini CLI** is enabled in the **Settings** panel or run the patch manually. For other providers, start with the provider comparison in [Provider Runtimes](../providers.md).
-
-## Related Research
-
-- [Skill Manager References](../research/skill-manager-references.md)

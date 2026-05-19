@@ -59,7 +59,6 @@ Related docs:
 Related docs:
 
 - [Source Control](./guide/source-control.md)
-- [Source Control Panel](./specs/2026-04-17-source-control-panel.md)
 
 ## Workflow Builder and Runtime
 
@@ -97,8 +96,6 @@ Related docs:
 Related docs:
 
 - [Settings](./guide/settings.md)
-- [Runtime Shell Selection](./specs/2026-03-30-runtime-shell-selection.md)
-- [Session Persistence Policy](./specs/2026-04-17-session-persistence-policy.md)
 
 ## Provider-Aware Orchestration
 
