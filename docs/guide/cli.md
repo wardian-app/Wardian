@@ -2,19 +2,35 @@
 
 Wardian includes a standalone `wardian` command for agents and automation to inspect, coordinate, and control known agent sessions. Wardian remains GUI/app-first for humans; the CLI is the textual control surface agents use when they need to discover themselves, coordinate peers, or ask the running app to perform live actions for the same `WARDIAN_HOME`.
 
+Use it when an agent, script, or terminal workflow needs repeatable access to Wardian state without clicking through the desktop UI.
+
+## When to Use It
+
+- Let a managed agent identify itself with `wardian agent`.
+- Send prompts or structured asks from one agent to another.
+- Wait for an agent to reach a status or emit a marker.
+- Start, stop, or inspect workflows from automation.
+- Read persisted teams, watchlists, and agent state when the app is not running.
+
+## Basic Workflow
+
+1. Launch Wardian once so the CLI is installed into the Wardian bin directory.
+2. Restart your terminal if `wardian` is not on `PATH`.
+3. Set the same `WARDIAN_HOME` in both the app and terminal when using an isolated test home.
+4. Run `wardian agent list --scope all` to confirm the CLI sees the expected state.
+5. Use live-control commands only while the desktop app is running for that same home.
+
 ## Installation
 
 The desktop app copies the bundled CLI on startup:
 
+- macOS/Linux command: `$HOME/.wardian/bin/wardian`
+- macOS/Linux implementation binary: `$HOME/.wardian/bin/wardian-cli`
 - Windows command: `%USERPROFILE%\.wardian\bin\wardian.cmd`
 - Windows bash command: `%USERPROFILE%\.wardian\bin\wardian`
 - Windows implementation binary: `%USERPROFILE%\.wardian\bin\wardian-cli.exe`
-- macOS/Linux command: `$HOME/.wardian/bin/wardian`
-- macOS/Linux implementation binary: `$HOME/.wardian/bin/wardian-cli`
 
-Wardian also attempts to add that `bin` directory to the user PATH. On Windows, Wardian installs both a `.cmd` launcher for PowerShell/cmd and an extensionless launcher for bash-family shells such as Git Bash. Managed agent processes receive the Wardian `bin` directory at the front of their runtime PATH so Claude can run `wardian` from either PowerShell or bash commands. Restart ordinary terminals after first launch if `wardian` is not found.
-
-On Windows, Wardian installs both a `wardian.cmd` launcher for PowerShell/cmd and an extensionless POSIX shell launcher for Git Bash, MSYS2, or provider shell tools that execute `bash`. Wardian-managed agent processes also receive the active Wardian `bin` directory at the front of `PATH`, so shell tools inside Claude sessions can resolve `wardian` without depending on the user's global shell startup files.
+Wardian also attempts to add that `bin` directory to the user PATH. On Windows, Wardian installs both a `.cmd` launcher for PowerShell/cmd and an extensionless launcher for bash-family shells such as Git Bash, MSYS2, or provider shell tools that execute `bash`. Wardian-managed agent processes receive the active Wardian `bin` directory at the front of `PATH`, so shell tools inside managed sessions can resolve `wardian` without depending on the user's global shell startup files. Restart ordinary terminals after first launch if `wardian` is not found.
 
 Set `WARDIAN_HOME` to redirect state, the CLI install location, and the live app control endpoint for tests or isolated runs.
 
@@ -181,6 +197,13 @@ Output options:
 
 Default JSON is indented for terminal readability. It includes `schema: 1` and an `agent` or `agents` payload with `name`, `uuid`, `class`, `provider`, `workspace`, and `status`.
 
+## Important Limits
+
+- The desktop app must be running for live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, `workflow run`, and `workflow stop`.
+- `WARDIAN_HOME` must match between the app and CLI when you expect shared live state.
+- Team mutation and `send --to team:<name>` are not implemented yet.
+- Raw terminal output can include escape sequences; prefer transcript or sanitized output unless debugging PTY behavior.
+
 ## Exit Codes
 
 | Code | Meaning |
@@ -209,3 +232,11 @@ Errors are written to stderr as JSON:
   }
 }
 ```
+
+## Related Links
+
+- [Getting Started](./getting-started.md)
+- [Watchlists](./watchlists.md)
+- [Command Panel](./command-panel.md)
+- [Workflows](../workflows/index.md)
+- [Native E2E Harness](../developer/native-e2e.md)

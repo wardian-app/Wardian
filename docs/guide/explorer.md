@@ -2,9 +2,26 @@
 
 The Explorer is a specialized tab in the Left Sidebar that provides a tactile interface for browsing the physical files created and managed by your agents.
 
+Use it when you need to inspect generated files, logs, prompt assets, or the selected agent's workspace without leaving Wardian.
+
 ![Explorer panel showing a selected agent workspace tree with changed documentation files](../assets/screenshots/explorer/workspace-tree.png)
 
-## 🌳 Root Behavior
+## When to Use It
+
+- Browse the workspace for the agent selected in [Watchlists](./watchlists.md).
+- Inspect files after an agent reports completion in [Queue](./queue.md).
+- Open a quick preview before deciding whether to edit files in an external tool.
+- Reveal a file in the system file manager when you need native OS actions.
+
+## Basic Workflow
+
+1. Select an agent in the right roster, or clear selection for global Wardian home browsing.
+2. Open the **Explorer** tab in the left sidebar.
+3. Expand folders to inspect files.
+4. Use preview, reveal, copy path, or delete from the file context menu.
+5. Move to [Source Control](./source-control.md) when the selected root is a Git workspace and you need to review changes.
+
+## Root Behavior
 
 The Explorer is context-aware and automatically re-roots itself based on your selection:
 
@@ -30,3 +47,16 @@ The Explorer supports standard right-click actions for rapid file management:
 ## Git Status Markers
 
 When the selected root is a Git repository, the Explorer uses status colors and markers to identify changed, staged, deleted, and untracked paths. Parent folders are highlighted when they contain changed files.
+
+## Important Limits
+
+- Delete removes files from disk after confirmation; it is not a soft-hide operation.
+- Explorer context follows selection. If the tree is not showing the workspace you expect, check the selected agent in the roster.
+- Previews are for quick inspection. Use your editor or Source Control for deeper code review.
+
+## Related Links
+
+- [Getting Started](./getting-started.md)
+- [Watchlists](./watchlists.md)
+- [Source Control](./source-control.md)
+- [Queue](./queue.md)

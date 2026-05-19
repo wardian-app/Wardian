@@ -124,7 +124,7 @@ const directoryTree = {
 };
 
 const gitStatus = {
-  branch: "docs/core-feature-screenshots",
+  branch: "docs/task-oriented-feature-guides",
   ahead: 1,
   behind: 0,
   files: [
@@ -222,7 +222,18 @@ const queueItems = [
     agent_session_id: "docs-codex",
     agent_name: "Docs-Codex",
     summary:
-      "Completed the first read-only workspace pass. The agent identified the guide, docs, and source folders and suggested reviewing Queue before assigning follow-up edits.",
+      "Completed the first read-only workspace pass. The agent identified the guide, docs, and source folders and suggested reviewing Queue before assigning follow-up edits.\n\nNext steps:\n- Open the source-control panel and inspect the pending documentation changes.\n- Compare the regenerated screenshots against the guides that reference them.\n- Ask a reviewer agent for a focused pass before committing the branch.",
+  },
+  {
+    id: "docs-workflow-completion",
+    type: "workflow_completed",
+    timestamp: 1778585100000,
+    read: true,
+    workflow_id: "docs-workflow",
+    workflow_run_id: "docs-run-1",
+    workflow_name: "Docs Screenshot Refresh",
+    status: "completed",
+    summary: "Captured feature screenshots for the guide refresh.",
   },
 ];
 
@@ -608,6 +619,11 @@ async function main() {
     await page.locator('[data-testid="spawn-workspace-path"]').blur();
     await capture(page, "spawn-agent/spawn-form.png");
 
+    await page.locator('[data-testid="sidebar-tab-classes"]').click();
+    await page.getByRole("heading", { name: "Classes", exact: true }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "classes/class-management.png", page.locator('[data-testid="class-manager-panel"]'));
+
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
     await page.locator('[data-testid="broadcast-textarea"]').fill("Summarize this workspace in five bullets. Do not edit files.");
@@ -636,12 +652,16 @@ async function main() {
     await capture(page, "explorer/workspace-tree.png", page.locator('[data-testid="explorer-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-git"]').click();
-    await page.getByText("docs/core-feature-screenshots").waitFor({ timeout: 10_000 });
+    await page.getByText("docs/task-oriented-feature-guides").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
 
     await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await page.getByText("Workflow completed").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "queue/queue-view.png", page.locator("main"));
     await page.getByTestId("queue-item-summary-docs-first-run-result").waitFor({ timeout: 10_000 });
+    await page.getByRole("button", { name: "Show full summary" }).click();
     await page.waitForTimeout(700);
     await capture(page, "queue/completed-result.png", page.locator("main"));
 
