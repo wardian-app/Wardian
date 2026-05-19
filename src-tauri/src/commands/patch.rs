@@ -1,6 +1,22 @@
 use crate::manager::log_debug;
+use std::path::PathBuf;
 use std::process::Command;
 use tauri::{AppHandle, Manager};
+
+fn node_entrypoint_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.as_os_str().to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+
+    path
+}
 
 #[tauri::command]
 pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
@@ -51,9 +67,11 @@ pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
         resource_path
     ));
 
+    let node_resource_path = node_entrypoint_path(resource_path);
+
     #[allow(unused_mut)]
     let mut cmd = Command::new("node");
-    cmd.arg(&resource_path);
+    cmd.arg(&node_resource_path);
 
     #[cfg(windows)]
     {
@@ -77,5 +95,40 @@ pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
             "Script exited with status: {}. Stderr: {}",
             output.status, stderr
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::node_entrypoint_path;
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg(windows)]
+    fn node_entrypoint_path_removes_windows_verbatim_prefix() {
+        let path = PathBuf::from(r"\\?\D:\Development\Wardian\scripts\gemini-patch-skills.cjs");
+
+        assert_eq!(
+            node_entrypoint_path(path),
+            PathBuf::from(r"D:\Development\Wardian\scripts\gemini-patch-skills.cjs")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn node_entrypoint_path_removes_windows_verbatim_unc_prefix() {
+        let path = PathBuf::from(r"\\?\UNC\server\share\scripts\gemini-patch-skills.cjs");
+
+        assert_eq!(
+            node_entrypoint_path(path),
+            PathBuf::from(r"\\server\share\scripts\gemini-patch-skills.cjs")
+        );
+    }
+
+    #[test]
+    fn node_entrypoint_path_keeps_regular_paths() {
+        let path = PathBuf::from("scripts/gemini-patch-skills.cjs");
+
+        assert_eq!(node_entrypoint_path(path.clone()), path);
     }
 }
