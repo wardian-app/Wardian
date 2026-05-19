@@ -31,7 +31,7 @@ async function installCustomCloneIpcMock(page: Page) {
         session_name: "E2E Mock Agent",
         agent_class: "TestClass",
         folder: "C:/projects/e2e",
-        provider: "mock",
+        provider: "claude",
         is_off: false,
       },
     ];
@@ -65,6 +65,14 @@ async function installCustomCloneIpcMock(page: Page) {
         if (command === "list_agent_classes") {
           return [{ name: "TestClass", description: "E2E test class", is_default: true }];
         }
+        if (command === "list_provider_readiness") {
+          return [
+            { provider: "claude", display_name: "Claude", available: true, executable: "C:/tools/claude.cmd", reason: null },
+            { provider: "codex", display_name: "Codex", available: true, executable: "C:/tools/codex.cmd", reason: null },
+            { provider: "gemini", display_name: "Gemini", available: true, executable: "C:/tools/gemini.cmd", reason: null },
+            { provider: "opencode", display_name: "OpenCode", available: true, executable: "C:/tools/opencode.cmd", reason: null },
+          ];
+        }
         if (command === "load_watchlists") return [];
         if (command === "load_watchlist_prefs") return null;
         if (command === "load_agent_interactions") return {};
@@ -90,7 +98,7 @@ async function installCustomCloneIpcMock(page: Page) {
             source_session_id: "mock-session-e2e-001",
             source_session_name: "E2E Mock Agent",
             suggested_session_name: "E2E Mock Agent-copy",
-            provider: "mock",
+            provider: "claude",
             agent_class: "TestClass",
             folder: "C:/projects/e2e",
             files: {

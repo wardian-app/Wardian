@@ -96,7 +96,7 @@ Open the **Agent Configuration** rail item and fill in the spawn form:
 
 ![Wardian spawn agent form with agent name, class, workspace, provider, and initialize controls](../assets/screenshots/spawn-agent/spawn-form.png)
 
-1. Choose an agent class, such as **Coder** or **Researcher**. Classes are reusable blueprints; see [Library](./library.md) when you want to inspect or customize them.
+1. Choose an agent class, such as **Coder** or **Researcher**. Classes are reusable blueprints; see [Class Management](./class-management.md) when you want to inspect or customize them.
 2. Select the provider you installed and authenticated.
 3. Enter a short agent name.
 4. Set the workspace to `<absolute-workspace-path>`.
@@ -173,7 +173,8 @@ Related docs:
 ## Next Steps
 
 - Learn the main windows in [UI Overview](./ui-overview.md).
-- Manage reusable prompts, classes, and skills in [Library](./library.md).
+- Manage reusable prompts and skills in [Library](./library.md).
+- Inspect or customize agent classes in [Class Management](./class-management.md).
 - Browse your agent's local files in [Explorer](./explorer.md).
 - Send one instruction to multiple agents with [Command Panel](./command-panel.md).
 - Use the agent-facing [Wardian CLI](./cli.md) for scripted coordination.

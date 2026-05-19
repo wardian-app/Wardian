@@ -2,6 +2,16 @@
 
 The Queue is Wardian's app-level triage surface for completed work. It is separate from the workflow engine: agents and workflows can produce outcomes, and the Queue keeps those outcomes visible after the originating terminal or workflow run has moved on.
 
+Use it when you need to review finished work, catch failed workflow runs, or return to unread outcomes after switching away from the originating agent.
+
+![Wardian Queue view showing agent completion and workflow result cards](../assets/screenshots/queue/queue-view.png)
+
+## When to Use It
+
+- Review agent completions after working in [Grid](./grid.md), [Command Panel](./command-panel.md), or the [Wardian CLI](./cli.md).
+- Triage workflow completions and failures from the [Workflow View](./workflows.md).
+- Keep unread outcomes visible while you inspect files, source control, or follow-up terminals.
+
 ## What Appears in the Queue
 
 Wardian currently records two item types:
@@ -41,8 +51,17 @@ Queue items are persisted under the active Wardian home, so unread work survives
 4. Follow up in the source agent terminal, workflow run, or repository if the item needs action.
 5. Mark reviewed items read and clear them when they are no longer needed.
 
-## Related Docs
+## Important Limits
+
+- Queue is for completed outcomes, not live provider approvals or interactive prompts.
+- Items older than seven days are ignored on load.
+- A generic "Completed" summary means Wardian did not capture a provider-specific final answer for that transition.
+- Clearing read items removes them from the visible queue for the active Wardian home.
+
+## Related Links
 
 - [Getting Started](./getting-started.md)
+- [Grid](./grid.md)
+- [Command Panel](./command-panel.md)
 - [Wardian CLI](./cli.md)
 - [Workflows](../workflows/index.md)

@@ -2,6 +2,8 @@
 
 The Command panel is the left-sidebar surface for fast message delivery and prompt execution across one or many agents.
 
+Use it when you need to send the same instruction to selected agents, run a starred Library prompt, or coordinate a group without switching into each terminal.
+
 ## Two Modes in One Panel
 
 ![Wardian Command panel showing quick prompts and a broadcast message ready to send](../assets/screenshots/command-panel/broadcast-prompt.png)
@@ -11,9 +13,24 @@ The Command panel is the left-sidebar surface for fast message delivery and prom
 
 Both modes operate on your current agent selection in the right roster.
 
+## When to Use It
+
+- Send a one-off coordination message to selected agents.
+- Reuse a starred prompt from the [Library](./library.md).
+- Ask a whole role group to report status after selecting that group in [Watchlists](./watchlists.md).
+- Broadcast after [Getting Started](./getting-started.md) when you have more than one active agent.
+
+## Basic Workflow
+
+1. Select the target agents in the right roster.
+2. Open the **Command** tab in the left sidebar.
+3. Click a starred quick prompt or type a broadcast message.
+4. Confirm the all-agent fallback when no agents are selected.
+5. Watch responses in [Grid](./grid.md), [Dashboard](./dashboard.md), or [Queue](./queue.md).
+
 ## Quick Prompts
 
-Quick Prompts are starred prompt files from the Library (`~/.wardian/library/prompts`).
+Quick Prompts are starred prompt files from the Library (`<wardian-home>/library/prompts`).
 
 What happens when you click a quick prompt:
 
@@ -52,8 +69,16 @@ Behavior:
 - Use **Broadcast** for ad-hoc coordination messages.
 - Combine with watchlists to target only the relevant squad of agents.
 
-## Related References
+## Important Limits
+
+- Broadcasts are delivered as terminal input. They do not guarantee that a provider accepts or completes the instruction.
+- No selection means "all active agents" only after confirmation.
+- Quick Prompts only lists prompts starred in the Library.
+- Use [Wardian CLI](./cli.md) for scriptable waits, marker watching, or structured peer asks.
+
+## Related Links
 
 - [Library](./library.md)
 - [Watchlists](./watchlists.md)
-- [UI Overview](./ui-overview.md)
+- [Grid](./grid.md)
+- [Wardian CLI](./cli.md)

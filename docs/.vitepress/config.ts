@@ -37,7 +37,7 @@ export default defineConfig({
     sidebar: {
       "/guide/": [
         {
-          text: "First-Time Setup",
+          text: "Start and Orient",
           items: [
             { text: "First-Time Install and First Run", link: "/guide/getting-started" },
             { text: "Provider Readiness", link: "/guide/provider-readiness" },
@@ -45,27 +45,34 @@ export default defineConfig({
           ],
         },
         {
-          text: "Agent Operations",
+          text: "Run and Monitor Agents",
           items: [
-            { text: "Wardian CLI", link: "/guide/cli" },
-            { text: "Class Management", link: "/guide/class-management" },
-            { text: "Library", link: "/guide/library" },
-            { text: "Command Panel", link: "/guide/command-panel" },
+            { text: "Grid", link: "/guide/grid" },
+            { text: "Dashboard", link: "/guide/dashboard" },
             { text: "Watchlists", link: "/guide/watchlists" },
             { text: "Queue", link: "/guide/queue" },
+            { text: "Class Management", link: "/guide/class-management" },
+          ],
+        },
+        {
+          text: "Reuse and Direct Work",
+          items: [
+            { text: "Library", link: "/guide/library" },
+            { text: "Command Panel", link: "/guide/command-panel" },
+            { text: "Wardian CLI", link: "/guide/cli" },
+          ],
+        },
+        {
+          text: "Inspect and Ship Changes",
+          items: [
             { text: "Explorer", link: "/guide/explorer" },
-          ],
-        },
-        {
-          text: "Source Control and Runtime",
-          items: [
             { text: "Source Control", link: "/guide/source-control" },
-            { text: "Settings", link: "/guide/settings" },
           ],
         },
         {
-          text: "Workflows",
+          text: "Configure and Automate",
           items: [
+            { text: "Settings", link: "/guide/settings" },
             { text: "Workflow View", link: "/guide/workflows" },
             { text: "Workflow Reference", link: "/workflows/" },
           ],

@@ -2,6 +2,8 @@
 
 The Settings tab controls app updates, theme behavior, runtime shell selection, session policy defaults, and Gemini patch utilities.
 
+Use it when you need to change runtime defaults before spawning more agents, tune provider behavior, or align Wardian with your preferred shell environment.
+
 ![Wardian Settings tab showing theme, session persistence, and shell selection controls](../assets/screenshots/settings/runtime-settings.png)
 
 ## Updates
@@ -19,6 +21,21 @@ If update checks fail:
 - verify internet access to GitHub Releases
 - try **Check Now**
 - install the latest release manually if the running build predates in-app update support
+
+## When to Use It
+
+- Choose the shell that hosts agent providers and shell-based workflow commands.
+- Decide whether regular agents resume provider sessions or start fresh after being off.
+- Configure provider-specific runtime utilities such as Gemini patching or Codex runtime policy.
+- Change the app theme.
+
+## Basic Workflow
+
+1. Open **Settings** from the left control rail.
+2. Adjust theme, agent runtime, shell, or provider utility settings.
+3. Use the relevant save button for shell or runtime changes.
+4. Spawn or resume an agent to confirm the new runtime behavior.
+5. Check [Provider Runtimes](../providers.md) when behavior differs by CLI provider.
 
 ## Theme
 
@@ -84,8 +101,15 @@ Use this when Gemini skill discovery requires Wardian's patch flow.
 - If resume behavior is not what you expect, verify both the global runtime policy and any per-agent override.
 - If Gemini skills are missing, run patch manually and restart the app session.
 
-## Related References
+## Important Limits
+
+- Shell and runtime policy changes affect future launches and resumes; they do not reconfigure an already-running provider process.
+- Workflow Agent nodes have their own execution mode and do not simply inherit the regular-agent resume default.
+- Provider utilities are provider-specific. Changing Gemini patch settings does not affect Claude, Codex, or OpenCode.
+
+## Related Links
 
 - [UI Overview](./ui-overview.md)
+- [Getting Started](./getting-started.md)
 - [Provider Readiness](./provider-readiness.md)
 - [Provider Runtimes](../providers.md)

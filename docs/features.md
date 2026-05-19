@@ -13,6 +13,8 @@ Related docs:
 
 - [UI Overview](./guide/ui-overview.md)
 - [Getting Started](./guide/getting-started.md)
+- [Grid](./guide/grid.md)
+- [Dashboard](./guide/dashboard.md)
 - [Watchlists](./guide/watchlists.md)
 - [Queue](./guide/queue.md)
 
