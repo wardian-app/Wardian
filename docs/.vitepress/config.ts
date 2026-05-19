@@ -41,6 +41,7 @@ export default defineConfig({
           items: [
             { text: "First-Time Install and First Run", link: "/guide/getting-started" },
             { text: "Provider Readiness", link: "/guide/provider-readiness" },
+            { text: "First-Run Troubleshooting", link: "/guide/first-run-troubleshooting" },
             { text: "UI Overview", link: "/guide/ui-overview" },
           ],
         },

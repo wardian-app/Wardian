@@ -2,6 +2,8 @@
 
 Use this guide to get from a fresh Wardian install to a completed first agent task. It is the canonical beginner path for people who want to run the desktop app rather than develop Wardian itself.
 
+If any first-run step fails, use [First-Run Troubleshooting](./first-run-troubleshooting.md) to recover without switching to developer-only diagnostics.
+
 ## 1. Download and Launch Wardian
 
 Download the latest installer or app bundle from the [Wardian releases page](https://github.com/tangemicioglu/Wardian/releases/latest), then launch Wardian from your operating system.
@@ -26,6 +28,8 @@ PowerShell:
 ```
 
 Before the first spawn, verify the provider command, authentication, and shell `PATH` using [Provider Readiness](./provider-readiness.md).
+
+If Wardian will not launch or your provider is not detected after installation, see [First-Run Troubleshooting](./first-run-troubleshooting.md).
 
 ## 2. Install One Supported Provider CLI
 
@@ -113,6 +117,8 @@ Status colors help you read the first launch:
 - **Amber / Action Required:** the provider needs approval or sign-in input.
 - **Red / Error:** the provider or shell failed to start.
 
+If the terminal stays blank, exits immediately, or the agent remains stuck in Processing, Off, or Action Required, use the [first-run terminal checklist](./first-run-troubleshooting.md#terminal-does-not-start).
+
 ## 7. Send the First Instruction
 
 Click inside the agent terminal and send a small, low-risk instruction:
@@ -165,6 +171,7 @@ Start with the visible failure point:
 
 Related docs:
 
+- [First-Run Troubleshooting](./first-run-troubleshooting.md)
 - [Provider Runtimes](../providers.md)
 - [Settings](./settings.md)
 - [Queue](./queue.md)
@@ -173,6 +180,7 @@ Related docs:
 ## Next Steps
 
 - Learn the main windows in [UI Overview](./ui-overview.md).
+- Recover from first-run launch, provider, terminal, Queue, and CLI failures in [First-Run Troubleshooting](./first-run-troubleshooting.md).
 - Manage reusable prompts and skills in [Library](./library.md).
 - Inspect or customize agent classes in [Class Management](./class-management.md).
 - Browse your agent's local files in [Explorer](./explorer.md).

@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use crate::utils::fs::create_directory_link;
 use notify::Watcher;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
@@ -13,7 +14,78 @@ use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 /// Sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` so git never blocks
 /// waiting for credential input (mirrors VS Code's git extension behaviour).
 fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new("git");
+    run_git_with_candidates(cwd, args, &git_command_candidates())
+}
+
+fn git_command_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from("git")];
+
+    #[cfg(unix)]
+    {
+        for path in ["/usr/bin/git", "/bin/git", "/usr/local/bin/git"] {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        for path in [
+            r"C:\Program Files\Git\cmd\git.exe",
+            r"C:\Program Files\Git\bin\git.exe",
+            r"C:\Program Files (x86)\Git\cmd\git.exe",
+        ] {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    candidates
+}
+
+fn run_git_with_candidates(
+    cwd: &str,
+    args: &[&str],
+    candidates: &[PathBuf],
+) -> Result<String, String> {
+    let mut last_not_found = None;
+
+    for candidate in candidates {
+        let output = match build_git_command(candidate, cwd, args).output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                last_not_found = Some(error);
+                continue;
+            }
+            Err(error) => return Err(format!("Failed to execute git: {}", error)),
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(git_failure_message(
+                output.status.code(),
+                stdout.as_ref(),
+                stderr.as_ref(),
+            ));
+        }
+
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    let message = last_not_found.map_or_else(
+        || "no git command candidates configured".to_string(),
+        |error| error.to_string(),
+    );
+    Err(format!("Failed to execute git: {}", message))
+}
+
+fn build_git_command(program: &Path, cwd: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(cwd)
@@ -27,20 +99,7 @@ fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
         command.creation_flags(0x08000000);
     }
 
-    let output = command
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(git_failure_message(
-            output.status.code(),
-            stdout.as_ref(),
-            stderr.as_ref(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    command
 }
 
 fn git_failure_message(status_code: Option<i32>, stdout: &str, stderr: &str) -> String {
@@ -544,6 +603,39 @@ mod tests {
             output.contains("## "),
             "expected porcelain status on stdout, got: {output:?}"
         );
+    }
+
+    #[test]
+    fn run_git_reports_missing_program_when_no_candidates_are_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = run_git_with_candidates(temp.path().to_str().unwrap(), &["--version"], &[])
+            .unwrap_err();
+
+        assert!(error.contains("Failed to execute git"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_git_tries_next_candidate_when_lookup_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fake_git = temp.path().join("git");
+        std::fs::write(&fake_git, "#!/bin/sh\necho git version fake\n").unwrap();
+
+        let mut permissions = std::fs::metadata(&fake_git).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_git, permissions).unwrap();
+
+        let missing_git = temp.path().join("missing").join("git");
+        let output = run_git_with_candidates(
+            temp.path().to_str().unwrap(),
+            &["--version"],
+            &[missing_git, fake_git],
+        )
+        .unwrap();
+
+        assert_eq!(output.trim(), "git version fake");
     }
 
     #[test]

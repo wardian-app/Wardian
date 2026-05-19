@@ -6,6 +6,7 @@ Use this index to find the guide that matches the task you are trying to finish.
 
 - [First-Time Install and First Run](./getting-started.md): install Wardian, verify a provider, spawn the first agent, and review the first Queue result.
 - [Provider Readiness](./provider-readiness.md): verify provider CLIs, authentication, shell `PATH`, and runtime prerequisites before spawning agents.
+- [First-Run Troubleshooting](./first-run-troubleshooting.md): recover from app launch, provider detection, terminal startup, Queue, or CLI issues during first setup.
 - [UI Overview](./ui-overview.md): learn the top bar, sidebars, roster, and main workspace layout.
 
 ## Run and Monitor Agents
