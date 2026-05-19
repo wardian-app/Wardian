@@ -1,6 +1,8 @@
 # Public Docs Site
 
-Wardian publishes the Markdown files in `docs/` as a VitePress site. The Markdown files remain the source of truth; VitePress is only the public rendering and navigation layer.
+Wardian publishes the public Markdown files in `docs/` as a VitePress site. The Markdown files remain the source of truth; VitePress is only the public rendering and navigation layer.
+
+`docs/specs/` and `docs/research/` are repository-internal project records. They remain readable on GitHub, but they are excluded from the public VitePress build and should not be linked from public guide pages.
 
 ## Local Development
 
@@ -44,6 +46,7 @@ The workflow sets `DOCS_BASE=/` because the Wardian repository uses the custom G
 
 - Keep docs source in `docs/`; do not move user guides into a separate website folder.
 - Prefer plain Markdown and relative links so pages remain readable on GitHub.
+- Keep strategic specs in `docs/specs/` and research notes in `docs/research/`, but do not add them to the public docs navigation or link to them from public pages.
 - Use placeholders such as `<absolute-workspace-path>` instead of local machine paths.
 - Put user-facing screenshots under `docs/assets/screenshots/` and follow [Screenshot Documentation](./screenshot-documentation.md).
 - Follow [Documentation Maintenance](./docs-maintenance.md) when a feature PR changes user-facing behavior, release notes, screenshots, or public docs links.

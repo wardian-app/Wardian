@@ -55,7 +55,7 @@ The system must also be forward-compatible with a planned CLI companion (`wardia
 - `feat!:` / `BREAKING CHANGE:` footer → major (suppressed to minor while `<1.0.0` via release-please's `bump-minor-pre-major` option).
 - `chore:` / `docs:` / `refactor:` / `test:` / `ci:` → no release, appears under Miscellaneous in CHANGELOG when configured.
 
-**Preview channel:** label the Release PR `autorelease: pre-release` (or manually edit the version to `X.Y.Z-preview.N`). The resulting tag has a prerelease suffix; the build workflow detects the `-preview.` / `-beta.` / `-rc.` substring and flips the GitHub Release to pre-release.
+**Preview channel:** label the Release PR `autorelease: pre-release` (or manually edit the version to `X.Y.Z-preview.N`). Any hyphenated version tag is treated as a prerelease. The build workflow detects the hyphenated suffix and flips the GitHub Release to pre-release.
 
 **Manual override:** maintainer can edit the Release PR body, version numbers, or CHANGELOG entries before merging. release-please re-derives from commits but respects manual overrides if committed onto the release branch.
 

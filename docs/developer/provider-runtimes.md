@@ -206,8 +206,3 @@ When provider behavior breaks, start with the provider-specific seam instead of 
 - Claude problems: inspect `CLAUDE.md` discovery, permission hooks, and explicit session flags.
 - Codex problems: inspect `CODEX_HOME`, `--cd`, bootstrap migration, and sandbox approval transitions.
 - OpenCode problems: inspect `OPENCODE_CONFIG_CONTENT`, real-workspace `cwd`, and JSON session parsing.
-
-## Related Research
-
-- [Agent Protocol and UI References](../research/agent-protocol-and-ui-references.md)
-- [Agent Runtime Sandbox References](../research/agent-runtime-sandbox-references.md)

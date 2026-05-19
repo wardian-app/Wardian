@@ -8,6 +8,7 @@ import {
   useSettingsStore,
 } from "../../store/useSettingsStore";
 import { DocsLink } from "../../components/DocsLink";
+import { useAppUpdate } from "./useAppUpdate";
 
 interface SettingsPanelProps {}
 
@@ -30,6 +31,51 @@ const resolveAutoShell = <T extends { id: string }>(availableShells: T[]) => {
   return preferredIds
     .map((id) => availableShells.find((option) => option.id === id))
     .find((option) => option !== undefined) ?? availableShells[0];
+};
+
+const updateStatusLabel = (
+  status: ReturnType<typeof useAppUpdate>['status'],
+  availableVersion: string | undefined,
+  progressPercent: number | null,
+  detailMessage: string,
+) => {
+  switch (status) {
+    case 'checking':
+      return 'Checking for updates...';
+    case 'up-to-date':
+      return 'Wardian is up to date.';
+    case 'available':
+      return `Wardian v${availableVersion ?? 'latest'} is available.`;
+    case 'downloading':
+      return progressPercent === null ? 'Downloading update...' : `Downloading update... ${progressPercent}%`;
+    case 'installed':
+      return 'Update installed. Restart to finish.';
+    case 'disabled':
+      return detailMessage || 'Updates are unavailable for this build.';
+    case 'error':
+      return detailMessage || 'Update check failed.';
+    case 'idle':
+    default:
+      return 'Update status idle.';
+  }
+};
+
+const updateStatusColor = (status: ReturnType<typeof useAppUpdate>['status']) => {
+  switch (status) {
+    case 'available':
+    case 'installed':
+      return 'var(--color-wardian-accent)';
+    case 'checking':
+    case 'downloading':
+      return 'var(--color-wardian-processing)';
+    case 'error':
+      return 'var(--color-wardian-error)';
+    case 'disabled':
+    case 'up-to-date':
+    case 'idle':
+    default:
+      return 'var(--color-wardian-text-muted-neutral)';
+  }
 };
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
@@ -75,6 +121,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
       ? 'preset'
       : 'custom',
   );
+  const appUpdate = useAppUpdate();
 
   useEffect(() => {
     if (!shell_settings_loaded) {
@@ -166,15 +213,81 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     : terminalFontFamily === '' || terminalFontFamilyOptions.some((option) => option.value === terminalFontFamily)
     ? terminalFontFamily
     : CUSTOM_TERMINAL_FONT_FAMILY_VALUE;
+  const updateMessage = updateStatusLabel(
+    appUpdate.status,
+    appUpdate.availableUpdate?.version,
+    appUpdate.progressPercent,
+    appUpdate.status === 'disabled'
+      ? appUpdate.updateEligibilityReason
+      : appUpdate.errorMessage,
+  );
+  const updateBusy = appUpdate.status === 'checking' || appUpdate.status === 'downloading';
+  const updatesDisabled = appUpdate.status === 'disabled';
+  const canCheckForUpdates = appUpdate.updatesEnabled && !updatesDisabled;
 
   return (
     <div data-testid="settings-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-xl font-bold text-primary tracking-tight">Settings</h2>
+        <div>
+          <h2 className="text-xl font-bold text-primary tracking-tight">Settings</h2>
+          <p className="text-[11px] font-bold text-muted-neutral mt-1">
+            Wardian v{appUpdate.currentVersion || '...'}
+          </p>
+        </div>
         <DocsLink path="/guide/getting-started">Getting Started</DocsLink>
       </div>
       
       <div className="flex flex-col gap-8 flex-1 overflow-y-auto pr-2 no-scrollbar">
+        <div className="bg-transparent">
+          <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Updates</h3>
+          <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-bold" style={{ color: updateStatusColor(appUpdate.status) }}>
+                {updateMessage}
+              </p>
+              {appUpdate.status === 'downloading' && appUpdate.contentLength !== null && (
+                <p className="text-[10px] text-muted-neutral">
+                  {appUpdate.downloadedBytes} / {appUpdate.contentLength} bytes
+                </p>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {canCheckForUpdates && (
+                <button
+                  type="button"
+                  onClick={() => void appUpdate.checkNow()}
+                  disabled={updateBusy}
+                  className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap ${
+                    updateBusy
+                      ? 'bg-wardian-border text-muted border-transparent cursor-not-allowed'
+                      : 'bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
+                  }`}
+                >
+                  Check Now
+                </button>
+              )}
+              {appUpdate.status === 'available' && (
+                <button
+                  type="button"
+                  onClick={() => void appUpdate.downloadAndInstall()}
+                  className="px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                >
+                  Download & Install
+                </button>
+              )}
+              {appUpdate.status === 'installed' && (
+                <button
+                  type="button"
+                  onClick={() => void appUpdate.relaunchApp()}
+                  className="px-4 py-2 text-xs font-bold rounded-lg border transition-all whitespace-nowrap bg-wardian-bg border-wardian-light text-primary hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                >
+                  Restart
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
         <div className="bg-transparent">
           <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Theme</h3>
           <div className="grid grid-cols-3 gap-3">

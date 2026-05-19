@@ -1,6 +1,6 @@
 # Wardian Documentation
 
-This folder contains user guides, workflow references, developer architecture notes, research references, and long-form specs.
+This folder contains the public Wardian user guides, workflow references, and developer notes.
 
 ## Start Here
 
@@ -52,21 +52,7 @@ This folder contains user guides, workflow references, developer architecture no
 - [Theming](./developer/theming.md)
 - [Screenshot Documentation](./developer/screenshot-documentation.md)
 
-## Research References
+## Project Context
 
-- [Research Index](./research/index.md)
-- [Agent Evaluation References](./research/agent-evaluation-references.md)
-- [Agent Protocol and UI References](./research/agent-protocol-and-ui-references.md)
-- [Agent Runtime Sandbox References](./research/agent-runtime-sandbox-references.md)
-- [Dashboard Observability References](./research/dashboard-observability-references.md)
-- [Graph Visualization References](./research/graph-visualization-references.md)
-- [Local-First State References](./research/local-first-state-references.md)
-- [Multi-Agent Orchestrator References](./research/multi-agent-orchestrator-references.md)
-- [Skill Manager References](./research/skill-manager-references.md)
-- [Workflow Design References](./research/workflow-design-references.md)
-
-## Specs and Design
-
-- [Specs](./specs/)
 - [Design Context](https://github.com/tangemicioglu/Wardian/blob/main/DESIGN.md)
 - [OS Support](./os-support.md)

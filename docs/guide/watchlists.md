@@ -95,4 +95,3 @@ Hover over any agent in the Roster to access instant control icons:
 - [Dashboard](./dashboard.md)
 - [Command Panel](./command-panel.md)
 - [Wardian CLI](./cli.md)
-- [Dashboard Observability References](../research/dashboard-observability-references.md)

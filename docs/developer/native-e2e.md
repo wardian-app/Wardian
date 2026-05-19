@@ -168,7 +168,3 @@ The lab sends the configured input text as PTY keystrokes and, by default, submi
 For OpenCode rendering runs, the lab defaults to the free remote OpenCode model `opencode/deepseek-v4-flash-free` so the provider does not fall back to local model backends such as LM Studio. Override `WARDIAN_E2E_RENDERING_OPENCODE_MODEL` only when intentionally testing a different OpenCode model.
 
 The lab fails the run for obvious Wardian-side evidence problems before manual screenshot inspection: non-empty screenshot requirements, missing fixed audit text after resize, unchanged columns when a resize state expects a geometry change, screen rectangle mismatch against xterm cell metrics, paused-buffer mismatch, and rendered rows that do not stabilize before the settle timeout. Outside-terminal parity is still captured separately with `scripts/capture-outside-provider-rendering.ps1` when side-by-side native Windows Terminal evidence is needed.
-
-## Related Research
-
-- [Agent Evaluation References](../research/agent-evaluation-references.md)

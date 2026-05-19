@@ -37,6 +37,7 @@ describe("release workflow contract", () => {
   it("keeps the artifact release workflow responsible for tag releases", () => {
     expect(releaseWorkflow).toContain("tags:");
     expect(releaseWorkflow).toContain('- "v*"');
+    expect(releaseWorkflow).toContain('if [[ "$TAG" == *-* ]]; then');
     expect(releaseWorkflow).toContain("tauri-apps/tauri-action@v0");
     expect(releaseWorkflow).toContain("releaseId:");
     expect(releaseWorkflow).toContain("Publish release");
@@ -48,13 +49,53 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("Resolve existing release");
     expect(releaseWorkflow).toContain("github.rest.repos.listReleases");
     expect(releaseWorkflow).toContain("candidate.tag_name === releaseTag");
+    expect(releaseWorkflow).toContain("core.setOutput('prerelease', String(release.prerelease || releaseTag.includes('-')))");
     expect(releaseWorkflow).toContain("needs.resolve-release.outputs.release_id");
     expect(releaseWorkflow).toContain("Publish the release");
-    expect(releaseWorkflow).toContain(
-      "always() && needs.build.result == 'success' && (github.event_name == 'push'",
-    );
+    expect(releaseWorkflow).toContain("always() && needs.build.result == 'success'");
+    expect(releaseWorkflow).toContain("needs.create-release.outputs.is_prerelease == 'true'");
+    expect(releaseWorkflow).toContain("needs.resolve-release.outputs.is_prerelease == 'true'");
     expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build]");
     expect(releaseWorkflow).not.toContain("needs.build-cli");
+  });
+
+  it("signs updater artifacts with tag-aware release metadata", () => {
+    expect(releaseWorkflow).toContain("TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}");
+    expect(releaseWorkflow).toContain(
+      "TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
+    );
+    expect(releaseWorkflow).toContain("tagName: ${{ github.ref_name }}");
+    expect(releaseWorkflow).toContain("tagName: ${{ inputs.release_tag }}");
+    expect(releaseWorkflow).toContain("WARDIAN_UPDATE_CHANNEL: ${{ needs.create-release.outputs.is_prerelease == 'false' && 'stable' || '' }}");
+    expect(releaseWorkflow).toContain("WARDIAN_UPDATE_CHANNEL: ${{ needs.resolve-release.outputs.is_prerelease == 'false' && 'stable' || '' }}");
+    expect(releaseWorkflow).toContain("uploadUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}");
+    expect(releaseWorkflow).toContain("uploadUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}");
+    expect(releaseWorkflow).toContain("updaterJsonPreferNsis: true");
+    expect(releaseWorkflow).toContain("Build (dry run)");
+    expect(releaseWorkflow).toContain("ref: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && inputs.release_tag || github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}");
+  });
+
+  it("validates updater metadata before publishing releases", () => {
+    expect(releaseWorkflow).toContain("Validate updater metadata");
+    expect(releaseWorkflow).toContain("latest.json");
+    expect(releaseWorkflow).toContain("windows-x86_64");
+    expect(releaseWorkflow).toContain("linux-x86_64");
+    expect(releaseWorkflow).toContain("darwin-aarch64");
+    expect(releaseWorkflow).toContain("darwin-x86_64");
+    expect(releaseWorkflow).toContain("const expectedTag =");
+    expect(releaseWorkflow).toContain("const expectedVersion = expectedTag.replace(/^v/, '')");
+    expect(releaseWorkflow).toContain("metadata.version !== expectedVersion");
+    expect(releaseWorkflow).toContain("asset.browser_download_url");
+    expect(releaseWorkflow).toContain("asset.url");
+    expect(releaseWorkflow).toContain("releaseAssetUrls.has(platforms[platform].url)");
+    expect(releaseWorkflow).toContain("needs.validate-updater-metadata.result == 'success'");
+  });
+
+  it("guards manual updater backfill before publishing", () => {
+    expect(releaseWorkflow).toContain("Ensure manual release is draft");
+    expect(releaseWorkflow).toContain("manual backfill requires a draft release");
+    expect(releaseWorkflow).toContain("release.draft");
+    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, validate-updater-metadata]");
   });
 
   it("publishes unified installers that carry the staged CLI", () => {

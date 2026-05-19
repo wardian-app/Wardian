@@ -85,4 +85,3 @@ If Gemini skills are missing, ensure **Auto-patch Gemini CLI** is enabled in the
 - [Command Panel](./command-panel.md)
 - [Watchlists](./watchlists.md)
 - [Provider Runtimes](../providers.md)
-- [Skill Manager References](../research/skill-manager-references.md)
