@@ -14,7 +14,7 @@ The fixed header at the top of the application acts as the global navigation and
 - **Center (View Switcher)**: Quickly toggle between primary workspace modes:
   - **GRID**: The primary terminal workspace for live agent interaction.
   - **DASHBOARD**: A summary view of system health and active agent status.
-  - **LIBRARY**: Management center for Prompts, Skills, and Agent Classes.
+  - **LIBRARY**: Management center for prompts and skills.
   - **WORKFLOWS**: Visual canvas for building automated agent sequences.
   - **QUEUE / GRAPH / GARDEN**: Specialized visualizations for high-fidelity orchestration.
 - **Right (Telemetry)**: Real-time monitoring of aggregate **CPU**, **Memory**, and **Active Agent** count.
@@ -29,6 +29,7 @@ The Left Sidebar provides the "Context" for your work. It consists of:
   - **Explorer**: Browse the physical files of the selected agent or the Wardian home.
   - **Source Control**: Stage, diff, commit, sync, and manage worktree mode for the selected agent workspace.
   - **Agent Configuration**: Quick settings for spawning and tuning agents.
+  - **Classes**: Blueprint editor for reusable agent roles and class-level skills.
   - **Command**: Broadcast text and run starred quick prompts against selected agents.
   - **Settings**: System-wide preferences, theme engine, and the default runtime shell used by agents and shell-based workflows.
 - **Content Pane**: Displays the detailed menu or tree for the active rail icon.
@@ -67,6 +68,9 @@ Wardian preserves terminal state across grid remounts so interactive TUIs, inclu
 
 ## Related Guides
 
+- [Grid](./grid.md)
+- [Dashboard](./dashboard.md)
+- [Watchlists](./watchlists.md)
 - [Command Panel](./command-panel.md)
 - [Source Control](./source-control.md)
 - [Settings](./settings.md)

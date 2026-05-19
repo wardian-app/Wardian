@@ -6,7 +6,7 @@
 
 ## Context
 
-2026-04-21 Wardian CLI and Agent Command introduced the `wardian` CLI as a read-oriented agent introspection surface and explicitly deferred mutating commands. The next slice adds the control-plane commands agents need to act on Wardian state: lifecycle commands, workflow operations, and PTY message delivery.
+[Wardian CLI and `wardian agent` Command](./2026-04-21-wardian-cli-and-agent-command.md) introduced the `wardian` CLI as a read-oriented agent introspection surface and explicitly deferred mutating commands. The next slice adds the control-plane commands agents need to act on Wardian state: lifecycle commands, workflow operations, and PTY message delivery.
 
 ## Decision
 
@@ -40,7 +40,7 @@ The CLI preserves `not_found` and `not_supported` for app-reported control error
 
 ## State Access
 
-2026-04-21 Wardian CLI and Agent Command described read-only SQLite fallback for the original introspection commands. The current implementation opens the database normally and runs migrations before reading so older Wardian homes remain queryable from the CLI. This is a deliberate compatibility tradeoff: the CLI may upgrade schema metadata during reads, but it does not mutate agent lifecycle state through SQLite.
+[Wardian CLI and `wardian agent` Command](./2026-04-21-wardian-cli-and-agent-command.md) described read-only SQLite fallback for the original introspection commands. The current implementation opens the database normally and runs migrations before reading so older Wardian homes remain queryable from the CLI. This is a deliberate compatibility tradeoff: the CLI may upgrade schema metadata during reads, but it does not mutate agent lifecycle state through SQLite.
 
 ## Follow-Ups
 

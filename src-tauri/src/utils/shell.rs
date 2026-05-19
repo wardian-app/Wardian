@@ -7,6 +7,7 @@ use wardian_core::models::AgentSessionPersistence;
 const SHELL_SETTINGS_FILE: &str = "settings/shell.json";
 const CODEX_SANDBOX_MODES: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
 const CODEX_APPROVAL_POLICIES: &[&str] = &["untrusted", "on-failure", "on-request", "never"];
+const DEFAULT_PROVIDER_VALUES: &[&str] = &["auto", "claude", "codex", "gemini", "opencode"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellOption {
@@ -28,6 +29,8 @@ pub struct ShellSettings {
     pub agent_session_persistence: AgentSessionPersistence,
     #[serde(default)]
     pub codex_runtime_policy: CodexRuntimePolicy,
+    #[serde(default = "default_default_provider")]
+    pub default_provider: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,8 +58,13 @@ impl Default for ShellSettings {
             custom_args: None,
             agent_session_persistence: AgentSessionPersistence::Resume,
             codex_runtime_policy: CodexRuntimePolicy::default(),
+            default_provider: default_default_provider(),
         }
     }
+}
+
+fn default_default_provider() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,7 +193,17 @@ fn normalize_settings(mut settings: ShellSettings) -> ShellSettings {
         .custom_args
         .and_then(|value| trim_to_option(&value));
     settings.codex_runtime_policy = normalize_codex_runtime_policy(settings.codex_runtime_policy);
+    settings.default_provider = normalize_default_provider(&settings.default_provider);
     settings
+}
+
+fn normalize_default_provider(value: &str) -> String {
+    let trimmed = value.trim().to_ascii_lowercase();
+    if DEFAULT_PROVIDER_VALUES.contains(&trimmed.as_str()) {
+        trimmed
+    } else {
+        default_default_provider()
+    }
 }
 
 fn normalize_codex_runtime_policy(mut policy: CodexRuntimePolicy) -> CodexRuntimePolicy {
@@ -221,6 +239,9 @@ fn validate_shell_settings(
     }
     if !CODEX_APPROVAL_POLICIES.contains(&settings.codex_runtime_policy.approval_policy.as_str()) {
         return Err("Invalid Codex approval policy".to_string());
+    }
+    if !DEFAULT_PROVIDER_VALUES.contains(&settings.default_provider.as_str()) {
+        return Err("Invalid default provider".to_string());
     }
     Ok(())
 }
@@ -1031,6 +1052,52 @@ mod tests {
         let loaded = load_shell_settings_from_path(&path).expect("load settings");
 
         assert_eq!(loaded.codex_runtime_policy, CodexRuntimePolicy::default());
+    }
+
+    #[test]
+    fn shell_settings_backfills_default_provider_for_legacy_files() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        std::fs::write(
+            &path,
+            r#"{"shell_id":"auto","custom_executable":null,"custom_args":null,"agent_session_persistence":"resume"}"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(loaded.default_provider, "auto");
+    }
+
+    #[test]
+    fn shell_settings_normalizes_invalid_default_provider_to_auto() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        std::fs::write(
+            &path,
+            r#"{"shell_id":"auto","default_provider":"future-provider","agent_session_persistence":"resume"}"#,
+        )
+        .expect("write settings");
+
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(loaded.default_provider, "auto");
+    }
+
+    #[test]
+    fn shell_settings_round_trips_explicit_default_provider() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        let settings = ShellSettings {
+            default_provider: "codex".to_string(),
+            ..Default::default()
+        };
+
+        let saved = save_shell_settings_to_path(&path, &settings).expect("save settings");
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(saved.default_provider, "codex");
+        assert_eq!(loaded.default_provider, "codex");
     }
 
     #[test]

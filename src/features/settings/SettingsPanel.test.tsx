@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +20,7 @@ describe('SettingsPanel', () => {
       custom_executable: '',
       custom_args: '',
       agent_session_persistence: 'resume',
+      default_provider: 'auto',
       available_shells: [],
       shell_settings_loaded: false,
       shells_loaded: false,
@@ -33,6 +34,7 @@ describe('SettingsPanel', () => {
             custom_executable: null,
             custom_args: null,
             agent_session_persistence: 'resume',
+            default_provider: 'auto',
             codex_runtime_policy: {
               sandbox_mode: 'workspace-write',
               approval_policy: 'on-request',
@@ -67,6 +69,7 @@ describe('SettingsPanel', () => {
               approval_policy: 'on-request',
               full_auto: false,
             },
+            default_provider: 'auto',
           };
         case 'run_gemini_patch':
           return 'ok';
@@ -74,6 +77,16 @@ describe('SettingsPanel', () => {
           return null;
       }
     });
+  });
+
+  it('links to the getting started guide from settings', async () => {
+    render(<SettingsPanel />);
+
+    expect(screen.getByRole('link', { name: /getting started/i })).toHaveAttribute(
+      'href',
+      'https://docs.wardian.org/guide/getting-started',
+    );
+    await screen.findByLabelText('Shell / Interpreter');
   });
 
   it('loads discovered shells and current shell settings on mount', async () => {
@@ -114,6 +127,7 @@ describe('SettingsPanel', () => {
           custom_executable: 'C:/Tools/custom-shell.exe',
           custom_args: '--command',
           agent_session_persistence: 'resume',
+          default_provider: 'auto',
           codex_runtime_policy: {
             sandbox_mode: 'workspace-write',
             approval_policy: 'on-request',
@@ -198,6 +212,7 @@ describe('SettingsPanel', () => {
           custom_executable: null,
           custom_args: null,
           agent_session_persistence: 'fresh',
+          default_provider: 'auto',
           codex_runtime_policy: {
             sandbox_mode: 'workspace-write',
             approval_policy: 'on-request',
@@ -232,6 +247,7 @@ describe('SettingsPanel', () => {
           custom_executable: null,
           custom_args: null,
           agent_session_persistence: 'resume',
+          default_provider: 'auto',
           codex_runtime_policy: {
             sandbox_mode: 'danger-full-access',
             approval_policy: 'never',
@@ -251,6 +267,7 @@ describe('SettingsPanel', () => {
             custom_executable: null,
             custom_args: null,
             agent_session_persistence: 'resume',
+            default_provider: 'auto',
           };
         case 'list_available_shells':
           return [
@@ -285,6 +302,38 @@ describe('SettingsPanel', () => {
 
     expect(useSettingsStore.getState().terminalFontSize).toBe(16);
     expect(input).toHaveValue(16);
+  });
+
+  it('saves the default provider preference with agent runtime settings', async () => {
+    render(<SettingsPanel />);
+
+    const select = await screen.findByLabelText('Default provider');
+    expect(select).toHaveValue('auto');
+    expect(within(select).getByRole('option', { name: 'Auto' })).toBeInTheDocument();
+    expect(within(select).getByRole('option', { name: 'Claude' })).toBeInTheDocument();
+    expect(within(select).getByRole('option', { name: 'Codex' })).toBeInTheDocument();
+    expect(within(select).getByRole('option', { name: 'Gemini' })).toBeInTheDocument();
+    expect(within(select).getByRole('option', { name: 'OpenCode' })).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: 'gemini' } });
+    fireEvent.click(screen.getByText('Save Agent Runtime'));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_shell_settings', {
+        settings: {
+          shell_id: 'pwsh',
+          custom_executable: null,
+          custom_args: null,
+          agent_session_persistence: 'resume',
+          default_provider: 'gemini',
+          codex_runtime_policy: {
+            sandbox_mode: 'workspace-write',
+            approval_policy: 'on-request',
+            full_auto: false,
+          },
+        },
+      });
+    });
   });
 
   it('keeps partial terminal font size edits local until they become valid', async () => {

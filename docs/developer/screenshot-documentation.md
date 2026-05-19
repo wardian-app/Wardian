@@ -83,4 +83,4 @@ For screenshots that require Tauri IPC, PTY behavior, or provider runtime behavi
 
 Use [Core Feature Screenshot Capture Plan](./screenshot-capture-plan.md) to decide which screenshots belong in the first documentation pass.
 
-See [2026-05-12 Core Feature Screenshot Documentation](../specs/2026-05-12-core-feature-screenshot-documentation.md) for the architectural decision.
+See [Core Feature Screenshot Documentation](../specs/2026-05-12-core-feature-screenshot-documentation.md) for the architectural decision.

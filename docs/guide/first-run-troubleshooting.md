@@ -151,6 +151,7 @@ Do not include API keys, provider tokens, private prompts, private repository co
 ## Related Docs
 
 - [Getting Started](./getting-started.md)
+- [Provider Readiness](./provider-readiness.md)
 - [Wardian CLI](./cli.md)
 - [Queue](./queue.md)
 - [Settings](./settings.md)

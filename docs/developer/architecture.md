@@ -11,7 +11,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **PTY Management**: Uses `portable-pty` for cross-platform PTY handles. On Windows, it leverages `win32job` to ensure child processes are strictly terminated when the agent session ends.
 - **Provider Adapters**: Agent CLIs are integrated behind a Rust provider layer so session spawn, headless execution, and telemetry enrichment can support Gemini, Claude, Codex, and OpenCode without rewriting the rest of the backend.
   See [Provider Runtime Notes](./provider-runtimes.md) for the provider-specific working-root, skill, and session rules that sit behind this abstraction.
-- **Provider Context Projection**: The backend adapts Wardian instructions and skills to each provider's native discovery model without mutating the user repository. Gemini and Claude run in the real workspace with provider-native instruction/include paths, Codex runs against the real workspace via `--cd` while keeping per-agent `CODEX_HOME` habitat state, and OpenCode runs in the real workspace with generated runtime config and config-directory skill projection.
+- **Habitat Projection**: For providers that cannot natively discover Wardian instructions and skills from external include roots, the backend materializes a neutral per-session `habitat` directory. That habitat links the real workspace, projects a scoped `AGENTS.md`, and exposes provider-native skill layouts without mutating the user repository. OpenCode is an explicit exception: it stays in the real workspace and receives class/skill scope through injected runtime config instead of a projected workspace.
 - **State Management**: `AppState` holds `Mutex`-protected maps of active agents, metrics, and background triggers.
 - **Worker Threads**:
   - **Heartbeat (Scheduler)**: Handles periodic tasks and cron triggers.
@@ -30,7 +30,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Continuity vs Memory**: Provider-native resume state is not the same thing as long-term memory. Session IDs, PTY ownership, approval hooks, and provider trust remain runtime concerns.
 - **Evidence-First Memory**: Wardian's memory direction is to preserve raw evidence, index it for retrieval, and build prompt context selectively rather than replaying prior sessions wholesale.
 - **Promoted Knowledge**: Curated atoms remain useful, but as promoted knowledge with provenance back to retrieved evidence rather than as the primary memory substrate.
-- See [2026-04-17 Evidence First Memory](../specs/2026-04-17-evidence-first-memory.md) for the target architecture.
+- See [Evidence-First Memory](../specs/2026-04-17-evidence-first-memory.md) for the target architecture.
 
 ### 3. The UI Layer (React Frontend)
 

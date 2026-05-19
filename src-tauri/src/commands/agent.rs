@@ -755,6 +755,10 @@ fn provider_uses_generated_session_id(provider_name: &str) -> bool {
     )
 }
 
+fn ensure_provider_available_before_session_bootstrap(provider_name: &str) -> Result<(), String> {
+    crate::providers::readiness::ensure_provider_available_for_launch(provider_name)
+}
+
 fn provider_needs_obtain_session_id_on_clear(_provider_name: &str) -> bool {
     false
 }
@@ -1316,6 +1320,28 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Result<(), String> {
+    if config.is_off {
+        return Ok(());
+    }
+
+    prepare_resume_config(config)
+}
+
+fn prepare_resume_config_for_runtime(
+    config: &mut AgentConfig,
+    query_count: usize,
+) -> Result<(), String> {
+    if config.provider == "gemini" && query_count == 0 && !config.is_off {
+        config.is_off = false;
+        config.resume_session = None;
+        config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
+        return Ok(());
+    }
+
+    prepare_resume_config(config)
+}
+
 fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
@@ -1470,6 +1496,12 @@ async fn register_new_agent(
 }
 
 #[tauri::command]
+pub fn list_provider_readiness(
+) -> Result<Vec<crate::providers::readiness::ProviderReadiness>, String> {
+    Ok(crate::providers::readiness::list_provider_readiness())
+}
+
+#[tauri::command]
 pub async fn spawn_agent(
     req: SpawnAgentRequest,
     state: State<'_, AppState>,
@@ -1482,6 +1514,12 @@ pub async fn spawn_agent(
     let is_off = req.is_off;
     let config_override = req.config_override;
 
+    let provider_name = config_override
+        .as_ref()
+        .map(|c| c.provider.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    ensure_provider_available_before_session_bootstrap(&provider_name)?;
+
     let name_reservation =
         reserve_spawn_session_name(&state, &requested_session_name, &agent_class).await?;
     let session_name = name_reservation.session_name.clone();
@@ -1490,10 +1528,6 @@ pub async fn spawn_agent(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
     ));
-    let provider_name = config_override
-        .as_ref()
-        .map(|c| c.provider.clone())
-        .unwrap_or_else(|| "claude".to_string());
     let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
 
     let mut session_id = actual_resume.clone();
@@ -1615,6 +1649,7 @@ pub async fn clone_agent(
         req.start.unwrap_or(true),
     );
     let provider_name = config.provider.clone();
+    ensure_provider_available_before_session_bootstrap(&provider_name)?;
     let mut actual_resume = None;
     let profile_home = if should_copy_profile {
         Some(
@@ -1935,7 +1970,7 @@ pub async fn resume_agent(
     };
 
     let mut config = snapshot.config;
-    prepare_resume_config(&mut config)?;
+    prepare_resume_config_for_runtime(&mut config, snapshot.query_count)?;
     let mut new_active = manager::spawn_agent(
         app.clone(),
         config.clone(),
@@ -2647,15 +2682,17 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, disable_worktree_config, enable_worktree_config,
-        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
-        mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
-        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, reserve_spawn_session_name,
-        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, terminal_cleared_payload, AgentOrderPlacement,
-        CloneProfileCopyPlan, CloneProfileSelection,
+        ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
+        generated_agent_name, insert_new_agent_order, mark_agent_paused_off,
+        normalize_clone_folder_override, normalize_spawn_folder,
+        persisted_resume_session_for_provider, prepare_clear_config,
+        prepare_restored_config_for_spawn, prepare_resume_config,
+        prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
+        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
+        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
+        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
+        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
+        terminal_cleared_payload, AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -2718,6 +2755,46 @@ mod tests {
 
     fn clone_name_set(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn spawn_bootstrap_readiness_error_precedes_provider_session_initialization() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("PATH", temp.path()) };
+
+        let err = ensure_provider_available_before_session_bootstrap("codex")
+            .expect_err("missing Codex should fail before bootstrap");
+
+        assert!(err.contains("Codex"));
+        assert!(err.contains("codex"));
+        assert!(err.contains("docs/guide/provider-readiness.md"));
+
+        match previous_path {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+    }
+
+    #[test]
+    fn clone_bootstrap_readiness_error_precedes_provider_session_initialization() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("PATH", temp.path()) };
+
+        let err = ensure_provider_available_before_session_bootstrap("codex")
+            .expect_err("missing Codex should fail before clone bootstrap");
+
+        assert!(err.contains("Codex"));
+        assert!(err.contains("codex"));
+        assert!(err.contains("docs/guide/provider-readiness.md"));
+
+        match previous_path {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     fn test_pwsh_shell() -> (ShellSettings, Vec<ShellOption>) {
@@ -4813,6 +4890,45 @@ mod tests {
     }
 
     #[test]
+    fn restored_gemini_startup_config_uses_resume_spawn_args() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: false,
+            ..Default::default()
+        };
+
+        prepare_restored_config_for_spawn(&mut config).expect("prepare restored config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn restored_off_gemini_startup_config_stays_off() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_restored_config_for_spawn(&mut config).expect("prepare restored config");
+
+        assert!(config.is_off);
+        assert_eq!(config.resume_session, None);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
     fn gemini_fresh_resume_uses_new_provider_session_without_changing_wardian_id() {
         let _guard = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -4840,6 +4956,62 @@ mod tests {
             Some("wardian-agent-id")
         );
         assert!(config.fresh_provider_session_id.is_some());
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn gemini_empty_runtime_resume_starts_fresh_session() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "wardian-agent-id".to_string(),
+            resume_session: Some("gemini-provider-session".to_string()),
+            is_off: false,
+            ..Default::default()
+        };
+
+        prepare_resume_config_for_runtime(&mut config, 0).expect("prepare resume config");
+
+        assert_eq!(config.session_id, "wardian-agent-id");
+        assert_eq!(config.resume_session, None);
+        assert_ne!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("wardian-agent-id")
+        );
+        assert_ne!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("gemini-provider-session")
+        );
+        assert!(config.fresh_provider_session_id.is_some());
+        let args = GeminiProvider::new().get_spawn_args(&config, false);
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn off_gemini_runtime_resume_with_unknown_query_count_keeps_resume_session() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "wardian-agent-id".to_string(),
+            resume_session: Some("gemini-provider-session".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config_for_runtime(&mut config, 0).expect("prepare resume config");
+
+        assert_eq!(
+            config.resume_session.as_deref(),
+            Some("gemini-provider-session")
+        );
+        assert_eq!(config.fresh_provider_session_id, None);
+        assert!(!config.is_off);
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-provider-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
         std::env::remove_var("WARDIAN_HOME");
     }
 

@@ -13,6 +13,8 @@ Related docs:
 
 - [UI Overview](./guide/ui-overview.md)
 - [Getting Started](./guide/getting-started.md)
+- [Grid](./guide/grid.md)
+- [Dashboard](./guide/dashboard.md)
 - [Watchlists](./guide/watchlists.md)
 - [Queue](./guide/queue.md)
 
@@ -59,7 +61,7 @@ Related docs:
 Related docs:
 
 - [Source Control](./guide/source-control.md)
-- [2026-04-17 Source Control Panel](./specs/2026-04-17-source-control-panel.md)
+- [Source Control Panel](./specs/2026-04-17-source-control-panel.md)
 
 ## Workflow Builder and Runtime
 
@@ -92,13 +94,13 @@ Related docs:
 
 - Default shell selection (`auto`, discovered shell, or custom executable)
 - Per-installation regular-agent session persistence policy (`resume` vs `fresh`)
-- Provider-specific runtime utilities, including Gemini skill patching, Codex runtime policy, and OpenCode theme sync
+- Theme sync support and Gemini patch actions from settings
 
 Related docs:
 
 - [Settings](./guide/settings.md)
-- [2026-03-30 Runtime Shell Selection](./specs/2026-03-30-runtime-shell-selection.md)
-- [2026-04-17 Session Persistence Policy](./specs/2026-04-17-session-persistence-policy.md)
+- [Runtime Shell Selection](./specs/2026-03-30-runtime-shell-selection.md)
+- [Session Persistence Policy](./specs/2026-04-17-session-persistence-policy.md)
 
 ## Provider-Aware Orchestration
 

@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { EventCallback } from "@tauri-apps/api/event";
 import App from "./App";
-import type { AgentConfig, AgentClassDefinition, AgentClonePreview } from "../types";
+import type { AgentConfig, AgentClassDefinition, AgentClonePreview, ProviderReadiness } from "../types";
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useQueueStore } from "../store/useQueueStore";
@@ -73,6 +73,13 @@ let currentAgents: AgentConfig[] = [];
 let currentWatchlists: unknown = [];
 let currentInteractions: unknown = {};
 let currentQueueItems: unknown = [];
+
+const allProvidersReady: ProviderReadiness[] = [
+  { provider: "claude", display_name: "Claude", available: true, executable: "claude", reason: null },
+  { provider: "codex", display_name: "Codex", available: true, executable: "codex", reason: null },
+  { provider: "gemini", display_name: "Gemini", available: true, executable: "gemini", reason: null },
+  { provider: "opencode", display_name: "OpenCode", available: true, executable: "opencode", reason: null },
+];
 
 function simulateBackendCloneTeamPlacement(sourceAgentId: string, cloneAgentId: string) {
   const state = normalizeWatchlistState(currentWatchlists);
@@ -174,6 +181,8 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
           default_selected_skills: [],
         } satisfies AgentClonePreview;
       }
+      case "list_provider_readiness":
+        return allProvidersReady;
       case "get_agent_metrics":
         return [];
       case "attach_agent_pty":
@@ -352,6 +361,18 @@ describe("Native window layout bridge", () => {
       expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
       expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
     });
+  });
+
+  it("allows the main Grid pane to shrink beside the roster", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+
+    render(<App />);
+
+    await screen.findByTestId("agent-grid");
+    const main = document.querySelector("main");
+
+    expect(main).not.toBeNull();
+    expect(main).toHaveClass("min-w-0");
   });
 
   it("uses outer dimensions when the Tauri global appears after mount", async () => {

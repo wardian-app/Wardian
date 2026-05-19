@@ -18,6 +18,49 @@ use crate::state::AppState;
 use tauri::{Emitter, Manager};
 use wardian_core::models::AgentConfig;
 
+const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const TELEMETRY_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn restored_agent_without_process(
+    config: AgentConfig,
+    status: &str,
+    output: String,
+    process_id: Option<u32>,
+    born: Option<String>,
+) -> crate::state::ActiveAgent {
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut watch_state =
+        crate::state::AgentWatchState::new(config.session_id.clone(), 4096, 262_144);
+    watch_state.push_event(
+        "status",
+        serde_json::json!({
+            "status": wardian_core::identity::normalize_status(status),
+            "observed_at": observed_at,
+        }),
+    );
+
+    crate::state::ActiveAgent {
+        config: std::sync::Arc::new(std::sync::Mutex::new(config)),
+        child_process: None,
+        background_processes: Vec::new(),
+        pty_master: None,
+        stdin_tx: None,
+        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(output)),
+        process_id,
+        query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(born)),
+        current_status: std::sync::Arc::new(std::sync::Mutex::new(status.to_string())),
+        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(Some(observed_at))),
+        watch_state: std::sync::Arc::new(std::sync::Mutex::new(watch_state)),
+        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        #[cfg(windows)]
+        job_object: None,
+    }
+}
+
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;
 
@@ -55,6 +98,41 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
         }
     }
     Ok(())
+}
+
+async fn emit_metrics_tick(metrics_handle: tauri::AppHandle) {
+    let state = metrics_handle.state::<AppState>();
+    let metrics = manager::get_all_metrics(&state).await;
+    let app_metrics = manager::get_app_metrics(&state).await;
+    let _ = metrics_handle.emit("agent-metrics", &metrics);
+    let _ = metrics_handle.emit("app-metrics", &app_metrics);
+}
+
+fn start_metrics_supervisor(metrics_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(TELEMETRY_INTERVAL).await;
+            let tick_handle = metrics_handle.clone();
+            let mut tick = tauri::async_runtime::spawn(async move {
+                emit_metrics_tick(tick_handle).await;
+            });
+            match tokio::time::timeout(TELEMETRY_TICK_TIMEOUT, &mut tick).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Telemetry tick failed; continuing metrics supervisor: {error}"
+                    ));
+                }
+                Err(_) => {
+                    tick.abort();
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Telemetry tick exceeded {}s; continuing metrics supervisor while timed-out work finishes in background",
+                        TELEMETRY_TICK_TIMEOUT.as_secs()
+                    ));
+                }
+            }
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -108,17 +186,7 @@ pub fn run() {
             control::spawn_control_server(app_handle.clone());
             manager::init_agent_classes(&app_handle);
 
-            let metrics_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    let state = metrics_handle.state::<AppState>();
-                    let metrics = manager::get_all_metrics(&state).await;
-                    let app_metrics = manager::get_app_metrics(&state).await;
-                    let _ = metrics_handle.emit("agent-metrics", &metrics);
-                    let _ = metrics_handle.emit("app-metrics", &app_metrics);
-                }
-            });
+            start_metrics_supervisor(app.handle().clone());
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
@@ -178,6 +246,15 @@ pub fn run() {
                                         &config.agent_class,
                                         &config.session_id,
                                     ));
+                                if let Err(error) =
+                                    commands::agent::prepare_restored_config_for_spawn(&mut config)
+                                {
+                                    eprintln!(
+                                        "Failed to prepare restored agent {}: {}",
+                                        config.session_id, error
+                                    );
+                                    continue;
+                                }
 
                                 let (last_status, last_pid, last_born) = db_status_map
                                     .get(&config.session_id)
@@ -185,65 +262,61 @@ pub fn run() {
                                     .unwrap_or((None, None, None));
 
                                 if last_status.as_deref() == Some("Headless") {
-                                    let agent = crate::state::ActiveAgent {
-                                        config: std::sync::Arc::new(std::sync::Mutex::new(
-                                            config.clone(),
-                                        )),
-                                        child_process: None,
-                                        background_processes: Vec::new(),
-                                        pty_master: None,
-                                        stdin_tx: None,
-                                        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(
-                                            String::new(),
-                                        )),
-                                        process_id: last_pid,
-                                        query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(
-                                            last_born,
-                                        )),
-                                        current_status: std::sync::Arc::new(std::sync::Mutex::new(
-                                            "Headless".to_string(),
-                                        )),
-                                        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(
-                                            None,
-                                        )),
-                                        watch_state: std::sync::Arc::new(std::sync::Mutex::new(
-                                            crate::state::AgentWatchState::new(
-                                                config.session_id.clone(),
-                                                4096,
-                                                262_144,
-                                            ),
-                                        )),
-                                        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(
-                                            String::new(),
-                                        )),
-                                        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(
-                                            None,
-                                        )),
-                                        log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                                        log_last_modified: std::sync::Arc::new(
-                                            std::sync::Mutex::new(None),
-                                        ),
-                                        #[cfg(windows)]
-                                        job_object: None,
-                                    };
+                                    let agent = restored_agent_without_process(
+                                        config.clone(),
+                                        "Headless",
+                                        String::new(),
+                                        last_pid,
+                                        last_born,
+                                    );
                                     order_map.push(config.session_id.clone());
                                     agents_map.insert(config.session_id.clone(), agent);
-                                } else if let Ok(agent) = manager::spawn_agent(
-                                    app_handle.clone(),
-                                    config.clone(),
-                                    true,
-                                    last_born,
-                                )
-                                .await
-                                {
-                                    if let Some(ref tx) = agent.stdin_tx {
-                                        if let Ok(mut senders) = state.input_senders.write() {
-                                            senders.insert(config.session_id.clone(), tx.clone());
+                                } else {
+                                    let spawn_result = manager::spawn_agent(
+                                        app_handle.clone(),
+                                        config.clone(),
+                                        true,
+                                        last_born.clone(),
+                                    )
+                                    .await;
+                                    match spawn_result {
+                                        Ok(agent) => {
+                                            if let Some(ref tx) = agent.stdin_tx {
+                                                if let Ok(mut senders) = state.input_senders.write()
+                                                {
+                                                    senders.insert(
+                                                        config.session_id.clone(),
+                                                        tx.clone(),
+                                                    );
+                                                }
+                                            }
+                                            order_map.push(config.session_id.clone());
+                                            agents_map.insert(config.session_id.clone(), agent);
+                                        }
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Failed to restore agent {}: {}",
+                                                config.session_id, error
+                                            );
+                                            let _ = wardian_core::db::update_agent_status(
+                                                &config.session_id,
+                                                "Error",
+                                                None,
+                                            );
+                                            let agent = restored_agent_without_process(
+                                                config.clone(),
+                                                "Error",
+                                                format!(
+                                                    "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
+                                                    error
+                                                ),
+                                                None,
+                                                last_born,
+                                            );
+                                            order_map.push(config.session_id.clone());
+                                            agents_map.insert(config.session_id.clone(), agent);
                                         }
                                     }
-                                    order_map.push(config.session_id.clone());
-                                    agents_map.insert(config.session_id.clone(), agent);
                                 }
                             }
                             manager::save_state(&app_handle, &agents_map, &order_map);
@@ -256,6 +329,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::agent::spawn_agent,
+            commands::agent::list_provider_readiness,
             commands::agent::clone_agent,
             commands::agent::get_agent_clone_preview,
             commands::agent::list_agents,
@@ -357,6 +431,8 @@ pub fn run() {
             commands::settings::save_shell_settings,
             commands::settings::save_agent_session_persistence,
             commands::settings::sync_provider_theme_settings,
+            commands::settings::load_onboarding_hints,
+            commands::settings::dismiss_onboarding_hint,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

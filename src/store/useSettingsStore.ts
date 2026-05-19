@@ -5,6 +5,7 @@ import type {
   CodexApprovalPolicy,
   CodexRuntimePolicy,
   CodexSandboxMode,
+  DefaultProviderSetting,
   ShellOption,
   ShellSettings,
 } from '../types/settings';
@@ -58,6 +59,7 @@ export function effectiveTerminalFontFamily(value: string | null | undefined) {
 
 const CODEX_SANDBOX_MODES: CodexSandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'];
 const CODEX_APPROVAL_POLICIES: CodexApprovalPolicy[] = ['untrusted', 'on-failure', 'on-request', 'never'];
+const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', 'codex', 'gemini', 'opencode'];
 
 export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
   sandbox_mode: 'danger-full-access',
@@ -83,6 +85,14 @@ export function normalizeCodexRuntimePolicy(
   };
 }
 
+export function normalizeDefaultProviderSetting(
+  value: string | null | undefined,
+): DefaultProviderSetting {
+  return DEFAULT_PROVIDER_SETTINGS.includes(value as DefaultProviderSetting)
+    ? value as DefaultProviderSetting
+    : 'auto';
+}
+
 interface SettingsState {
   theme: 'dark' | 'light' | 'system';
   autoPatchGemini: boolean;
@@ -93,6 +103,7 @@ interface SettingsState {
   custom_args: string;
   agent_session_persistence: 'fresh' | 'resume';
   codex_runtime_policy: CodexRuntimePolicy;
+  default_provider: DefaultProviderSetting;
   available_shells: ShellOption[];
   shell_settings_loaded: boolean;
   shells_loaded: boolean;
@@ -104,6 +115,7 @@ interface SettingsState {
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
   setAgentSessionPersistence: (value: 'fresh' | 'resume') => void;
+  setDefaultProvider: (value: DefaultProviderSetting) => void;
   setCodexSandboxMode: (value: CodexSandboxMode) => void;
   setCodexApprovalPolicy: (value: CodexApprovalPolicy) => void;
   setCodexFullAuto: (value: boolean) => void;
@@ -119,6 +131,7 @@ const DEFAULT_SHELL_SETTINGS: ShellSettings = {
   custom_args: null,
   agent_session_persistence: 'resume',
   codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
+  default_provider: 'auto',
 };
 
 export const useSettingsStore = create<SettingsState>()(
@@ -133,6 +146,7 @@ export const useSettingsStore = create<SettingsState>()(
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
       agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
       codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
+      default_provider: DEFAULT_SHELL_SETTINGS.default_provider ?? 'auto',
       available_shells: [],
       shell_settings_loaded: false,
       shells_loaded: false,
@@ -146,6 +160,9 @@ export const useSettingsStore = create<SettingsState>()(
       setCustomExecutable: (custom_executable) => set({ custom_executable }),
       setCustomArgs: (custom_args) => set({ custom_args }),
       setAgentSessionPersistence: (agent_session_persistence) => set({ agent_session_persistence }),
+      setDefaultProvider: (default_provider) => set({
+        default_provider: normalizeDefaultProviderSetting(default_provider),
+      }),
       setCodexSandboxMode: (sandbox_mode) => set((state) => ({
         codex_runtime_policy: { ...state.codex_runtime_policy, sandbox_mode },
       })),
@@ -164,6 +181,7 @@ export const useSettingsStore = create<SettingsState>()(
             custom_args: settings.custom_args ?? '',
             agent_session_persistence: settings.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
             codex_runtime_policy: normalizeCodexRuntimePolicy(settings.codex_runtime_policy),
+            default_provider: normalizeDefaultProviderSetting(settings.default_provider),
             shell_settings_loaded: true,
           });
         } catch (error) {
@@ -174,6 +192,7 @@ export const useSettingsStore = create<SettingsState>()(
             custom_args: '',
             agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
             codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
+            default_provider: DEFAULT_SHELL_SETTINGS.default_provider ?? 'auto',
             shell_settings_loaded: true,
           });
         }
@@ -194,6 +213,7 @@ export const useSettingsStore = create<SettingsState>()(
           custom_args: get().custom_args.trim() || null,
           agent_session_persistence: get().agent_session_persistence,
           codex_runtime_policy: normalizeCodexRuntimePolicy(get().codex_runtime_policy),
+          default_provider: normalizeDefaultProviderSetting(get().default_provider),
         };
         const saved = await invoke<ShellSettings>('save_shell_settings', { settings });
         set({
@@ -202,6 +222,7 @@ export const useSettingsStore = create<SettingsState>()(
           custom_args: saved.custom_args ?? '',
           agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
           codex_runtime_policy: normalizeCodexRuntimePolicy(saved.codex_runtime_policy ?? settings.codex_runtime_policy),
+          default_provider: normalizeDefaultProviderSetting(saved.default_provider ?? settings.default_provider),
           shell_settings_loaded: true,
         });
       },
@@ -215,6 +236,7 @@ export const useSettingsStore = create<SettingsState>()(
           custom_args: saved.custom_args ?? '',
           agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
           codex_runtime_policy: normalizeCodexRuntimePolicy(saved.codex_runtime_policy ?? get().codex_runtime_policy),
+          default_provider: normalizeDefaultProviderSetting(saved.default_provider ?? get().default_provider),
           shell_settings_loaded: true,
         });
       },

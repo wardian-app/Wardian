@@ -36,35 +36,43 @@ export default defineConfig({
     sidebar: {
       "/guide/": [
         {
-          text: "First-Time Setup",
+          text: "Start and Orient",
           items: [
-            { text: "Getting Started", link: "/guide/getting-started" },
+            { text: "First-Time Install and First Run", link: "/guide/getting-started" },
+            { text: "Provider Readiness", link: "/guide/provider-readiness" },
             { text: "First-Run Troubleshooting", link: "/guide/first-run-troubleshooting" },
             { text: "UI Overview", link: "/guide/ui-overview" },
           ],
         },
         {
-          text: "Agent Operations",
+          text: "Run and Monitor Agents",
           items: [
-            { text: "Wardian CLI", link: "/guide/cli" },
-            { text: "Class Management", link: "/guide/class-management" },
-            { text: "Library", link: "/guide/library" },
-            { text: "Command Panel", link: "/guide/command-panel" },
+            { text: "Grid", link: "/guide/grid" },
+            { text: "Dashboard", link: "/guide/dashboard" },
             { text: "Watchlists", link: "/guide/watchlists" },
             { text: "Queue", link: "/guide/queue" },
+            { text: "Class Management", link: "/guide/class-management" },
+          ],
+        },
+        {
+          text: "Reuse and Direct Work",
+          items: [
+            { text: "Library", link: "/guide/library" },
+            { text: "Command Panel", link: "/guide/command-panel" },
+            { text: "Wardian CLI", link: "/guide/cli" },
+          ],
+        },
+        {
+          text: "Inspect and Ship Changes",
+          items: [
             { text: "Explorer", link: "/guide/explorer" },
-          ],
-        },
-        {
-          text: "Source Control and Runtime",
-          items: [
             { text: "Source Control", link: "/guide/source-control" },
-            { text: "Settings", link: "/guide/settings" },
           ],
         },
         {
-          text: "Workflows",
+          text: "Configure and Automate",
           items: [
+            { text: "Settings", link: "/guide/settings" },
             { text: "Workflow View", link: "/guide/workflows" },
             { text: "Workflow Reference", link: "/workflows/" },
           ],
@@ -97,6 +105,7 @@ export default defineConfig({
             { text: "Provider Runtimes", link: "/developer/provider-runtimes" },
             { text: "PTY Lifecycle", link: "/developer/pty-lifecycle" },
             { text: "Native E2E", link: "/developer/native-e2e" },
+            { text: "Docs Maintenance", link: "/developer/docs-maintenance" },
             { text: "Theming", link: "/developer/theming" },
             { text: "Screenshot Documentation", link: "/developer/screenshot-documentation" },
           ],
@@ -107,7 +116,7 @@ export default defineConfig({
           text: "Start Here",
           items: [
             { text: "Documentation Index", link: "/" },
-            { text: "Getting Started", link: "/guide/getting-started" },
+            { text: "First-Time Install and First Run", link: "/guide/getting-started" },
             { text: "Key Features", link: "/features" },
             { text: "Providers", link: "/providers" },
             { text: "OS Support", link: "/os-support" },

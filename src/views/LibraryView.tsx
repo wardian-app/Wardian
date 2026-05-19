@@ -5,6 +5,7 @@ import { ItemEditorModal } from '../features/library/ItemEditorModal';
 import { AssignSkillModal } from '../features/library/AssignSkillModal';
 import { AssignPromptModal } from '../features/library/AssignPromptModal';
 import { LibraryFolder, LibraryPrompt, LibrarySkill } from '../types';
+import { DocsLink } from '../components/DocsLink';
 import { flattenPromptForInjection, submitInputToAgents } from '../utils/terminalInput';
 
 interface LibraryViewProps {
@@ -171,6 +172,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
 
                 {/* Filters & Actions */}
                 <div className="flex items-center gap-3">
+                    <DocsLink path="/guide/library">Library guide</DocsLink>
                     <button 
                         onClick={() => openLibraryFolder(currentPath.join('/'))}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-wardian-border label-small text-muted hover:text-primary hover:border-wardian-accent transition-all whitespace-nowrap"

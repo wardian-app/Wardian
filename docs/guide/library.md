@@ -1,10 +1,27 @@
 # The Library System
 
-The Library is the centralized repository for all reusable agent assets in Wardian. It allows you to manage "Blueprints" (what an agent can be) and "Actions" (what an agent can do).
+The Library is the centralized repository for reusable prompts and skills in Wardian. It stores the actions and capabilities you want agents to reuse across sessions.
+
+Use it when you want to save repeatable prompts, manage reusable skills, or prepare assets that classes and agents can reuse.
 
 ![Wardian Library view showing folders, reusable prompts, starred prompts, and search controls](../assets/screenshots/library/library-view.png)
 
-## 🗂️ Library Sections
+## When to Use It
+
+- Turn a repeated instruction into a prompt instead of rewriting it in terminals.
+- Star operational prompts so they appear in the [Command Panel](./command-panel.md).
+- Deploy skills globally, by class, or to a specific active agent.
+- Prepare prompts or skills before spawning a new agent from [Getting Started](./getting-started.md).
+
+## Basic Workflow
+
+1. Click **Library** in the top workspace tabs.
+2. Choose **Prompts** or **Skills**.
+3. Create or edit the asset you need.
+4. Star prompts that should appear in Command.
+5. Deploy skills to the right scope, or select a prompt and run it against selected agents.
+
+## Library Sections
 
 ### 1. Prompts
 
@@ -25,15 +42,11 @@ Skills are modular capabilities (extensions) that can be deployed to your agents
   - **Class**: Deploys the skill to a specific blueprint (e.g., all future `Coder` agents).
   - **Instance**: Deploys the skill only to one specific, active agent session.
 
-### 3. Classes
+### Class Relationship
 
-Classes are the foundational blueprints for your agents.
+Classes are managed from the separate [Class Management](./class-management.md) panel. Use the Library to maintain the skills that classes can receive, then assign those skills from the Classes panel.
 
-- **Consolidated Registry**: All classes are stored in a single `classes.json` file in your `.wardian` folder.
-- **Custom Instructions**: Edit the `AGENTS.md` content for any class to define its personality, constraints, and standard operating procedures.
-- **Default Skills**: Pre-assign specific skills to a class so every instance spawned from it starts with the necessary tools.
-
-## 🖱️ Key Interactions
+## Key Interactions
 
 ### Managing Assets
 
@@ -48,7 +61,14 @@ To run a prompt from the Library:
 2. Find the prompt in the **Library**.
 3. Click the **Run** icon (Play button). The prompt text will be flattened into a single line and sent to the selected terminals automatically.
 
-## 🚀 Advanced: Provider Skill Discovery
+## Important Limits
+
+- Prompt runs are terminal input, not a background job system. Check the target agent selection before running them.
+- Skill deployments may use links or fallback copies depending on platform support and filesystem permissions.
+- Class editing happens in [Class Management](./class-management.md), not in the Library view.
+- Use [Provider Runtimes](../providers.md) when skill visibility differs by CLI provider.
+
+## Provider Skill Discovery
 
 Wardian adapts the same assigned skills to each provider's native discovery model:
 
@@ -59,6 +79,10 @@ Wardian adapts the same assigned skills to each provider's native discovery mode
 
 If Gemini skills are missing, ensure **Auto-patch Gemini CLI** is enabled in the **Settings** panel or run the patch manually. For other providers, start with the provider comparison in [Provider Runtimes](../providers.md).
 
-## Related Research
+## Related Links
 
+- [Class Management](./class-management.md)
+- [Command Panel](./command-panel.md)
+- [Watchlists](./watchlists.md)
+- [Provider Runtimes](../providers.md)
 - [Skill Manager References](../research/skill-manager-references.md)
