@@ -10,6 +10,8 @@ const explicitBaseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL;
 const screenshotPort = Number.parseInt(process.env.WARDIAN_DOCS_SCREENSHOT_PORT ?? "1420", 10);
 const baseUrl = explicitBaseUrl ?? `http://127.0.0.1:${screenshotPort}`;
 const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
+const defaultSidebarContentWidth = 240;
+const wideSidebarContentWidth = 320;
 
 const agents = [
   {
@@ -303,15 +305,71 @@ async function capture(page, relativePath, locator) {
   if (locator) {
     await locator.screenshot({ path: filePath, animations: "disabled" });
   } else {
+    await assertShellHasNoHorizontalOverlap(page, relativePath);
     await page.screenshot({ path: filePath, animations: "disabled" });
   }
   console.log(`captured ${path.relative(root, filePath)}`);
+}
+
+async function setSidebarContentWidth(page, width) {
+  await page.evaluate((nextWidth) => {
+    document.documentElement.style.setProperty("--sidebar-content-width", `${nextWidth}px`);
+  }, width);
+}
+
+async function assertShellHasNoHorizontalOverlap(page, relativePath) {
+  const rects = await page.evaluate(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+      };
+    };
+
+    return {
+      main: rectFor("main"),
+      roster: rectFor('[data-testid="agent-watchlist"]'),
+      grid: rectFor('[data-testid="agent-grid"]'),
+      sidebarWidth: getComputedStyle(document.documentElement).getPropertyValue("--sidebar-content-width").trim(),
+    };
+  });
+
+  if (!rects.main || !rects.roster) return;
+
+  if (rects.main.right > rects.roster.left + 1) {
+    throw new Error(
+      [
+        `Refusing to capture ${relativePath}: main pane overlaps the right roster.`,
+        `main.right=${rects.main.right}`,
+        `roster.left=${rects.roster.left}`,
+        `sidebar-content-width=${rects.sidebarWidth}`,
+      ].join(" "),
+    );
+  }
+
+  if (rects.grid && rects.grid.right > rects.roster.left + 1) {
+    throw new Error(
+      [
+        `Refusing to capture ${relativePath}: Grid extends under the right roster.`,
+        `grid.right=${rects.grid.right}`,
+        `roster.left=${rects.roster.left}`,
+        `grid.width=${rects.grid.width}`,
+        `sidebar-content-width=${rects.sidebarWidth}`,
+      ].join(" "),
+    );
+  }
 }
 
 async function installTauriDocsMock(page) {
   await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory }) => {
     const fixedNow = 1778590800000;
     const RealDate = Date;
+
+    window.localStorage.removeItem("wardian-layout");
 
     class FixedDate extends RealDate {
       constructor(...args) {
@@ -525,15 +583,20 @@ async function main() {
     await page.waitForTimeout(1_500);
 
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
+    await page.locator("#agent-card-docs-codex").hover();
+    await page.locator("#agent-card-docs-codex button").first().click({ force: true });
+    await page
+      .getByTestId("agent-card-header-docs-codex")
+      .getByRole("button", { name: "Minimize" })
+      .waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
     await capture(page, "grid/app-shell.png");
     await capture(page, "grid/active-agent-state.png", page.locator("main"));
 
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
 
-    await page.evaluate(() => {
-      document.documentElement.style.setProperty("--sidebar-content-width", "360px");
-    });
+    await setSidebarContentWidth(page, wideSidebarContentWidth);
 
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.waitForTimeout(500);
@@ -556,6 +619,8 @@ async function main() {
     await page.locator('[data-testid="shell-select"]').scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
     await capture(page, "settings/runtime-settings.png", page.locator('[data-testid="settings-panel"]'));
+
+    await setSidebarContentWidth(page, defaultSidebarContentWidth);
 
     await page.getByRole("button", { name: "Grid" }).click();
     await page.locator("#agent-card-docs-codex").click();
