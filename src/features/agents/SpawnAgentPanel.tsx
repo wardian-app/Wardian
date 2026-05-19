@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen } from "lucide-react";
-import { AgentConfig, AgentClassDefinition, ProviderName } from "../../types";
+import { AgentConfig, AgentClassDefinition, ProviderReadiness, UserFacingProviderName } from "../../types";
 import { AdvancedSettings } from "../../components/AdvancedSettings";
 import { defaultProviderConfig, withProvider } from "./configUtils";
+import { useSettingsStore } from "../../store/useSettingsStore";
+import { buildProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
 
 interface Props {
   agentClasses: AgentClassDefinition[];
@@ -12,6 +14,7 @@ interface Props {
 }
 
 export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) => {
+  const defaultProvider = useSettingsStore((state) => state.default_provider);
   const [newSessionName, setNewSessionName] = useState("");
   const [nameError, setNameError] = useState<string | null>(null);
   const [newAgentClass, setNewAgentClass] = useState("Generalist");
@@ -32,8 +35,65 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
     provider_config: defaultProviderConfig("claude"),
   };
   const [spawnAdvancedConfig, setSpawnAdvancedConfig] = useState<Partial<AgentConfig>>(initialProviderConfig);
+  const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
+  const [providerNote, setProviderNote] = useState<string | null>(null);
+  const [providerTouched, setProviderTouched] = useState(false);
   const [isSpawning, setIsSpawning] = useState(false);
   const [folderIsValid, setFolderIsValid] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<ProviderReadiness[]>("list_provider_readiness")
+      .then((readiness) => {
+        if (!cancelled) setProviderReadiness(readiness);
+      })
+      .catch((error) => {
+        console.error("Failed to load provider readiness:", error);
+        if (!cancelled) {
+          setProviderReadiness([]);
+          setProviderNote("Unable to check provider readiness.");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const providerOptions = useMemo(
+    () => (providerReadiness ? buildProviderOptions(providerReadiness) : []),
+    [providerReadiness],
+  );
+  const selectedProvider = spawnAdvancedConfig.provider;
+  const selectedProviderAvailable = providerReadiness
+    ? providerOptions.some((option) => option.value === selectedProvider && option.available)
+    : false;
+
+  useEffect(() => {
+    if (!providerReadiness) return;
+
+    const optionFor = (provider: string | undefined) =>
+      providerOptions.find((option) => option.value === provider);
+
+    if (!providerTouched) {
+      const resolved = resolveEffectiveProvider(providerReadiness, defaultProvider);
+      setProviderNote(resolved.note);
+      if (resolved.provider && spawnAdvancedConfig.provider !== resolved.provider) {
+        setSpawnAdvancedConfig((prev) => withProvider(prev, resolved.provider));
+      }
+      return;
+    }
+
+    if (!optionFor(spawnAdvancedConfig.provider)?.available) {
+      const resolved = resolveEffectiveProvider(providerReadiness, defaultProvider);
+      setProviderNote(resolved.note);
+      if (resolved.provider) {
+        setSpawnAdvancedConfig((prev) => withProvider(prev, resolved.provider));
+      }
+    } else {
+      setProviderNote(null);
+    }
+  }, [defaultProvider, providerOptions, providerReadiness, providerTouched, spawnAdvancedConfig.provider]);
 
   useEffect(() => {
     if (newFolder) {
@@ -50,6 +110,10 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
     const err = validateName(newSessionName);
     if (err) {
       setNameError(err);
+      return;
+    }
+    if (!selectedProviderAvailable) {
+      setProviderNote("Choose an installed provider before initializing an agent.");
       return;
     }
     setIsSpawning(true);
@@ -69,7 +133,13 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
       setNewAgentClass("Generalist");
       setNewFolder("");
       setResumeSession("");
-      setSpawnAdvancedConfig(initialProviderConfig);
+      const resolved = providerReadiness
+        ? resolveEffectiveProvider(providerReadiness, defaultProvider).provider
+        : "claude";
+      setProviderTouched(false);
+      setSpawnAdvancedConfig(resolved
+        ? { provider: resolved, provider_config: defaultProviderConfig(resolved) }
+        : initialProviderConfig);
       onSpawned();
     } catch (error) {
       console.error("Failed to spawn agent:", error);
@@ -200,17 +270,25 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             value={spawnAdvancedConfig.provider || "claude"}
             onChange={(e) => {
-              const provider = e.currentTarget.value as ProviderName;
+              const provider = e.currentTarget.value as UserFacingProviderName;
+              setProviderTouched(true);
               setSpawnAdvancedConfig((prev) =>
                 withProvider(prev, provider),
               );
             }}
           >
-            <option value="claude">Claude</option>
-            <option value="codex">Codex</option>
-            <option value="gemini">Gemini</option>
-            <option value="opencode">OpenCode</option>
+            {providerOptions.map((option) => (
+              <option key={option.value} value={option.value} disabled={!option.available}>
+                {option.label}
+              </option>
+            ))}
           </select>
+          <p className="mt-1 text-[10px] text-muted-neutral">
+            Only provider CLIs found on this machine are selectable.
+          </p>
+          {providerNote && (
+            <p className="mt-1 text-[10px] text-wardian-warning">{providerNote}</p>
+          )}
         </div>
         <div>
           <label className="block text-[10px] font-bold text-muted-neutral mb-1">
@@ -233,7 +311,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
         <button
           data-testid="spawn-submit"
           type="submit"
-          disabled={isSpawning}
+          disabled={isSpawning || !selectedProviderAvailable || !isUserFacingProviderName(spawnAdvancedConfig.provider)}
           className="w-full mt-2 bg-wardian-success/80 hover:bg-wardian-success/60 disabled:bg-wardian-off/30 disabled:cursor-not-allowed text-[var(--color-wardian-bg)] py-2.5 rounded-lg font-bold text-xs tracking-wide transition-all flex items-center justify-center gap-2 shadow-lg shadow-wardian-success/10"
         >
           {isSpawning ? (

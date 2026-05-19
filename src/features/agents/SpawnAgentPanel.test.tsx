@@ -1,20 +1,59 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SpawnAgentPanel } from "./SpawnAgentPanel";
+import { useSettingsStore } from "../../store/useSettingsStore";
+import type { ProviderReadiness, UserFacingProviderName } from "../../types";
 
 const openMock = vi.mocked(open);
 const invokeMock = vi.mocked(invoke);
+
+const readiness = (
+  provider: UserFacingProviderName,
+  available: boolean,
+): ProviderReadiness => ({
+  provider,
+  display_name: provider === "opencode" ? "OpenCode" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
+  available,
+  executable: available ? provider : null,
+  reason: available ? null : `The ${provider} command was not found.`,
+});
+
+const allProvidersReady: ProviderReadiness[] = [
+  readiness("claude", true),
+  readiness("codex", true),
+  readiness("gemini", true),
+  readiness("opencode", true),
+];
+
+const spawnResponse = {
+  session_id: "agent-1",
+  session_name: "Generalist-1",
+  agent_class: "Generalist",
+  folder: "",
+  is_off: false,
+};
+
+const mockSpawnInvokes = (providerReadiness = allProvidersReady) => {
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "list_provider_readiness") return providerReadiness;
+    if (command === "validate_directory_path") return true;
+    if (command === "spawn_agent") return spawnResponse;
+    return null;
+  });
+};
 
 describe("SpawnAgentPanel", () => {
   beforeEach(() => {
     openMock.mockReset();
     invokeMock.mockReset();
+    useSettingsStore.setState({ default_provider: "auto" });
+    mockSpawnInvokes();
   });
 
-  it("lists OpenCode as a provider option", () => {
+  it("lists OpenCode as a provider option", async () => {
     render(
       <SpawnAgentPanel
         agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
@@ -23,13 +62,12 @@ describe("SpawnAgentPanel", () => {
     );
 
     const providerSelect = screen.getByTestId("spawn-provider");
-    expect(screen.getByRole("option", { name: "OpenCode" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "OpenCode" })).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent("OpenCode");
   });
 
   it("sets the workspace path from the native folder picker", async () => {
     openMock.mockResolvedValue("C:\\projects\\picked-app");
-    invokeMock.mockResolvedValue(true);
     const user = userEvent.setup();
 
     render(
@@ -51,7 +89,6 @@ describe("SpawnAgentPanel", () => {
 
   it("keeps the current workspace path when the folder picker is cancelled", async () => {
     openMock.mockResolvedValue(null);
-    invokeMock.mockResolvedValue(true);
     const user = userEvent.setup();
 
     render(
@@ -69,13 +106,6 @@ describe("SpawnAgentPanel", () => {
   });
 
   it("submits a blank name so the backend can generate one", async () => {
-    invokeMock.mockResolvedValue({
-      session_id: "agent-1",
-      session_name: "Generalist-1",
-      agent_class: "Generalist",
-      folder: "",
-      is_off: false,
-    });
     const user = userEvent.setup();
     const onSpawned = vi.fn();
 
@@ -98,13 +128,6 @@ describe("SpawnAgentPanel", () => {
   });
 
   it("initializes the config override with a matching provider config", async () => {
-    invokeMock.mockResolvedValue({
-      session_id: "agent-1",
-      session_name: "Generalist-1",
-      agent_class: "Generalist",
-      folder: "",
-      is_off: false,
-    });
     const user = userEvent.setup();
 
     render(
@@ -114,6 +137,7 @@ describe("SpawnAgentPanel", () => {
       />,
     );
 
+    await screen.findByRole("option", { name: "Codex" });
     await user.selectOptions(screen.getByTestId("spawn-provider"), "codex");
     await user.click(screen.getByTestId("spawn-submit"));
 
@@ -128,13 +152,6 @@ describe("SpawnAgentPanel", () => {
   });
 
   it("clears custom args when changing providers", async () => {
-    invokeMock.mockResolvedValue({
-      session_id: "agent-1",
-      session_name: "Generalist-1",
-      agent_class: "Generalist",
-      folder: "",
-      is_off: false,
-    });
     const user = userEvent.setup();
 
     render(
@@ -144,6 +161,7 @@ describe("SpawnAgentPanel", () => {
       />,
     );
 
+    await screen.findByRole("option", { name: "OpenCode" });
     await user.click(screen.getByRole("button", { name: "Advanced Settings" }));
     await user.type(screen.getByLabelText("Custom Arguments"), "--old-provider-flag");
     await user.selectOptions(screen.getByTestId("spawn-provider"), "opencode");
@@ -175,5 +193,96 @@ describe("SpawnAgentPanel", () => {
 
     expect(invokeMock).not.toHaveBeenCalledWith("spawn_agent", expect.anything());
     expect(screen.getByText(/Names must be alphanumeric/)).toBeInTheDocument();
+  });
+
+  it("disables missing providers and explains provider readiness", async () => {
+    mockSpawnInvokes([
+      readiness("claude", true),
+      readiness("codex", false),
+      readiness("gemini", false),
+      readiness("opencode", true),
+    ]);
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("option", { name: "Codex - not installed" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "Gemini - not installed" })).toBeDisabled();
+    expect(screen.getByText(/Only provider CLIs found on this machine are selectable/i)).toBeInTheDocument();
+  });
+
+  it("falls back when the saved default provider is unavailable", async () => {
+    useSettingsStore.setState({ default_provider: "codex" });
+    mockSpawnInvokes([
+      readiness("claude", true),
+      readiness("codex", false),
+      readiness("gemini", true),
+      readiness("opencode", true),
+    ]);
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("spawn-provider")).toHaveValue("claude");
+    });
+    expect(await screen.findByText(/Default provider Codex is not installed\. Using Claude\./)).toBeInTheDocument();
+  });
+
+  it("disables Initialize when no provider CLI is available", async () => {
+    mockSpawnInvokes([
+      readiness("claude", false),
+      readiness("codex", false),
+      readiness("gemini", false),
+      readiness("opencode", false),
+    ]);
+    const user = userEvent.setup();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    const submit = await screen.findByTestId("spawn-submit");
+    expect(submit).toBeDisabled();
+    await user.click(submit);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("spawn_agent", expect.anything());
+  });
+
+  it("submits the configured default provider when it is available", async () => {
+    useSettingsStore.setState({ default_provider: "codex" });
+    const user = userEvent.setup();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("spawn-provider")).toHaveValue("codex");
+    });
+    await user.click(screen.getByTestId("spawn-submit"));
+
+    expect(invokeMock).toHaveBeenCalledWith("spawn_agent", {
+      req: expect.objectContaining({
+        configOverride: expect.objectContaining({
+          provider: "codex",
+          provider_config: { type: "codex" },
+        }),
+      }),
+    });
   });
 });

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigureAgentPanel } from "./ConfigureAgentPanel";
-import type { AgentConfig } from "../../types";
+import type { AgentConfig, ProviderReadiness, UserFacingProviderName } from "../../types";
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   writeText: vi.fn(),
@@ -16,6 +16,24 @@ vi.mock("../library/ManageSkills", () => ({
 
 const invokeMock = vi.mocked(invoke);
 const writeTextMock = vi.mocked(writeText);
+
+const readiness = (
+  provider: UserFacingProviderName,
+  available: boolean,
+): ProviderReadiness => ({
+  provider,
+  display_name: provider === "opencode" ? "OpenCode" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
+  available,
+  executable: available ? provider : null,
+  reason: available ? null : `The ${provider} command was not found.`,
+});
+
+const allProvidersReady: ProviderReadiness[] = [
+  readiness("claude", true),
+  readiness("codex", true),
+  readiness("gemini", true),
+  readiness("opencode", true),
+];
 
 const baseAgent: AgentConfig = {
   session_id: "agent-1",
@@ -29,11 +47,21 @@ const baseAgent: AgentConfig = {
 
 const classes = [{ name: "Coder", description: "", is_default: true }];
 
+const mockConfigureInvokes = (providerReadiness = allProvidersReady) => {
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "list_provider_readiness") return providerReadiness;
+    if (command === "update_agent_config") return null;
+    if (command === "resolve_system_include_directories") return [];
+    return null;
+  });
+};
+
 describe("ConfigureAgentPanel", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     writeTextMock.mockReset();
     vi.spyOn(window, "alert").mockImplementation(() => {});
+    mockConfigureInvokes();
   });
 
   it("normalizes legacy flat provider fields before saving", async () => {
@@ -93,5 +121,68 @@ describe("ConfigureAgentPanel", () => {
     await user.click(screen.getAllByRole("button", { name: "Copy" })[0]);
 
     expect(writeTextMock).toHaveBeenCalledWith("agent-1");
+  });
+
+  it("labels unavailable providers and blocks saving stale unavailable provider state", async () => {
+    const user = userEvent.setup();
+    mockConfigureInvokes([
+      readiness("claude", true),
+      readiness("codex", false),
+      readiness("gemini", true),
+      readiness("opencode", true),
+    ]);
+
+    render(
+      <ConfigureAgentPanel
+        agentId="agent-1"
+        agents={[baseAgent]}
+        agentClasses={classes}
+        telemetry={{}}
+        onSaved={() => {}}
+        onBackToSpawn={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("option", { name: "Codex - not installed" })).toBeDisabled();
+    expect(screen.getByText(/Only provider CLIs found on this machine are selectable/i)).toBeInTheDocument();
+    const saveButton = screen.getByRole("button", { name: "Save Changes" });
+    expect(saveButton).toBeDisabled();
+
+    await user.click(saveButton);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("update_agent_config", expect.anything());
+  });
+
+  it("saves after switching an unavailable current provider to an available one", async () => {
+    const user = userEvent.setup();
+    mockConfigureInvokes([
+      readiness("claude", true),
+      readiness("codex", false),
+      readiness("gemini", true),
+      readiness("opencode", true),
+    ]);
+
+    render(
+      <ConfigureAgentPanel
+        agentId="agent-1"
+        agents={[baseAgent]}
+        agentClasses={classes}
+        telemetry={{}}
+        onSaved={() => {}}
+        onBackToSpawn={() => {}}
+      />,
+    );
+
+    await user.selectOptions(await screen.findByLabelText("Provider Engine"), "claude");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_agent_config", {
+        newConfig: expect.objectContaining({
+          provider: "claude",
+          provider_config: { type: "claude" },
+        }),
+      });
+    });
   });
 });

@@ -6,7 +6,11 @@ import type {
   AgentConfig,
   CloneFileTreeNode,
   DeployedSkillRef,
+  ProviderReadiness,
+  UserFacingProviderName,
 } from "../../types";
+import { useSettingsStore } from "../../store/useSettingsStore";
+import { buildProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
 
 interface CustomCloneModalProps {
   sourceSessionId: string;
@@ -15,13 +19,6 @@ interface CustomCloneModalProps {
   onClose: () => void;
   onCloned: (cloned: AgentConfig) => void | Promise<void>;
 }
-
-const providerOptions = [
-  { value: "claude", label: "Claude" },
-  { value: "codex", label: "Codex" },
-  { value: "gemini", label: "Gemini" },
-  { value: "opencode", label: "OpenCode" },
-];
 
 const skillKey = (skill: DeployedSkillRef) => `${skill.name}\u0000${skill.source_path ?? ""}`;
 
@@ -42,12 +39,15 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
   onClose,
   onCloned,
 }) => {
+  const defaultProvider = useSettingsStore((state) => state.default_provider);
   const [preview, setPreview] = useState<AgentClonePreview | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cloneName, setCloneName] = useState("");
-  const [provider, setProvider] = useState("claude");
+  const [provider, setProvider] = useState<UserFacingProviderName | "">("");
+  const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
+  const [providerNote, setProviderNote] = useState<string | null>(null);
   const [agentClass, setAgentClass] = useState("");
   const [folder, setFolder] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
@@ -60,13 +60,18 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
     setIsLoading(true);
     setError(null);
     setPreview(null);
+    setProviderReadiness(null);
 
-    invoke<AgentClonePreview>("get_agent_clone_preview", { sourceSessionId })
-      .then((nextPreview) => {
+    Promise.all([
+      invoke<AgentClonePreview>("get_agent_clone_preview", { sourceSessionId }),
+      invoke<ProviderReadiness[]>("list_provider_readiness"),
+    ])
+      .then(([nextPreview, readiness]) => {
         if (cancelled) return;
         setPreview(nextPreview);
+        setProviderReadiness(readiness);
         setCloneName(nextPreview.suggested_session_name);
-        setProvider(nextPreview.provider || "claude");
+        setProvider(isUserFacingProviderName(nextPreview.provider) ? nextPreview.provider : "");
         setAgentClass(nextPreview.agent_class);
         setFolder(nextPreview.folder);
         setSelectedFiles(new Set(nextPreview.default_selected_files));
@@ -83,6 +88,32 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
       cancelled = true;
     };
   }, [isOpen, sourceSessionId]);
+
+  const providerOptions = useMemo(
+    () => (providerReadiness ? buildProviderOptions(providerReadiness) : []),
+    [providerReadiness],
+  );
+  const selectedProviderAvailable = providerOptions.some((option) => option.value === provider && option.available);
+
+  useEffect(() => {
+    if (!preview || !providerReadiness) return;
+
+    const currentOption = providerOptions.find((option) => option.value === provider);
+    if (currentOption?.available) {
+      setProviderNote(null);
+      return;
+    }
+
+    const resolved = resolveEffectiveProvider(providerReadiness, defaultProvider);
+    setProvider(resolved.provider ?? "");
+    if (!resolved.provider) {
+      setProviderNote(resolved.note);
+    } else if (provider && currentOption && !currentOption.available) {
+      setProviderNote(`${currentOption.label.replace(" - not installed", "")} is not installed. Using ${providerOptions.find((option) => option.value === resolved.provider)?.label ?? resolved.provider}.`);
+    } else {
+      setProviderNote(resolved.note);
+    }
+  }, [defaultProvider, preview, provider, providerOptions, providerReadiness]);
 
   const selectedSkillRefs = useMemo(() => {
     if (!preview) return [];
@@ -126,6 +157,10 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!preview || isSubmitting) return;
+    if (!selectedProviderAvailable || !provider) {
+      setError("Choose an installed provider before cloning an agent.");
+      return;
+    }
     if (!cloneName.trim()) {
       setError("Clone name is required.");
       return;
@@ -243,15 +278,21 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
                     aria-label="Provider Engine"
                     data-testid="custom-clone-provider"
                     value={provider}
-                    onChange={(event) => setProvider(event.target.value)}
+                    onChange={(event) => setProvider(event.target.value as UserFacingProviderName)}
                     className="mt-1 w-full rounded border border-wardian-border bg-[var(--color-wardian-input-bg)] px-3 py-2 text-sm text-primary focus:outline-none"
                   >
                     {providerOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
+                      <option key={option.value} value={option.value} disabled={!option.available}>
                         {option.label}
                       </option>
                     ))}
                   </select>
+                  <span className="mt-1 block text-[10px] font-normal text-muted-neutral">
+                    Only provider CLIs found on this machine are selectable.
+                  </span>
+                  {providerNote && (
+                    <span className="mt-1 block text-[10px] font-normal text-wardian-warning">{providerNote}</span>
+                  )}
                 </label>
                 <label className="block text-[10px] font-bold text-muted-neutral">
                   Agent Class
@@ -325,7 +366,7 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
           <button
             type="submit"
             data-testid="custom-clone-submit"
-            disabled={!preview || isLoading || isSubmitting}
+            disabled={!preview || isLoading || isSubmitting || !selectedProviderAvailable}
             className="rounded bg-[var(--color-wardian-accent)] px-4 py-2 text-xs font-bold text-[var(--color-wardian-bg)] disabled:opacity-50"
           >
             {isSubmitting ? "Cloning..." : "Clone"}
