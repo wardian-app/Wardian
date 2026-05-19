@@ -284,6 +284,41 @@ describe("SpawnAgentPanel", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("spawn_agent", expect.anything());
   });
 
+  it("keeps spawning available when provider readiness cannot be checked", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") throw new Error("readiness unavailable");
+      if (command === "validate_directory_path") return true;
+      if (command === "spawn_agent") return spawnResponse;
+      return null;
+    });
+    const user = userEvent.setup();
+    const onSpawned = vi.fn();
+
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={onSpawned}
+      />,
+    );
+
+    expect(await screen.findByText("Unable to check provider readiness.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Claude" })).toBeInTheDocument();
+    const submit = screen.getByTestId("spawn-submit");
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+
+    expect(invokeMock).toHaveBeenCalledWith("spawn_agent", {
+      req: expect.objectContaining({
+        configOverride: expect.objectContaining({
+          provider: "claude",
+          provider_config: { type: "claude" },
+        }),
+      }),
+    });
+    expect(onSpawned).toHaveBeenCalled();
+  });
+
   it("submits the configured default provider when it is available", async () => {
     useSettingsStore.setState({ default_provider: "codex" });
     const user = userEvent.setup();

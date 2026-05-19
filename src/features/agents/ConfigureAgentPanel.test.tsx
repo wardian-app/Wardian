@@ -185,4 +185,41 @@ describe("ConfigureAgentPanel", () => {
       });
     });
   });
+
+  it("keeps saving available when provider readiness cannot be checked", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") throw new Error("readiness unavailable");
+      if (command === "update_agent_config") return null;
+      if (command === "resolve_system_include_directories") return [];
+      return null;
+    });
+    const user = userEvent.setup();
+
+    render(
+      <ConfigureAgentPanel
+        agentId="agent-1"
+        agents={[baseAgent]}
+        agentClasses={classes}
+        telemetry={{}}
+        onSaved={() => {}}
+        onBackToSpawn={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("Unable to check provider readiness.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Codex" })).toBeInTheDocument();
+    const saveButton = screen.getByRole("button", { name: "Save Changes" });
+    expect(saveButton).toBeEnabled();
+
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_agent_config", {
+        newConfig: expect.objectContaining({
+          provider: "codex",
+          provider_config: expect.objectContaining({ type: "codex" }),
+        }),
+      });
+    });
+  });
 });

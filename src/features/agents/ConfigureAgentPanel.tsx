@@ -5,7 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { normalizeAgentConfig, requiresRestart, toPersistedAgentConfig, withProvider } from "./configUtils";
 import { AdvancedSettings } from '../../components/AdvancedSettings';
 import { ManageSkills } from '../library/ManageSkills';
-import { buildProviderOptions, isUserFacingProviderName } from "./providerOptions";
+import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName } from "./providerOptions";
 
 interface Props {
   agentId: string;
@@ -29,6 +29,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
   const [copiedId, setCopiedId] = useState(false);
   const [copiedLog, setCopiedLog] = useState(false);
   const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
+  const [providerNote, setProviderNote] = useState<string | null>(null);
 
   // Sync state when agentId or agents change
   useEffect(() => {
@@ -47,7 +48,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
       })
       .catch((error) => {
         console.error("Failed to load provider readiness:", error);
-        if (!cancelled) setProviderReadiness([]);
+        if (!cancelled) setProviderNote("Unable to check provider readiness.");
       });
 
     return () => {
@@ -56,7 +57,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
   }, []);
 
   const providerOptions = useMemo(
-    () => (providerReadiness ? buildProviderOptions(providerReadiness) : []),
+    () => (providerReadiness ? buildProviderOptions(providerReadiness) : buildUngatedProviderOptions()),
     [providerReadiness],
   );
 
@@ -68,7 +69,9 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
 
   const currentProvider = isUserFacingProviderName(config.provider) ? config.provider : "";
   const selectedProviderAvailable = currentProvider
-    ? providerOptions.some((option) => option.value === currentProvider && option.available)
+    ? providerReadiness
+      ? providerOptions.some((option) => option.value === currentProvider && option.available)
+      : true
     : true;
 
   const handleSave = async (e: React.FormEvent) => {
@@ -180,6 +183,9 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
               <p className="mt-1 text-[10px] text-wardian-warning">
                 Choose an installed provider before saving this agent.
               </p>
+            )}
+            {providerNote && (
+              <p className="mt-1 text-[10px] text-wardian-warning">{providerNote}</p>
             )}
           </div>
           <div>

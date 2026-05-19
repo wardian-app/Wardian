@@ -107,6 +107,42 @@ describe("CustomCloneModal", () => {
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
 
+  it("still loads preview and allows clone when provider readiness cannot be checked", async () => {
+    const user = userEvent.setup();
+    const onCloned = vi.fn();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") throw new Error("readiness unavailable");
+      if (command === "get_agent_clone_preview") return preview;
+      if (command === "clone_agent") return { session_id: "clone-1" };
+      return null;
+    });
+
+    render(
+      <CustomCloneModal
+        sourceSessionId="agent-1"
+        agentClasses={classes}
+        isOpen
+        onClose={() => {}}
+        onCloned={onCloned}
+      />,
+    );
+
+    expect(await screen.findByDisplayValue("Alpha-copy")).toBeInTheDocument();
+    expect(screen.getByText("Unable to check provider readiness.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Claude" })).toBeInTheDocument();
+    const submit = screen.getByTestId("custom-clone-submit");
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+
+    expect(invokeMock).toHaveBeenCalledWith("clone_agent", {
+      req: expect.objectContaining({
+        provider: "claude",
+      }),
+    });
+    expect(onCloned).toHaveBeenCalled();
+  });
+
   it("submits edited identity fields and selected profile items", async () => {
     const user = userEvent.setup();
     const onCloned = vi.fn();

@@ -10,7 +10,7 @@ import type {
   UserFacingProviderName,
 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
-import { buildProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
+import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
 
 interface CustomCloneModalProps {
   sourceSessionId: string;
@@ -61,27 +61,45 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
     setError(null);
     setPreview(null);
     setProviderReadiness(null);
+    setProviderNote(null);
 
-    Promise.all([
-      invoke<AgentClonePreview>("get_agent_clone_preview", { sourceSessionId }),
-      invoke<ProviderReadiness[]>("list_provider_readiness"),
-    ])
-      .then(([nextPreview, readiness]) => {
-        if (cancelled) return;
-        setPreview(nextPreview);
-        setProviderReadiness(readiness);
-        setCloneName(nextPreview.suggested_session_name);
-        setProvider(isUserFacingProviderName(nextPreview.provider) ? nextPreview.provider : "");
-        setAgentClass(nextPreview.agent_class);
-        setFolder(nextPreview.folder);
-        setSelectedFiles(new Set(nextPreview.default_selected_files));
-        setSelectedSkills(new Set(nextPreview.default_selected_skills.map(skillKey)));
-      })
+    const load = async () => {
+      const [previewResult, readinessResult] = await Promise.allSettled([
+        invoke<AgentClonePreview>("get_agent_clone_preview", { sourceSessionId }),
+        invoke<ProviderReadiness[]>("list_provider_readiness"),
+      ]);
+
+      if (cancelled) return;
+
+      if (previewResult.status === "rejected") {
+        setError(errorMessage(previewResult.reason));
+        return;
+      }
+
+      const nextPreview = previewResult.value;
+      setPreview(nextPreview);
+      setCloneName(nextPreview.suggested_session_name);
+      setProvider(isUserFacingProviderName(nextPreview.provider) ? nextPreview.provider : "");
+      setAgentClass(nextPreview.agent_class);
+      setFolder(nextPreview.folder);
+      setSelectedFiles(new Set(nextPreview.default_selected_files));
+      setSelectedSkills(new Set(nextPreview.default_selected_skills.map(skillKey)));
+
+      if (readinessResult.status === "fulfilled") {
+        setProviderReadiness(readinessResult.value);
+      } else {
+        console.error("Failed to load provider readiness:", readinessResult.reason);
+        setProviderNote("Unable to check provider readiness.");
+      }
+    };
+
+    load()
       .catch((err: unknown) => {
         if (!cancelled) setError(errorMessage(err));
       })
       .finally(() => {
-        if (!cancelled) setIsLoading(false);
+        if (cancelled) return;
+        setIsLoading(false);
       });
 
     return () => {
@@ -90,10 +108,14 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
   }, [isOpen, sourceSessionId]);
 
   const providerOptions = useMemo(
-    () => (providerReadiness ? buildProviderOptions(providerReadiness) : []),
+    () => (providerReadiness ? buildProviderOptions(providerReadiness) : buildUngatedProviderOptions()),
     [providerReadiness],
   );
-  const selectedProviderAvailable = providerOptions.some((option) => option.value === provider && option.available);
+  const selectedProviderAvailable = provider
+    ? providerReadiness
+      ? providerOptions.some((option) => option.value === provider && option.available)
+      : true
+    : false;
 
   useEffect(() => {
     if (!preview || !providerReadiness) return;

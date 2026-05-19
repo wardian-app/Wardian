@@ -42,6 +42,15 @@ export function buildProviderOptions(readiness: ProviderReadiness[]): ProviderOp
   });
 }
 
+export function buildUngatedProviderOptions(): ProviderOption[] {
+  return PROVIDER_ORDER.map((provider) => ({
+    value: provider,
+    label: providerDisplayName(provider),
+    available: true,
+    reason: null,
+  }));
+}
+
 export function resolveEffectiveProvider(
   readiness: ProviderReadiness[],
   defaultProvider: DefaultProviderSetting,

@@ -8,7 +8,7 @@ import { DocsLink } from "../../components/DocsLink";
 import { OnboardingHint } from "../../components/OnboardingHint";
 import { defaultProviderConfig, withProvider } from "./configUtils";
 import { useSettingsStore } from "../../store/useSettingsStore";
-import { buildProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
+import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
 
 const FIRST_AGENT_ONBOARDING_HINT_ID = "spawn-agent-first-run:v1";
 
@@ -54,7 +54,6 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
       .catch((error) => {
         console.error("Failed to load provider readiness:", error);
         if (!cancelled) {
-          setProviderReadiness([]);
           setProviderNote("Unable to check provider readiness.");
         }
       });
@@ -65,13 +64,13 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
   }, []);
 
   const providerOptions = useMemo(
-    () => (providerReadiness ? buildProviderOptions(providerReadiness) : []),
+    () => (providerReadiness ? buildProviderOptions(providerReadiness) : buildUngatedProviderOptions()),
     [providerReadiness],
   );
   const selectedProvider = spawnAdvancedConfig.provider;
   const selectedProviderAvailable = providerReadiness
     ? providerOptions.some((option) => option.value === selectedProvider && option.available)
-    : false;
+    : true;
 
   useEffect(() => {
     if (!providerReadiness) return;

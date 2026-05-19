@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderReadiness } from '../../types';
-import { resolveEffectiveProvider } from './providerOptions';
+import { buildUngatedProviderOptions, resolveEffectiveProvider } from './providerOptions';
 
 const readiness = (provider: ProviderReadiness['provider'], available: boolean): ProviderReadiness => ({
   provider,
@@ -11,6 +11,15 @@ const readiness = (provider: ProviderReadiness['provider'], available: boolean):
 });
 
 describe('provider option helpers', () => {
+  it('builds enabled fallback options when readiness is unknown', () => {
+    expect(buildUngatedProviderOptions()).toEqual([
+      { value: 'claude', label: 'Claude', available: true, reason: null },
+      { value: 'codex', label: 'Codex', available: true, reason: null },
+      { value: 'gemini', label: 'Gemini', available: true, reason: null },
+      { value: 'opencode', label: 'OpenCode', available: true, reason: null },
+    ]);
+  });
+
   it('auto prefers Claude when available', () => {
     const result = resolveEffectiveProvider([
       readiness('claude', true),
