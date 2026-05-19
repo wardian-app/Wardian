@@ -8,6 +8,10 @@ Use this guide when a provider does not appear to start, opens an unexpected sig
 
 Wardian can detect and launch supported provider commands when they are visible from the Wardian app process environment. For desktop launches, that usually means the provider command must be on the user or system `PATH` before Wardian starts.
 
+The app checks whether the provider executable exists. It does not run provider probes such as `--version`, test account status, validate billing, or check workspace trust. A provider can appear selectable and still fail later if its own runtime setup is incomplete.
+
+In spawn, custom clone, and agent configuration forms, Wardian lists the supported user-facing providers and disables any provider whose CLI command is not found by the app process. Disabled provider options are labeled as not installed. If no supported provider command is found, launch actions are disabled until at least one provider CLI is installed and visible to Wardian.
+
 Wardian does not install provider accounts, complete browser sign-in, create provider billing, or repair shell startup files. Do those steps in a normal terminal before spawning an agent.
 
 ## Basic Workflow
@@ -16,7 +20,9 @@ Wardian does not install provider accounts, complete browser sign-in, create pro
 2. Confirm the command is on `PATH`.
 3. Run the provider once in a normal terminal and complete its authentication flow.
 4. Restart Wardian after changing `PATH` so the app process can see the provider command.
-5. Return to [Getting Started](./getting-started.md) and spawn an agent with that provider.
+5. Return to [Getting Started](./getting-started.md) and spawn an agent with an enabled provider.
+
+You can choose a preferred launch provider in [Settings](./settings.md). `Auto` keeps the Claude-first default when Claude is installed, then falls back to the first installed supported provider.
 
 ## Shared Checks
 
@@ -137,6 +143,8 @@ Get-Command <provider-command>
 ```
 
 If the command exists in a terminal but Wardian still cannot find it, update the user or system `PATH` that the desktop app inherits, then fully restart Wardian. Changing the agent **Default Shell** can help shell-hosted workflow commands, but it does not by itself make an interactive provider executable visible to the Wardian app process.
+
+If the provider is disabled in Wardian but appears in a terminal, the desktop app and that terminal are seeing different environments. Fix the app-level `PATH`, restart Wardian, and check the provider list again.
 
 ### Authentication Prompt Appears in the Agent Terminal
 
