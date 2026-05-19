@@ -180,6 +180,7 @@ pub async fn spawn_agent(
     initial_timestamp: Option<String>,
 ) -> Result<ActiveAgent, String> {
     let provider = ProviderFactory::resolve(&config.provider)?;
+    crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
 
     let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
 

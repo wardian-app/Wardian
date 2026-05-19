@@ -1,4 +1,13 @@
 export type ProviderName = "claude" | "codex" | "gemini" | "opencode" | "mock";
+export type UserFacingProviderName = "claude" | "codex" | "gemini" | "opencode";
+
+export interface ProviderReadiness {
+    provider: UserFacingProviderName;
+    display_name: string;
+    available: boolean;
+    executable: string | null;
+    reason: string | null;
+}
 
 export interface ClaudeProviderConfig {
     type: "claude";
