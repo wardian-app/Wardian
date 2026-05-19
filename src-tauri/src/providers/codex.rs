@@ -38,6 +38,34 @@ impl CodexProvider {
         None
     }
 
+    #[cfg(not(target_os = "windows"))]
+    fn find_unix_codex_in_paths<I>(paths: I) -> Option<String>
+    where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        for path in paths {
+            let candidate = path.join("codex");
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn codex_unix_fallback_paths() -> Vec<std::path::PathBuf> {
+        let home = dirs::home_dir().unwrap_or_default();
+        vec![
+            home.join(".local/bin/codex"),
+            std::path::PathBuf::from("/usr/local/bin/codex"),
+            std::path::PathBuf::from("/opt/homebrew/bin/codex"),
+            std::path::PathBuf::from("/opt/homebrew/sbin/codex"),
+            home.join(".npm-global/bin/codex"),
+            home.join(".volta/bin/codex"),
+        ]
+    }
+
     fn parse_action_required_from_arguments(arguments: &str) -> Option<String> {
         let parsed: serde_json::Value = serde_json::from_str(arguments).ok()?;
         let sandbox_permissions = parsed.get("sandbox_permissions")?.as_str()?;
@@ -223,6 +251,32 @@ impl AgentProvider for CodexProvider {
 
         #[cfg(not(target_os = "windows"))]
         {
+            #[cfg(target_os = "macos")]
+            {
+                for path in Self::codex_unix_fallback_paths() {
+                    if path.is_file() {
+                        return (path.to_string_lossy().to_string(), vec![]);
+                    }
+                }
+            }
+
+            if let Some(paths) = std::env::var_os("PATH") {
+                if let Some(executable) =
+                    Self::find_unix_codex_in_paths(std::env::split_paths(&paths))
+                {
+                    return (executable, vec![]);
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                for path in Self::codex_unix_fallback_paths() {
+                    if path.is_file() {
+                        return (path.to_string_lossy().to_string(), vec![]);
+                    }
+                }
+            }
+
             ("codex".to_string(), vec![])
         }
     }
@@ -356,6 +410,51 @@ mod tests {
     fn name_returns_codex() {
         let p = make_provider();
         assert_eq!(p.name(), "Codex");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_codex_readiness_and_launch_use_extended_path_fallback() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("HOME");
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bin_dir = temp.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let codex_path = bin_dir.join("codex");
+        std::fs::write(&codex_path, "#!/bin/sh\n").expect("write codex shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&codex_path)
+                .expect("codex metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&codex_path, permissions).expect("set executable bit");
+        }
+
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        }
+
+        let expected = codex_path.to_string_lossy().to_string();
+        let (executable, args) = make_provider().get_executable();
+        let readiness = crate::providers::readiness::provider_readiness("codex");
+
+        assert_eq!(executable, expected);
+        assert!(args.is_empty());
+        assert!(readiness.available);
+        assert_eq!(readiness.executable.as_deref(), Some(expected.as_str()));
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     #[test]

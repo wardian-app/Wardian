@@ -146,7 +146,7 @@ fn unavailable(provider_id: &str, display_name: &str, reason: &str) -> ProviderR
 fn resolve_executable(executable: &str, path_override: Option<&str>) -> Option<PathBuf> {
     let path = Path::new(executable);
     if path.is_absolute() || executable.contains('/') || executable.contains('\\') {
-        return path.exists().then(|| path.to_path_buf());
+        return path.is_file().then(|| path.to_path_buf());
     }
 
     find_executable_on_path(executable, path_override)
@@ -161,7 +161,7 @@ fn find_executable_on_path(name: &str, path_override: Option<&str>) -> Option<Pa
     for directory in std::env::split_paths(&path_value) {
         for candidate_name in &candidate_names {
             let candidate = directory.join(candidate_name);
-            if candidate.exists() {
+            if candidate.is_file() {
                 return Some(candidate);
             }
         }
@@ -270,6 +270,18 @@ mod tests {
             &[],
             None,
         );
+
+        assert!(!readiness.available);
+        assert!(readiness.reason.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn directory_named_like_executable_is_not_ready() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(temp.path().join("codex")).expect("codex dir");
+        let path = temp.path().to_string_lossy();
+
+        let readiness = readiness_from_launch_parts("codex", "Codex", "codex", &[], Some(&path));
 
         assert!(!readiness.available);
         assert!(readiness.reason.unwrap().contains("not found"));
