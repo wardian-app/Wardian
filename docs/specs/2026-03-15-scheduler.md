@@ -40,7 +40,7 @@ The Workflow Sidebar will be refactored to handle two primary tabs:
 
 ### 4. Implementation (Rust)
 
-The **Internal Heartbeat Thread** (from the original 2026-03-15 Scheduler) will remain the driver, but it will now query a `scheduled_runs.json` store instead of individual workflow files.
+The **Internal Heartbeat Thread** (from the original scheduler spec) will remain the driver, but it will now query a `scheduled_runs.json` store instead of individual workflow files.
 
 ## Consequences
 

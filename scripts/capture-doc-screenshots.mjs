@@ -81,7 +81,13 @@ const telemetry = [
 ];
 
 const terminalOutput = {
-  "docs-codex": "\x1b]0;Working\x07Wardian docs capture\n$ npm run lint\nAnalyzing screenshot documentation structure...\n",
+  "docs-codex":
+    "\x1b]0;Working\x07$ Summarize this workspace in five bullets. Do not edit files.\n" +
+    "- docs/ contains the public guide and developer documentation.\n" +
+    "- src/ contains the React command-center UI.\n" +
+    "- src-tauri/ contains the native runtime and provider orchestration.\n" +
+    "- scripts/ contains automation for repeatable docs screenshots.\n" +
+    "- Queue will keep this completed summary available for triage.\n",
   "docs-reviewer": "\x1b]0;Ready\x07Review complete. No blocking findings.\n",
   "docs-designer": "\x1b]0;Action Required\x07Approval needed before replacing the current hero capture.\n",
 };
@@ -522,18 +528,8 @@ async function main() {
     await capture(page, "grid/app-shell.png");
     await capture(page, "grid/active-agent-state.png", page.locator("main"));
 
-    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
-    await page.getByTestId("queue-item-summary-docs-first-run-result").waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "queue/completed-result.png", page.locator("main"));
-
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
-
-    await page.getByRole("button", { name: "Dashboard" }).click();
-    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "dashboard/system-summary.png");
 
     await page.evaluate(() => {
       document.documentElement.style.setProperty("--sidebar-content-width", "360px");
@@ -549,15 +545,10 @@ async function main() {
 
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
-    await page.locator('[data-testid="broadcast-textarea"]').fill("Summarize the current branch and list verification evidence.");
+    await page.locator('[data-testid="broadcast-textarea"]').fill("Summarize this workspace in five bullets. Do not edit files.");
     await page.locator('[data-testid="broadcast-textarea"]').waitFor({ timeout: 10_000 });
     await page.locator('[data-testid="broadcast-textarea"]').blur();
     await capture(page, "command-panel/broadcast-prompt.png");
-
-    await page.getByRole("button", { name: "Library" }).click();
-    await page.getByRole("heading", { name: "Review Checklist" }).waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "library/library-view.png");
 
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.getByRole("heading", { name: "Agent Runtime" }).waitFor({ timeout: 10_000 });
@@ -565,12 +556,6 @@ async function main() {
     await page.locator('[data-testid="shell-select"]').scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
     await capture(page, "settings/runtime-settings.png", page.locator('[data-testid="settings-panel"]'));
-
-    await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
-    await page.locator('[data-testid="sidebar-tab-workflows"]').click();
-    await page.getByRole("heading", { name: "Docs Screenshot Refresh" }).waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "workflows/builder-canvas.png");
 
     await page.getByRole("button", { name: "Grid" }).click();
     await page.locator("#agent-card-docs-codex").click();
@@ -587,6 +572,27 @@ async function main() {
     await page.getByText("docs/core-feature-screenshots").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
+
+    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await page.getByTestId("queue-item-summary-docs-first-run-result").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "queue/completed-result.png", page.locator("main"));
+
+    await page.getByRole("button", { name: "Library" }).click();
+    await page.getByRole("heading", { name: "Review Checklist" }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "library/library-view.png");
+
+    await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
+    await page.locator('[data-testid="sidebar-tab-workflows"]').click();
+    await page.getByRole("heading", { name: "Docs Screenshot Refresh" }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "workflows/builder-canvas.png");
+
+    await page.getByRole("button", { name: "Dashboard" }).click();
+    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "dashboard/system-summary.png");
 
     if (browserErrors.length > 0) {
       throw new Error(`Browser errors were logged during screenshot capture:\n${browserErrors.join("\n")}`);

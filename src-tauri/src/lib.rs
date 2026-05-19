@@ -18,6 +18,9 @@ use crate::state::AppState;
 use tauri::{Emitter, Manager};
 use wardian_core::models::AgentConfig;
 
+const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const TELEMETRY_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;
 
@@ -55,6 +58,41 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
         }
     }
     Ok(())
+}
+
+async fn emit_metrics_tick(metrics_handle: tauri::AppHandle) {
+    let state = metrics_handle.state::<AppState>();
+    let metrics = manager::get_all_metrics(&state).await;
+    let app_metrics = manager::get_app_metrics(&state).await;
+    let _ = metrics_handle.emit("agent-metrics", &metrics);
+    let _ = metrics_handle.emit("app-metrics", &app_metrics);
+}
+
+fn start_metrics_supervisor(metrics_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(TELEMETRY_INTERVAL).await;
+            let tick_handle = metrics_handle.clone();
+            let mut tick = tauri::async_runtime::spawn(async move {
+                emit_metrics_tick(tick_handle).await;
+            });
+            match tokio::time::timeout(TELEMETRY_TICK_TIMEOUT, &mut tick).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Telemetry tick failed; continuing metrics supervisor: {error}"
+                    ));
+                }
+                Err(_) => {
+                    tick.abort();
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Telemetry tick exceeded {}s; continuing metrics supervisor while timed-out work finishes in background",
+                        TELEMETRY_TICK_TIMEOUT.as_secs()
+                    ));
+                }
+            }
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -108,17 +146,7 @@ pub fn run() {
             control::spawn_control_server(app_handle.clone());
             manager::init_agent_classes(&app_handle);
 
-            let metrics_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    let state = metrics_handle.state::<AppState>();
-                    let metrics = manager::get_all_metrics(&state).await;
-                    let app_metrics = manager::get_app_metrics(&state).await;
-                    let _ = metrics_handle.emit("agent-metrics", &metrics);
-                    let _ = metrics_handle.emit("app-metrics", &app_metrics);
-                }
-            });
+            start_metrics_supervisor(app.handle().clone());
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
@@ -178,6 +206,15 @@ pub fn run() {
                                         &config.agent_class,
                                         &config.session_id,
                                     ));
+                                if let Err(error) =
+                                    commands::agent::prepare_restored_config_for_spawn(&mut config)
+                                {
+                                    eprintln!(
+                                        "Failed to prepare restored agent {}: {}",
+                                        config.session_id, error
+                                    );
+                                    continue;
+                                }
 
                                 let (last_status, last_pid, last_born) = db_status_map
                                     .get(&config.session_id)

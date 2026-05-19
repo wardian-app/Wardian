@@ -25,6 +25,8 @@ PowerShell:
 .\Wardian*.exe
 ```
 
+Before the first spawn, verify the provider command, authentication, and shell `PATH` using [Provider Readiness](./provider-readiness.md).
+
 ## 2. Install One Supported Provider CLI
 
 Wardian runs local provider CLIs inside managed terminals. Install and authenticate at least one provider before spawning an agent:
@@ -94,7 +96,7 @@ Open the **Agent Configuration** rail item and fill in the spawn form:
 
 ![Wardian spawn agent form with agent name, class, workspace, provider, and initialize controls](../assets/screenshots/spawn-agent/spawn-form.png)
 
-1. Choose an agent class, such as **Coder** or **Researcher**.
+1. Choose an agent class, such as **Coder** or **Researcher**. Classes are reusable blueprints; see [Library](./library.md) when you want to inspect or customize them.
 2. Select the provider you installed and authenticated.
 3. Enter a short agent name.
 4. Set the workspace to `<absolute-workspace-path>`.
@@ -172,6 +174,12 @@ Related docs:
 
 - Learn the main windows in [UI Overview](./ui-overview.md).
 - Manage reusable prompts, classes, and skills in [Library](./library.md).
+- Browse your agent's local files in [Explorer](./explorer.md).
 - Send one instruction to multiple agents with [Command Panel](./command-panel.md).
-- Automate repeated work with [Visual Workflows](./workflows.md).
 - Use the agent-facing [Wardian CLI](./cli.md) for scripted coordination.
+- Triage completed work in the [Queue](./queue.md).
+- Manage per-agent Git operations in [Source Control](./source-control.md).
+- Configure runtime behavior and shell defaults in [Settings](./settings.md).
+- Verify provider commands and authentication in [Provider Readiness](./provider-readiness.md).
+- Compare provider runtime behavior in [Provider Runtimes](../providers.md).
+- Automate complex tasks with [Visual Workflows](./workflows.md).

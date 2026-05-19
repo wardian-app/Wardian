@@ -21,7 +21,7 @@ This document captures the practical runtime differences between Wardian's suppo
 | Gemini | Real target workspace | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 | Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
 | Codex | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
-| OpenCode | Real target workspace | `AGENTS.md` plus injected runtime config | `OPENCODE_CONFIG_DIR` skill projection built from Wardian include roots | Discovered from provider output |
+| OpenCode | Real target workspace | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
 
 ## Gemini
 
@@ -75,19 +75,12 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude depends heavily on the permission-hook path being writable and stable.
 - Bugs here are usually about hook setup, `CLAUDE.md` discovery, or resume/session flags.
-- On Windows, Claude sessions may invoke tools through either PowerShell/cmd semantics or a Git Bash-compatible `bash`. Wardian prepends its managed CLI `bin` directory to Claude child process `PATH` and installs both `wardian.cmd` and an extensionless POSIX shell launcher so `wardian` resolves in both shell families.
-- To smoke-test the launcher pair on Windows, use an isolated `WARDIAN_HOME`, launch Wardian once so the CLI is installed, then verify both shells:
-
-```bash
-command -v wardian
-wardian --version
-```
-
-PowerShell:
+- On Windows, Claude may invoke both PowerShell and bash-family tool shells during one Wardian-managed session. Wardian therefore installs both `%USERPROFILE%\.wardian\bin\wardian.cmd` and `%USERPROFILE%\.wardian\bin\wardian`, then prepends the active Wardian `bin` directory to the managed provider process PATH. Verify shell parity from inside the managed runtime, not only from the parent Wardian process.
+- Windows manual smoke:
 
 ```powershell
-(Get-Command wardian).Source
-wardian --version
+powershell -NoProfile -Command "wardian --version"
+bash -lc "wardian --version"
 ```
 
 ## Codex
@@ -184,10 +177,10 @@ OpenCode runs directly in the real target workspace. Wardian does not use a proj
 ### Instruction and skill discovery
 
 - OpenCode reads `AGENTS.md` natively when it exists in the working tree.
-- Wardian also injects runtime configuration through generated `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` paths.
+- Wardian also injects runtime configuration through `OPENCODE_CONFIG_CONTENT`.
 - That injected config adds:
   - extra `AGENTS.md` files from Wardian include roots to `instructions`
-  - linked skills from Wardian include roots into the generated config directory
+  - extra `.agents/skills` directories from Wardian include roots to `skills.paths`
 
 This is how OpenCode sees Wardian-managed class and agent context without forcing those files into the user repository.
 
@@ -201,7 +194,7 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 
 - OpenCode is closer to Gemini than Codex on workspace handling: it wants the real repo as `cwd`.
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
-- If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `OPENCODE_CONFIG` file and `OPENCODE_CONFIG_DIR` first.
+- If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `OPENCODE_CONFIG_CONTENT` first.
 - If interactive spawn works but telemetry is thin, that is expected today; OpenCode does not expose one stable per-session JSONL path the way Claude and Codex do.
 - On Windows, Wardian should prefer a native `opencode.exe` or packaged OpenCode binary over `.cmd`/script shims during PATH resolution. If only a shim exists, interactive launch must wrap it through `cmd /d /c ...` because direct PTY spawning does not get shell dispatch semantics.
 
@@ -212,7 +205,7 @@ When provider behavior breaks, start with the provider-specific seam instead of 
 - Gemini problems: inspect patching, include directories, and JSON event parsing.
 - Claude problems: inspect `CLAUDE.md` discovery, permission hooks, and explicit session flags.
 - Codex problems: inspect `CODEX_HOME`, `--cd`, bootstrap migration, and sandbox approval transitions.
-- OpenCode problems: inspect `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, real-workspace `cwd`, and JSON session parsing.
+- OpenCode problems: inspect `OPENCODE_CONFIG_CONTENT`, real-workspace `cwd`, and JSON session parsing.
 
 ## Related Research
 

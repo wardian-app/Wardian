@@ -12,7 +12,7 @@ The desktop app copies the bundled CLI on startup:
 - macOS/Linux command: `$HOME/.wardian/bin/wardian`
 - macOS/Linux implementation binary: `$HOME/.wardian/bin/wardian-cli`
 
-Wardian also attempts to add that `bin` directory to the user PATH. Restart the terminal after first launch if `wardian` is not found.
+Wardian also attempts to add that `bin` directory to the user PATH. On Windows, Wardian installs both a `.cmd` launcher for PowerShell/cmd and an extensionless launcher for bash-family shells such as Git Bash. Managed agent processes receive the Wardian `bin` directory at the front of their runtime PATH so Claude can run `wardian` from either PowerShell or bash commands. Restart ordinary terminals after first launch if `wardian` is not found.
 
 On Windows, Wardian installs both a `wardian.cmd` launcher for PowerShell/cmd and an extensionless POSIX shell launcher for Git Bash, MSYS2, or provider shell tools that execute `bash`. Wardian-managed agent processes also receive the active Wardian `bin` directory at the front of `PATH`, so shell tools inside Claude sessions can resolve `wardian` without depending on the user's global shell startup files.
 

@@ -22,6 +22,58 @@ use super::{
 };
 use crate::providers::gemini::gemini_status_from_title;
 
+const OUTPUT_READY_EMIT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+#[derive(Default)]
+struct OutputReadyEmitGate {
+    last_emit_at: Option<std::time::Instant>,
+    delayed_emit_scheduled: bool,
+}
+
+impl OutputReadyEmitGate {
+    fn after_buffer_append(&mut self, now: std::time::Instant) -> OutputReadyEmitAction {
+        let elapsed = self
+            .last_emit_at
+            .map(|last_emit_at| now.saturating_duration_since(last_emit_at));
+        if elapsed.is_none_or(|elapsed| elapsed >= OUTPUT_READY_EMIT_MIN_INTERVAL) {
+            self.last_emit_at = Some(now);
+            self.delayed_emit_scheduled = false;
+            return OutputReadyEmitAction::EmitNow;
+        }
+
+        if self.delayed_emit_scheduled {
+            return OutputReadyEmitAction::Suppress;
+        }
+
+        self.delayed_emit_scheduled = true;
+        OutputReadyEmitAction::ScheduleAfter(OUTPUT_READY_EMIT_MIN_INTERVAL - elapsed.unwrap())
+    }
+
+    fn finish_delayed_emit(&mut self, buffer_has_output: bool, now: std::time::Instant) -> bool {
+        self.delayed_emit_scheduled = false;
+        if !buffer_has_output {
+            return false;
+        }
+
+        let elapsed = self
+            .last_emit_at
+            .map(|last_emit_at| now.saturating_duration_since(last_emit_at));
+        if elapsed.is_none_or(|elapsed| elapsed >= OUTPUT_READY_EMIT_MIN_INTERVAL) {
+            self.last_emit_at = Some(now);
+            return true;
+        }
+
+        false
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OutputReadyEmitAction {
+    EmitNow,
+    ScheduleAfter(std::time::Duration),
+    Suppress,
+}
+
 fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
     config.codex_config().cleared_provider_sessions
 }
@@ -378,6 +430,8 @@ pub async fn spawn_agent(
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
         let mut pty_decoder = PtyUtf8Decoder::new();
+        let output_ready_emit_gate =
+            std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -555,18 +609,50 @@ pub async fn spawn_agent(
                             }
                         }
                     }
-                    let should_emit_output_ready = if let Ok(mut h) = output_buffer_clone.lock() {
-                        let was_empty = h.is_empty();
+                    let output_ready_action = if let Ok(mut h) = output_buffer_clone.lock() {
                         h.push_str(&text);
-                        was_empty
+                        output_ready_emit_gate
+                            .lock()
+                            .map(|mut gate| gate.after_buffer_append(std::time::Instant::now()))
+                            .unwrap_or(OutputReadyEmitAction::Suppress)
                     } else {
-                        false
+                        OutputReadyEmitAction::Suppress
                     };
-                    if should_emit_output_ready {
-                        let _ = pty_emit_app.emit(
-                            "agent-pty-output-ready",
-                            serde_json::json!({ "session_id": sid_for_pty }),
-                        );
+                    match output_ready_action {
+                        OutputReadyEmitAction::EmitNow => {
+                            let _ = pty_emit_app.emit(
+                                "agent-pty-output-ready",
+                                serde_json::json!({ "session_id": sid_for_pty }),
+                            );
+                        }
+                        OutputReadyEmitAction::ScheduleAfter(delay) => {
+                            let delayed_app = pty_emit_app.clone();
+                            let delayed_session_id = sid_for_pty.clone();
+                            let delayed_buffer = output_buffer_clone.clone();
+                            let delayed_gate = output_ready_emit_gate.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                let should_emit = match delayed_buffer.lock() {
+                                    Ok(buffer) => delayed_gate
+                                        .lock()
+                                        .map(|mut gate| {
+                                            gate.finish_delayed_emit(
+                                                !buffer.is_empty(),
+                                                std::time::Instant::now(),
+                                            )
+                                        })
+                                        .unwrap_or(false),
+                                    Err(_) => false,
+                                };
+                                if should_emit {
+                                    let _ = delayed_app.emit(
+                                        "agent-pty-output-ready",
+                                        serde_json::json!({ "session_id": delayed_session_id }),
+                                    );
+                                }
+                            });
+                        }
+                        OutputReadyEmitAction::Suppress => {}
                     }
                     current_line.push_str(&text);
                     loop {
@@ -1163,5 +1249,25 @@ mod tests {
     fn restored_spawns_skip_stale_process_scan() {
         assert!(!should_cleanup_stale_session_processes_before_spawn(true));
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
+    }
+
+    #[test]
+    fn output_ready_emit_gate_coalesces_repeats_after_throttle() {
+        let mut gate = OutputReadyEmitGate::default();
+        let start = std::time::Instant::now();
+
+        assert_eq!(
+            gate.after_buffer_append(start),
+            OutputReadyEmitAction::EmitNow
+        );
+        assert_eq!(
+            gate.after_buffer_append(start + OUTPUT_READY_EMIT_MIN_INTERVAL / 2),
+            OutputReadyEmitAction::ScheduleAfter(OUTPUT_READY_EMIT_MIN_INTERVAL / 2)
+        );
+        assert_eq!(
+            gate.after_buffer_append(start + OUTPUT_READY_EMIT_MIN_INTERVAL / 2),
+            OutputReadyEmitAction::Suppress
+        );
+        assert!(gate.finish_delayed_emit(true, start + OUTPUT_READY_EMIT_MIN_INTERVAL));
     }
 }
