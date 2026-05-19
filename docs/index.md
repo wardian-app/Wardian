@@ -4,7 +4,7 @@ This folder contains user guides, workflow references, developer architecture no
 
 ## Start Here
 
-- [Getting Started](./guide/getting-started.md)
+- [First-Time Install and First Run](./guide/getting-started.md)
 - [UI Overview](./guide/ui-overview.md)
 - [Wardian CLI](./guide/cli.md)
 - [Queue](./guide/queue.md)
