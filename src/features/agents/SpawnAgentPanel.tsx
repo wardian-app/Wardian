@@ -8,6 +8,8 @@ import { DocsLink } from "../../components/DocsLink";
 import { OnboardingHint } from "../../components/OnboardingHint";
 import { defaultProviderConfig, withProvider } from "./configUtils";
 
+const FIRST_AGENT_ONBOARDING_HINT_ID = "spawn-agent-first-run:v1";
+
 interface Props {
   agentClasses: AgentClassDefinition[];
   onSpawned: () => void;
@@ -105,7 +107,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
       </h3>
       <div className="mb-4">
         <OnboardingHint
-          id="spawn-agent-first-run"
+          id={FIRST_AGENT_ONBOARDING_HINT_ID}
           title="First agent checklist"
           actions={(
             <>

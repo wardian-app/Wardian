@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SpawnAgentPanel } from "./SpawnAgentPanel";
+import { useOnboardingStore } from "../../store/useOnboardingStore";
 
 const openMock = vi.mocked(open);
 const invokeMock = vi.mocked(invoke);
@@ -12,6 +13,10 @@ describe("SpawnAgentPanel", () => {
   beforeEach(() => {
     openMock.mockReset();
     invokeMock.mockReset();
+    useOnboardingStore.setState({
+      dismissedHintIds: [],
+      hintsLoaded: true,
+    });
   });
 
   it("lists OpenCode as a provider option", () => {

@@ -1,7 +1,6 @@
-import { useEffect, useState, type PropsWithChildren, type ReactNode } from "react";
+import { useEffect, type PropsWithChildren, type ReactNode } from "react";
 import { X } from "lucide-react";
-
-const storagePrefix = "wardian:onboarding-hint:";
+import { useOnboardingStore } from "../store/useOnboardingStore";
 
 interface OnboardingHintProps extends PropsWithChildren {
   id: string;
@@ -9,28 +8,25 @@ interface OnboardingHintProps extends PropsWithChildren {
   actions?: ReactNode;
 }
 
-function storageKey(id: string) {
-  return `${storagePrefix}${id}`;
-}
-
-function isStoredDismissed(id: string) {
-  return localStorage.getItem(storageKey(id)) === "dismissed";
-}
-
 export function OnboardingHint({ id, title, actions, children }: OnboardingHintProps) {
-  const [isDismissed, setIsDismissed] = useState(() => isStoredDismissed(id));
+  const dismissedHintIds = useOnboardingStore((state) => state.dismissedHintIds);
+  const hintsLoaded = useOnboardingStore((state) => state.hintsLoaded);
+  const loadOnboardingHints = useOnboardingStore((state) => state.loadOnboardingHints);
+  const dismissOnboardingHint = useOnboardingStore((state) => state.dismissOnboardingHint);
+  const isDismissed = dismissedHintIds.includes(id);
 
   useEffect(() => {
-    setIsDismissed(isStoredDismissed(id));
-  }, [id]);
+    if (!hintsLoaded) {
+      void loadOnboardingHints();
+    }
+  }, [hintsLoaded, loadOnboardingHints]);
 
-  if (isDismissed) {
+  if (!hintsLoaded || isDismissed) {
     return null;
   }
 
   const dismiss = () => {
-    localStorage.setItem(storageKey(id), "dismissed");
-    setIsDismissed(true);
+    void dismissOnboardingHint(id);
   };
 
   return (

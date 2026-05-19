@@ -10,6 +10,7 @@ const explicitBaseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL;
 const screenshotPort = Number.parseInt(process.env.WARDIAN_DOCS_SCREENSHOT_PORT ?? "1420", 10);
 const baseUrl = explicitBaseUrl ?? `http://127.0.0.1:${screenshotPort}`;
 const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
+const dismissedOnboardingHintIds = ["spawn-agent-first-run:v1"];
 const defaultSidebarContentWidth = 240;
 const wideSidebarContentWidth = 320;
 
@@ -365,7 +366,7 @@ async function assertShellHasNoHorizontalOverlap(page, relativePath) {
 }
 
 async function installTauriDocsMock(page) {
-  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory }) => {
+  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds }) => {
     const fixedNow = 1778590800000;
     const RealDate = Date;
 
@@ -498,6 +499,14 @@ async function installTauriDocsMock(page) {
             agent_session_persistence: "resume",
           };
         }
+        if (command === "load_onboarding_hints") {
+          return { dismissed_hint_ids: dismissedOnboardingHintIds };
+        }
+        if (command === "dismiss_onboarding_hint") {
+          return {
+            dismissed_hint_ids: Array.from(new Set([...dismissedOnboardingHintIds, args.hintId])).sort(),
+          };
+        }
         if (command === "list_workflows") return workflows;
         if (command === "load_workflow_library") {
           return {
@@ -549,7 +558,7 @@ async function installTauriDocsMock(page) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory });
+  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds });
 }
 
 async function main() {

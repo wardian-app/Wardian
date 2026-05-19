@@ -11,6 +11,7 @@ const framesDir = path.join(tempRoot, "frames");
 const palettePath = path.join(tempRoot, "palette.png");
 const outputPath = path.join(root, "public", "demo.gif");
 const demoHome = path.join(tempRoot, "wardian-home");
+const dismissedOnboardingHintIds = ["spawn-agent-first-run:v1"];
 
 const demoPort = Number.parseInt(process.env.WARDIAN_DEMO_PORT ?? "1421", 10);
 const explicitBaseUrl = process.env.WARDIAN_DEMO_URL;
@@ -248,6 +249,7 @@ async function installTauriDemoMock(page) {
       gitStatus,
       gitHistory,
       initialQueueItems,
+      dismissedOnboardingHintIds,
     }) => {
       const RealDate = Date;
       class FixedDate extends RealDate {
@@ -428,6 +430,14 @@ async function installTauriDemoMock(page) {
             ];
           }
           if (command === "save_shell_settings" || command === "save_agent_session_persistence") return null;
+          if (command === "load_onboarding_hints") {
+            return { dismissed_hint_ids: dismissedOnboardingHintIds };
+          }
+          if (command === "dismiss_onboarding_hint") {
+            return {
+              dismissed_hint_ids: Array.from(new Set([...dismissedOnboardingHintIds, args.hintId])).sort(),
+            };
+          }
           if (command === "list_workflows") return workflows;
           if (command === "load_workflow_library") {
             return {
@@ -503,6 +513,7 @@ async function installTauriDemoMock(page) {
       gitStatus,
       gitHistory,
       initialQueueItems,
+      dismissedOnboardingHintIds,
     },
   );
 }
