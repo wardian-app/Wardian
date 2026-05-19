@@ -77,18 +77,20 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
 
     if (!providerTouched) {
       const resolved = resolveEffectiveProvider(providerReadiness, defaultProvider);
+      const provider = resolved.provider;
       setProviderNote(resolved.note);
-      if (resolved.provider && spawnAdvancedConfig.provider !== resolved.provider) {
-        setSpawnAdvancedConfig((prev) => withProvider(prev, resolved.provider));
+      if (provider && spawnAdvancedConfig.provider !== provider) {
+        setSpawnAdvancedConfig((prev) => withProvider(prev, provider));
       }
       return;
     }
 
     if (!optionFor(spawnAdvancedConfig.provider)?.available) {
       const resolved = resolveEffectiveProvider(providerReadiness, defaultProvider);
+      const provider = resolved.provider;
       setProviderNote(resolved.note);
-      if (resolved.provider) {
-        setSpawnAdvancedConfig((prev) => withProvider(prev, resolved.provider));
+      if (provider) {
+        setSpawnAdvancedConfig((prev) => withProvider(prev, provider));
       }
     } else {
       setProviderNote(null);
