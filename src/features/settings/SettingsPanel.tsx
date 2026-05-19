@@ -45,6 +45,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     custom_executable,
     custom_args,
     agent_session_persistence,
+    default_provider,
     codex_runtime_policy,
     available_shells,
     shell_settings_loaded,
@@ -53,6 +54,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     setCustomExecutable,
     setCustomArgs,
     setAgentSessionPersistence,
+    setDefaultProvider,
     setCodexSandboxMode,
     setCodexApprovalPolicy,
     setCodexFullAuto,
@@ -230,21 +232,42 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
           <h3 className="text-[10px] font-bold text-muted-neutral tracking-wide mb-4">Agent Runtime</h3>
 
           <div className="bg-wardian-card-bg-muted border border-wardian-light/50 rounded-xl p-4 flex flex-col gap-3">
-            <label className="text-sm font-bold text-primary" htmlFor="agent-session-persistence">
-              Regular agent sessions
+            <label className="text-sm font-bold text-primary" htmlFor="default-provider-select">
+              Default provider
             </label>
             <select
-              id="agent-session-persistence"
-              value={agent_session_persistence}
-              onChange={(e) => setAgentSessionPersistence(e.target.value as 'fresh' | 'resume')}
+              id="default-provider-select"
+              value={default_provider}
+              onChange={(e) => setDefaultProvider(e.target.value as typeof default_provider)}
               className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
             >
-              <option value="resume">Resume sessions</option>
-              <option value="fresh">Start fresh</option>
+              <option value="auto">Auto</option>
+              <option value="claude">Claude</option>
+              <option value="codex">Codex</option>
+              <option value="gemini">Gemini</option>
+              <option value="opencode">OpenCode</option>
             </select>
             <p className="text-[10px] text-muted-neutral leading-relaxed">
-              Applies when regular visible agents are resumed from Off. Workflow agent nodes use their own run mode.
+              Auto prefers Claude when available, then uses the first installed provider.
             </p>
+
+            <div className="border-t border-wardian-border pt-3 mt-1 flex flex-col gap-3">
+              <label className="text-sm font-bold text-primary" htmlFor="agent-session-persistence">
+                Regular agent sessions
+              </label>
+              <select
+                id="agent-session-persistence"
+                value={agent_session_persistence}
+                onChange={(e) => setAgentSessionPersistence(e.target.value as 'fresh' | 'resume')}
+                className="w-full rounded-lg border border-wardian-border bg-wardian-input-bg px-3 py-2 text-sm text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+              >
+                <option value="resume">Resume sessions</option>
+                <option value="fresh">Start fresh</option>
+              </select>
+              <p className="text-[10px] text-muted-neutral leading-relaxed">
+                Applies when regular visible agents are resumed from Off. Workflow agent nodes use their own run mode.
+              </p>
+            </div>
 
             <div className="border-t border-wardian-border pt-3 mt-1 flex flex-col gap-3">
               <div>
