@@ -125,11 +125,21 @@ pub fn run() {
         eprintln!("Failed to initialize process supervisor: {}", e);
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+
+    let builder = if commands::settings::update_plugins_enabled_for_current_build() {
+        builder
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+
+    builder
         .manage(AppState::new())
         .setup(|app| {
             if let Ok(resource_dir) = app.path().resource_dir() {
@@ -390,6 +400,7 @@ pub fn run() {
             commands::library::library_unwatch,
             commands::patch::run_gemini_patch,
             commands::settings::load_shell_settings,
+            commands::settings::get_update_eligibility,
             commands::settings::list_available_shells,
             commands::settings::save_shell_settings,
             commands::settings::save_agent_session_persistence,

@@ -3,14 +3,39 @@ import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
+import { useAppUpdate } from './useAppUpdate';
 import { useSettingsStore } from '../../store/useSettingsStore';
+import type { AppUpdateState } from './useAppUpdate';
+
+vi.mock('./useAppUpdate', () => ({
+  useAppUpdate: vi.fn(),
+}));
 
 const mockInvoke = vi.mocked(invoke);
+const mockUseAppUpdate = vi.mocked(useAppUpdate);
+
+const appUpdateState = (overrides: Partial<AppUpdateState> = {}): AppUpdateState => ({
+  currentVersion: '0.3.5',
+  availableUpdate: null,
+  status: 'up-to-date',
+  errorMessage: '',
+  updatesEnabled: true,
+  updateEligibilityReason: '',
+  updateChannel: 'stable',
+  downloadedBytes: 0,
+  contentLength: null,
+  progressPercent: null,
+  checkNow: vi.fn(),
+  downloadAndInstall: vi.fn(),
+  relaunchApp: vi.fn(),
+  ...overrides,
+});
 
 describe('SettingsPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    mockUseAppUpdate.mockReturnValue(appUpdateState());
     useSettingsStore.setState({
       theme: 'system',
       autoPatchGemini: false,
@@ -100,6 +125,99 @@ describe('SettingsPanel', () => {
     expect(screen.getByLabelText('Codex sandbox')).toHaveValue('workspace-write');
     expect(screen.getByLabelText('Codex approval')).toHaveValue('on-request');
     expect(screen.getByLabelText('Autonomous full access, no prompts')).not.toBeChecked();
+  });
+
+  it('shows the current Wardian version at the top of Settings', async () => {
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Wardian v0.3.5')).toBeInTheDocument();
+  });
+
+  it('keeps settings controls usable while update check is running', async () => {
+    mockUseAppUpdate.mockReturnValue(appUpdateState({ status: 'checking' }));
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Checking for updates...')).toBeInTheDocument();
+    expect(screen.getByLabelText('Shell / Interpreter')).toBeInTheDocument();
+  });
+
+  it('checks for updates on demand', async () => {
+    const user = userEvent.setup();
+    const checkNow = vi.fn();
+    mockUseAppUpdate.mockReturnValue(appUpdateState({ checkNow }));
+
+    render(<SettingsPanel />);
+
+    await user.click(await screen.findByText('Check Now'));
+
+    expect(checkNow).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows and installs an available update', async () => {
+    const user = userEvent.setup();
+    const downloadAndInstall = vi.fn();
+    mockUseAppUpdate.mockReturnValue(appUpdateState({
+      status: 'available',
+      availableUpdate: { version: '0.3.6' },
+      downloadAndInstall,
+    }));
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Wardian v0.3.6 is available.')).toBeInTheDocument();
+    await user.click(screen.getByText('Download & Install'));
+
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows restart control after update installation', async () => {
+    const user = userEvent.setup();
+    const relaunchApp = vi.fn();
+    mockUseAppUpdate.mockReturnValue(appUpdateState({
+      status: 'installed',
+      availableUpdate: { version: '0.3.6' },
+      relaunchApp,
+    }));
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Update installed. Restart to finish.')).toBeInTheDocument();
+    await user.click(screen.getByText('Restart'));
+
+    expect(relaunchApp).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows disabled update eligibility without install controls', async () => {
+    const checkNow = vi.fn();
+    mockUseAppUpdate.mockReturnValue({
+      ...appUpdateState({ checkNow }),
+      status: 'disabled',
+      updateEligibilityReason: 'Updates are only available in official installed release builds.',
+    } as unknown as AppUpdateState);
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Updates are only available in official installed release builds.')).toBeInTheDocument();
+    expect(screen.queryByText('Check Now')).not.toBeInTheDocument();
+    expect(screen.queryByText('Download & Install')).not.toBeInTheDocument();
+    expect(checkNow).not.toHaveBeenCalled();
+  });
+
+  it('does not show update controls before eligibility is known', async () => {
+    const checkNow = vi.fn();
+    mockUseAppUpdate.mockReturnValue(appUpdateState({
+      status: 'idle',
+      updatesEnabled: false,
+      checkNow,
+    }));
+
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText('Update status idle.')).toBeInTheDocument();
+    expect(screen.queryByText('Check Now')).not.toBeInTheDocument();
+    expect(screen.queryByText('Download & Install')).not.toBeInTheDocument();
+    expect(checkNow).not.toHaveBeenCalled();
   });
 
   it('saves custom shell settings through tauri', async () => {

@@ -10,6 +10,8 @@
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
     "notification:default",
+    "updater:default",
+    "process:allow-restart",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",

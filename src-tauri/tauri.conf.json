@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis",
       "app",
@@ -47,5 +48,16 @@
       "resources/bin/*",
       "resources/library/skills/**/*"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENBQUQ3NkRBNzBDMTc3RDkKUldUWmQ4RncybmF0eWtadWFpNURLNUVONDN3UXdPYm9OZE8vbS9ISjJzUWxVTy91U3RzZ1FOcnkK",
+      "endpoints": [
+        "https://github.com/tangemicioglu/Wardian/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
