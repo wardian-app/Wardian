@@ -4,6 +4,48 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.6](https://github.com/tangemicioglu/Wardian/compare/v0.3.5...v0.3.6) (2026-05-19)
+
+
+### Features
+
+* **agents:** add copy full agent command ([#262](https://github.com/tangemicioglu/Wardian/issues/262)) ([4776ece](https://github.com/tangemicioglu/Wardian/commit/4776ece9502a95ccea90f4f2f69204c6b13eaf6e))
+* **cli:** add command send mode ([#253](https://github.com/tangemicioglu/Wardian/issues/253)) ([1d7b66f](https://github.com/tangemicioglu/Wardian/commit/1d7b66fb3922eb9998fe32e122f492b869dcd7f1))
+* **cli:** add structured ask replies ([#257](https://github.com/tangemicioglu/Wardian/issues/257)) ([63841ef](https://github.com/tangemicioglu/Wardian/commit/63841efad998cba8f26083afcc80691f4a0a5e35))
+* **onboarding:** add contextual help entry points ([#294](https://github.com/tangemicioglu/Wardian/issues/294)) ([1df9c36](https://github.com/tangemicioglu/Wardian/commit/1df9c36e5dcb36fa54ef747d82a5bbe1e1d95ef4))
+* **providers:** gate unavailable provider runtimes ([#311](https://github.com/tangemicioglu/Wardian/issues/311)) ([123553f](https://github.com/tangemicioglu/Wardian/commit/123553fea1b5adbe0d171e73e39bec47b683ebc6))
+* **settings:** add guarded in-app updater ([#313](https://github.com/tangemicioglu/Wardian/issues/313)) ([fa8ea91](https://github.com/tangemicioglu/Wardian/commit/fa8ea9156099b77f1fd75ffa4364f064648858e7))
+
+
+### Bug Fixes
+
+* **agents:** hide provider resume ids ([#289](https://github.com/tangemicioglu/Wardian/issues/289)) ([8a9ac6e](https://github.com/tangemicioglu/Wardian/commit/8a9ac6e2c8fc9ca5cd86a7d76e9b95cd0820850b))
+* **cli:** detect current Codex ready prompt ([#305](https://github.com/tangemicioglu/Wardian/issues/305)) ([414c8b9](https://github.com/tangemicioglu/Wardian/commit/414c8b9d9854b785e5a097a792aa4ae9d60a853e))
+* **deps:** resolve dependabot vulnerabilities ([#316](https://github.com/tangemicioglu/Wardian/issues/316)) ([eed52d7](https://github.com/tangemicioglu/Wardian/commit/eed52d75072086c5bc471135a24155c22429f296))
+* **gemini:** align manual session lifecycle ([#267](https://github.com/tangemicioglu/Wardian/issues/267)) ([45a6f97](https://github.com/tangemicioglu/Wardian/commit/45a6f972ef1b46be34ac2c4caee8d91af76ab64e))
+* **gemini:** handle empty restarts and patch paths ([#309](https://github.com/tangemicioglu/Wardian/issues/309)) ([bcee066](https://github.com/tangemicioglu/Wardian/commit/bcee0668cfd1f99cc0d3a523f13fbe211b818f72))
+* **gemini:** resume restored manual sessions ([#301](https://github.com/tangemicioglu/Wardian/issues/301)) ([cfc1a28](https://github.com/tangemicioglu/Wardian/commit/cfc1a28c0d14691a271562d8f94714c61a1104e9))
+* **release:** sync Rust workspace versions ([#261](https://github.com/tangemicioglu/Wardian/issues/261)) ([241f06e](https://github.com/tangemicioglu/Wardian/commit/241f06eb53f93b6f200328aef16c8f4b6b559b08))
+* **runtime:** harden agent update telemetry ([#303](https://github.com/tangemicioglu/Wardian/issues/303)) ([4770f3f](https://github.com/tangemicioglu/Wardian/commit/4770f3f44e105aed9f26b929426c2dd8d60dcb34))
+* **source-control:** show active worktree name ([#265](https://github.com/tangemicioglu/Wardian/issues/265)) ([0cd5e18](https://github.com/tangemicioglu/Wardian/commit/0cd5e18433857ab92136344f7f30a6aa8c88bd64))
+* **terminal:** harden real-provider PTY rendering ([#271](https://github.com/tangemicioglu/Wardian/issues/271)) ([20e5926](https://github.com/tangemicioglu/Wardian/commit/20e5926634d9aa46ba922d41bda08b2a2091aefe))
+* **ui:** simplify help links and grid resizing ([#318](https://github.com/tangemicioglu/Wardian/issues/318)) ([59c83bd](https://github.com/tangemicioglu/Wardian/commit/59c83bd8eabac31e9ce0cceccd0032b198cb59ab))
+* **ui:** tighten three-column shell density ([#285](https://github.com/tangemicioglu/Wardian/issues/285)) ([d8bb927](https://github.com/tangemicioglu/Wardian/commit/d8bb9278df0f7c05f6d5acfff27c6f33886ff11b))
+
+
+### Documentation
+
+* add first-run onboarding guide ([#293](https://github.com/tangemicioglu/Wardian/issues/293)) ([7a0c8c7](https://github.com/tangemicioglu/Wardian/commit/7a0c8c7da56edff7482137dfdb4b601f702c5728))
+* add first-run troubleshooting guide ([#297](https://github.com/tangemicioglu/Wardian/issues/297)) ([64c68da](https://github.com/tangemicioglu/Wardian/commit/64c68da00d108730af678d65d10f3256756f27d3))
+* add provider readiness guide ([#296](https://github.com/tangemicioglu/Wardian/issues/296)) ([48495ac](https://github.com/tangemicioglu/Wardian/commit/48495ac065b958769c197e2e2a4330ab196a0dc9))
+* define docs maintenance workflow ([#299](https://github.com/tangemicioglu/Wardian/issues/299)) ([aa21521](https://github.com/tangemicioglu/Wardian/commit/aa21521c970afbed2da1494c89f78ed6f742a1c7))
+* organize task-oriented feature guides ([#295](https://github.com/tangemicioglu/Wardian/issues/295)) ([3878fe1](https://github.com/tangemicioglu/Wardian/commit/3878fe1817331aa6db0a585d8d21b5592edbbc32))
+* **providers:** standardize supported provider docs ([#291](https://github.com/tangemicioglu/Wardian/issues/291)) ([9d7688a](https://github.com/tangemicioglu/Wardian/commit/9d7688a9e833c622e4b75c8544b5de6c8274a5f8))
+* publish VitePress documentation site ([#286](https://github.com/tangemicioglu/Wardian/issues/286)) ([885ddd0](https://github.com/tangemicioglu/Wardian/commit/885ddd0e154378c677808077bbfe46f38964b515))
+* **readme:** refresh demo walkthrough gif ([#251](https://github.com/tangemicioglu/Wardian/issues/251)) ([84e4cd5](https://github.com/tangemicioglu/Wardian/commit/84e4cd578983870901a184e83780300ac3208155))
+* refresh provider runtime references ([#307](https://github.com/tangemicioglu/Wardian/issues/307)) ([b365e51](https://github.com/tangemicioglu/Wardian/commit/b365e516010fac1de1f3c073644520a6df7b341b))
+* **research:** add org control plane references ([#259](https://github.com/tangemicioglu/Wardian/issues/259)) ([28f35cc](https://github.com/tangemicioglu/Wardian/commit/28f35cc6bed642070af2606d7c62a9bceb07fb52))
+
 ## [0.3.5](https://github.com/tangemicioglu/Wardian/compare/v0.3.4...v0.3.5) (2026-05-12)
 
 
