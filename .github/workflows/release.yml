@@ -197,7 +197,7 @@ jobs:
           releaseDraft: true
           uploadUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
           updaterJsonPreferNsis: true
-          args: ${{ matrix.platform.args || '' }}
+          args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
       - name: Build and upload (manual backfill)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'
@@ -214,7 +214,7 @@ jobs:
           releaseDraft: true
           uploadUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}
           updaterJsonPreferNsis: true
-          args: ${{ matrix.platform.args || '' }}
+          args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
       - name: Build (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
@@ -224,7 +224,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          args: ${{ matrix.platform.args || '' }}
+          args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
       - name: Upload dry-run artifacts
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
