@@ -16,6 +16,14 @@ describe("QueueView", () => {
   it("shows empty state when no items", () => {
     render(<QueueView />);
     expect(screen.getByText("No completions yet.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /first-run guide/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/getting-started",
+    );
+    expect(screen.getByRole("link", { name: /queue guide/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/queue",
+    );
   });
 
   it("renders an agent completion item", () => {

@@ -69,6 +69,12 @@ async function installCustomCloneIpcMock(page: Page) {
         if (command === "load_watchlist_prefs") return null;
         if (command === "load_agent_interactions") return {};
         if (command === "load_queue_items") return [];
+        if (command === "load_onboarding_hints") {
+          return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
+        }
+        if (command === "dismiss_onboarding_hint") {
+          return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
+        }
         if (command === "list_workflows") return [];
         if (command === "list_scheduled_runs") return [];
         if (command === "load_workflow_library") return { folders: [], rootWorkflowIds: [] };

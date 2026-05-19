@@ -14,12 +14,15 @@ export interface SeedOptions {
   withTestClass?: boolean;
   /** Include a test workflow */
   withTestWorkflow?: boolean;
+  /** Pre-dismiss contextual onboarding hints for non-onboarding tests */
+  dismissOnboardingHints?: boolean;
 }
 
 const DEFAULT_OPTIONS: SeedOptions = {
   withMockAgent: true,
   withTestClass: true,
   withTestWorkflow: false,
+  dismissOnboardingHints: true,
 };
 
 const MOCK_AGENT_ID = "e2e-mock-agent-001";
@@ -38,6 +41,7 @@ export function seedTestHome(
     "workflows",
     "library",
     "debug",
+    "settings",
   ];
 
   for (const dir of dirs) {
@@ -167,6 +171,19 @@ export function seedTestHome(
             path: "workflows/e2e-test-workflow.json",
           },
         ],
+        null,
+        2
+      )
+    );
+  }
+
+  if (options.dismissOnboardingHints) {
+    fs.writeFileSync(
+      path.join(targetDir, "settings", "onboarding.json"),
+      JSON.stringify(
+        {
+          dismissed_hint_ids: ["spawn-agent-first-run:v1"],
+        },
         null,
         2
       )
