@@ -96,10 +96,7 @@ describe("CommandPanel", () => {
   it("lists starred prompts from nested folders and omits unstarred prompts", () => {
     renderCommandPanel();
 
-    expect(screen.getByRole("link", { name: /command guide/i })).toHaveAttribute(
-      "href",
-      "https://docs.wardian.org/guide/command-panel",
-    );
+    expect(screen.queryByRole("link", { name: /command guide/i })).not.toBeInTheDocument();
     expect(screen.getByText("Ship Summary")).toBeInTheDocument();
     expect(screen.getByText("Review Notes")).toBeInTheDocument();
     expect(screen.queryByText("Draft")).not.toBeInTheDocument();

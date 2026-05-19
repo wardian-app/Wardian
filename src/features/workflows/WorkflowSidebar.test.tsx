@@ -88,10 +88,7 @@ describe('WorkflowSidebar', () => {
     renderWithProvider(<WorkflowSidebar />);
 
     expect(screen.getByText('Workflows')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /workflow guide/i })).toHaveAttribute(
-      'href',
-      'https://docs.wardian.org/guide/workflows',
-    );
+    expect(screen.queryByRole('link', { name: /workflow guide/i })).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText('Search workflows...')).toBeInTheDocument();
     expect(screen.getByTitle('Stop All (Panic)')).toBeInTheDocument();
     expect(screen.getByTitle('Pause All')).toBeInTheDocument();

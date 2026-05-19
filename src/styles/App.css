@@ -363,11 +363,22 @@
 
 /* Snap Guide Lines */
 .grid-guide-line-v {
-  position: fixed;
+  position: absolute;
   top: 0;
   bottom: 0;
   width: 1px;
   border-left: 1px dashed var(--color-wardian-accent);
+  opacity: 0.2;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.grid-guide-line-h {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  border-top: 1px dashed var(--color-wardian-accent);
   opacity: 0.2;
   pointer-events: none;
   z-index: 100;

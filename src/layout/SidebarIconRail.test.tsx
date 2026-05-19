@@ -21,7 +21,7 @@ describe("SidebarIconRail density", () => {
     expect(explorerIcon).toHaveClass("h-6");
   });
 
-  it("exposes a non-blocking Getting Started help entry point from the app shell", () => {
+  it("does not reserve a persistent help slot on the icon rail", () => {
     render(
       <SidebarIconRail
         activeTab="explorer"
@@ -32,9 +32,6 @@ describe("SidebarIconRail density", () => {
       />,
     );
 
-    expect(screen.getByTestId("sidebar-help-getting-started")).toHaveAttribute(
-      "href",
-      "https://docs.wardian.org/guide/getting-started",
-    );
+    expect(screen.queryByTestId("sidebar-help-getting-started")).not.toBeInTheDocument();
   });
 });

@@ -1,6 +1,5 @@
 import React from "react";
-import { Folder, HelpCircle, MessageSquareCode } from "lucide-react";
-import { docsUrl } from "../components/DocsLink";
+import { Folder, MessageSquareCode } from "lucide-react";
 
 export type SidebarTab = "explorer" | "git" | "agent-config" | "command" | "classes" | "workflows" | "ssh" | "settings";
 
@@ -106,18 +105,6 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       </button>
 
       <div className="mt-auto flex flex-col gap-3">
-        <a
-          data-testid="sidebar-help-getting-started"
-          href={docsUrl("/guide/getting-started")}
-          target="_blank"
-          rel="noreferrer"
-          className="relative p-3 rounded-xl transition-all group text-muted-neutral hover:text-bright-neutral"
-          title="Getting Started"
-          aria-label="Getting Started"
-        >
-          <HelpCircle className="w-6 h-6 group-hover:scale-110 transition-transform" strokeWidth={2} />
-        </a>
-
         <button
           data-testid="sidebar-tab-terminal"
           onClick={onToggleUserTerminal}

@@ -13,6 +13,25 @@ const makeContainer = (width = 1000) => {
   return el;
 };
 
+const makeOffsetContainer = (width = 1000, left = 24, top = 120) => {
+  const el = document.createElement('div');
+  Object.defineProperty(el, 'getBoundingClientRect', {
+    value: () => ({
+      left,
+      top,
+      right: left + width,
+      bottom: top + 600,
+      width,
+      height: 600,
+      x: left,
+      y: top,
+      toJSON: () => '',
+    }),
+  });
+  Object.defineProperty(el, 'clientWidth', { value: width });
+  return el;
+};
+
 describe('useLayoutStore — gridStacked basics', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -124,5 +143,32 @@ describe('useGridResize — stacked exit', () => {
     act(() => window.dispatchEvent(new MouseEvent('mouseup')));
 
     expect(useLayoutStore.getState().gridStacked).toBe(true);
+  });
+});
+
+describe('useGridResize — row resizing', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    act(() => useLayoutStore.getState().resetLayout());
+  });
+
+  it('reports horizontal guide positions relative to the grid container', () => {
+    const ref = { current: makeOffsetContainer(1000, 24, 120) } as React.RefObject<HTMLDivElement>;
+    const { result } = renderHook(() => useGridResize(ref));
+
+    act(() => result.current.startResize('v', 0));
+    act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 0, clientY: 570 })));
+
+    expect(result.current.guidePos).toBe(450);
+  });
+
+  it('treats vertical resize indexes as row boundaries rather than agent indexes', () => {
+    const ref = { current: makeContainer(1000) } as React.RefObject<HTMLDivElement>;
+    const { result } = renderHook(() => useGridResize(ref));
+
+    act(() => result.current.startResize('v', 1));
+    act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 0, clientY: 900 })));
+
+    expect(useLayoutStore.getState().layout.row_height).toBe(450);
   });
 });

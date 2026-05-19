@@ -178,6 +178,15 @@ describe('GridView density', () => {
     expect(screen.getByText('(Coder)')).toBeInTheDocument();
   });
 
+  it('uses a larger status orb in compact card headers', () => {
+    renderGrid(null);
+
+    const header = screen.getByTestId('agent-card-header-agent-1');
+    const statusOrb = header.querySelector('[data-testid="agent-card-status-orb"]');
+    expect(statusOrb).toHaveClass('w-2.5');
+    expect(statusOrb).toHaveClass('h-2.5');
+  });
+
   it('keeps dense UI proportions roomy enough for VSCode-style scanning', async () => {
     const { readFileSync } = await import("node:fs");
     const { cwd } = await import("node:process");
@@ -213,5 +222,20 @@ describe('GridView stacked mode', () => {
     act(() => useLayoutStore.getState().setGridStacked(true));
     const { container } = renderGrid(null, agents);
     expect(container.querySelectorAll('[data-resize-handle="h"]').length).toBe(0);
+  });
+
+  it('keeps row resize gutters available when gridStacked is true', () => {
+    act(() => useLayoutStore.getState().setGridStacked(true));
+    const { container } = renderGrid(null, agents);
+    expect(container.querySelectorAll('[data-resize-handle="v"]').length).toBe(agents.length - 1);
+  });
+
+  it('defines a visible horizontal resize guide style', async () => {
+    const { readFileSync } = await import("node:fs");
+    const { cwd } = await import("node:process");
+    const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
+
+    expect(appStyles).toContain(".grid-guide-line-h");
+    expect(appStyles).toContain("border-top: 1px dashed var(--color-wardian-accent);");
   });
 });

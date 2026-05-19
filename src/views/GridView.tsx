@@ -131,6 +131,10 @@ export const GridView: React.FC<GridViewProps> = ({
   const visibleColumnTracks = visibleAgents.length <= 1
     ? [1]
     : layout.column_tracks.slice(0, visibleAgents.length);
+  const renderedColumnCount = renderStacked ? 1 : visibleColumnTracks.length;
+  const visibleRowCount = renderedColumnCount > 0
+    ? Math.ceil(visibleAgents.length / renderedColumnCount)
+    : 0;
   const gridMinWidth = visibleAgents.length > 0
     ? `${(visibleColumnTracks.length * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, visibleColumnTracks.length - 1) * 8)}px`
     : undefined;
@@ -202,7 +206,7 @@ export const GridView: React.FC<GridViewProps> = ({
               className={`px-[var(--density-grid-header-padding-x)] py-[var(--density-grid-header-padding-y)] min-h-[var(--density-grid-header-min-height)] border-b border-wardian-light justify-between items-center group transition-colors cursor-grab active:cursor-grabbing select-none flex ${isSelected ? 'bg-[var(--color-wardian-accent)]/5' : 'bg-[var(--color-wardian-sidebar-primary)]'}`}
             >
               <div className="flex items-center gap-2 min-w-0">
-                <div className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${statusColorClass}`}></div>
+                <div data-testid="agent-card-status-orb" className={`w-2.5 h-2.5 rounded-full transition-colors flex-shrink-0 ${statusColorClass}`}></div>
                 {editingAgentId === agentId ? (
                   <input
                     className="inline-edit-input"
@@ -288,10 +292,10 @@ export const GridView: React.FC<GridViewProps> = ({
       )}
 
       {/* Global Track Resize Overlays (Gutters) */}
-      {!isMaximized && !isMobile && !gridStacked && (
+      {!isMaximized && !isMobile && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
-          {visibleColumnTracks.slice(0, -1).map((_weight, i) => {
+          {!gridStacked && visibleColumnTracks.slice(0, -1).map((_weight, i) => {
             const leftWeight = visibleColumnTracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
             const totalSpacing = 16 + (visibleColumnTracks.length - 1) * 8;
             return (
@@ -313,16 +317,19 @@ export const GridView: React.FC<GridViewProps> = ({
           })}
 
           {/* Horizontal Gutters (Row Resizing) */}
-          {Array.from({ length: Math.ceil(visibleAgents.length / visibleColumnTracks.length) - 1 }).map((_, i) => (
+          {Array.from({ length: Math.max(0, visibleRowCount - 1) }).map((_, i) => (
             <div 
               key={`gutter-v-${i}`}
+              data-resize-handle="v"
               className="absolute left-0 right-0 z-30 group/gutter flex items-center"
               style={{ 
-                top: `calc(${(i + 1) * layout.row_height}px + ${i * 8}px + 6px)`, 
+                top: renderStacked
+                  ? `calc(${(i + 1) * layout.row_height}px - 6px)`
+                  : `calc(var(--density-grid-gap) + ${(i + 1) * layout.row_height}px + ${i} * var(--density-grid-gap) - 3px)`,
                 height: '12px',
                 cursor: 'row-resize'
               }}
-              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i * visibleColumnTracks.length); }}
+              onMouseDown={(e) => { e.stopPropagation(); startResize('v', i); }}
             >
               {/* Visual Line */}
               <div className="h-[2px] w-full bg-wardian-accent/0 group-hover/gutter:bg-wardian-accent/30 group-active/gutter:bg-wardian-accent/60 transition-colors" />
