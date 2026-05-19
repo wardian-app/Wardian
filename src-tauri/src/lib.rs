@@ -395,6 +395,8 @@ pub fn run() {
             commands::settings::save_shell_settings,
             commands::settings::save_agent_session_persistence,
             commands::settings::sync_provider_theme_settings,
+            commands::settings::load_onboarding_hints,
+            commands::settings::dismiss_onboarding_hint,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

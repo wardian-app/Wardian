@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SpawnAgentPanel } from "./SpawnAgentPanel";
+import { useOnboardingStore } from "../../store/useOnboardingStore";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import type { ProviderReadiness, UserFacingProviderName } from "../../types";
 
@@ -49,6 +50,10 @@ describe("SpawnAgentPanel", () => {
   beforeEach(() => {
     openMock.mockReset();
     invokeMock.mockReset();
+    useOnboardingStore.setState({
+      dismissedHintIds: [],
+      hintsLoaded: true,
+    });
     useSettingsStore.setState({ default_provider: "auto" });
     mockSpawnInvokes();
   });
@@ -64,6 +69,25 @@ describe("SpawnAgentPanel", () => {
     const providerSelect = screen.getByTestId("spawn-provider");
     expect(await screen.findByRole("option", { name: "OpenCode" })).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent("OpenCode");
+  });
+
+  it("shows dismissible provider and first-run help before spawning", () => {
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("First agent checklist")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /first-run guide/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/getting-started",
+    );
+    expect(screen.getByRole("link", { name: /provider runtimes/i })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/providers",
+    );
   });
 
   it("sets the workspace path from the native folder picker", async () => {

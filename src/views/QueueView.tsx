@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Bot, ChevronDown, ChevronUp, GitBranch, Trash2 } from "lucide-react";
 import { useQueueStore } from "../store/useQueueStore";
 import type { QueueItem } from "../types";
+import { DocsLink } from "../components/DocsLink";
 
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts;
@@ -178,7 +179,16 @@ export function QueueView() {
 
       {items.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-sm text-muted-neutral">No completions yet.</p>
+          <div className="max-w-sm text-center">
+            <p className="text-sm font-semibold text-primary">No completions yet.</p>
+            <p className="mt-2 text-xs leading-5 text-muted-neutral">
+              Queue fills after an active agent or workflow finishes and returns a result.
+            </p>
+            <div className="mt-3 flex justify-center gap-4">
+              <DocsLink path="/guide/getting-started">First-run guide</DocsLink>
+              <DocsLink path="/guide/queue">Queue guide</DocsLink>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto pr-1">

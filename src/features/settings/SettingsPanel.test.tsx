@@ -79,6 +79,16 @@ describe('SettingsPanel', () => {
     });
   });
 
+  it('links to the getting started guide from settings', async () => {
+    render(<SettingsPanel />);
+
+    expect(screen.getByRole('link', { name: /getting started/i })).toHaveAttribute(
+      'href',
+      'https://docs.wardian.org/guide/getting-started',
+    );
+    await screen.findByLabelText('Shell / Interpreter');
+  });
+
   it('loads discovered shells and current shell settings on mount', async () => {
     render(<SettingsPanel />);
 

@@ -7,6 +7,7 @@ import {
   normalizeTerminalFontSize,
   useSettingsStore,
 } from "../../store/useSettingsStore";
+import { DocsLink } from "../../components/DocsLink";
 
 interface SettingsPanelProps {}
 
@@ -170,6 +171,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = () => {
     <div data-testid="settings-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-bold text-primary tracking-tight">Settings</h2>
+        <DocsLink path="/guide/getting-started">Getting Started</DocsLink>
       </div>
       
       <div className="flex flex-col gap-8 flex-1 overflow-y-auto pr-2 no-scrollbar">
