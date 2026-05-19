@@ -10,7 +10,6 @@ const FRONTEND_PATTERNS = [
   /^index\.html$/,
   /^vite\.config\.ts$/,
   /^vitest\.config\.ts$/,
-  /^package(-lock)?\.json$/,
 ];
 
 function git(args) {
