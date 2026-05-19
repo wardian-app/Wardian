@@ -4,7 +4,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen } from "lucide-react";
 import { AgentConfig, AgentClassDefinition, ProviderName } from "../../types";
 import { AdvancedSettings } from "../../components/AdvancedSettings";
+import { DocsLink } from "../../components/DocsLink";
+import { OnboardingHint } from "../../components/OnboardingHint";
 import { defaultProviderConfig, withProvider } from "./configUtils";
+
+const FIRST_AGENT_ONBOARDING_HINT_ID = "spawn-agent-first-run:v1";
 
 interface Props {
   agentClasses: AgentClassDefinition[];
@@ -101,6 +105,20 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
       <h3 className="text-xs font-bold text-muted tracking-wide mb-4">
         Spawn Agent
       </h3>
+      <div className="mb-4">
+        <OnboardingHint
+          id={FIRST_AGENT_ONBOARDING_HINT_ID}
+          title="First agent checklist"
+          actions={(
+            <>
+              <DocsLink path="/guide/getting-started">First-run guide</DocsLink>
+              <DocsLink path="/providers">Provider Runtimes</DocsLink>
+            </>
+          )}
+        >
+          Verify one provider CLI, authenticate it in a normal terminal, then choose the workspace this agent should use.
+        </OnboardingHint>
+      </div>
       <form className="flex flex-col gap-4" onSubmit={spawnAgent}>
         <div>
           <label className="block text-[10px] font-bold text-muted-neutral mb-1">

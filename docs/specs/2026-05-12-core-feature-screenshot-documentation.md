@@ -8,7 +8,7 @@
 
 Wardian has user guides for the core windows and feature areas, but most pages describe the interface only in text. Clean screenshots would make the documentation easier to scan, especially for readers learning the Grid, Dashboard, Library, Workflows, Explorer, Command Panel, Source Control, Settings, and Watchlist surfaces.
 
-2026-04-26 Testing Coverage and Screenshot Docs already defines local PR screenshot evidence under `e2e/screenshots/<feature>/<timestamp>/`. That path is intentionally ignored by git and should remain a temporary evidence location. Reader-facing documentation screenshots need a committed, stable home that does not mix with local test artifacts.
+[Testing Coverage and Screenshot Documentation](./2026-04-26-testing-coverage-and-screenshot-docs.md) already defines local PR screenshot evidence under `e2e/screenshots/<feature>/<timestamp>/`. That path is intentionally ignored by git and should remain a temporary evidence location. Reader-facing documentation screenshots need a committed, stable home that does not mix with local test artifacts.
 
 ## Proposed Decision
 

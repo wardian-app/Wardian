@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LibraryView } from './LibraryView';
 import { useLibraryStore } from '../store/useLibraryStore';
@@ -32,5 +32,14 @@ describe('LibraryView', () => {
     });
 
     expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('links to the Library guide from the Library view', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByRole('link', { name: /library guide/i })).toHaveAttribute(
+      'href',
+      'https://docs.wardian.org/guide/library',
+    );
   });
 });

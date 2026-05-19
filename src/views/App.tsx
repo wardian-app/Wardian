@@ -1078,9 +1078,9 @@ function AppBody() {
           onOpenWorkflowRunModalInMain={openWorkflowRunModalInMain}
         />
 
-        <main className="flex-1 h-full flex flex-col overflow-hidden relative">
+        <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
           <div 
-            className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col"
+            className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2 flex flex-col"
             onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
           >
             {viewMode === "workflow-builder" && (

@@ -30,9 +30,7 @@ The desktop app copies the bundled CLI on startup:
 - Windows bash command: `%USERPROFILE%\.wardian\bin\wardian`
 - Windows implementation binary: `%USERPROFILE%\.wardian\bin\wardian-cli.exe`
 
-Wardian also attempts to add that `bin` directory to the user PATH. Restart the terminal after first launch if `wardian` is not found.
-
-On Windows, Wardian installs both a `wardian.cmd` launcher for PowerShell/cmd and an extensionless POSIX shell launcher for Git Bash, MSYS2, or provider shell tools that execute `bash`. Wardian-managed agent processes also receive the active Wardian `bin` directory at the front of `PATH`, so shell tools inside Claude sessions can resolve `wardian` without depending on the user's global shell startup files.
+Wardian also attempts to add that `bin` directory to the user PATH. On Windows, Wardian installs both a `.cmd` launcher for PowerShell/cmd and an extensionless launcher for bash-family shells such as Git Bash, MSYS2, or provider shell tools that execute `bash`. Wardian-managed agent processes receive the active Wardian `bin` directory at the front of `PATH`, so shell tools inside managed sessions can resolve `wardian` without depending on the user's global shell startup files. Restart ordinary terminals after first launch if `wardian` is not found.
 
 Set `WARDIAN_HOME` to redirect state, the CLI install location, and the live app control endpoint for tests or isolated runs.
 

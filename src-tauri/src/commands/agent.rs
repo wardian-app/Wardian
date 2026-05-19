@@ -1316,6 +1316,28 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Result<(), String> {
+    if config.is_off {
+        return Ok(());
+    }
+
+    prepare_resume_config(config)
+}
+
+fn prepare_resume_config_for_runtime(
+    config: &mut AgentConfig,
+    query_count: usize,
+) -> Result<(), String> {
+    if config.provider == "gemini" && query_count == 0 && !config.is_off {
+        config.is_off = false;
+        config.resume_session = None;
+        config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
+        return Ok(());
+    }
+
+    prepare_resume_config(config)
+}
+
 fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
@@ -1935,7 +1957,7 @@ pub async fn resume_agent(
     };
 
     let mut config = snapshot.config;
-    prepare_resume_config(&mut config)?;
+    prepare_resume_config_for_runtime(&mut config, snapshot.query_count)?;
     let mut new_active = manager::spawn_agent(
         app.clone(),
         config.clone(),
@@ -2649,7 +2671,8 @@ mod tests {
         collect_agent_worktrees, disable_worktree_config, enable_worktree_config,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
-        persisted_resume_session_for_provider, prepare_clear_config, prepare_resume_config,
+        persisted_resume_session_for_provider, prepare_clear_config,
+        prepare_restored_config_for_spawn, prepare_resume_config, prepare_resume_config_for_runtime,
         promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
@@ -4813,6 +4836,45 @@ mod tests {
     }
 
     #[test]
+    fn restored_gemini_startup_config_uses_resume_spawn_args() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: false,
+            ..Default::default()
+        };
+
+        prepare_restored_config_for_spawn(&mut config).expect("prepare restored config");
+
+        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn restored_off_gemini_startup_config_stays_off() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "gemini-session".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_restored_config_for_spawn(&mut config).expect("prepare restored config");
+
+        assert!(config.is_off);
+        assert_eq!(config.resume_session, None);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
     fn gemini_fresh_resume_uses_new_provider_session_without_changing_wardian_id() {
         let _guard = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -4840,6 +4902,62 @@ mod tests {
             Some("wardian-agent-id")
         );
         assert!(config.fresh_provider_session_id.is_some());
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn gemini_empty_runtime_resume_starts_fresh_session() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "wardian-agent-id".to_string(),
+            resume_session: Some("gemini-provider-session".to_string()),
+            is_off: false,
+            ..Default::default()
+        };
+
+        prepare_resume_config_for_runtime(&mut config, 0).expect("prepare resume config");
+
+        assert_eq!(config.session_id, "wardian-agent-id");
+        assert_eq!(config.resume_session, None);
+        assert_ne!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("wardian-agent-id")
+        );
+        assert_ne!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("gemini-provider-session")
+        );
+        assert!(config.fresh_provider_session_id.is_some());
+        let args = GeminiProvider::new().get_spawn_args(&config, false);
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn off_gemini_runtime_resume_with_unknown_query_count_keeps_resume_session() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "gemini".to_string(),
+            session_id: "wardian-agent-id".to_string(),
+            resume_session: Some("gemini-provider-session".to_string()),
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config_for_runtime(&mut config, 0).expect("prepare resume config");
+
+        assert_eq!(
+            config.resume_session.as_deref(),
+            Some("gemini-provider-session")
+        );
+        assert_eq!(config.fresh_provider_session_id, None);
+        assert!(!config.is_off);
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-provider-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
         std::env::remove_var("WARDIAN_HOME");
     }
 

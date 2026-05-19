@@ -4,7 +4,8 @@ Use this index to find the guide that matches the task you are trying to finish.
 
 ## Start and Orient
 
-- [Getting Started](./getting-started.md): install prerequisites, spawn the first agent, and understand the first review loop.
+- [First-Time Install and First Run](./getting-started.md): install Wardian, verify a provider, spawn the first agent, and review the first Queue result.
+- [Provider Readiness](./provider-readiness.md): verify provider CLIs, authentication, shell `PATH`, and runtime prerequisites before spawning agents.
 - [UI Overview](./ui-overview.md): learn the top bar, sidebars, roster, and main workspace layout.
 
 ## Run and Monitor Agents

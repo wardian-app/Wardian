@@ -354,6 +354,18 @@ describe("Native window layout bridge", () => {
     });
   });
 
+  it("allows the main Grid pane to shrink beside the roster", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+
+    render(<App />);
+
+    await screen.findByTestId("agent-grid");
+    const main = document.querySelector("main");
+
+    expect(main).not.toBeNull();
+    expect(main).toHaveClass("min-w-0");
+  });
+
   it("uses outer dimensions when the Tauri global appears after mount", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     Object.defineProperty(window, "outerWidth", { configurable: true, value: 980 });
