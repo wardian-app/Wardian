@@ -21,6 +21,46 @@ use wardian_core::models::AgentConfig;
 const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const TELEMETRY_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn restored_agent_without_process(
+    config: AgentConfig,
+    status: &str,
+    output: String,
+    process_id: Option<u32>,
+    born: Option<String>,
+) -> crate::state::ActiveAgent {
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut watch_state =
+        crate::state::AgentWatchState::new(config.session_id.clone(), 4096, 262_144);
+    watch_state.push_event(
+        "status",
+        serde_json::json!({
+            "status": wardian_core::identity::normalize_status(status),
+            "observed_at": observed_at,
+        }),
+    );
+
+    crate::state::ActiveAgent {
+        config: std::sync::Arc::new(std::sync::Mutex::new(config)),
+        child_process: None,
+        background_processes: Vec::new(),
+        pty_master: None,
+        stdin_tx: None,
+        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(output)),
+        process_id,
+        query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(born)),
+        current_status: std::sync::Arc::new(std::sync::Mutex::new(status.to_string())),
+        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(Some(observed_at))),
+        watch_state: std::sync::Arc::new(std::sync::Mutex::new(watch_state)),
+        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        #[cfg(windows)]
+        job_object: None,
+    }
+}
+
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;
 
@@ -222,65 +262,61 @@ pub fn run() {
                                     .unwrap_or((None, None, None));
 
                                 if last_status.as_deref() == Some("Headless") {
-                                    let agent = crate::state::ActiveAgent {
-                                        config: std::sync::Arc::new(std::sync::Mutex::new(
-                                            config.clone(),
-                                        )),
-                                        child_process: None,
-                                        background_processes: Vec::new(),
-                                        pty_master: None,
-                                        stdin_tx: None,
-                                        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(
-                                            String::new(),
-                                        )),
-                                        process_id: last_pid,
-                                        query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
-                                        init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(
-                                            last_born,
-                                        )),
-                                        current_status: std::sync::Arc::new(std::sync::Mutex::new(
-                                            "Headless".to_string(),
-                                        )),
-                                        last_status_at: std::sync::Arc::new(std::sync::Mutex::new(
-                                            None,
-                                        )),
-                                        watch_state: std::sync::Arc::new(std::sync::Mutex::new(
-                                            crate::state::AgentWatchState::new(
-                                                config.session_id.clone(),
-                                                4096,
-                                                262_144,
-                                            ),
-                                        )),
-                                        terminal_title: std::sync::Arc::new(std::sync::Mutex::new(
-                                            String::new(),
-                                        )),
-                                        last_output_at: std::sync::Arc::new(std::sync::Mutex::new(
-                                            None,
-                                        )),
-                                        log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                                        log_last_modified: std::sync::Arc::new(
-                                            std::sync::Mutex::new(None),
-                                        ),
-                                        #[cfg(windows)]
-                                        job_object: None,
-                                    };
+                                    let agent = restored_agent_without_process(
+                                        config.clone(),
+                                        "Headless",
+                                        String::new(),
+                                        last_pid,
+                                        last_born,
+                                    );
                                     order_map.push(config.session_id.clone());
                                     agents_map.insert(config.session_id.clone(), agent);
-                                } else if let Ok(agent) = manager::spawn_agent(
-                                    app_handle.clone(),
-                                    config.clone(),
-                                    true,
-                                    last_born,
-                                )
-                                .await
-                                {
-                                    if let Some(ref tx) = agent.stdin_tx {
-                                        if let Ok(mut senders) = state.input_senders.write() {
-                                            senders.insert(config.session_id.clone(), tx.clone());
+                                } else {
+                                    let spawn_result = manager::spawn_agent(
+                                        app_handle.clone(),
+                                        config.clone(),
+                                        true,
+                                        last_born.clone(),
+                                    )
+                                    .await;
+                                    match spawn_result {
+                                        Ok(agent) => {
+                                            if let Some(ref tx) = agent.stdin_tx {
+                                                if let Ok(mut senders) = state.input_senders.write()
+                                                {
+                                                    senders.insert(
+                                                        config.session_id.clone(),
+                                                        tx.clone(),
+                                                    );
+                                                }
+                                            }
+                                            order_map.push(config.session_id.clone());
+                                            agents_map.insert(config.session_id.clone(), agent);
+                                        }
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Failed to restore agent {}: {}",
+                                                config.session_id, error
+                                            );
+                                            let _ = wardian_core::db::update_agent_status(
+                                                &config.session_id,
+                                                "Error",
+                                                None,
+                                            );
+                                            let agent = restored_agent_without_process(
+                                                config.clone(),
+                                                "Error",
+                                                format!(
+                                                    "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
+                                                    error
+                                                ),
+                                                None,
+                                                last_born,
+                                            );
+                                            order_map.push(config.session_id.clone());
+                                            agents_map.insert(config.session_id.clone(), agent);
                                         }
                                     }
-                                    order_map.push(config.session_id.clone());
-                                    agents_map.insert(config.session_id.clone(), agent);
                                 }
                             }
                             manager::save_state(&app_handle, &agents_map, &order_map);

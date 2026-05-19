@@ -1514,6 +1514,12 @@ pub async fn spawn_agent(
     let is_off = req.is_off;
     let config_override = req.config_override;
 
+    let provider_name = config_override
+        .as_ref()
+        .map(|c| c.provider.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    ensure_provider_available_before_session_bootstrap(&provider_name)?;
+
     let name_reservation =
         reserve_spawn_session_name(&state, &requested_session_name, &agent_class).await?;
     let session_name = name_reservation.session_name.clone();
@@ -1522,11 +1528,6 @@ pub async fn spawn_agent(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
     ));
-    let provider_name = config_override
-        .as_ref()
-        .map(|c| c.provider.clone())
-        .unwrap_or_else(|| "claude".to_string());
-    ensure_provider_available_before_session_bootstrap(&provider_name)?;
     let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
 
     let mut session_id = actual_resume.clone();
