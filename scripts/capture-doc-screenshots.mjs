@@ -10,6 +10,8 @@ const explicitBaseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL;
 const screenshotPort = Number.parseInt(process.env.WARDIAN_DOCS_SCREENSHOT_PORT ?? "1420", 10);
 const baseUrl = explicitBaseUrl ?? `http://127.0.0.1:${screenshotPort}`;
 const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
+const defaultSidebarContentWidth = 240;
+const wideSidebarContentWidth = 320;
 
 const agents = [
   {
@@ -36,7 +38,7 @@ const agents = [
     agent_class: "Designer",
     folder: "<absolute-workspace-path>",
     provider: "gemini",
-    is_off: false,
+    is_off: true,
     model: "pro",
   },
 ];
@@ -75,13 +77,19 @@ const telemetry = [
     uptime_seconds: 620,
     query_count: 2,
     init_timestamp: "2026-05-12T10:12:00.000Z",
-    current_status: "Action Needed",
+    current_status: "Off",
     log_path: null,
   },
 ];
 
 const terminalOutput = {
-  "docs-codex": "\x1b]0;Working\x07Wardian docs capture\n$ npm run lint\nAnalyzing screenshot documentation structure...\n",
+  "docs-codex":
+    "\x1b]0;Working\x07$ Summarize this workspace in five bullets. Do not edit files.\n" +
+    "- docs/ contains the public guide and developer documentation.\n" +
+    "- src/ contains the React command-center UI.\n" +
+    "- src-tauri/ contains the native runtime and provider orchestration.\n" +
+    "- scripts/ contains automation for repeatable docs screenshots.\n" +
+    "- Queue will keep this completed summary available for triage.\n",
   "docs-reviewer": "\x1b]0;Ready\x07Review complete. No blocking findings.\n",
   "docs-designer": "\x1b]0;Action Required\x07Approval needed before replacing the current hero capture.\n",
 };
@@ -204,6 +212,19 @@ const workflows = [
   },
 ];
 
+const queueItems = [
+  {
+    id: "docs-first-run-result",
+    type: "agent_completed",
+    timestamp: 1778590740000,
+    read: false,
+    agent_session_id: "docs-codex",
+    agent_name: "Docs-Codex",
+    summary:
+      "Completed the first read-only workspace pass. The agent identified the guide, docs, and source folders and suggested reviewing Queue before assigning follow-up edits.",
+  },
+];
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function isUrlReady(url = baseUrl) {
@@ -284,15 +305,71 @@ async function capture(page, relativePath, locator) {
   if (locator) {
     await locator.screenshot({ path: filePath, animations: "disabled" });
   } else {
+    await assertShellHasNoHorizontalOverlap(page, relativePath);
     await page.screenshot({ path: filePath, animations: "disabled" });
   }
   console.log(`captured ${path.relative(root, filePath)}`);
 }
 
+async function setSidebarContentWidth(page, width) {
+  await page.evaluate((nextWidth) => {
+    document.documentElement.style.setProperty("--sidebar-content-width", `${nextWidth}px`);
+  }, width);
+}
+
+async function assertShellHasNoHorizontalOverlap(page, relativePath) {
+  const rects = await page.evaluate(() => {
+    const rectFor = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+      };
+    };
+
+    return {
+      main: rectFor("main"),
+      roster: rectFor('[data-testid="agent-watchlist"]'),
+      grid: rectFor('[data-testid="agent-grid"]'),
+      sidebarWidth: getComputedStyle(document.documentElement).getPropertyValue("--sidebar-content-width").trim(),
+    };
+  });
+
+  if (!rects.main || !rects.roster) return;
+
+  if (rects.main.right > rects.roster.left + 1) {
+    throw new Error(
+      [
+        `Refusing to capture ${relativePath}: main pane overlaps the right roster.`,
+        `main.right=${rects.main.right}`,
+        `roster.left=${rects.roster.left}`,
+        `sidebar-content-width=${rects.sidebarWidth}`,
+      ].join(" "),
+    );
+  }
+
+  if (rects.grid && rects.grid.right > rects.roster.left + 1) {
+    throw new Error(
+      [
+        `Refusing to capture ${relativePath}: Grid extends under the right roster.`,
+        `grid.right=${rects.grid.right}`,
+        `roster.left=${rects.roster.left}`,
+        `grid.width=${rects.grid.width}`,
+        `sidebar-content-width=${rects.sidebarWidth}`,
+      ].join(" "),
+    );
+  }
+}
+
 async function installTauriDocsMock(page) {
-  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory }) => {
+  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory }) => {
     const fixedNow = 1778590800000;
     const RealDate = Date;
+
+    window.localStorage.removeItem("wardian-layout");
 
     class FixedDate extends RealDate {
       constructor(...args) {
@@ -378,7 +455,7 @@ async function installTauriDocsMock(page) {
             "docs-reviewer": "2026-05-12T10:16:00.000Z",
           };
         }
-        if (command === "load_queue_items") return [];
+        if (command === "load_queue_items") return queueItems;
         if (command === "get_explorer_root") return repoRoot;
         if (command === "get_directory_tree") return directoryTree[args.path] || [];
         if (command === "read_file_preview") {
@@ -472,7 +549,7 @@ async function installTauriDocsMock(page) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, repoRoot, directoryTree, gitStatus, gitHistory });
+  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory });
 }
 
 async function main() {
@@ -487,7 +564,7 @@ async function main() {
   }
 
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: 1680, height: 960 }, deviceScaleFactor: 1 });
   const browserErrors = [];
   page.on("pageerror", (error) => {
     browserErrors.push(`page error: ${error.stack || error.message}`);
@@ -507,18 +584,12 @@ async function main() {
 
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
     await capture(page, "grid/app-shell.png");
+    await capture(page, "grid/active-agent-state.png", page.locator("main"));
 
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
 
-    await page.getByRole("button", { name: "Dashboard" }).click();
-    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "dashboard/system-summary.png");
-
-    await page.evaluate(() => {
-      document.documentElement.style.setProperty("--sidebar-content-width", "360px");
-    });
+    await setSidebarContentWidth(page, wideSidebarContentWidth);
 
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.waitForTimeout(500);
@@ -530,26 +601,19 @@ async function main() {
 
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
-    await page.locator('[data-testid="broadcast-textarea"]').fill("Summarize the current branch and list verification evidence.");
+    await page.locator('[data-testid="broadcast-textarea"]').fill("Summarize this workspace in five bullets. Do not edit files.");
     await page.locator('[data-testid="broadcast-textarea"]').waitFor({ timeout: 10_000 });
     await page.locator('[data-testid="broadcast-textarea"]').blur();
     await capture(page, "command-panel/broadcast-prompt.png");
 
-    await page.getByRole("button", { name: "Library" }).click();
-    await page.getByRole("heading", { name: "Review Checklist" }).waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "library/library-view.png");
-
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
     await page.getByRole("heading", { name: "Agent Runtime" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(500);
-    await capture(page, "settings/runtime-settings.png");
+    await page.locator('[data-testid="shell-select"]').scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
+    await capture(page, "settings/runtime-settings.png", page.locator('[data-testid="settings-panel"]'));
 
-    await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
-    await page.locator('[data-testid="sidebar-tab-workflows"]').click();
-    await page.getByRole("heading", { name: "Docs Screenshot Refresh" }).waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "workflows/builder-canvas.png");
+    await setSidebarContentWidth(page, defaultSidebarContentWidth);
 
     await page.getByRole("button", { name: "Grid" }).click();
     await page.locator("#agent-card-docs-codex").click();
@@ -566,6 +630,27 @@ async function main() {
     await page.getByText("docs/core-feature-screenshots").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
+
+    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await page.getByTestId("queue-item-summary-docs-first-run-result").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "queue/completed-result.png", page.locator("main"));
+
+    await page.getByRole("button", { name: "Library" }).click();
+    await page.getByRole("heading", { name: "Review Checklist" }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "library/library-view.png");
+
+    await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
+    await page.locator('[data-testid="sidebar-tab-workflows"]').click();
+    await page.getByRole("heading", { name: "Docs Screenshot Refresh" }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "workflows/builder-canvas.png");
+
+    await page.getByRole("button", { name: "Dashboard" }).click();
+    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(700);
+    await capture(page, "dashboard/system-summary.png");
 
     if (browserErrors.length > 0) {
       throw new Error(`Browser errors were logged during screenshot capture:\n${browserErrors.join("\n")}`);

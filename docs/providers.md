@@ -85,5 +85,6 @@ If OpenCode misses instructions or skills, inspect the generated `OPENCODE_CONFI
 ## Related References
 
 - [Developer Provider Runtime Notes](./developer/provider-runtimes.md)
+- [Provider Readiness](./guide/provider-readiness.md)
 - [Settings](./guide/settings.md)
 - [Agent Roles and Responsibilities](./agents/roles.md)

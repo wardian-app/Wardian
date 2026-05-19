@@ -169,7 +169,7 @@ Update user-facing workflow docs to explain:
 
 Update developer docs to preserve the key invariant: provider-native resume state is runtime state, not Wardian memory.
 
-Memory read/write behavior is intentionally out of scope for this spec except for one boundary: `inherit_fresh` may read source-agent scoped memory, but it should write workflow artifacts only. Promotion into source-agent memory belongs to [2026-04-17 Evidence First Memory](./2026-04-17-evidence-first-memory.md).
+Memory read/write behavior is intentionally out of scope for this spec except for one boundary: `inherit_fresh` may read source-agent scoped memory, but it should write workflow artifacts only. Promotion into source-agent memory belongs to [Evidence-First Memory](./2026-04-17-evidence-first-memory.md).
 
 ## Consequences
 

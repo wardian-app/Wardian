@@ -4,7 +4,8 @@ Use this index to find user-facing documentation by task.
 
 ## First-Time Setup
 
-- [Getting Started](./getting-started.md)
+- [First-Time Install and First Run](./getting-started.md)
+- [Provider Readiness](./provider-readiness.md)
 - [UI Overview](./ui-overview.md)
 
 ## Agent Operations
