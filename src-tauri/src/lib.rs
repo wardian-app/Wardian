@@ -293,6 +293,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::agent::spawn_agent,
+            commands::agent::list_provider_readiness,
             commands::agent::clone_agent,
             commands::agent::get_agent_clone_preview,
             commands::agent::list_agents,

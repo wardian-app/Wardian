@@ -96,7 +96,7 @@ pub fn readiness_from_launch_parts(
             provider_id,
             display_name,
             &format!(
-                "The {executable} command was not found in the Wardian app environment. See docs/guide/provider-readiness.md."
+                "{display_name} is not available because the {executable} command was not found in the Wardian app environment. See docs/guide/provider-readiness.md."
             ),
         );
     };

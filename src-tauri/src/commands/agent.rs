@@ -755,6 +755,10 @@ fn provider_uses_generated_session_id(provider_name: &str) -> bool {
     )
 }
 
+fn ensure_provider_available_before_session_bootstrap(provider_name: &str) -> Result<(), String> {
+    crate::providers::readiness::ensure_provider_available_for_launch(provider_name)
+}
+
 fn provider_needs_obtain_session_id_on_clear(_provider_name: &str) -> bool {
     false
 }
@@ -1492,6 +1496,12 @@ async fn register_new_agent(
 }
 
 #[tauri::command]
+pub fn list_provider_readiness(
+) -> Result<Vec<crate::providers::readiness::ProviderReadiness>, String> {
+    Ok(crate::providers::readiness::list_provider_readiness())
+}
+
+#[tauri::command]
 pub async fn spawn_agent(
     req: SpawnAgentRequest,
     state: State<'_, AppState>,
@@ -1516,6 +1526,7 @@ pub async fn spawn_agent(
         .as_ref()
         .map(|c| c.provider.clone())
         .unwrap_or_else(|| "claude".to_string());
+    ensure_provider_available_before_session_bootstrap(&provider_name)?;
     let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
 
     let mut session_id = actual_resume.clone();
@@ -1637,6 +1648,7 @@ pub async fn clone_agent(
         req.start.unwrap_or(true),
     );
     let provider_name = config.provider.clone();
+    ensure_provider_available_before_session_bootstrap(&provider_name)?;
     let mut actual_resume = None;
     let profile_home = if should_copy_profile {
         Some(
@@ -2669,16 +2681,17 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, disable_worktree_config, enable_worktree_config,
-        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
-        mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
+        ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
+        generated_agent_name, insert_new_agent_order, mark_agent_paused_off,
+        normalize_clone_folder_override, normalize_spawn_folder,
         persisted_resume_session_for_provider, prepare_clear_config,
-        prepare_restored_config_for_spawn, prepare_resume_config, prepare_resume_config_for_runtime,
-        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, reserve_spawn_session_name,
-        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, terminal_cleared_payload, AgentOrderPlacement,
-        CloneProfileCopyPlan, CloneProfileSelection,
+        prepare_restored_config_for_spawn, prepare_resume_config,
+        prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
+        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
+        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
+        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
+        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
+        terminal_cleared_payload, AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -2741,6 +2754,46 @@ mod tests {
 
     fn clone_name_set(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn spawn_bootstrap_readiness_error_precedes_provider_session_initialization() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("PATH", temp.path()) };
+
+        let err = ensure_provider_available_before_session_bootstrap("codex")
+            .expect_err("missing Codex should fail before bootstrap");
+
+        assert!(err.contains("Codex"));
+        assert!(err.contains("codex"));
+        assert!(err.contains("docs/guide/provider-readiness.md"));
+
+        match previous_path {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+    }
+
+    #[test]
+    fn clone_bootstrap_readiness_error_precedes_provider_session_initialization() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("PATH", temp.path()) };
+
+        let err = ensure_provider_available_before_session_bootstrap("codex")
+            .expect_err("missing Codex should fail before clone bootstrap");
+
+        assert!(err.contains("Codex"));
+        assert!(err.contains("codex"));
+        assert!(err.contains("docs/guide/provider-readiness.md"));
+
+        match previous_path {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     fn test_pwsh_shell() -> (ShellSettings, Vec<ShellOption>) {
