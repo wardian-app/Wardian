@@ -4,6 +4,7 @@ import releaseWorkflow from "../../.github/workflows/release.yml?raw";
 import releasePleaseWorkflow from "../../.github/workflows/release-please.yml?raw";
 import stageCliScript from "../../scripts/stage-cli.mjs?raw";
 import tauriConfig from "../../src-tauri/tauri.conf.json?raw";
+import tauriUpdaterConfig from "../../src-tauri/tauri.updater.conf.json?raw";
 
 describe("release workflow contract", () => {
   it("keeps Release Please releases draft until assets are uploaded", () => {
@@ -73,6 +74,12 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("updaterJsonPreferNsis: true");
     expect(releaseWorkflow).toContain("Build (dry run)");
     expect(releaseWorkflow).toContain("ref: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && inputs.release_tag || github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}");
+  });
+
+  it("keeps local Tauri bundles free of updater signing while release builds opt in", () => {
+    expect(JSON.parse(tauriConfig).bundle.createUpdaterArtifacts).toBe(false);
+    expect(JSON.parse(tauriUpdaterConfig).bundle.createUpdaterArtifacts).toBe(true);
+    expect(releaseWorkflow.match(/--config src-tauri\/tauri\.updater\.conf\.json/g)).toHaveLength(3);
   });
 
   it("validates updater metadata before publishing releases", () => {

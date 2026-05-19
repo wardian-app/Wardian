@@ -8,7 +8,7 @@ The first updater-capable release is a bridge release. Users on older builds mus
 
 ## Signing Keys
 
-Tauri update signatures are required. The public key is committed in `src-tauri/tauri.conf.json`; the private key is release infrastructure and must never be committed.
+Tauri update signatures are required for release updater artifacts. The public key is committed in `src-tauri/tauri.conf.json`; the private key is release infrastructure and must never be committed.
 
 Generate the key pair outside the repository:
 
@@ -47,6 +47,8 @@ Official stable release builds opt into updater checks with the compile-time mar
 
 The release workflow builds platform installers, signs update artifacts, uploads `latest.json`, validates updater metadata, and only then publishes the release.
 
+Local `npm run tauri build` creates an installable bundle without updater artifacts, so it does not require `TAURI_SIGNING_PRIVATE_KEY`. Release builds opt into updater artifact generation by passing `--config src-tauri/tauri.updater.conf.json` to Tauri. That overlay sets `bundle.createUpdaterArtifacts` to `true` only inside release infrastructure.
+
 Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=stable` before invoking `tauri-apps/tauri-action`. Prerelease builds intentionally omit the marker and do not upload stable updater metadata. Do not set that marker for ordinary local builds unless you are deliberately producing an official stable release artifact.
 
 `latest.json` must contain all stable platform keys:
@@ -60,7 +62,7 @@ Each platform entry must include a URL and signature. The metadata version must 
 
 Manual backfill runs must target an explicit `release_tag`. Backfill is draft-only unless the workflow is deliberately changed to support published-release mutation. If the target release is already published, the workflow should fail instead of rewriting updater metadata.
 
-Dry-run builds still require signing secrets because updater artifacts are enabled in `tauri.conf.json`. Dry runs can prove signed installer generation, but they do not publish `latest.json`; validate release-scoped metadata against a real draft or backfill release before claiming updater release readiness.
+Release dry-run builds still require signing secrets because they use the updater config overlay. Dry runs can prove signed installer generation, but they do not publish `latest.json`; validate release-scoped metadata against a real draft or backfill release before claiming updater release readiness.
 
 ## Verification
 

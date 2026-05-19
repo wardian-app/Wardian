@@ -42,7 +42,7 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
       globalWeight = Math.max(0, Math.min(1, globalWeight));
 
       lastGlobalWeightRef.current = globalWeight;
-      setGuidePos(rect.left + (globalWeight * container.clientWidth));
+      setGuidePos(globalWeight * container.clientWidth);
 
       const totalWeight = layout.column_tracks.reduce((a, b) => a + b, 0);
       const normalizedTracks = layout.column_tracks.map(t => t / totalWeight);
@@ -71,7 +71,7 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
       globalWeight = Math.max(0.05, Math.min(0.95, globalWeight));
 
       lastGlobalWeightRef.current = globalWeight;
-      setGuidePos(rect.left + (globalWeight * container.clientWidth));
+      setGuidePos(globalWeight * container.clientWidth);
       // Live preview: render a 2-column split so the stacked cell shrinks with the drag.
       setColumnTracks([globalWeight, 1 - globalWeight]);
     } else {
@@ -87,9 +87,9 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
         }
       }
 
-      setGuidePos(rect.top + finalY);
+      setGuidePos(finalY);
 
-      const rowIdx = Math.floor(resizing.index / layout.column_tracks.length);
+      const rowIdx = resizing.index;
       const calculatedHeight = finalY / (rowIdx + 1);
 
       setRowHeight(Math.max(300, calculatedHeight));

@@ -3,7 +3,6 @@ import { useWorkflowStore } from '../../store/useWorkflowStore';
 import { WorkflowLibrary } from './WorkflowLibrary';
 import { ActiveMonitoring } from './ActiveMonitoring';
 import { getManualTriggerSchema } from './RunPayloadModal';
-import { DocsLink } from '../../components/DocsLink';
 import type { WorkflowDefinition } from '../../types/workflow';
 import { useConfirm } from '../../components/ConfirmDialog';
 import {
@@ -176,7 +175,6 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
           <h2 className="text-xl font-bold text-primary tracking-tight truncate">
             Workflows
           </h2>
-          <DocsLink path="/guide/workflows">Workflow guide</DocsLink>
         </div>
 
         <div className="relative">

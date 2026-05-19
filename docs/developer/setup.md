@@ -109,11 +109,21 @@ Stage the release CLI into the Tauri resource directory used by bundling:
 npm run stage-cli
 ```
 
-Build a production desktop bundle for the current platform:
+Build a local production desktop bundle for the current platform:
 
 ```bash
 npm run tauri build
 ```
+
+This creates an installable local bundle that uses your normal Wardian state directory (`~/.wardian` by default). Local bundles do not create updater artifacts and do not require `TAURI_SIGNING_PRIVATE_KEY`.
+
+PowerShell:
+
+```powershell
+npm run tauri build
+```
+
+Official release builds opt into signed updater artifacts with the release-only Tauri config overlay. Do not use the release overlay for ordinary local builds.
 
 ## Environment Variables
 
