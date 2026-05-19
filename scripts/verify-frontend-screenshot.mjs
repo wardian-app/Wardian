@@ -12,6 +12,10 @@ const FRONTEND_PATTERNS = [
   /^vitest\.config\.ts$/,
 ];
 
+const NON_VISUAL_FRONTEND_PATTERNS = [
+  /^src\/.+\.test\.(ts|tsx)$/,
+];
+
 function git(args) {
   return execFileSync("git", args, { encoding: "utf8" }).trim();
 }
@@ -30,6 +34,10 @@ function changedFiles(base, head) {
 }
 
 function isFrontendFile(file) {
+  if (NON_VISUAL_FRONTEND_PATTERNS.some((pattern) => pattern.test(file))) {
+    return false;
+  }
+
   return FRONTEND_PATTERNS.some((pattern) => pattern.test(file));
 }
 
