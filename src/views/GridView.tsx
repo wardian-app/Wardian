@@ -136,7 +136,7 @@ export const GridView: React.FC<GridViewProps> = ({
     ? Math.ceil(visibleAgents.length / renderedColumnCount)
     : 0;
   const gridMinWidth = visibleAgents.length > 0
-    ? `${(visibleColumnTracks.length * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, visibleColumnTracks.length - 1) * 8)}px`
+    ? `${(renderedColumnCount * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, renderedColumnCount - 1) * 8)}px`
     : undefined;
 
   const gridStyle: React.CSSProperties = {

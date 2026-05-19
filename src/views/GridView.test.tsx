@@ -211,6 +211,13 @@ describe('GridView stacked mode', () => {
     expect(grid.style.gridTemplateColumns).toBe('1fr');
   });
 
+  it('uses a single-column minimum width when gridStacked is true', () => {
+    act(() => useLayoutStore.getState().setGridStacked(true));
+    const { container } = renderGrid(null, agents);
+    const grid = container.firstElementChild as HTMLElement;
+    expect(grid.style.minWidth).toBe('520px');
+  });
+
   it('renders per-cell stack-exit handles when gridStacked is true', () => {
     act(() => useLayoutStore.getState().setGridStacked(true));
     const { container } = renderGrid(null, agents);

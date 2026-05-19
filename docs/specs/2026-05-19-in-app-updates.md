@@ -32,7 +32,7 @@ Wardian configures:
 - `tauri-plugin-process` in the Rust app for controlled relaunch.
 - `@tauri-apps/plugin-updater` in the frontend.
 - `@tauri-apps/plugin-process` for relaunch.
-- `bundle.createUpdaterArtifacts: true` in `src-tauri/tauri.conf.json`.
+- `bundle.createUpdaterArtifacts: true` in the release-only Tauri config overlay (`src-tauri/tauri.updater.conf.json`).
 - A stable endpoint at `https://github.com/tangemicioglu/Wardian/releases/latest/download/latest.json`.
 - Tauri updater permissions in `src-tauri/capabilities/default.json`.
 - Tauri process restart permission in `src-tauri/capabilities/default.json`.
