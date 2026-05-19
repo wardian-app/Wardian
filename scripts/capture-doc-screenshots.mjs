@@ -38,7 +38,7 @@ const agents = [
     agent_class: "Designer",
     folder: "<absolute-workspace-path>",
     provider: "gemini",
-    is_off: false,
+    is_off: true,
     model: "pro",
   },
 ];
@@ -77,7 +77,7 @@ const telemetry = [
     uptime_seconds: 620,
     query_count: 2,
     init_timestamp: "2026-05-12T10:12:00.000Z",
-    current_status: "Action Needed",
+    current_status: "Off",
     log_path: null,
   },
 ];
@@ -564,7 +564,7 @@ async function main() {
   }
 
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: 1680, height: 960 }, deviceScaleFactor: 1 });
   const browserErrors = [];
   page.on("pageerror", (error) => {
     browserErrors.push(`page error: ${error.stack || error.message}`);
@@ -583,13 +583,6 @@ async function main() {
     await page.waitForTimeout(1_500);
 
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
-    await page.locator("#agent-card-docs-codex").hover();
-    await page.locator("#agent-card-docs-codex button").first().click({ force: true });
-    await page
-      .getByTestId("agent-card-header-docs-codex")
-      .getByRole("button", { name: "Minimize" })
-      .waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
     await capture(page, "grid/app-shell.png");
     await capture(page, "grid/active-agent-state.png", page.locator("main"));
 
