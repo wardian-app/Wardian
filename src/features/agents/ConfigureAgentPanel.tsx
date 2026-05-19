@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "../../types";
+import { AgentConfig, AgentClassDefinition, AgentTelemetry, ProviderReadiness, UserFacingProviderName } from "../../types";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { normalizeAgentConfig, requiresRestart, toPersistedAgentConfig } from "./configUtils";
+import { normalizeAgentConfig, requiresRestart, toPersistedAgentConfig, withProvider } from "./configUtils";
 import { AdvancedSettings } from '../../components/AdvancedSettings';
 import { ManageSkills } from '../library/ManageSkills';
+import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName } from "./providerOptions";
 
 interface Props {
   agentId: string;
@@ -27,6 +28,8 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
   const [copiedLog, setCopiedLog] = useState(false);
+  const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
+  const [providerNote, setProviderNote] = useState<string | null>(null);
 
   // Sync state when agentId or agents change
   useEffect(() => {
@@ -37,15 +40,44 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
     }
   }, [agentId, agents]);
 
+  useEffect(() => {
+    let cancelled = false;
+    invoke<ProviderReadiness[]>("list_provider_readiness")
+      .then((readiness) => {
+        if (!cancelled) setProviderReadiness(readiness);
+      })
+      .catch((error) => {
+        console.error("Failed to load provider readiness:", error);
+        if (!cancelled) setProviderNote("Unable to check provider readiness.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const providerOptions = useMemo(
+    () => (providerReadiness ? buildProviderOptions(providerReadiness) : buildUngatedProviderOptions()),
+    [providerReadiness],
+  );
+
   if (!config) return null;
 
   const updateField = (field: keyof AgentConfig, value: any) => {
     setConfig(prev => prev ? { ...prev, [field]: value } : null);
   };
 
+  const currentProvider = isUserFacingProviderName(config.provider) ? config.provider : "";
+  const selectedProviderAvailable = currentProvider
+    ? providerReadiness
+      ? providerOptions.some((option) => option.value === currentProvider && option.available)
+      : true
+    : true;
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!config) return;
+    if (!selectedProviderAvailable) return;
 
     const originalAgent = agents.find(a => a.session_id === agentId);
     const persistedConfig = toPersistedAgentConfig(config);
@@ -133,16 +165,28 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           <div>
             <label className="block text-[10px] font-bold text-muted-neutral mb-1">Provider Engine</label>
             <select
-              disabled
-              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] opacity-60 cursor-not-allowed transition-colors"
-              value={config.provider || "claude"}
-              onChange={(e) => updateField("provider", e.target.value)}
+              aria-label="Provider Engine"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              value={currentProvider}
+              onChange={(e) => {
+                const provider = e.target.value as UserFacingProviderName;
+                setConfig(prev => prev ? { ...prev, ...withProvider(prev, provider, { preserveCustomArgs: true }) } : null);
+              }}
             >
-              <option value="codex">Codex</option>
-              <option value="gemini">Gemini</option>
-              <option value="claude">Claude</option>
-              <option value="opencode">OpenCode</option>
+              {providerOptions.map((option) => (
+                <option key={option.value} value={option.value} disabled={!option.available}>
+                  {option.label}
+                </option>
+              ))}
             </select>
+            {!selectedProviderAvailable && (
+              <p className="mt-1 text-[10px] text-wardian-warning">
+                Choose an installed provider before saving this agent.
+              </p>
+            )}
+            {providerNote && (
+              <p className="mt-1 text-[10px] text-wardian-warning">{providerNote}</p>
+            )}
           </div>
           <div>
             <div className="flex justify-between items-center mb-1">
@@ -209,7 +253,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
 
         <button
           type="submit"
-          disabled={isSaving}
+          disabled={isSaving || !selectedProviderAvailable}
           className="w-full mt-2 bg-[var(--color-wardian-accent)] hover:opacity-90 disabled:opacity-50 text-[var(--color-wardian-bg)] py-2.5 rounded-lg font-bold text-xs tracking-wide transition-all shadow-lg shadow-[var(--color-wardian-accent)]/20"
         >
           {isSaving ? "Saving..." : "Save Changes"}

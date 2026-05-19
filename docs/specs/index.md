@@ -52,3 +52,4 @@ Wardian specs capture design decisions, implementation boundaries, rollout notes
 - [2026-05-18 Agent Watch Readable Output](./2026-05-18-agent-watch-readable-output.md)
 - [2026-05-18 Dense Three-Column UI](./2026-05-18-dense-three-column-ui.md)
 - [2026-05-18 Windows Claude Dual-Shell CLI Access](./2026-05-18-windows-claude-dual-shell-cli.md)
+- [2026-05-19 Provider Readiness Gating](./2026-05-19-provider-readiness-gating.md)

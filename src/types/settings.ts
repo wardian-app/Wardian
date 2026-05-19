@@ -7,6 +7,7 @@ export interface ShellOption {
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
+export type DefaultProviderSetting = 'auto' | 'claude' | 'codex' | 'gemini' | 'opencode';
 
 export interface CodexRuntimePolicy {
   sandbox_mode: CodexSandboxMode;
@@ -20,4 +21,5 @@ export interface ShellSettings {
   custom_args: string | null;
   agent_session_persistence: 'fresh' | 'resume';
   codex_runtime_policy?: CodexRuntimePolicy;
+  default_provider?: DefaultProviderSetting;
 }
