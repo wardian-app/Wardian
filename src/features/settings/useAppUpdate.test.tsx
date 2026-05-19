@@ -6,6 +6,7 @@ import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppUpdate } from './useAppUpdate';
+import packageJson from '../../../package.json';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 
 vi.mock('@tauri-apps/api/app', () => ({
@@ -28,6 +29,8 @@ const mockGetVersion = vi.mocked(getVersion);
 const mockInvoke = vi.mocked(invoke);
 const mockCheck = vi.mocked(check);
 const mockRelaunch = vi.mocked(relaunch);
+const mockedRuntimeVersion = '0.3.5';
+const packageVersion = packageJson.version;
 const setTauriRuntime = (available: boolean) => {
   if (available) {
     Object.defineProperty(window, '__TAURI_INTERNALS__', {
@@ -85,7 +88,7 @@ describe('useAppUpdate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setTauriRuntime(true);
-    mockGetVersion.mockResolvedValue('0.3.5');
+    mockGetVersion.mockResolvedValue(mockedRuntimeVersion);
     mockInvoke.mockResolvedValue({
       enabled: true,
       channel: 'stable',
@@ -98,7 +101,7 @@ describe('useAppUpdate', () => {
   it('loads the current app version and silently checks for updates', async () => {
     render(<Probe />);
 
-    expect(await screen.findByTestId('version')).toHaveTextContent('0.3.5');
+    expect(await screen.findByTestId('version')).toHaveTextContent(mockedRuntimeVersion);
     await waitFor(() => expect(mockCheck).toHaveBeenCalledTimes(1));
     expect(screen.getByTestId('status')).toHaveTextContent('up-to-date');
     expect(screen.getByTestId('updates-enabled')).toHaveTextContent('true');
@@ -187,7 +190,7 @@ describe('useAppUpdate', () => {
 
     render(<Probe />);
 
-    expect(await screen.findByTestId('version')).toHaveTextContent('0.3.5');
+    expect(await screen.findByTestId('version')).toHaveTextContent(packageVersion);
     expect(screen.getByTestId('status')).toHaveTextContent('disabled');
     expect(screen.getByTestId('eligibility-reason')).toHaveTextContent(
       'Updates are unavailable outside the Wardian desktop runtime.',
@@ -206,7 +209,7 @@ describe('useAppUpdate', () => {
 
     render(<Probe />);
 
-    expect(await screen.findByTestId('version')).toHaveTextContent('0.3.5');
+    expect(await screen.findByTestId('version')).toHaveTextContent(mockedRuntimeVersion);
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('get_update_eligibility');
     });

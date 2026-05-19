@@ -37,7 +37,7 @@ const updateStatusLabel = (
   status: ReturnType<typeof useAppUpdate>['status'],
   availableVersion: string | undefined,
   progressPercent: number | null,
-  errorMessage: string,
+  detailMessage: string,
 ) => {
   switch (status) {
     case 'checking':
@@ -51,9 +51,9 @@ const updateStatusLabel = (
     case 'installed':
       return 'Update installed. Restart to finish.';
     case 'disabled':
-      return errorMessage || 'Updates are unavailable for this build.';
+      return detailMessage || 'Updates are unavailable for this build.';
     case 'error':
-      return errorMessage || 'Update check failed.';
+      return detailMessage || 'Update check failed.';
     case 'idle':
     default:
       return 'Update status idle.';

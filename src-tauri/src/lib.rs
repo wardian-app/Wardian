@@ -131,13 +131,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init());
 
-    let builder = if commands::settings::update_plugins_enabled_for_current_build() {
-        builder
-            .plugin(tauri_plugin_process::init())
-            .plugin(tauri_plugin_updater::Builder::new().build())
-    } else {
-        builder
-    };
+    let builder = register_update_plugins(builder);
 
     builder
         .manage(AppState::new())
@@ -410,4 +404,24 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn register_update_plugins<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    if commands::settings::update_plugins_enabled_for_current_build() {
+        builder
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+fn register_update_plugins<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    builder
 }
