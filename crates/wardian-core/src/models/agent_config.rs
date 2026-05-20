@@ -12,6 +12,7 @@ fn provider_key(provider: &str) -> &str {
         "claude" => "claude",
         "gemini" => "gemini",
         "codex" => "codex",
+        "antigravity" => "antigravity",
         "opencode" => "opencode",
         "mock" => "mock",
         _ => "",
@@ -20,7 +21,9 @@ fn provider_key(provider: &str) -> &str {
 
 fn provider_type_name(provider: &str) -> String {
     match provider_key(provider) {
-        "claude" | "gemini" | "codex" | "opencode" | "mock" => provider_key(provider).to_string(),
+        "claude" | "gemini" | "codex" | "antigravity" | "opencode" | "mock" => {
+            provider_key(provider).to_string()
+        }
         _ => {
             let provider = provider.trim().to_ascii_lowercase();
             if provider.is_empty() {
@@ -35,7 +38,7 @@ fn provider_type_name(provider: &str) -> String {
 fn is_known_provider_type(provider: &str) -> bool {
     matches!(
         provider,
-        "claude" | "gemini" | "codex" | "opencode" | "mock"
+        "claude" | "gemini" | "codex" | "antigravity" | "opencode" | "mock"
     )
 }
 
@@ -51,6 +54,7 @@ pub enum ProviderConfig {
     Claude(ClaudeProviderConfig),
     Gemini(GeminiProviderConfig),
     Codex(CodexProviderConfig),
+    Antigravity(AntigravityProviderConfig),
     OpenCode(OpenCodeProviderConfig),
     Mock(MockProviderConfig),
     Unknown(serde_json::Value),
@@ -125,6 +129,17 @@ pub struct CodexProviderConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
+pub struct AntigravityProviderConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dangerously_skip_permissions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub print_timeout: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct OpenCodeProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
@@ -142,6 +157,7 @@ impl ProviderConfig {
             Self::Claude(_) => "claude",
             Self::Gemini(_) => "gemini",
             Self::Codex(_) => "codex",
+            Self::Antigravity(_) => "antigravity",
             Self::OpenCode(_) => "opencode",
             Self::Mock(_) => "mock",
             Self::Unknown(value) => value
@@ -155,6 +171,7 @@ impl ProviderConfig {
         match provider_key(provider) {
             "gemini" => Self::Gemini(GeminiProviderConfig::default()),
             "codex" => Self::Codex(CodexProviderConfig::default()),
+            "antigravity" => Self::Antigravity(AntigravityProviderConfig::default()),
             "opencode" => Self::OpenCode(OpenCodeProviderConfig::default()),
             "mock" => Self::Mock(MockProviderConfig::default()),
             "claude" => Self::Claude(ClaudeProviderConfig::default()),
@@ -198,6 +215,8 @@ impl ProviderConfig {
             "claude" => serde_json::from_value::<ClaudeProviderConfig>(value).map(Self::Claude),
             "gemini" => serde_json::from_value::<GeminiProviderConfig>(value).map(Self::Gemini),
             "codex" => serde_json::from_value::<CodexProviderConfig>(value).map(Self::Codex),
+            "antigravity" => serde_json::from_value::<AntigravityProviderConfig>(value)
+                .map(Self::Antigravity),
             "opencode" => {
                 serde_json::from_value::<OpenCodeProviderConfig>(value).map(Self::OpenCode)
             }
@@ -216,6 +235,7 @@ impl Serialize for ProviderConfig {
             Self::Claude(config) => Self::to_value_with_type("claude", config),
             Self::Gemini(config) => Self::to_value_with_type("gemini", config),
             Self::Codex(config) => Self::to_value_with_type("codex", config),
+            Self::Antigravity(config) => Self::to_value_with_type("antigravity", config),
             Self::OpenCode(config) => Self::to_value_with_type("opencode", config),
             Self::Mock(config) => Self::to_value_with_type("mock", config),
             Self::Unknown(value) => value.clone(),
@@ -458,6 +478,7 @@ impl AgentConfigCompat {
                 ephemeral: self.codex_ephemeral,
                 cleared_provider_sessions: self.codex_cleared_provider_sessions.clone(),
             }),
+            "antigravity" => ProviderConfig::Antigravity(AntigravityProviderConfig::default()),
             "opencode" => ProviderConfig::OpenCode(OpenCodeProviderConfig {
                 agent: self.opencode_agent.clone(),
                 port: self.opencode_port,
@@ -595,6 +616,17 @@ impl AgentConfig {
         }
     }
 
+    pub fn antigravity_config(&self) -> AntigravityProviderConfig {
+        match &self.provider_config {
+            ProviderConfig::Antigravity(config)
+                if provider_key(&self.provider) == "antigravity" =>
+            {
+                config.clone()
+            }
+            _ => AntigravityProviderConfig::default(),
+        }
+    }
+
     pub fn codex_config_mut(&mut self) -> &mut CodexProviderConfig {
         self.codex_config_mut_preserve_encoding()
     }
@@ -707,6 +739,7 @@ impl AgentConfig {
                 self.codex_ephemeral = config.ephemeral;
                 self.codex_cleared_provider_sessions = config.cleared_provider_sessions.clone();
             }
+            ProviderConfig::Antigravity(_) => {}
             ProviderConfig::OpenCode(config) => {
                 self.opencode_agent = config.agent.clone();
                 self.opencode_port = config.port;
@@ -774,6 +807,7 @@ impl AgentConfig {
                     )?;
                 }
             }
+            "antigravity" => {}
             "opencode" => {
                 let config = self.opencode_config();
                 map.serialize_entry("opencode_agent", &config.agent)?;
@@ -1146,6 +1180,43 @@ mod tests {
             deserialized.provider_config,
             ProviderConfig::Mock(_)
         ));
+    }
+
+    #[test]
+    fn antigravity_provider_config_roundtrips() {
+        let config = AgentConfig {
+            provider: "antigravity".into(),
+            provider_config: ProviderConfig::Antigravity(AntigravityProviderConfig {
+                sandbox: Some(true),
+                dangerously_skip_permissions: Some(true),
+                print_timeout: Some("2m".into()),
+            }),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&config).unwrap();
+
+        assert_eq!(value["provider_config"]["type"], "antigravity");
+        assert_eq!(value["provider_config"]["sandbox"], true);
+        assert_eq!(value["provider_config"]["dangerously_skip_permissions"], true);
+        assert_eq!(value["provider_config"]["print_timeout"], "2m");
+
+        let deserialized: AgentConfig = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            deserialized.provider_config,
+            ProviderConfig::Antigravity(_)
+        ));
+        assert_eq!(deserialized.antigravity_config().sandbox, Some(true));
+        assert_eq!(
+            deserialized
+                .antigravity_config()
+                .dangerously_skip_permissions,
+            Some(true)
+        );
+        assert_eq!(
+            deserialized.antigravity_config().print_timeout.as_deref(),
+            Some("2m")
+        );
     }
 
     #[test]

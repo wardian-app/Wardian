@@ -9,6 +9,7 @@ pub fn extract_transcript_message(
         "codex" => extract_codex(raw_line),
         "claude" => extract_claude(raw_line),
         "gemini" => extract_gemini(raw_line),
+        "antigravity" => extract_antigravity(raw_line),
         "mock" => extract_mock(raw_line),
         "opencode" => extract_opencode(raw_line),
         _ => None,
@@ -147,6 +148,27 @@ fn extract_opencode(raw_line: &str) -> Option<WatchTranscriptMessage> {
     })
 }
 
+fn extract_antigravity(raw_line: &str) -> Option<WatchTranscriptMessage> {
+    let parsed: serde_json::Value = serde_json::from_str(raw_line).ok()?;
+    if parsed.get("source").and_then(|value| value.as_str()) != Some("MODEL")
+        || parsed.get("type").and_then(|value| value.as_str()) != Some("PLANNER_RESPONSE")
+        || parsed.get("status").and_then(|value| value.as_str()) != Some("DONE")
+    {
+        return None;
+    }
+    let text = extract_text(&parsed)?;
+    Some(WatchTranscriptMessage {
+        role: "assistant".to_string(),
+        text,
+        provider: "antigravity".to_string(),
+        turn_id: parsed
+            .get("step_index")
+            .and_then(|value| value.as_u64())
+            .map(|value| value.to_string()),
+        source: Some("transcript".to_string()),
+    })
+}
+
 fn gemini_message_kind(value: &serde_json::Value) -> Option<&str> {
     value
         .get("type")
@@ -244,6 +266,26 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_planner_response_extracts_assistant_text() {
+        let line = r#"{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-05-20T09:21:54Z","content":"Antigravity answer"}"#;
+
+        let message = extract_transcript_message("antigravity", line).unwrap();
+
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.text, "Antigravity answer");
+        assert_eq!(message.provider, "antigravity");
+        assert_eq!(message.turn_id.as_deref(), Some("2"));
+        assert_eq!(message.source.as_deref(), Some("transcript"));
+    }
+
+    #[test]
+    fn antigravity_user_input_does_not_extract_transcript() {
+        let line = r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"hello"}"#;
+
+        assert!(extract_transcript_message("antigravity", line).is_none());
+    }
+
+    #[test]
     fn gemini_completed_model_record_extracts_assistant_text() {
         let line = r#"{"id":"gem-msg-1","type":"model","content":"Gemini answer","tokens":{"input":10,"output":2,"total":12}}"#;
 
@@ -284,5 +326,10 @@ mod tests {
         assert!(
             extract_transcript_message("gemini", r#"{"type":"user","content":"hello"}"#).is_none()
         );
+        assert!(extract_transcript_message(
+            "antigravity",
+            r#"{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}"#
+        )
+        .is_none());
     }
 }

@@ -1,5 +1,6 @@
 import {
   AgentConfig,
+  AntigravityProviderConfig,
   ClaudeProviderConfig,
   CodexProviderConfig,
   GeminiProviderConfig,
@@ -9,7 +10,7 @@ import {
 } from "../../types";
 
 function isKnownProviderName(provider: string | undefined): provider is ProviderName {
-  return provider === "claude" || provider === "codex" || provider === "gemini" || provider === "opencode" || provider === "mock";
+  return provider === "claude" || provider === "codex" || provider === "gemini" || provider === "antigravity" || provider === "opencode" || provider === "mock";
 }
 
 function providerValue(provider: AgentConfig["provider"]): string {
@@ -29,6 +30,8 @@ export function defaultProviderConfig(provider: AgentConfig["provider"]): Provid
       return { type: "codex" };
     case "gemini":
       return { type: "gemini" };
+    case "antigravity":
+      return { type: "antigravity" };
     case "opencode":
       return { type: "opencode" };
     case "mock":
@@ -84,6 +87,12 @@ function legacyProviderConfig(config: AgentConfig, provider: ProviderName): Prov
         output_format: config.output_format,
       };
       return stripUndefined(gemini);
+    }
+    case "antigravity": {
+      const antigravity: AntigravityProviderConfig = {
+        type: "antigravity",
+      };
+      return stripUndefined(antigravity);
     }
     case "opencode": {
       const opencode: OpenCodeProviderConfig = {

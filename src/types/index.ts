@@ -1,5 +1,5 @@
-export type ProviderName = "claude" | "codex" | "gemini" | "opencode" | "mock";
-export type UserFacingProviderName = "claude" | "codex" | "gemini" | "opencode";
+export type ProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "mock";
+export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode";
 
 export interface ProviderReadiness {
     provider: UserFacingProviderName;
@@ -44,6 +44,13 @@ export interface CodexProviderConfig {
     cleared_provider_sessions?: string[];
 }
 
+export interface AntigravityProviderConfig {
+    type: "antigravity";
+    sandbox?: boolean;
+    dangerously_skip_permissions?: boolean;
+    print_timeout?: string;
+}
+
 export interface OpenCodeProviderConfig {
     type: "opencode";
     agent?: string;
@@ -63,6 +70,7 @@ export type ProviderConfig =
     | ClaudeProviderConfig
     | GeminiProviderConfig
     | CodexProviderConfig
+    | AntigravityProviderConfig
     | OpenCodeProviderConfig
     | MockProviderConfig;
 

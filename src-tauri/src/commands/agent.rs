@@ -751,7 +751,7 @@ fn provider_uses_manual_session_id(provider_name: &str) -> bool {
 fn provider_uses_generated_session_id(provider_name: &str) -> bool {
     matches!(
         provider_name,
-        "claude" | "codex" | "gemini" | "mock" | "opencode"
+        "claude" | "codex" | "gemini" | "mock" | "opencode" | "antigravity"
     )
 }
 
@@ -1309,7 +1309,7 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     if config.resume_session.is_none() {
         let should_fallback = match config.provider.as_str() {
             "opencode" => config.session_id.starts_with("ses_"),
-            "codex" => false,
+            "codex" | "antigravity" => false,
             _ => true,
         };
         if should_fallback {
@@ -4198,6 +4198,11 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_uses_generated_wardian_id_until_transcript_reports_provider_session() {
+        assert!(provider_uses_generated_session_id("antigravity"));
+    }
+
+    #[test]
     fn gemini_clear_starts_visible_fresh_session_without_headless_bootstrap() {
         assert!(!provider_needs_obtain_session_id_on_clear("gemini"));
         assert!(!provider_needs_obtain_session_id_on_clear("claude"));
@@ -4508,6 +4513,24 @@ mod tests {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "codex".to_string(),
+            session_id: "22ff532b-007a-44c9-a4b4-9b7c0f546274".to_string(),
+            resume_session: None,
+            is_off: true,
+            ..Default::default()
+        };
+
+        prepare_resume_config(&mut config).expect("prepare resume config");
+
+        assert_eq!(config.resume_session, None);
+        assert!(!config.is_off);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn antigravity_resume_without_conversation_id_does_not_use_wardian_uuid() {
+        let (_guard, _temp) = use_isolated_resume_setting();
+        let mut config = AgentConfig {
+            provider: "antigravity".to_string(),
             session_id: "22ff532b-007a-44c9-a4b4-9b7c0f546274".to_string(),
             resume_session: None,
             is_off: true,

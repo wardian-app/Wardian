@@ -1,12 +1,13 @@
 # Provider Runtimes
 
-Wardian provides one orchestration layer over four supported CLI providers: Gemini CLI, Claude Code, Codex, and OpenCode. Each provider keeps its native command-line behavior, while Wardian adapts session identity, working roots, skill discovery, status tracking, and workflow execution into a consistent app model.
+Wardian provides one orchestration layer over five supported CLI providers: Gemini CLI, Antigravity, Claude Code, Codex, and OpenCode. Each provider keeps its native command-line behavior, while Wardian adapts session identity, working roots, skill discovery, status tracking, and workflow execution into a consistent app model.
 
 ## Overview
 
 | Provider | Support | Working Root | Instruction Source | Skill and Context Model | Session Identity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Supported | Real target workspace | `GEMINI.md` | Wardian include roots passed through `--include-directories`; Gemini patch enables multi-root skill discovery | Discovered from provider output |
+| **[Antigravity](https://www.antigravity.google/docs/cli-overview)** | Supported | Real target workspace | `AGENTS.md` | Wardian include roots passed through repeated `--add-dir` flags | Discovered from Antigravity conversation state |
 | **[Claude Code](https://github.com/anthropics/claude-code)** | Supported | Real target workspace | `CLAUDE.md` | `--add-dir` instruction roots plus `.claude/skills` links to Wardian-managed skills | Wardian assigns fresh session IDs and resumes explicitly |
 | **[Codex](https://github.com/openai/codex)** | Supported | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME` habitat with scoped skill projection | Discovered during bootstrap, then adopted into the final habitat |
 | **[OpenCode](https://github.com/anomalyco/opencode)** | Supported | Real target workspace | `AGENTS.md` plus injected runtime config | `OPENCODE_CONFIG` adds Wardian instructions; `OPENCODE_CONFIG_DIR` exposes projected skills | Discovered from JSON events and resumed with `--session` |
@@ -33,6 +34,28 @@ Wardian learns Gemini session identity from provider output and parses Gemini st
 ### Debug First
 
 If Gemini misses Wardian-managed skills, check the Gemini patch state and include roots before changing workspace or workflow logic.
+
+### Migration Note
+
+Keep Gemini CLI support while users transition provider choices. Consumer/free Gemini CLI access is scheduled to cut off on June 18, 2026. Antigravity support is a separate provider path and does not reuse the Gemini adapter.
+
+## Antigravity (`agy`)
+
+Antigravity runs directly in the real target workspace.
+
+### Instruction and Skill Discovery
+
+Antigravity reads `AGENTS.md`. Wardian passes common, class, and agent include roots with repeated `--add-dir <absolute-path>` flags so the CLI can load Wardian-managed context without copying agent files into the repository.
+
+### Session and Status Handling
+
+Wardian launches visible Antigravity agents with `agy --prompt-interactive`. Headless workflow runs use `agy --print` and, when resuming, `--conversation <conversation-id>`. Provider options include `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout <duration>`.
+
+Antigravity stores runtime state under `~/.gemini/antigravity-cli`. Wardian discovers the conversation ID from the provider cache and reads `brain/<conversation-id>/.system_generated/logs/transcript.jsonl` for status and assistant transcript text. `wardian agent watch` uses completed `MODEL` `PLANNER_RESPONSE` transcript records as provider-adapted assistant output.
+
+### Debug First
+
+If Antigravity starts but Wardian does not show assistant text, inspect the conversation cache and transcript path above. If `agy --print` returns empty stdout, check the transcript before treating the run as failed.
 
 ## Claude Code (`@anthropic-ai/claude-code`)
 

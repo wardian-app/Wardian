@@ -16,7 +16,7 @@ const readiness = (
   available: boolean,
 ): ProviderReadiness => ({
   provider,
-  display_name: provider === "opencode" ? "OpenCode" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
+  display_name: provider === "opencode" ? "OpenCode" : provider === "antigravity" ? "antigravity" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
   available,
   executable: available ? provider : null,
   reason: available ? null : `The ${provider} command was not found.`,
@@ -26,6 +26,7 @@ const allProvidersReady: ProviderReadiness[] = [
   readiness("claude", true),
   readiness("codex", true),
   readiness("gemini", true),
+  readiness("antigravity", true),
   readiness("opencode", true),
 ];
 
@@ -69,6 +70,19 @@ describe("SpawnAgentPanel", () => {
     const providerSelect = screen.getByTestId("spawn-provider");
     expect(await screen.findByRole("option", { name: "OpenCode" })).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent("OpenCode");
+  });
+
+  it("lists antigravity as a provider option", async () => {
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    const providerSelect = screen.getByTestId("spawn-provider");
+    expect(await screen.findByRole("option", { name: "antigravity" })).toBeInTheDocument();
+    expect(providerSelect).toHaveTextContent("antigravity");
   });
 
   it("shows dismissible provider and first-run help before spawning", () => {

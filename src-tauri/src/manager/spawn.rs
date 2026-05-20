@@ -1,3 +1,4 @@
+use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::transcript::extract_transcript_message;
 use crate::providers::ProviderFactory;
@@ -1137,6 +1138,147 @@ pub async fn spawn_agent(
                 }
             });
         }
+    } else if config.provider == "antigravity" {
+        let watcher_app = app.clone();
+        let watcher_provider = provider.clone();
+        let watcher_session = config.session_id.clone();
+        let watcher_query_count = query_count.clone();
+        let watcher_init_timestamp = init_timestamp.clone();
+        let watcher_current_status = current_status.clone();
+        let watcher_log_path = log_path.clone();
+        let watcher_config = config_lock.clone();
+        let watcher_watch_state = watch_state.clone();
+        let watcher_skip_existing_log = is_restored;
+        let watcher_workspace = cwd.clone();
+
+        std::thread::spawn(move || {
+            let mut offset: u64 = 0;
+            let mut positioned_initial_log = !watcher_skip_existing_log;
+            let mut last_conversation_id = String::new();
+            loop {
+                let current = watcher_current_status
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
+                if current == "Off" {
+                    break;
+                }
+
+                let home = AntigravityProvider::antigravity_home();
+                let conversation_id = {
+                    let configured = watcher_config.lock().ok().and_then(|cfg| {
+                        cfg.resume_session
+                            .as_ref()
+                            .map(|value| value.trim().to_string())
+                            .filter(|value| !value.is_empty())
+                    });
+                    configured.or_else(|| {
+                        home.as_ref()
+                            .and_then(|home| {
+                                AntigravityProvider::conversation_for_workspace(
+                                    home,
+                                    &watcher_workspace,
+                                )
+                            })
+                            .or_else(|| {
+                                home.as_ref().and_then(|home| {
+                                    AntigravityProvider::latest_conversation_id(home)
+                                })
+                            })
+                    })
+                };
+
+                let path = home
+                    .as_ref()
+                    .zip(conversation_id.as_deref())
+                    .map(|(home, conversation_id)| {
+                        AntigravityProvider::transcript_path(home, conversation_id)
+                    })
+                    .filter(|path| path.exists());
+
+                if let (Some(conversation_id), Some(path)) = (conversation_id, path) {
+                    if last_conversation_id != conversation_id {
+                        offset = 0;
+                        positioned_initial_log = !watcher_skip_existing_log;
+                        last_conversation_id = conversation_id.clone();
+                    }
+
+                    let needs_save = {
+                        let mut cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
+                        if cfg.resume_session.as_deref() != Some(conversation_id.as_str()) {
+                            cfg.resume_session = Some(conversation_id.clone());
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if needs_save {
+                        let _ = watcher_app.emit("agents-updated", ());
+                        save_agent_state_after_session_capture(&watcher_app);
+                    }
+
+                    if let Ok(mut out) = watcher_log_path.lock() {
+                        *out = Some(path.clone());
+                    }
+                    if let Ok(mut file) = std::fs::File::open(&path) {
+                        if let Ok(metadata) = file.metadata() {
+                            if metadata.len() < offset {
+                                offset = 0;
+                                positioned_initial_log = true;
+                            }
+                            if !positioned_initial_log {
+                                offset = metadata.len();
+                                positioned_initial_log = true;
+                            }
+                        }
+                        if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
+                            let mut reader = std::io::BufReader::new(file);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                let read = reader.read_line(&mut line).unwrap_or(0);
+                                if read == 0 {
+                                    break;
+                                }
+                                offset += read as u64;
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(trimmed)
+                                {
+                                    let raw_line = parsed.to_string();
+                                    if let Some(message) =
+                                        extract_transcript_message("antigravity", &raw_line)
+                                    {
+                                        if let Ok(mut watch_state) = watcher_watch_state.lock() {
+                                            watch_state.push_transcript(message);
+                                        }
+                                    }
+                                    if let Some(event) = watcher_provider.parse_output(&raw_line) {
+                                        apply_agent_event(
+                                            &watcher_app,
+                                            &watcher_session,
+                                            event,
+                                            &watcher_query_count,
+                                            &watcher_init_timestamp,
+                                            &watcher_current_status,
+                                        );
+                                    }
+                                    let _ = watcher_app.emit(
+                                        "agent-json-event",
+                                        serde_json::json!({ "session_id": watcher_session, "data": parsed }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
     }
 
     // ── OpenCode log-file watcher ─────────────────────────────────────────

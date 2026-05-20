@@ -444,9 +444,7 @@ pub fn run() {
 }
 
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-fn register_update_plugins<R: tauri::Runtime>(
-    builder: tauri::Builder<R>,
-) -> tauri::Builder<R> {
+fn register_update_plugins<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     if commands::settings::update_plugins_enabled_for_current_build() {
         builder
             .plugin(tauri_plugin_process::init())
@@ -457,8 +455,6 @@ fn register_update_plugins<R: tauri::Runtime>(
 }
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-fn register_update_plugins<R: tauri::Runtime>(
-    builder: tauri::Builder<R>,
-) -> tauri::Builder<R> {
+fn register_update_plugins<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder
 }

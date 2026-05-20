@@ -39,6 +39,32 @@ describe("AdvancedSettings", () => {
     });
   });
 
+  it("writes Antigravity settings to nested provider config", () => {
+    const updateField = vi.fn();
+
+    render(
+      <AdvancedSettings
+        config={{ provider: "antigravity", provider_config: { type: "antigravity" } }}
+        updateField={updateField}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced Settings" }));
+    fireEvent.click(screen.getByLabelText("Sandbox"));
+    fireEvent.change(screen.getByLabelText("Print Timeout"), {
+      target: { value: "90s" },
+    });
+
+    expect(updateField).toHaveBeenNthCalledWith(1, "provider_config", {
+      type: "antigravity",
+      sandbox: true,
+    });
+    expect(updateField).toHaveBeenNthCalledWith(2, "provider_config", {
+      type: "antigravity",
+      print_timeout: "90s",
+    });
+  });
+
   it("writes Codex sandbox settings to nested provider config", () => {
     const updateField = vi.fn();
 
@@ -75,6 +101,7 @@ describe("AdvancedSettings", () => {
     expect(screen.getByLabelText("Permission Mode")).toBeInTheDocument();
     expect(screen.queryByLabelText("Sandbox Mode")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("OpenCode Agent")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Print Timeout")).not.toBeInTheDocument();
   });
 
   it("edits regular session persistence from advanced settings", () => {

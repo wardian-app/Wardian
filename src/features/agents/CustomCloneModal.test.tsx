@@ -12,7 +12,7 @@ const readiness = (
   available: boolean,
 ): ProviderReadiness => ({
   provider,
-  display_name: provider === "opencode" ? "OpenCode" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
+  display_name: provider === "opencode" ? "OpenCode" : provider === "antigravity" ? "antigravity" : `${provider[0].toUpperCase()}${provider.slice(1)}`,
   available,
   executable: available ? provider : null,
   reason: available ? null : `The ${provider} command was not found.`,
@@ -22,6 +22,7 @@ const allProvidersReady: ProviderReadiness[] = [
   readiness("claude", true),
   readiness("codex", true),
   readiness("gemini", true),
+  readiness("antigravity", true),
   readiness("opencode", true),
 ];
 

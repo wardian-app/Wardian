@@ -59,7 +59,7 @@ export function effectiveTerminalFontFamily(value: string | null | undefined) {
 
 const CODEX_SANDBOX_MODES: CodexSandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'];
 const CODEX_APPROVAL_POLICIES: CodexApprovalPolicy[] = ['untrusted', 'on-failure', 'on-request', 'never'];
-const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', 'codex', 'gemini', 'opencode'];
+const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', 'codex', 'gemini', 'antigravity', 'opencode'];
 
 export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
   sandbox_mode: 'danger-full-access',

@@ -60,7 +60,7 @@ provider readiness guide.
 
 Add a default provider setting:
 
-- Values: `auto`, `claude`, `codex`, `gemini`, `opencode`
+- Values: `auto`, `claude`, `codex`, `gemini`, `antigravity`, `opencode`
 - Default: `auto`
 - Auto order: prefer `claude`, then the next available user-facing provider in
   the supported-provider order

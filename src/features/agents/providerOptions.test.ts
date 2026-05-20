@@ -4,7 +4,7 @@ import { buildUngatedProviderOptions, resolveEffectiveProvider } from './provide
 
 const readiness = (provider: ProviderReadiness['provider'], available: boolean): ProviderReadiness => ({
   provider,
-  display_name: provider === 'opencode' ? 'OpenCode' : provider[0].toUpperCase() + provider.slice(1),
+  display_name: provider === 'opencode' ? 'OpenCode' : provider === 'antigravity' ? 'antigravity' : provider[0].toUpperCase() + provider.slice(1),
   available,
   executable: available ? provider : null,
   reason: available ? null : `${provider} missing`,
@@ -16,6 +16,7 @@ describe('provider option helpers', () => {
       { value: 'claude', label: 'Claude', available: true, reason: null },
       { value: 'codex', label: 'Codex', available: true, reason: null },
       { value: 'gemini', label: 'Gemini', available: true, reason: null },
+      { value: 'antigravity', label: 'antigravity', available: true, reason: null },
       { value: 'opencode', label: 'OpenCode', available: true, reason: null },
     ]);
   });
