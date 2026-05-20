@@ -187,20 +187,37 @@ fn project_antigravity_include_directory(session_id: &str, index: usize, dir: St
             .unwrap_or_else(|| "dir".to_string())
     ));
 
-    if projected_link_matches_target(&link, &source) {
-        return link.to_string_lossy().to_string();
-    }
+    if source.join(".agents").join("skills").exists() {
+        match materialize_antigravity_include_projection(&source, &link) {
+            Ok(()) => link.to_string_lossy().to_string(),
+            Err(_) => dir,
+        }
+    } else {
+        if projected_link_matches_target(&link, &source) {
+            return link.to_string_lossy().to_string();
+        }
 
-    if (link.exists() || link.symlink_metadata().is_ok())
-        && remove_existing_projection_path(&link).is_err()
-    {
-        return dir;
-    }
+        if (link.exists() || link.symlink_metadata().is_ok())
+            && remove_existing_projection_path(&link).is_err()
+        {
+            return dir;
+        }
 
-    match create_directory_link(&source, &link) {
-        Ok(()) => link.to_string_lossy().to_string(),
-        Err(_) => dir,
+        match create_directory_link(&source, &link) {
+            Ok(()) => link.to_string_lossy().to_string(),
+            Err(_) => dir,
+        }
     }
+}
+
+fn materialize_antigravity_include_projection(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    if target.exists() || target.symlink_metadata().is_ok() {
+        remove_existing_projection_path(target)?;
+    }
+    copy_dir_all_following_links(source, target).map_err(|e| e.to_string())
 }
 
 fn path_has_hidden_component(path: &std::path::Path) -> bool {
@@ -865,6 +882,24 @@ pub(crate) fn copy_dir_all(
     Ok(())
 }
 
+fn copy_dir_all_following_links(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = dst.as_ref().join(entry.file_name());
+        if source.is_dir() {
+            copy_dir_all_following_links(&source, &target)?;
+        } else if source.is_file() {
+            std::fs::copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn project_file(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
     if target.exists() {
         let _ = std::fs::remove_file(target);
@@ -1477,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_include_projection_exposes_hidden_wardian_roots_through_visible_links() {
+    fn antigravity_include_projection_exposes_hidden_wardian_roots_through_visible_paths() {
         let root = unique_temp_dir("antigravity-include-projection");
         let hidden = root.join(".wardian").join("classes").join("Builder");
         std::fs::create_dir_all(hidden.join(".agents").join("skills").join("role-skill"))
@@ -1500,6 +1535,54 @@ mod tests {
             .join("skills")
             .join("role-skill")
             .exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        if let Some(parent) = projected_path.parent().and_then(|path| path.parent()) {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn antigravity_include_projection_materializes_linked_skills() {
+        let root = unique_temp_dir("antigravity-linked-skills");
+        let hidden = root.join(".wardian");
+        let source = hidden.join("common");
+        let library_skill = hidden
+            .join("library")
+            .join("skills")
+            .join("wardian-skills")
+            .join("wardian-cli");
+        let deployed_skill = source
+            .join(".agents")
+            .join("skills")
+            .join("wardian-cli");
+
+        std::fs::create_dir_all(&library_skill).expect("create library skill");
+        std::fs::write(library_skill.join("SKILL.md"), "wardian cli instructions")
+            .expect("write library skill");
+        std::fs::create_dir_all(deployed_skill.parent().expect("skill parent"))
+            .expect("create deployed skills parent");
+        create_directory_link(&library_skill, &deployed_skill).expect("link deployed skill");
+
+        let projected = project_antigravity_include_directories(
+            "session-linked-skills",
+            vec![source.to_string_lossy().to_string()],
+        );
+
+        assert_eq!(projected.len(), 1);
+        let projected_path = PathBuf::from(&projected[0]);
+        let projected_skill = projected_path
+            .join(".agents")
+            .join("skills")
+            .join("wardian-cli");
+        assert_eq!(
+            std::fs::read_to_string(projected_skill.join("SKILL.md")).expect("read projected skill"),
+            "wardian cli instructions"
+        );
+        assert!(
+            std::fs::read_link(&projected_skill).is_err(),
+            "projected skill must be a materialized directory, not a link back into hidden storage"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
         if let Some(parent) = projected_path.parent().and_then(|path| path.parent()) {
