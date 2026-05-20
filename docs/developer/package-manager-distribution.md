@@ -14,9 +14,9 @@ Phase 1 covers:
 
 npm bootstrap, standalone CLI-only distribution, signed APT repositories,
 Flathub, and Snap are out of scope for Phase 1. Linux package-manager publishing
-is tracked in [#324](https://github.com/tangemicioglu/Wardian/issues/324).
+is tracked in [#324](https://github.com/wardian-app/Wardian/issues/324).
 The Phase 1 implementation is tracked in
-[#325](https://github.com/tangemicioglu/Wardian/issues/325).
+[#325](https://github.com/wardian-app/Wardian/issues/325).
 
 ## Generate Manifests
 
@@ -39,9 +39,9 @@ npm run release:package-manifests -- --release-assets dist/package-managers/v0.3
 
 Generated files:
 
-- `dist/package-managers/v0.3.6/winget/Tangemicioglu.Wardian.yaml`
-- `dist/package-managers/v0.3.6/winget/Tangemicioglu.Wardian.locale.en-US.yaml`
-- `dist/package-managers/v0.3.6/winget/Tangemicioglu.Wardian.installer.yaml`
+- `dist/package-managers/v0.3.6/winget/WardianApp.Wardian.yaml`
+- `dist/package-managers/v0.3.6/winget/WardianApp.Wardian.locale.en-US.yaml`
+- `dist/package-managers/v0.3.6/winget/WardianApp.Wardian.installer.yaml`
 - `dist/package-managers/v0.3.6/homebrew/wardian.rb`
 - `dist/package-managers/v0.3.6/linux/install.md`
 
@@ -54,19 +54,19 @@ Copy the generated winget files into a local clone of
 `microsoft/winget-pkgs` under:
 
 ```text
-manifests/t/Tangemicioglu/Wardian/0.3.6/
+manifests/w/WardianApp/Wardian/0.3.6/
 ```
 
 Validate before submitting:
 
 ```bash
-winget validate manifests/t/Tangemicioglu/Wardian/0.3.6
+winget validate manifests/w/WardianApp/Wardian/0.3.6
 ```
 
 PowerShell:
 
 ```powershell
-winget validate manifests\t\Tangemicioglu\Wardian\0.3.6
+winget validate manifests\w\WardianApp\Wardian\0.3.6
 ```
 
 Submit through the normal `microsoft/winget-pkgs` PR flow or with

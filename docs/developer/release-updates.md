@@ -38,7 +38,7 @@ If the private key or password is lost, existing updater-enabled installs cannot
 The first implementation uses only the stable channel:
 
 ```text
-https://github.com/tangemicioglu/Wardian/releases/latest/download/latest.json
+https://github.com/wardian-app/Wardian/releases/latest/download/latest.json
 ```
 
 Stable builds must not consume prerelease metadata. Hyphenated version tags such as preview, alpha, beta, rc, or nightly are treated as prereleases and must not publish stable updater metadata. Preview, beta, nightly, staged rollout, or rollback behavior should use a separate channel manifest or a dynamic update endpoint rather than overloading GitHub's stable latest release.

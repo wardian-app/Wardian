@@ -17,31 +17,31 @@ function writeReleaseFixture(dir: string): string {
       {
         name: "Wardian_0.3.6_x64-setup.exe",
         browser_download_url:
-          "https://github.com/tangemicioglu/Wardian/releases/download/v0.3.6/Wardian_0.3.6_x64-setup.exe",
+          "https://github.com/wardian-app/Wardian/releases/download/v0.3.6/Wardian_0.3.6_x64-setup.exe",
         digest: `sha256:${hash("a")}`,
       },
       {
         name: "Wardian_0.3.6_aarch64.dmg",
         browser_download_url:
-          "https://github.com/tangemicioglu/Wardian/releases/download/v0.3.6/Wardian_0.3.6_aarch64.dmg",
+          "https://github.com/wardian-app/Wardian/releases/download/v0.3.6/Wardian_0.3.6_aarch64.dmg",
         digest: `sha256:${hash("b")}`,
       },
       {
         name: "Wardian_0.3.6_x64.dmg",
         browser_download_url:
-          "https://github.com/tangemicioglu/Wardian/releases/download/v0.3.6/Wardian_0.3.6_x64.dmg",
+          "https://github.com/wardian-app/Wardian/releases/download/v0.3.6/Wardian_0.3.6_x64.dmg",
         digest: `sha256:${hash("c")}`,
       },
       {
         name: "Wardian_0.3.6_amd64.deb",
         browser_download_url:
-          "https://github.com/tangemicioglu/Wardian/releases/download/v0.3.6/Wardian_0.3.6_amd64.deb",
+          "https://github.com/wardian-app/Wardian/releases/download/v0.3.6/Wardian_0.3.6_amd64.deb",
         digest: `sha256:${hash("d")}`,
       },
       {
         name: "Wardian_0.3.6_amd64.AppImage",
         browser_download_url:
-          "https://github.com/tangemicioglu/Wardian/releases/download/v0.3.6/Wardian_0.3.6_amd64.AppImage",
+          "https://github.com/wardian-app/Wardian/releases/download/v0.3.6/Wardian_0.3.6_amd64.AppImage",
         digest: `sha256:${hash("e")}`,
       },
     ],
@@ -64,10 +64,10 @@ describe("package-manager manifest generator", () => {
       });
 
       const wingetInstaller = readFileSync(
-        join(outDir, "winget", "Tangemicioglu.Wardian.installer.yaml"),
+        join(outDir, "winget", "WardianApp.Wardian.installer.yaml"),
         "utf8",
       );
-      expect(wingetInstaller).toContain("PackageIdentifier: Tangemicioglu.Wardian");
+      expect(wingetInstaller).toContain("PackageIdentifier: WardianApp.Wardian");
       expect(wingetInstaller).toContain("PackageVersion: 0.3.6");
       expect(wingetInstaller).toContain("InstallerType: nullsoft");
       expect(wingetInstaller).toContain("Silent: /S");
@@ -107,7 +107,7 @@ describe("package-manager manifest generator", () => {
             {
               name: "Wardian_0.3.6_x64-setup.exe",
               browser_download_url:
-                "https://github.com/tangemicioglu/Wardian/releases/download/v0.3.6/Wardian_0.3.6_x64-setup.exe",
+                "https://github.com/wardian-app/Wardian/releases/download/v0.3.6/Wardian_0.3.6_x64-setup.exe",
               digest: `sha256:${hash("a")}`,
             },
           ],

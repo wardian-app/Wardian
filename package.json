@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tangemicioglu/Wardian.git"
+    "url": "https://github.com/wardian-app/Wardian.git"
   },
-  "homepage": "https://github.com/tangemicioglu/Wardian#readme",
+  "homepage": "https://wardian.org",
   "bugs": {
-    "url": "https://github.com/tangemicioglu/Wardian/issues"
+    "url": "https://github.com/wardian-app/Wardian/issues"
   },
   "scripts": {
     "start": "tauri dev",

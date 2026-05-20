@@ -3,8 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-05-20
 - **Decider:** Wardian Codex and user
-- **Issue:** [#325](https://github.com/tangemicioglu/Wardian/issues/325)
-- **Follow-up:** Linux package-manager publishing is tracked in [#324](https://github.com/tangemicioglu/Wardian/issues/324).
+- **Issue:** [#325](https://github.com/wardian-app/Wardian/issues/325)
+- **Follow-up:** Linux package-manager publishing is tracked in [#324](https://github.com/wardian-app/Wardian/issues/324).
 
 ## Context and Problem Statement
 

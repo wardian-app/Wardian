@@ -4,9 +4,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-const packageIdentifier = "Tangemicioglu.Wardian";
-const repositoryUrl = "https://github.com/tangemicioglu/Wardian";
-const publisher = "Tangemicioglu";
+const packageIdentifier = "WardianApp.Wardian";
+const homepageUrl = "https://wardian.org";
+const publisher = "Wardian App";
 const description = "Local command center for multi-agent CLI workflows.";
 
 function parseArgs(argv) {
@@ -122,11 +122,11 @@ function writeWingetManifests(outDir, release, assets) {
       `PackageVersion: ${release.version}`,
       "PackageLocale: en-US",
       `Publisher: ${publisher}`,
-      "PublisherUrl: https://github.com/tangemicioglu",
-      "PublisherSupportUrl: https://github.com/tangemicioglu/Wardian/issues",
-      "Author: Tangemicioglu",
+      `PublisherUrl: ${homepageUrl}`,
+      "PublisherSupportUrl: https://github.com/wardian-app/Wardian/issues",
+      "Author: Wardian App",
       "PackageName: Wardian",
-      `PackageUrl: ${repositoryUrl}`,
+      `PackageUrl: ${homepageUrl}`,
       "License: MIT",
       `Description: ${description}`,
       "ShortDescription: Local command center for multi-agent CLI workflows.",
@@ -191,7 +191,7 @@ function writeHomebrewCask(outDir, release, assets) {
       "",
       '  name "Wardian"',
       `  desc "${description}"`,
-      `  homepage "${repositoryUrl}"`,
+      `  homepage "${homepageUrl}"`,
       "",
       "  livecheck do",
       "    url :url",

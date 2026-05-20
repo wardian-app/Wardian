@@ -55,5 +55,5 @@ This folder contains the public Wardian user guides, workflow references, and de
 
 ## Project Context
 
-- [Design Context](https://github.com/tangemicioglu/Wardian/blob/main/DESIGN.md)
+- [Design Context](https://github.com/wardian-app/Wardian/blob/main/DESIGN.md)
 - [OS Support](./os-support.md)
