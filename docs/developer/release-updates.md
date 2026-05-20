@@ -49,7 +49,7 @@ Official stable release builds opt into updater checks with the compile-time mar
 
 ## Release Workflow
 
-The release workflow builds platform installers, signs update artifacts, uploads `latest.json`, validates updater metadata, and only then publishes the release.
+The release workflow builds platform installers, signs update artifacts, uploads `latest.json`, validates updater metadata, and only then publishes the release. Standalone `.sig` assets are not uploaded to GitHub Releases; Tauri embeds the signature content that the app needs inside `latest.json`.
 
 Local `npm run tauri build` creates an installable bundle without updater artifacts, so it does not require `TAURI_SIGNING_PRIVATE_KEY`. Release builds opt into updater artifact generation by passing `--config src-tauri/tauri.updater.conf.json` to Tauri. That overlay sets `bundle.createUpdaterArtifacts` to `true` only inside release infrastructure.
 
@@ -62,7 +62,7 @@ Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=st
 - `darwin-aarch64`
 - `darwin-x86_64`
 
-Each platform entry must include a URL and signature. The metadata version must match the release tag without the leading `v`, and each platform URL must be a canonical GitHub release download URL for that tag whose filename matches an uploaded release asset. This filename-based validation is intentional: GitHub draft releases expose asset URLs under an `untagged-...` placeholder until publish time, while updater metadata must already point at the final tag URL. A missing, incomplete, wrong-version, or wrong-release `latest.json` should leave the release as a draft.
+Each platform entry must include a URL and inline signature. The metadata version must match the release tag without the leading `v`, and each platform URL must be a canonical GitHub release download URL for that tag whose filename matches an uploaded release asset. This filename-based validation is intentional: GitHub draft releases expose asset URLs under an `untagged-...` placeholder until publish time, while updater metadata must already point at the final tag URL. A missing, incomplete, wrong-version, or wrong-release `latest.json` should leave the release as a draft.
 
 Manual backfill runs must target an explicit `release_tag`. Backfill is draft-only unless the workflow is deliberately changed to support published-release mutation. If the target release is already published, the workflow should fail instead of rewriting updater metadata.
 

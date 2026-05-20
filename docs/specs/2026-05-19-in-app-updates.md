@@ -38,7 +38,7 @@ Wardian configures:
 - Tauri process restart permission in `src-tauri/capabilities/default.json`.
 - Windows updater install mode `passive`.
 
-The release workflow signs update artifacts with `TAURI_SIGNING_PRIVATE_KEY` and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, uploads updater signatures, and publishes `latest.json` only as part of successful release builds. The public key is committed in `tauri.conf.json`; the private key never appears in the repository or documentation beyond secret-name references.
+The release workflow signs update artifacts with `TAURI_SIGNING_PRIVATE_KEY` and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, embeds updater signatures in `latest.json`, and publishes `latest.json` only as part of successful release builds. Standalone `.sig` files are not uploaded as GitHub Release assets because the updater consumes inline signatures from `latest.json`, not separate signature URLs. The public key is committed in `tauri.conf.json`; the private key never appears in the repository or documentation beyond secret-name references.
 
 The app exposes update eligibility through a backend command rather than letting Settings infer it from frontend runtime details. Official stable tag-push and stable manual backfill release builds set `WARDIAN_UPDATE_CHANNEL=stable` at compile time. Prerelease, debug, and unmarked release builds return disabled eligibility, and the backend skips updater/process plugin registration for those builds. This keeps local builds and prereleases from replacing themselves with public stable installer releases and keeps updater IPC unavailable outside official stable builds.
 
