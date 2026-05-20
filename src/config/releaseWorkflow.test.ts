@@ -69,8 +69,9 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("tagName: ${{ inputs.release_tag }}");
     expect(releaseWorkflow).toContain("WARDIAN_UPDATE_CHANNEL: ${{ needs.create-release.outputs.is_prerelease == 'false' && 'stable' || '' }}");
     expect(releaseWorkflow).toContain("WARDIAN_UPDATE_CHANNEL: ${{ needs.resolve-release.outputs.is_prerelease == 'false' && 'stable' || '' }}");
-    expect(releaseWorkflow).toContain("uploadUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}");
-    expect(releaseWorkflow).toContain("uploadUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}");
+    expect(releaseWorkflow).toContain("includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}");
+    expect(releaseWorkflow).toContain("includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}");
+    expect(releaseWorkflow).not.toContain("uploadUpdaterJson:");
     expect(releaseWorkflow).toContain("updaterJsonPreferNsis: true");
     expect(releaseWorkflow).toContain("Build (dry run)");
     expect(releaseWorkflow).toContain("ref: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && inputs.release_tag || github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}");
