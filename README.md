@@ -29,6 +29,18 @@ Wardian is an **Integrated Agent Environment** — a local, app-first governance
 
 Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are available from the [Releases page](https://github.com/tangemicioglu/Wardian/releases).
 
+Choose the asset for your operating system and CPU:
+
+| System | Download asset | Notes |
+| :--- | :--- | :--- |
+| Windows x64 | `Wardian_X.Y.Z_x64-setup.exe` | Standard Windows installer. |
+| macOS Apple Silicon | `Wardian_X.Y.Z_aarch64.dmg` | For M-series Macs such as M1, M2, M3, or M4. |
+| macOS Intel | `Wardian_X.Y.Z_x64.dmg` | For older Intel Macs. |
+| Linux Debian/Ubuntu x64 | `Wardian_X.Y.Z_amd64.deb` | Installable Debian package. |
+| Linux other x64 | `Wardian_X.Y.Z_amd64.AppImage` | Portable Linux app. |
+
+`x64` and `amd64` both mean 64-bit Intel/AMD CPUs. On macOS, Apple Silicon uses `aarch64`, not `x64`. Ignore updater-only assets such as `latest.json`, `.app.tar.gz`, or `.sig` files when installing manually.
+
 > **Note:** Wardian binaries are currently unsigned. On first launch:
 > - **Windows:** SmartScreen will show a warning. Click "More info" → "Run anyway."
 > - **macOS:** Gatekeeper will refuse to open the app. Right-click the app and choose "Open," or run `xattr -cr /Applications/Wardian.app` from Terminal.

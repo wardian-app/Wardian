@@ -196,6 +196,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
           includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
+          uploadUpdaterSignatures: false
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -213,6 +214,7 @@ jobs:
           tagName: ${{ inputs.release_tag }}
           releaseDraft: true
           includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}
+          uploadUpdaterSignatures: false
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -224,6 +226,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          uploadUpdaterSignatures: false
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
       - name: Upload dry-run artifacts
