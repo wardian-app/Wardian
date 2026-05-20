@@ -25,6 +25,9 @@ tempfile = "3.26.0"
 thiserror = "2.0"
 uuid = { version = "1.21.0", features = ["v4"] }
 
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }
+
 [profile.dev.package."*"]
 debug = false
 opt-level = 1
