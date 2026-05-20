@@ -28,6 +28,7 @@ docs/.vitepress/dist/
 # Agent stores
 .gemini/*
 .claude/*
+.antigravitycli/*
 .superpowers/*
 
 # Backup and test files
