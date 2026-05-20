@@ -295,10 +295,33 @@ jobs:
               return;
             }
 
-            const releaseAssetUrls = new Set(assets.flatMap((asset) => [
-              asset.browser_download_url,
-              asset.url,
-            ]));
+            const releaseAssetNames = new Set(assets.map((asset) => asset.name));
+            const releaseAssetNameFromUrl = (candidateUrl) => {
+              let parsed;
+              try {
+                parsed = new URL(candidateUrl);
+              } catch {
+                return null;
+              }
+
+              const parts = parsed.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+              const [owner, repo, releases, download, tag, ...assetParts] = parts;
+              if (
+                parsed.protocol !== 'https:' ||
+                parsed.hostname !== 'github.com' ||
+                owner !== context.repo.owner ||
+                repo !== context.repo.repo ||
+                releases !== 'releases' ||
+                download !== 'download' ||
+                tag !== expectedTag ||
+                assetParts.length === 0
+              ) {
+                return null;
+              }
+
+              return assetParts.join('/');
+            };
+
             const platforms = metadata.platforms ?? {};
             const missing = requiredPlatforms.filter((platform) => {
               const entry = platforms[platform];
@@ -309,9 +332,12 @@ jobs:
               return;
             }
 
-            const invalidUrls = requiredPlatforms.filter((platform) => !releaseAssetUrls.has(platforms[platform].url));
+            const invalidUrls = requiredPlatforms.filter((platform) => {
+              const assetName = releaseAssetNameFromUrl(platforms[platform].url);
+              return !assetName || !releaseAssetNames.has(assetName);
+            });
             if (invalidUrls.length > 0) {
-              core.setFailed(`latest.json contains URLs that are not assets on ${expectedTag}: ${invalidUrls.join(', ')}`);
+              core.setFailed(`latest.json contains URLs that do not target uploaded ${expectedTag} assets: ${invalidUrls.join(', ')}`);
             }
 
   publish:

@@ -93,9 +93,11 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("const expectedTag =");
     expect(releaseWorkflow).toContain("const expectedVersion = expectedTag.replace(/^v/, '')");
     expect(releaseWorkflow).toContain("metadata.version !== expectedVersion");
-    expect(releaseWorkflow).toContain("asset.browser_download_url");
-    expect(releaseWorkflow).toContain("asset.url");
-    expect(releaseWorkflow).toContain("releaseAssetUrls.has(platforms[platform].url)");
+    expect(releaseWorkflow).toContain("const releaseAssetNames = new Set(assets.map((asset) => asset.name))");
+    expect(releaseWorkflow).toContain("const releaseAssetNameFromUrl = (candidateUrl) =>");
+    expect(releaseWorkflow).toContain("parsed.hostname !== 'github.com'");
+    expect(releaseWorkflow).toContain("tag !== expectedTag");
+    expect(releaseWorkflow).toContain("releaseAssetNames.has(assetName)");
     expect(releaseWorkflow).toContain("needs.validate-updater-metadata.result == 'success'");
   });
 

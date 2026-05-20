@@ -62,7 +62,7 @@ Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=st
 - `darwin-aarch64`
 - `darwin-x86_64`
 
-Each platform entry must include a URL and signature. The metadata version must match the release tag without the leading `v`, and each platform URL must match a browser download URL or GitHub API asset URL on the target release. A missing, incomplete, wrong-version, or wrong-release `latest.json` should leave the release as a draft.
+Each platform entry must include a URL and signature. The metadata version must match the release tag without the leading `v`, and each platform URL must be a canonical GitHub release download URL for that tag whose filename matches an uploaded release asset. This filename-based validation is intentional: GitHub draft releases expose asset URLs under an `untagged-...` placeholder until publish time, while updater metadata must already point at the final tag URL. A missing, incomplete, wrong-version, or wrong-release `latest.json` should leave the release as a draft.
 
 Manual backfill runs must target an explicit `release_tag`. Backfill is draft-only unless the workflow is deliberately changed to support published-release mutation. If the target release is already published, the workflow should fail instead of rewriting updater metadata.
 
