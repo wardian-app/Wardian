@@ -31,6 +31,10 @@ const USER_FACING_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "Gemini",
     },
     ProviderDescriptor {
+        id: "antigravity",
+        display_name: "Antigravity",
+    },
+    ProviderDescriptor {
         id: "opencode",
         display_name: "OpenCode",
     },
@@ -258,7 +262,20 @@ mod tests {
             .map(|provider| provider.id)
             .collect();
 
-        assert_eq!(ids, vec!["claude", "codex", "gemini", "opencode"]);
+        assert_eq!(
+            ids,
+            vec!["claude", "codex", "gemini", "antigravity", "opencode"]
+        );
+    }
+
+    #[test]
+    fn antigravity_descriptor_uses_capitalized_user_label() {
+        let descriptor = user_facing_provider_descriptors()
+            .iter()
+            .find(|provider| provider.id == "antigravity")
+            .expect("antigravity descriptor");
+
+        assert_eq!(descriptor.display_name, "Antigravity");
     }
 
     #[test]

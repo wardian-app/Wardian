@@ -29,6 +29,7 @@ Install and authenticate at least one supported provider CLI before running real
 | Provider | GitHub Project | Common CLI Command |
 |---|---|---|
 | Gemini CLI | [google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli) | `gemini` |
+| Antigravity | [Antigravity CLI overview](https://www.antigravity.google/docs/cli-overview) | `agy` |
 | Claude Code | [anthropics/claude-code](https://github.com/anthropics/claude-code) | `claude` |
 | Codex | [openai/codex](https://github.com/openai/codex) | `codex` |
 | OpenCode | [anomalyco/opencode](https://github.com/anomalyco/opencode) | `opencode` |
@@ -132,6 +133,7 @@ Official release builds opt into signed updater artifacts with the release-only 
 | `WARDIAN_HOME` | Redirect all state to an isolated directory | `~/.wardian` |
 | `WARDIAN_MOCK_SCENARIO` | Mock provider scenario for native E2E tests | `basic` |
 | `WARDIAN_MOCK_DELAY_MS` | Delay between mock provider events (ms) | `100` |
+| `WARDIAN_E2E_REAL_ANTIGRAVITY` | Enable real Antigravity provider in native E2E | unset |
 | `WARDIAN_E2E_REAL_OPENCODE` | Enable real OpenCode provider in native E2E | unset |
 
 ## Running Coverage Reports

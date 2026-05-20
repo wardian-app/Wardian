@@ -26,6 +26,7 @@ const allProvidersReady: ProviderReadiness[] = [
   readiness("claude", true),
   readiness("codex", true),
   readiness("gemini", true),
+  readiness("antigravity", true),
   readiness("opencode", true),
 ];
 
@@ -69,6 +70,19 @@ describe("SpawnAgentPanel", () => {
     const providerSelect = screen.getByTestId("spawn-provider");
     expect(await screen.findByRole("option", { name: "OpenCode" })).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent("OpenCode");
+  });
+
+  it("lists Antigravity as a provider option", async () => {
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    const providerSelect = screen.getByTestId("spawn-provider");
+    expect(await screen.findByRole("option", { name: "Antigravity" })).toBeInTheDocument();
+    expect(providerSelect).toHaveTextContent("Antigravity");
   });
 
   it("shows dismissible provider and first-run help before spawning", () => {

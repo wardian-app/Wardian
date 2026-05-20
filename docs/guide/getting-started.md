@@ -50,6 +50,7 @@ Wardian runs local provider CLIs inside managed terminals. Install and authentic
 | Provider | Install command | Basic check |
 | :--- | :--- | :--- |
 | Gemini CLI | `npm install -g @google/gemini-cli` | `gemini --version` |
+| Antigravity | See the [Antigravity CLI overview](https://www.antigravity.google/docs/cli-overview) | `agy --version` |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude --version` |
 | Codex | `npm install -g @openai/codex` | `codex --version` |
 | OpenCode | Provider package that exposes `opencode` | `opencode --version` |
@@ -62,6 +63,7 @@ Start the provider directly once and complete any sign-in prompt before launchin
 
 ```bash
 gemini
+agy
 claude
 codex
 opencode
@@ -73,6 +75,7 @@ PowerShell uses the same provider commands:
 
 ```powershell
 gemini
+agy
 claude
 codex
 opencode

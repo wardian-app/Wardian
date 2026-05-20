@@ -1,3 +1,4 @@
+use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
 use crate::providers::gemini::GeminiProvider;
@@ -13,7 +14,7 @@ pub struct ProviderFactory;
 impl ProviderFactory {
     /// Returns an `Arc<dyn AgentProvider>` for the given provider name.
     ///
-    /// Currently supported: `"gemini"`, `"claude"`, `"codex"`, `"opencode"`, and `"mock"`.
+    /// Currently supported: `"gemini"`, `"claude"`, `"codex"`, `"antigravity"`, `"opencode"`, and `"mock"`.
     /// Returns `Err` for unknown provider names.
     pub fn resolve(provider_name: &str) -> Result<Arc<dyn AgentProvider>, String> {
         let lower = provider_name.to_lowercase();
@@ -21,10 +22,11 @@ impl ProviderFactory {
             "gemini" => Ok(Arc::new(GeminiProvider::new())),
             "claude" => Ok(Arc::new(ClaudeProvider::new())),
             "codex" => Ok(Arc::new(CodexProvider::new())),
+            "antigravity" => Ok(Arc::new(AntigravityProvider::new())),
             "opencode" => Ok(Arc::new(OpenCodeProvider::new())),
             "mock" => Ok(Arc::new(MockProvider::new())),
             other => Err(format!(
-                "Unknown provider '{}'. Supported providers: gemini, claude, codex, opencode, mock",
+                "Unknown provider '{}'. Supported providers: gemini, claude, codex, antigravity, opencode, mock",
                 other
             )),
         }
@@ -71,6 +73,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_antigravity_succeeds() {
+        let provider = ProviderFactory::resolve("antigravity");
+        assert!(provider.is_ok());
+        assert_eq!(provider.unwrap().name(), "antigravity");
+    }
+
+    #[test]
+    fn resolve_antigravity_case_insensitive() {
+        assert!(ProviderFactory::resolve("Antigravity").is_ok());
+        assert!(ProviderFactory::resolve("ANTIGRAVITY").is_ok());
+    }
+
+    #[test]
     fn resolve_unknown_returns_error() {
         let result = ProviderFactory::resolve("invalid_provider_name");
         assert!(result.is_err());
@@ -107,6 +122,12 @@ mod tests {
     #[test]
     fn resolved_opencode_provider_uses_agents_md() {
         let provider = ProviderFactory::resolve("opencode").unwrap();
+        assert_eq!(provider.get_instruction_filename(), "AGENTS.md");
+    }
+
+    #[test]
+    fn resolved_antigravity_provider_uses_agents_md() {
+        let provider = ProviderFactory::resolve("antigravity").unwrap();
         assert_eq!(provider.get_instruction_filename(), "AGENTS.md");
     }
 }

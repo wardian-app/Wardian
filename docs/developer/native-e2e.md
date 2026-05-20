@@ -92,12 +92,26 @@ Real-provider checks are opt-in. Keep them isolated and only use them when the m
 WARDIAN_E2E_REAL_OPENCODE=1 WARDIAN_E2E_REAL_WORKSPACE=<absolute-workspace-path> npm run test:e2e:native
 ```
 
+For the opt-in Antigravity smoke:
+
+```bash
+WARDIAN_E2E_REAL_ANTIGRAVITY=1 WARDIAN_E2E_REAL_WORKSPACE=<absolute-workspace-path> npm run test:e2e:native:fast -- e2e-native/tests/antigravity-native.test.mjs
+```
+
 On PowerShell, use the same placeholder with a Windows absolute path:
 
 ```powershell
 $env:WARDIAN_E2E_REAL_OPENCODE='1'
 $env:WARDIAN_E2E_REAL_WORKSPACE='<absolute-workspace-path>'
 npm run test:e2e:native
+```
+
+PowerShell Antigravity smoke:
+
+```powershell
+$env:WARDIAN_E2E_REAL_ANTIGRAVITY='1'
+$env:WARDIAN_E2E_REAL_WORKSPACE='<absolute-workspace-path>'
+npm run test:e2e:native:fast -- e2e-native/tests/antigravity-native.test.mjs
 ```
 
 The harness uses an isolated `WARDIAN_HOME` by default, so native E2E runs should not modify production `<wardian-home>` state.

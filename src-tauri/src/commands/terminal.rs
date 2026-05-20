@@ -80,7 +80,9 @@ pub async fn send_input_to_agent(
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
                         let provider = agent.config.lock().unwrap().provider.clone();
-                        if (provider == "opencode" || provider == "gemini")
+                        if (provider == "opencode"
+                            || provider == "gemini"
+                            || provider == "antigravity")
                             && manager::mark_agent_prompt_started(agent)
                         {
                             manager::set_agent_status(

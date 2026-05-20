@@ -48,7 +48,7 @@ The system is built on a **Modular Multi-Agent Architecture** where each agent i
 
 Roles are defined as standard Markdown files. When a new **Agent Class** is created, it resides in a dedicated directory within the application's configuration path, primarily managed via `AGENTS.md` as the master instruction file.
 
-Wardian adapts that role file to each supported provider. Codex and OpenCode consume `AGENTS.md` directly. Gemini and Claude receive provider-native instruction files that point back to the same Wardian role context. When a provider needs additional runtime structure, Wardian projects or injects the class and skill scope through the provider-specific path described in [Provider Runtimes](../providers.md).
+Wardian adapts that role file to each supported provider. Antigravity, Codex, and OpenCode consume `AGENTS.md` directly. Gemini and Claude receive provider-native instruction files that point back to the same Wardian role context. When a provider needs additional runtime structure, Wardian projects or injects the class and skill scope through the provider-specific path described in [Provider Runtimes](../providers.md).
 
 ### Instruction Precedence:
 

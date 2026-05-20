@@ -37,6 +37,7 @@ Confirm provider commands are visible:
 
 ```bash
 command -v gemini
+command -v agy
 command -v claude
 command -v codex
 command -v opencode
@@ -47,7 +48,7 @@ PowerShell:
 ```powershell
 node --version
 npm --version
-Get-Command gemini, claude, codex, opencode -ErrorAction SilentlyContinue
+Get-Command gemini, agy, claude, codex, opencode -ErrorAction SilentlyContinue
 ```
 
 If a command appears only after a shell startup script modifies `PATH`, make that path available to the app process as well. The agent default shell setting controls shell-hosted commands; interactive provider spawning resolves the provider executable before that shell runs.
@@ -68,6 +69,28 @@ gemini
 ```
 
 Complete the Gemini CLI sign-in or API-key flow in the terminal. After it reaches the interactive prompt, exit and spawn a Gemini agent from Wardian.
+
+Gemini CLI remains supported, but consumer/free Gemini CLI access is scheduled to cut off on June 18, 2026. Antigravity is a separate provider and uses the `agy` command.
+
+## Antigravity
+
+Install and setup instructions are maintained in the [Antigravity CLI overview](https://www.antigravity.google/docs/cli-overview).
+
+Verify:
+
+```bash
+agy --version
+agy
+```
+
+PowerShell:
+
+```powershell
+agy --version
+agy
+```
+
+Complete Antigravity authentication in the terminal. Wardian checks the `agy` executable before launch, then uses Antigravity's own conversation state under `~/.gemini/antigravity-cli` for session and transcript tracking.
 
 ## Claude Code
 

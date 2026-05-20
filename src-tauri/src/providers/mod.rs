@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod factory;
@@ -6,6 +7,7 @@ pub mod mock;
 pub mod opencode;
 pub mod readiness;
 pub mod transcript;
+pub use antigravity::AntigravityProvider;
 pub use codex::CodexProvider;
 pub use factory::ProviderFactory;
 pub use gemini::GeminiProvider;

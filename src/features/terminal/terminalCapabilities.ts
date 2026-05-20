@@ -189,6 +189,10 @@ function shouldReconstructProviderLine(provider: string | undefined) {
   return false;
 }
 
+function supportsTerminalCapabilityResponses(provider: string | undefined) {
+  return provider === "opencode" || provider === "antigravity";
+}
+
 function isCodexTransientUiLine(line: string) {
   const normalizedLine = normalizePlainLine(line);
   if (!normalizedLine) {
@@ -336,7 +340,7 @@ export function planTerminalCapabilityResponses(
   data: string,
   context: TerminalCapabilityContext,
 ): TerminalCapabilityPlan {
-  if (provider !== "opencode" || !data) {
+  if (!supportsTerminalCapabilityResponses(provider) || !data) {
     return {
       outgoingInputs: [],
       normalizedOutput: data,
@@ -393,14 +397,16 @@ export function planTerminalCapabilityResponses(
     outgoingInputs.push(`\u001b]11;rgb:${context.backgroundRgb}\u001b\\`);
   }
 
-  if (provider === "opencode" && !focusReported && data.includes("\u001b[?1004h")) {
+  if (supportsTerminalCapabilityResponses(provider) && !focusReported && data.includes("\u001b[?1004h")) {
     focusReported = true;
     outgoingInputs.push("\u001b[I");
   }
 
   return {
     outgoingInputs,
-    normalizedOutput: provider === "opencode" ? normalizeOpenCodeOutput(data, provider) : data,
+    normalizedOutput: supportsTerminalCapabilityResponses(provider)
+      ? normalizeOpenCodeOutput(data, "opencode")
+      : data,
     focusReported,
   };
 }

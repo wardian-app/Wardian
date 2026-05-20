@@ -89,7 +89,10 @@ pub fn list_available_shells() -> Result<Vec<ShellOption>, String> {
 
 #[tauri::command]
 pub fn get_update_eligibility() -> UpdateEligibility {
-    resolve_update_eligibility(cfg!(debug_assertions), option_env!("WARDIAN_UPDATE_CHANNEL"))
+    resolve_update_eligibility(
+        cfg!(debug_assertions),
+        option_env!("WARDIAN_UPDATE_CHANNEL"),
+    )
 }
 
 pub fn update_plugins_enabled_for_current_build() -> bool {

@@ -155,6 +155,99 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
     dirs
 }
 
+pub fn project_antigravity_include_directories(session_id: &str, dirs: Vec<String>) -> Vec<String> {
+    dirs.into_iter()
+        .enumerate()
+        .map(|(index, dir)| project_antigravity_include_directory(session_id, index, dir))
+        .collect()
+}
+
+fn project_antigravity_include_directory(session_id: &str, index: usize, dir: String) -> String {
+    let trimmed = dir.trim();
+    if trimmed.is_empty() {
+        return dir;
+    }
+
+    let source = std::path::PathBuf::from(trimmed);
+    if !source.is_dir() || !path_has_hidden_component(&source) {
+        return dir;
+    }
+
+    let projection_root = std::env::temp_dir()
+        .join("wardian-antigravity")
+        .join(safe_projection_name(session_id))
+        .join("include");
+    let link = projection_root.join(format!(
+        "{index:02}-{}",
+        source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(safe_projection_name)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "dir".to_string())
+    ));
+
+    if source.join(".agents").join("skills").exists() {
+        match materialize_antigravity_include_projection(&source, &link) {
+            Ok(()) => link.to_string_lossy().to_string(),
+            Err(_) => dir,
+        }
+    } else {
+        if projected_link_matches_target(&link, &source) {
+            return link.to_string_lossy().to_string();
+        }
+
+        if (link.exists() || link.symlink_metadata().is_ok())
+            && remove_existing_projection_path(&link).is_err()
+        {
+            return dir;
+        }
+
+        match create_directory_link(&source, &link) {
+            Ok(()) => link.to_string_lossy().to_string(),
+            Err(_) => dir,
+        }
+    }
+}
+
+fn materialize_antigravity_include_projection(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    if target.exists() || target.symlink_metadata().is_ok() {
+        remove_existing_projection_path(target)?;
+    }
+    copy_dir_all_following_links(source, target).map_err(|e| e.to_string())
+}
+
+fn path_has_hidden_component(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        let text = component.as_os_str().to_string_lossy();
+        text.starts_with('.') && text != "." && text != ".."
+    })
+}
+
+fn safe_projection_name(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '-' | '_') {
+            output.push(ch);
+        } else if !output.ends_with('-') {
+            output.push('-');
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        "session".to_string()
+    } else {
+        output
+    }
+}
+
 /// Convert a filesystem path to a forward-slash string safe for JSON/JSONC embedding.
 /// OpenCode is a Node.js app and accepts forward slashes on all platforms.
 /// Windows backslashes produce invalid JSONC escape sequences (e.g. `\U`, `\t`) that
@@ -493,6 +586,26 @@ fn remove_projected_path(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
+#[cfg(windows)]
+fn remove_existing_projection_path(path: &std::path::Path) -> Result<(), String> {
+    remove_projected_path(path)
+}
+
+#[cfg(not(windows))]
+fn remove_existing_projection_path(path: &std::path::Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    if metadata.file_type().is_symlink() || metadata.is_dir() {
+        std::fs::remove_dir(path).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
+
 const CODEX_LEGACY_GLOBAL_HARDLINK_GROUPS: &[(&str, &[&str], bool)] = &[
     ("history.jsonl", &[], true),
     ("session_index.jsonl", &[], true),
@@ -769,6 +882,24 @@ pub(crate) fn copy_dir_all(
     Ok(())
 }
 
+fn copy_dir_all_following_links(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = dst.as_ref().join(entry.file_name());
+        if source.is_dir() {
+            copy_dir_all_following_links(&source, &target)?;
+        } else if source.is_file() {
+            std::fs::copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn project_file(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
     if target.exists() {
         let _ = std::fs::remove_file(target);
@@ -873,7 +1004,8 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 mod tests {
     use super::{
         build_opencode_runtime_config, create_directory_link, ensure_claude_permission_hook,
-        habitat_root_for_session, projected_link_matches_target, provider_uses_projected_workspace,
+        habitat_root_for_session, project_antigravity_include_directories,
+        projected_link_matches_target, provider_uses_projected_workspace,
         resolve_opencode_runtime_roots, sync_codex_agent_home, sync_opencode_config_dir,
     };
     use std::path::{Path, PathBuf};
@@ -1377,5 +1509,82 @@ mod tests {
         assert_eq!(roots, vec![common, class_dir, agent_dir]);
 
         let _ = std::fs::remove_dir_all(&wardian_home);
+    }
+
+    #[test]
+    fn antigravity_include_projection_exposes_hidden_wardian_roots_through_visible_paths() {
+        let root = unique_temp_dir("antigravity-include-projection");
+        let hidden = root.join(".wardian").join("classes").join("Builder");
+        std::fs::create_dir_all(hidden.join(".agents").join("skills").join("role-skill"))
+            .expect("create hidden skill");
+        std::fs::write(hidden.join("AGENTS.md"), "role instructions").expect("write agents");
+
+        let projected = project_antigravity_include_directories(
+            "session-123",
+            vec![hidden.to_string_lossy().to_string()],
+        );
+
+        assert_eq!(projected.len(), 1);
+        let projected_path = PathBuf::from(&projected[0]);
+        assert!(!projected_path
+            .components()
+            .any(|component| component.as_os_str().to_string_lossy() == ".wardian"));
+        assert!(projected_path.join("AGENTS.md").exists());
+        assert!(projected_path
+            .join(".agents")
+            .join("skills")
+            .join("role-skill")
+            .exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        if let Some(parent) = projected_path.parent().and_then(|path| path.parent()) {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn antigravity_include_projection_materializes_linked_skills() {
+        let root = unique_temp_dir("antigravity-linked-skills");
+        let hidden = root.join(".wardian");
+        let source = hidden.join("common");
+        let library_skill = hidden
+            .join("library")
+            .join("skills")
+            .join("wardian-skills")
+            .join("wardian-cli");
+        let deployed_skill = source.join(".agents").join("skills").join("wardian-cli");
+
+        std::fs::create_dir_all(&library_skill).expect("create library skill");
+        std::fs::write(library_skill.join("SKILL.md"), "wardian cli instructions")
+            .expect("write library skill");
+        std::fs::create_dir_all(deployed_skill.parent().expect("skill parent"))
+            .expect("create deployed skills parent");
+        create_directory_link(&library_skill, &deployed_skill).expect("link deployed skill");
+
+        let projected = project_antigravity_include_directories(
+            "session-linked-skills",
+            vec![source.to_string_lossy().to_string()],
+        );
+
+        assert_eq!(projected.len(), 1);
+        let projected_path = PathBuf::from(&projected[0]);
+        let projected_skill = projected_path
+            .join(".agents")
+            .join("skills")
+            .join("wardian-cli");
+        assert_eq!(
+            std::fs::read_to_string(projected_skill.join("SKILL.md"))
+                .expect("read projected skill"),
+            "wardian cli instructions"
+        );
+        assert!(
+            std::fs::read_link(&projected_skill).is_err(),
+            "projected skill must be a materialized directory, not a link back into hidden storage"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        if let Some(parent) = projected_path.parent().and_then(|path| path.parent()) {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }

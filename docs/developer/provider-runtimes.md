@@ -1,6 +1,6 @@
 # Provider Runtime Notes
 
-This document captures the practical runtime differences between Wardian's supported CLI providers: Gemini, Claude, Codex, and OpenCode. It is intended for maintainers working on spawn, resume, workflow execution, skill projection, and status/approval handling.
+This document captures the practical runtime differences between Wardian's supported CLI providers: Gemini, Antigravity, Claude, Codex, and OpenCode. It is intended for maintainers working on spawn, resume, workflow execution, skill projection, and status/approval handling.
 
 ## Shared Wardian Invariants
 
@@ -19,6 +19,7 @@ This document captures the practical runtime differences between Wardian's suppo
 | Provider | Working root | Instruction file | Skill model | Session identity |
 | --- | --- | --- | --- | --- |
 | Gemini | Real target workspace | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
+| Antigravity | Real target workspace | `AGENTS.md` | `--add-dir` roots expose Wardian context | Discovered from conversation cache and transcript path |
 | Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
 | Codex | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
 | OpenCode | Real target workspace | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
@@ -45,6 +46,34 @@ Gemini runs directly in the real target workspace. Wardian does not project a ha
 
 - Gemini is the least habitat-dependent provider.
 - Regressions here are usually about CLI patch drift, include-directory handling, or event parsing, not workspace projection.
+
+## Antigravity
+
+### Working-root model
+
+Antigravity runs directly in the real target workspace. Wardian does not use a projected workspace for Antigravity.
+
+### Instruction and context discovery
+
+- Antigravity reads `AGENTS.md`.
+- Wardian passes common, class, and agent include roots as repeated `--add-dir <absolute-path>` flags.
+- The provider adapter intentionally stays separate from Gemini even though Antigravity stores runtime files under `~/.gemini/antigravity-cli`.
+- Hidden Wardian roots are projected through visible temp paths before they are passed to `agy`. If a projected root contains `.agents/skills`, Wardian materializes that root and follows deployed skill links so Antigravity sees real skill directories instead of junctions or symlinks back into hidden storage.
+- `deploy_skill` and `remove_deployed_skill` refresh live Antigravity projections after the canonical Wardian skill tree changes. The library skill watcher also refreshes projections after skill-file changes while it is active. Agent restart remains the full rebuild path for projections.
+
+### Session and telemetry behavior
+
+- Visible launches use `agy --prompt-interactive`.
+- Headless launches use `agy --print <prompt>`.
+- Resume launches pass `--conversation <conversation-id>`.
+- Antigravity may write the useful assistant response only to `brain/<conversation-id>/.system_generated/logs/transcript.jsonl`.
+- Wardian discovers the active conversation from `cache/last_conversations.json` or the newest `brain/<conversation-id>` directory, stores that ID as `resume_session`, and parses completed `MODEL` `PLANNER_RESPONSE` transcript records for status and `wardian agent watch` transcript text.
+
+### Practical implications
+
+- Do not use Gemini's `--include-directories`, `--session-id`, or stream output assumptions for Antigravity.
+- Empty stdout from `agy --print` can still be a successful run if the transcript contains the answer.
+- Auth or account polling warnings in Antigravity logs can be non-fatal; verify transcript output before declaring the run blocked.
 
 ## Claude
 

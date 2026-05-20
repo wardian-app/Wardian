@@ -131,6 +131,18 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                       </label>
                     </>
                   )}
+                  {provider === 'antigravity' && providerConfig.type === 'antigravity' && (
+                    <>
+                      <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                          <input type="checkbox" checked={providerConfig.sandbox || false} onChange={e => updateProviderConfigField("sandbox", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                          Sandbox
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-muted-neutral">
+                          <input type="checkbox" checked={providerConfig.dangerously_skip_permissions || false} onChange={e => updateProviderConfigField("dangerously_skip_permissions", e.target.checked)} className="accent-[var(--color-wardian-accent)]" />
+                          Skip Permissions
+                      </label>
+                    </>
+                  )}
               </div>
 
               <div>
@@ -336,6 +348,24 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                     </label>
                   </div>
                 </>
+              )}
+
+              {provider === 'antigravity' && providerConfig.type === 'antigravity' && (
+                <div>
+                    <label
+                      htmlFor="antigravity-print-timeout"
+                      className="block text-[10px] font-bold text-muted-neutral mb-1"
+                    >
+                      Print Timeout
+                    </label>
+                    <input
+                    id="antigravity-print-timeout"
+                    className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                    placeholder="e.g. 120s"
+                    value={providerConfig.print_timeout || ""}
+                    onChange={(e) => updateProviderConfigField("print_timeout", e.target.value || undefined)}
+                    />
+                </div>
               )}
 
               {provider === 'opencode' && providerConfig.type === 'opencode' && (

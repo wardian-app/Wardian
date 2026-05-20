@@ -71,4 +71,24 @@ describe('default provider settings', () => {
     });
     expect(useSettingsStore.getState().default_provider).toBe('gemini');
   });
+
+  it('accepts antigravity as a saved default provider', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      shell_id: 'auto',
+      custom_executable: null,
+      custom_args: null,
+      agent_session_persistence: 'resume',
+      default_provider: 'antigravity',
+    });
+
+    useSettingsStore.getState().setDefaultProvider('antigravity');
+    await useSettingsStore.getState().saveShellSettings();
+
+    expect(mockedInvoke).toHaveBeenCalledWith('save_shell_settings', {
+      settings: expect.objectContaining({
+        default_provider: 'antigravity',
+      }),
+    });
+    expect(useSettingsStore.getState().default_provider).toBe('antigravity');
+  });
 });

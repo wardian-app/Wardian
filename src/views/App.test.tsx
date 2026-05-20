@@ -78,6 +78,7 @@ const allProvidersReady: ProviderReadiness[] = [
   { provider: "claude", display_name: "Claude", available: true, executable: "claude", reason: null },
   { provider: "codex", display_name: "Codex", available: true, executable: "codex", reason: null },
   { provider: "gemini", display_name: "Gemini", available: true, executable: "gemini", reason: null },
+  { provider: "antigravity", display_name: "Antigravity", available: true, executable: "agy", reason: null },
   { provider: "opencode", display_name: "OpenCode", available: true, executable: "opencode", reason: null },
 ];
 

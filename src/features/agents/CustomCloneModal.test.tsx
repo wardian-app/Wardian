@@ -22,6 +22,7 @@ const allProvidersReady: ProviderReadiness[] = [
   readiness("claude", true),
   readiness("codex", true),
   readiness("gemini", true),
+  readiness("antigravity", true),
   readiness("opencode", true),
 ];
 

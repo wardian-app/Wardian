@@ -7,7 +7,14 @@ use wardian_core::models::AgentSessionPersistence;
 const SHELL_SETTINGS_FILE: &str = "settings/shell.json";
 const CODEX_SANDBOX_MODES: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
 const CODEX_APPROVAL_POLICIES: &[&str] = &["untrusted", "on-failure", "on-request", "never"];
-const DEFAULT_PROVIDER_VALUES: &[&str] = &["auto", "claude", "codex", "gemini", "opencode"];
+const DEFAULT_PROVIDER_VALUES: &[&str] = &[
+    "auto",
+    "claude",
+    "codex",
+    "gemini",
+    "antigravity",
+    "opencode",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellOption {

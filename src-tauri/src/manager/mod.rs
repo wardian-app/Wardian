@@ -459,6 +459,10 @@ pub(crate) fn interactive_provider_args(
             };
             provider_args.push(target_dir.to_string_lossy().replace('\\', "/"));
         }
+        "antigravity" => {
+            provider_args.push("--prompt-interactive".to_string());
+            provider_args.push(String::new());
+        }
         _ => {}
     }
 
@@ -570,6 +574,21 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn antigravity_interactive_launch_supplies_empty_prompt_value() {
+        let args = interactive_provider_args(
+            "antigravity",
+            Path::new("/workspace"),
+            Path::new("/workspace"),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            args,
+            vec!["--prompt-interactive".to_string(), String::new()]
+        );
+    }
 
     #[cfg(windows)]
     #[test]

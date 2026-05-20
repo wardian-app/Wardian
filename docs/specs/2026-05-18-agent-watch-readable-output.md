@@ -96,7 +96,7 @@ wardian agent watch CoderOne --include raw_output --raw
 
 ## Provider Coverage
 
-This slice extracts transcript messages for Codex, Claude, Gemini, OpenCode, and the mock provider. Gemini backfills completed assistant text from Gemini chat logs; OpenCode also backfills assistant text from the provider session database when the live TUI/log stream does not provide a clean structured transcript line. Ambiguous structured lines fall back to sanitized terminal `output`. `--until output:<token>` checks transcript text, sanitized output, and the internal raw PTY fallback so marker-based automation continues to work without exposing raw PTY text by default.
+This slice extracts transcript messages for Codex, Claude, Gemini, Antigravity, OpenCode, and the mock provider. Gemini backfills completed assistant text from Gemini chat logs; Antigravity backfills completed assistant text from its conversation transcript; OpenCode also backfills assistant text from the provider session database when the live TUI/log stream does not provide a clean structured transcript line. Ambiguous structured lines fall back to sanitized terminal `output`. `--until output:<token>` checks transcript text, sanitized output, and the internal raw PTY fallback so marker-based automation continues to work without exposing raw PTY text by default.
 
 ## Compatibility
 

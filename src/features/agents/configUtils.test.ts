@@ -94,6 +94,7 @@ describe("provider config utilities", () => {
         expect(defaultProviderConfig("claude")).toEqual({ type: "claude" });
         expect(defaultProviderConfig("gemini")).toEqual({ type: "gemini" });
         expect(defaultProviderConfig("codex")).toEqual({ type: "codex" });
+        expect(defaultProviderConfig("antigravity")).toEqual({ type: "antigravity" });
         expect(defaultProviderConfig("opencode")).toEqual({ type: "opencode" });
         expect(defaultProviderConfig("mock")).toEqual({ type: "mock" });
     });
@@ -137,6 +138,16 @@ describe("provider config utilities", () => {
         });
 
         expect(normalized.provider_config).toEqual({ type: "gemini" });
+    });
+
+    it("normalizes Antigravity to its independent nested provider config", () => {
+        const normalized = normalizeAgentConfig({
+            ...baseConfig,
+            provider: "antigravity",
+            provider_config: { type: "gemini", sandbox: true },
+        });
+
+        expect(normalized.provider_config).toEqual({ type: "antigravity" });
     });
 
     it("preserves unknown provider config from backend state", () => {

@@ -1,3 +1,4 @@
+use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::utils::fs::*;
@@ -103,6 +104,28 @@ pub(crate) fn headless_provider_args(
             provider_args
                 .push(crate::utils::terminal_input::normalize_prompt_for_terminal_submit(prompt));
         }
+        "antigravity" => {
+            if let Some(config) = config_override {
+                let mut config = config.clone();
+                config.resume_session = resume_session.map(str::to_string);
+                provider_args.extend(provider.get_spawn_args(&config, resume_session.is_some()));
+                let antigravity = config.antigravity_config();
+                if let Some(timeout) = antigravity
+                    .print_timeout
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    provider_args.push("--print-timeout".to_string());
+                    provider_args.push(timeout.to_string());
+                }
+            } else if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
+                provider_args.push("--conversation".to_string());
+                provider_args.push(resume_id.to_string());
+            }
+            provider_args.push("--print".to_string());
+            provider_args.push(prompt.to_string());
+        }
         _ => {
             provider_args.push("-p".to_string());
             provider_args.push(prompt.to_string());
@@ -162,7 +185,7 @@ pub async fn run_headless_with_options(
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
     let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(wardian_session_id))?;
     let provider_cwd = cwd.to_path_buf();
-    let persisted_opencode_config = if provider_name == "opencode" {
+    let persisted_provider_config = if matches!(provider_name, "opencode" | "antigravity") {
         config_override
             .cloned()
             .or_else(|| persisted_agent_config(wardian_session_id))
@@ -183,7 +206,7 @@ pub async fn run_headless_with_options(
         prompt,
         output_format,
         resume_session,
-        persisted_opencode_config.as_ref(),
+        persisted_provider_config.as_ref(),
     );
     if let Some(hook) = claude_hook.as_ref() {
         if provider_name == "claude" {
@@ -206,7 +229,7 @@ pub async fn run_headless_with_options(
     } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
     } else if provider_name == "opencode" {
-        let class_name = persisted_opencode_config
+        let class_name = persisted_provider_config
             .as_ref()
             .map(|config| config.agent_class.as_str())
             .unwrap_or("");
@@ -219,10 +242,12 @@ pub async fn run_headless_with_options(
             &provider_cwd,
             class_name,
             opencode_scope_session,
-            persisted_opencode_config.as_ref(),
+            persisted_provider_config.as_ref(),
         )? {
             cmd.env(key, value);
         }
+        cmd.stdin(std::process::Stdio::null());
+    } else if provider_name == "antigravity" {
         cmd.stdin(std::process::Stdio::null());
     } else if provider_name == "mock" {
         if let Ok(scenario) = std::env::var("WARDIAN_MOCK_SCENARIO") {
@@ -368,6 +393,38 @@ pub async fn run_headless_with_options(
         } else {
             Ok(serde_json::json!({ "text": summary.last_text.unwrap_or(output) }))
         }
+    } else if provider_name == "antigravity" {
+        let conversation_id = resume_session
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                AntigravityProvider::antigravity_home()
+                    .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd))
+            })
+            .or_else(|| {
+                AntigravityProvider::antigravity_home()
+                    .and_then(|home| AntigravityProvider::latest_conversation_id(&home))
+            });
+        let summary = conversation_id.as_deref().and_then(|conversation_id| {
+            AntigravityProvider::antigravity_home().and_then(|home| {
+                AntigravityProvider::summarize_conversation(&home, conversation_id).ok()
+            })
+        });
+        let response = summary
+            .as_ref()
+            .and_then(|summary| summary.last_text.clone())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| output.clone());
+
+        if output_format == "json" {
+            Ok(serde_json::json!({
+                "session_id": conversation_id.unwrap_or_else(|| wardian_session_id.to_string()),
+                "response": response,
+                "raw": output,
+            }))
+        } else {
+            Ok(serde_json::json!({ "text": response }))
+        }
     } else if output_format == "json" {
         serde_json::from_str(&output)
             .map_err(|e| format!("Failed to parse JSON output: {}. Raw: {}", e, output))
@@ -440,6 +497,12 @@ pub async fn obtain_session_id(
         provider_args.push("json".to_string());
         provider_args.push("--dir".to_string());
         provider_args.push(cwd.to_string_lossy().to_string());
+        provider_args.push(session_bootstrap_prompt().to_string());
+    } else if provider_name == "antigravity" {
+        if let Some(config) = config {
+            provider_args.extend(provider.get_spawn_args(config, false));
+        }
+        provider_args.push("--print".to_string());
         provider_args.push(session_bootstrap_prompt().to_string());
     } else if provider_name == "claude" {
         // --print mode does not accept --input-format stream-json; strip it.
@@ -728,6 +791,43 @@ mod tests {
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"build".to_string()));
         assert!(!args.contains(&"--session".to_string()));
+    }
+
+    #[test]
+    fn antigravity_headless_args_use_print_and_conversation_resume() {
+        let provider = crate::providers::ProviderFactory::resolve("antigravity").unwrap();
+        let config = AgentConfig {
+            provider: "antigravity".into(),
+            provider_config: wardian_core::models::ProviderConfig::Antigravity(
+                wardian_core::models::AntigravityProviderConfig {
+                    print_timeout: Some("90s".into()),
+                    sandbox: Some(true),
+                    dangerously_skip_permissions: Some(true),
+                },
+            ),
+            ..Default::default()
+        };
+
+        let args = headless_provider_args(
+            "antigravity",
+            provider.as_ref(),
+            Path::new("/workspace"),
+            "task",
+            "json",
+            Some("conversation-123"),
+            Some(&config),
+        );
+
+        assert!(args.contains(&"--print".to_string()));
+        assert!(args.contains(&"task".to_string()));
+        assert!(args.contains(&"--print-timeout".to_string()));
+        assert!(args.contains(&"90s".to_string()));
+        assert!(args.contains(&"--conversation".to_string()));
+        assert!(args.contains(&"conversation-123".to_string()));
+        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!args.contains(&"--output-format".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
     }
 
     #[test]

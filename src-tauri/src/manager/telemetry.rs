@@ -18,6 +18,7 @@ use super::opencode::{
     opencode_log_dirs, opencode_log_path_after, opencode_log_path_in, opencode_session_diff_path,
     opencode_should_fallback_to_idle,
 };
+use crate::providers::antigravity::AntigravityProvider;
 
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -430,6 +431,81 @@ fn record_latest_gemini_assistant_text(snap: &AgentSnapshot, content: &str) {
     }
 }
 
+fn latest_antigravity_assistant_message(
+    content: &str,
+) -> Option<wardian_core::control::WatchTranscriptMessage> {
+    content
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .find_map(|line| extract_transcript_message("antigravity", line))
+}
+
+fn record_latest_antigravity_assistant_text(snap: &AgentSnapshot, content: &str) {
+    let Some(message) = latest_antigravity_assistant_message(content) else {
+        return;
+    };
+
+    if let Ok(mut watch_state) = snap.watch_state.lock() {
+        let latest = watch_state
+            .snapshot_since(None, Some(4096))
+            .ok()
+            .and_then(|snapshot| snapshot.transcript.messages.last().cloned());
+        if latest.as_ref().is_some_and(|latest| {
+            latest.provider == message.provider
+                && latest.turn_id == message.turn_id
+                && latest.text == message.text
+        }) {
+            return;
+        }
+        watch_state.push_transcript(message);
+    }
+
+    if let Ok(mut stamp) = snap.last_output_at.lock() {
+        *stamp = Some(std::time::SystemTime::now());
+    }
+}
+
+fn parse_antigravity_log_metrics(content: &str) -> (usize, Option<String>, Option<&'static str>) {
+    let mut query_count = 0;
+    let mut init_timestamp = None;
+    let mut status = None;
+
+    for line in content.lines() {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if init_timestamp.is_none() {
+            init_timestamp = parsed
+                .get("created_at")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+        }
+        match (
+            parsed.get("source").and_then(|value| value.as_str()),
+            parsed.get("type").and_then(|value| value.as_str()),
+            parsed.get("status").and_then(|value| value.as_str()),
+        ) {
+            (Some("USER_EXPLICIT"), Some("USER_INPUT"), _) => {
+                query_count += 1;
+                status = Some("Processing...");
+            }
+            (Some("MODEL"), Some("PLANNER_RESPONSE"), Some("DONE")) => {
+                status = Some("Idle");
+            }
+            (Some("MODEL"), Some("PLANNER_RESPONSE"), _) => {
+                status = Some("Processing...");
+            }
+            _ => {}
+        }
+    }
+
+    (query_count, init_timestamp, status)
+}
+
 fn timestamp_to_system_time(timestamp: Option<&str>) -> Option<std::time::SystemTime> {
     let timestamp = timestamp?;
     let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
@@ -643,6 +719,30 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     }
                     *log_path_lock = discovered_log
                         .or_else(|| Some(opencode_session_diff_path(opencode_session_id)));
+                } else if snap.provider == "antigravity" {
+                    let conversation_id = snap
+                        .resume_session
+                        .as_ref()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| {
+                            AntigravityProvider::antigravity_home().and_then(|home| {
+                                AntigravityProvider::conversation_for_workspace(
+                                    &home,
+                                    std::path::Path::new(&snap.folder),
+                                )
+                                .or_else(|| AntigravityProvider::latest_conversation_id(&home))
+                            })
+                        });
+                    if let (Some(home), Some(conversation_id)) =
+                        (AntigravityProvider::antigravity_home(), conversation_id)
+                    {
+                        let candidate =
+                            AntigravityProvider::transcript_path(&home, &conversation_id);
+                        if candidate.exists() {
+                            *log_path_lock = Some(candidate);
+                        }
+                    }
                 } else if snap.provider == "claude" && snap.resume_session.is_some() {
                     // For Claude, if we have a resume_session (Conversation ID), always re-verify
                     // the path so it updates immediately after a Clear rotation.
@@ -868,6 +968,22 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                         is_initial_log_replay,
                                     );
                                 }
+                                "antigravity" => {
+                                    let (queries, start_time, status) =
+                                        parse_antigravity_log_metrics(&content);
+                                    q_count = queries;
+                                    if let Some(status) = status {
+                                        set_snapshot_status_from_log(
+                                            snap,
+                                            status,
+                                            is_initial_log_replay,
+                                        );
+                                    }
+                                    if start_time.is_some() {
+                                        i_ts = start_time;
+                                    }
+                                    record_latest_antigravity_assistant_text(snap, &content);
+                                }
                                 _ => {
                                     if let Some(metrics) = parse_gemini_log_metrics(&content) {
                                         q_count = metrics.query_count;
@@ -905,7 +1021,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 ));
             }
 
-            if (snap.provider == "opencode" || snap.provider == "claude")
+            if (snap.provider == "opencode"
+                || snap.provider == "claude"
+                || snap.provider == "antigravity")
                 && (snap.process_id.is_none() || process_alive == Some(true))
             {
                 let current_status = snap.current_status.lock().unwrap().clone();
