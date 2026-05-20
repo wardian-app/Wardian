@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-05-16
-- **Issue:** [#273](https://github.com/tangemicioglu/Wardian/issues/273)
+- **Issue:** [#273](https://github.com/wardian-app/Wardian/issues/273)
 - **Decider:** Wardian Codex
 
 ## Decision

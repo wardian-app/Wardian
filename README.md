@@ -6,11 +6,11 @@
 
 **Local command center for multi-agent CLI workflows** — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian.
 
-[![CI](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/tangemicioglu/Wardian/actions/workflows/ci.yml)
-[![Frontend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=frontend&label=frontend%20coverage)](https://codecov.io/gh/tangemicioglu/Wardian)
-[![Backend Coverage](https://codecov.io/gh/tangemicioglu/Wardian/branch/main/graph/badge.svg?flag=backend&label=backend%20coverage)](https://codecov.io/gh/tangemicioglu/Wardian)
-[![Release](https://img.shields.io/github/v/release/tangemicioglu/Wardian?label=release)](https://github.com/tangemicioglu/Wardian/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/tangemicioglu/Wardian/total?label=downloads)](https://github.com/tangemicioglu/Wardian/releases)
+[![CI](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
+[![Frontend Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg?flag=frontend&label=frontend%20coverage)](https://codecov.io/gh/wardian-app/Wardian)
+[![Backend Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg?flag=backend&label=backend%20coverage)](https://codecov.io/gh/wardian-app/Wardian)
+[![Release](https://img.shields.io/github/v/release/wardian-app/Wardian?label=release)](https://github.com/wardian-app/Wardian/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/wardian-app/Wardian/total?label=downloads)](https://github.com/wardian-app/Wardian/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555)
 
 [![Wardian Demo](public/demo.gif)](public/demo.gif)
@@ -19,7 +19,7 @@
 
 ---
 
-> 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/tangemicioglu/Wardian/issues) when something breaks.
+> 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/wardian-app/Wardian/issues) when something breaks.
 
 Wardian is an **Integrated Agent Environment** — a local, app-first governance layer for AI orchestration. It centralizes PTY management, live telemetry, completion queues, workflow execution, and shared context into a unified desktop Command Center for developers managing many long-running agent sessions across multiple projects. The bundled `wardian` CLI gives agents a textual control surface for discovering their own identity, coordinating peers, and controlling Wardian without driving the graphical app.
 
@@ -27,7 +27,7 @@ Wardian is an **Integrated Agent Environment** — a local, app-first governance
 
 ## Download
 
-Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are available from the [Releases page](https://github.com/tangemicioglu/Wardian/releases).
+Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are available from the [Releases page](https://github.com/wardian-app/Wardian/releases).
 
 Choose the asset for your operating system and CPU:
 
@@ -44,7 +44,7 @@ Choose the asset for your operating system and CPU:
 > **Note:** Wardian binaries are currently unsigned. On first launch:
 > - **Windows:** SmartScreen will show a warning. Click "More info" → "Run anyway."
 > - **macOS:** Gatekeeper will refuse to open the app. Right-click the app and choose "Open," or run `xattr -cr /Applications/Wardian.app` from Terminal.
-> - **Linux:** `.AppImage` is portable (`chmod +x` and run); `.deb` installs via `sudo dpkg -i wardian_*.deb`.
+> - **Linux:** `.AppImage` is portable (`chmod +x` and run); `.deb` installs via `sudo apt install ./Wardian_*.deb`.
 
 ---
 
@@ -75,7 +75,7 @@ That guide covers download, launch, provider CLI setup, authentication, the firs
 For local development, clone the repository and run the dev app:
 
 ```bash
-git clone https://github.com/tangemicioglu/Wardian.git
+git clone https://github.com/wardian-app/Wardian.git
 cd Wardian
 npm install
 npm run dev
@@ -220,7 +220,7 @@ Wardian is built with a focus on modularity, thread safety, and separation of co
 3. **Agent CLIs**: Install at least one supported provider CLI before spawning agents: [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`@google/gemini-cli`), [Claude Code](https://github.com/anthropics/claude-code) (`@anthropic-ai/claude-code`), [Codex](https://github.com/openai/codex) (`@openai/codex`), or [OpenCode](https://github.com/anomalyco/opencode) (`opencode` command, commonly installed from `opencode-ai`). Ensure each provider is authenticated successfully in your terminal first.
 4. **Clone & Install**:
    ```bash
-   git clone https://github.com/tangemicioglu/Wardian.git
+   git clone https://github.com/wardian-app/Wardian.git
    cd Wardian
    npm install
    ```

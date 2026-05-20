@@ -38,7 +38,7 @@ If the private key or password is lost, existing updater-enabled installs cannot
 The first implementation uses only the stable channel:
 
 ```text
-https://github.com/tangemicioglu/Wardian/releases/latest/download/latest.json
+https://github.com/wardian-app/Wardian/releases/latest/download/latest.json
 ```
 
 Stable builds must not consume prerelease metadata. Hyphenated version tags such as preview, alpha, beta, rc, or nightly are treated as prereleases and must not publish stable updater metadata. Preview, beta, nightly, staged rollout, or rollback behavior should use a separate channel manifest or a dynamic update endpoint rather than overloading GitHub's stable latest release.
@@ -54,6 +54,13 @@ The release workflow builds platform installers, signs update artifacts, uploads
 Local `npm run tauri build` creates an installable bundle without updater artifacts, so it does not require `TAURI_SIGNING_PRIVATE_KEY`. Release builds opt into updater artifact generation by passing `--config src-tauri/tauri.updater.conf.json` to Tauri. That overlay sets `bundle.createUpdaterArtifacts` to `true` only inside release infrastructure.
 
 Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=stable` before invoking `tauri-apps/tauri-action`. Prerelease builds intentionally omit the marker and do not upload stable updater metadata. Do not set that marker for ordinary local builds unless you are deliberately producing an official stable release artifact.
+
+After a stable release is published, generate winget, Homebrew, and Linux
+direct-install metadata from the published release assets. See
+[Package Manager Distribution](./package-manager-distribution.md) for the
+post-release package-manager workflow. Package-manager metadata must consume the
+published release asset URLs and SHA-256 digests; it must not depend on release
+titles.
 
 `latest.json` must contain all stable platform keys:
 

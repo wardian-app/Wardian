@@ -6,8 +6,8 @@ authors = ["Tan Gemicioglu"]
 edition = "2021"
 build = "build.rs"
 license = "MIT"
-repository = "https://github.com/tangemicioglu/Wardian"
-homepage = "https://github.com/tangemicioglu/Wardian"
+repository = "https://github.com/wardian-app/Wardian"
+homepage = "https://wardian.org"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

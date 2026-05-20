@@ -4,7 +4,7 @@ We would love to accept your patches and contributions! Wardian is a community-d
 
 ## 🚀 Getting Started
 
-1.  **Find an Issue**: Browse our [GitHub Issues](https://github.com/tangemicioglu/Wardian/issues). We use labels like `help-wanted` and `complexity-low` for new contributors.
+1.  **Find an Issue**: Browse our [GitHub Issues](https://github.com/wardian-app/Wardian/issues). We use labels like `help-wanted` and `complexity-low` for new contributors.
 2.  **Fork & Branch**: Fork the repository and create a new branch for your feature or bug fix.
     ```bash
     git checkout -b feat/your-feature-name

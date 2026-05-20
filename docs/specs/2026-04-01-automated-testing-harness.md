@@ -7,7 +7,7 @@
 ## Context and Problem Statement
 Wardian still depends heavily on manual verification for agent orchestration, workflow execution, PTY behavior, and provider-specific runtime behavior. That is slow, expensive, and risky because the current runtime shares the user's real `~/.wardian` state, real providers, and real agent sessions.
 
-Issue [#95](https://github.com/tangemicioglu/Wardian/issues/95) is not just about CI coverage. The more important requirement is that live agents must be able to verify their own changes during execution without interfering with production agents or hallucinating success.
+Issue [#95](https://github.com/wardian-app/Wardian/issues/95) is not just about CI coverage. The more important requirement is that live agents must be able to verify their own changes during execution without interfering with production agents or hallucinating success.
 
 The testing problem has three separate layers that must not be conflated:
 
