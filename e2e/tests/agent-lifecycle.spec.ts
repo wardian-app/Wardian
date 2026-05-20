@@ -70,7 +70,7 @@ async function installCustomCloneIpcMock(page: Page) {
             { provider: "claude", display_name: "Claude", available: true, executable: "C:/tools/claude.cmd", reason: null },
             { provider: "codex", display_name: "Codex", available: true, executable: "C:/tools/codex.cmd", reason: null },
             { provider: "gemini", display_name: "Gemini", available: true, executable: "C:/tools/gemini.cmd", reason: null },
-            { provider: "antigravity", display_name: "antigravity", available: true, executable: "C:/tools/agy.exe", reason: null },
+            { provider: "antigravity", display_name: "Antigravity", available: true, executable: "C:/tools/agy.exe", reason: null },
             { provider: "opencode", display_name: "OpenCode", available: true, executable: "C:/tools/opencode.cmd", reason: null },
           ];
         }
@@ -165,7 +165,7 @@ test.describe("Agent Spawn Form", () => {
     await expect(select).toBeVisible();
     const options = await select.locator("option").allTextContents();
     expect(options).toContain("Claude");
-    expect(options).toContain("antigravity");
+    expect(options).toContain("Antigravity");
     expect(options.length).toBeGreaterThanOrEqual(3);
   });
 

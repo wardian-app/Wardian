@@ -49,7 +49,7 @@ Antigravity reads `AGENTS.md`. Wardian passes common, class, and agent include r
 
 ### Session and Status Handling
 
-Wardian launches visible Antigravity agents with `agy --prompt-interactive`. Headless workflow runs use `agy --print` and, when resuming, `--conversation <conversation-id>`. Provider options include `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout <duration>`.
+Wardian launches visible Antigravity agents with `agy --prompt-interactive ""` so the CLI starts in interactive mode without an initial task. Headless workflow runs use `agy --print` and, when resuming, `--conversation <conversation-id>`. Provider options include `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout <duration>`.
 
 Antigravity stores runtime state under `~/.gemini/antigravity-cli`. Wardian discovers the conversation ID from the provider cache and reads `brain/<conversation-id>/.system_generated/logs/transcript.jsonl` for status and assistant transcript text. `wardian agent watch` uses completed `MODEL` `PLANNER_RESPONSE` transcript records as provider-adapted assistant output.
 

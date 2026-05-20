@@ -431,7 +431,7 @@ describe('SettingsPanel', () => {
     expect(within(select).getByRole('option', { name: 'Claude' })).toBeInTheDocument();
     expect(within(select).getByRole('option', { name: 'Codex' })).toBeInTheDocument();
     expect(within(select).getByRole('option', { name: 'Gemini' })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: 'antigravity' })).toBeInTheDocument();
+    expect(within(select).getByRole('option', { name: 'Antigravity' })).toBeInTheDocument();
     expect(within(select).getByRole('option', { name: 'OpenCode' })).toBeInTheDocument();
 
     fireEvent.change(select, { target: { value: 'gemini' } });

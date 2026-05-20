@@ -1,7 +1,7 @@
 /**
  * Mock agent fixture for browser E2E tests.
  *
- * CURRENT LIMITATION: The spawn form only exposes Claude/Codex/Gemini/OpenCode
+ * CURRENT LIMITATION: The spawn form only exposes Claude/Codex/Gemini/Antigravity/OpenCode
  * as provider options. The mock provider is not selectable via UI, so tests
  * that require an actively-running mock agent are @native-only.
  *

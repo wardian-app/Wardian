@@ -32,7 +32,7 @@ const USER_FACING_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
     },
     ProviderDescriptor {
         id: "antigravity",
-        display_name: "antigravity",
+        display_name: "Antigravity",
     },
     ProviderDescriptor {
         id: "opencode",
@@ -269,13 +269,13 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_descriptor_uses_lowercase_user_label() {
+    fn antigravity_descriptor_uses_capitalized_user_label() {
         let descriptor = user_facing_provider_descriptors()
             .iter()
             .find(|provider| provider.id == "antigravity")
             .expect("antigravity descriptor");
 
-        assert_eq!(descriptor.display_name, "antigravity");
+        assert_eq!(descriptor.display_name, "Antigravity");
     }
 
     #[test]

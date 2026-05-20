@@ -22,7 +22,7 @@ Antigravity's useful headless output can be written to provider state instead of
 
 ## Decision
 
-Add `antigravity` as a first-class provider id and UI label. The adapter is separate from Gemini and uses `AGENTS.md` for Wardian role context.
+Add `antigravity` as the first-class provider id and `Antigravity` as the user-facing label. The adapter is separate from Gemini and uses `AGENTS.md` for Wardian role context.
 
 Visible agents launch with:
 

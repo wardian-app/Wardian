@@ -19,7 +19,7 @@ export function providerDisplayName(provider: UserFacingProviderName): string {
     case "gemini":
       return "Gemini";
     case "antigravity":
-      return "antigravity";
+      return "Antigravity";
     case "opencode":
       return "OpenCode";
   }
