@@ -195,7 +195,7 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           releaseDraft: true
-          uploadUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
+          includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -212,7 +212,7 @@ jobs:
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
           tagName: ${{ inputs.release_tag }}
           releaseDraft: true
-          uploadUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}
+          includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 

@@ -27,6 +27,10 @@ Configure GitHub Actions secrets:
 - `TAURI_SIGNING_PRIVATE_KEY`: the private key content, or use `TAURI_SIGNING_PRIVATE_KEY_PATH` in a controlled runner environment.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional, only when the private key was generated with a password.
 
+For this repository's GitHub Actions workflow, store the private key file content in `TAURI_SIGNING_PRIVATE_KEY`. Do not store the public `.pub` file, the committed `plugins.updater.pubkey`, or a local filesystem path. The generated private key file is base64 text; when decoded it starts with `untrusted comment:` and contains `secret key`.
+
+If GitHub Actions reports `Missing comment in secret key`, replace `TAURI_SIGNING_PRIVATE_KEY` with the contents of the generated private key file and confirm `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` matches the password used when generating it. If the key was generated with a Tauri CLI version between `2.9.3` and `2.10.0` and no password, regenerate it with the current repository CLI before using it for the first updater-capable release.
+
 If the private key or password is lost, existing updater-enabled installs cannot verify future update packages. Recovery requires a manual installer release with a new public key. If the key is compromised, revoke use of the old key, generate a new pair, publish a manual recovery installer, and document the incident in release notes.
 
 ## Stable Channel
