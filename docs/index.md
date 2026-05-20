@@ -49,6 +49,7 @@ This folder contains the public Wardian user guides, workflow references, and de
 - [Workflow Engine](./developer/workflow-engine.md)
 - [Visual Builder](./developer/visual-builder.md)
 - [Native E2E Harness](./developer/native-e2e.md)
+- [Package Manager Distribution](./developer/package-manager-distribution.md)
 - [Theming](./developer/theming.md)
 - [Screenshot Documentation](./developer/screenshot-documentation.md)
 

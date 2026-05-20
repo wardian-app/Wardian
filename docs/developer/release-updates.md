@@ -55,6 +55,13 @@ Local `npm run tauri build` creates an installable bundle without updater artifa
 
 Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=stable` before invoking `tauri-apps/tauri-action`. Prerelease builds intentionally omit the marker and do not upload stable updater metadata. Do not set that marker for ordinary local builds unless you are deliberately producing an official stable release artifact.
 
+After a stable release is published, generate winget, Homebrew, and Linux
+direct-install metadata from the published release assets. See
+[Package Manager Distribution](./package-manager-distribution.md) for the
+post-release package-manager workflow. Package-manager metadata must consume the
+published release asset URLs and SHA-256 digests; it must not depend on release
+titles.
+
 `latest.json` must contain all stable platform keys:
 
 - `windows-x86_64`

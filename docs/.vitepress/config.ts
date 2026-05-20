@@ -106,6 +106,7 @@ export default defineConfig({
             { text: "Provider Runtimes", link: "/developer/provider-runtimes" },
             { text: "PTY Lifecycle", link: "/developer/pty-lifecycle" },
             { text: "Native E2E", link: "/developer/native-e2e" },
+            { text: "Package Manager Distribution", link: "/developer/package-manager-distribution" },
             { text: "Docs Maintenance", link: "/developer/docs-maintenance" },
             { text: "Theming", link: "/developer/theming" },
             { text: "Screenshot Documentation", link: "/developer/screenshot-documentation" },

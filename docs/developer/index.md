@@ -28,6 +28,7 @@ Use this index when implementing or debugging Wardian internals.
 
 - [Developer Setup](./setup.md)
 - [Release Updates](./release-updates.md)
+- [Package Manager Distribution](./package-manager-distribution.md)
 - [Documentation Maintenance](./docs-maintenance.md)
 - [Public Docs Site](./docs-site.md)
 - [Native E2E Harness](./native-e2e.md)

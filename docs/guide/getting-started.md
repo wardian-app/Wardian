@@ -6,7 +6,7 @@ If any first-run step fails, use [First-Run Troubleshooting](./first-run-trouble
 
 ## 1. Download and Launch Wardian
 
-Download the latest installer or app bundle from the [Wardian releases page](https://github.com/tangemicioglu/Wardian/releases/latest), then launch Wardian from your operating system.
+Download the latest installer or app bundle from the [Wardian releases page](https://github.com/tangemicioglu/Wardian/releases/latest), then launch Wardian from your operating system. GitHub Releases are the canonical install source; package-manager listings may lag behind the newest stable release.
 
 Choose the asset for your operating system and CPU:
 

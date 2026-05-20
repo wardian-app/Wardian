@@ -21,6 +21,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "stage-cli": "node scripts/stage-cli.mjs",
+    "release:package-manifests": "node scripts/package-managers/generate-manifests.mjs",
     "lint": "tsc --noEmit",
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
     "docs:dev": "vitepress dev docs",

@@ -30,7 +30,7 @@ Wardian is fully supported on Linux.
 
 - **Implementation**: Standard Unix PTY via `portable-pty`.
 - **Status**: Stable. Core features verified on Linux. Distribution-specific shell environments are handled via the runtime shell selection feature.
-- **Packages**: `.AppImage` (portable, `chmod +x` and run) and `.deb` (install via `sudo dpkg -i wardian_*.deb`) are available from the Releases page.
+- **Packages**: `.AppImage` (portable, `chmod +x` and run) and `.deb` (install via `sudo apt install ./Wardian_*.deb`) are available from the Releases page. A Linux package-manager channel is tracked separately in [#324](https://github.com/tangemicioglu/Wardian/issues/324).
 
 ---
 
