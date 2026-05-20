@@ -170,6 +170,10 @@ impl AgentProvider for AntigravityProvider {
                 }
             }
         }
+        let directories = crate::utils::fs::project_antigravity_include_directories(
+            &config.session_id,
+            directories,
+        );
         for dir in directories {
             args.push("--add-dir".to_string());
             args.push(dir);
@@ -294,6 +298,33 @@ mod tests {
                 "conversation-123",
             ]
         );
+    }
+
+    #[test]
+    fn spawn_args_project_hidden_wardian_include_roots_before_add_dir() {
+        let provider = make_provider();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let hidden = temp.path().join(".wardian").join("common");
+        std::fs::create_dir_all(hidden.join(".agents").join("skills").join("role-skill"))
+            .expect("create skill");
+        std::fs::write(hidden.join("AGENTS.md"), "instructions").expect("write agents");
+        let config = AgentConfig {
+            session_id: "antigravity-session".to_string(),
+            system_include_directories: Some(vec![hidden.to_string_lossy().to_string()]),
+            ..make_antigravity_config(AntigravityProviderConfig::default())
+        };
+
+        let args = provider.get_spawn_args(&config, false);
+
+        assert_eq!(args[0], "--add-dir");
+        assert_ne!(args[1], hidden.to_string_lossy());
+        let projected = PathBuf::from(&args[1]);
+        assert!(projected.join("AGENTS.md").exists());
+        assert!(projected
+            .join(".agents")
+            .join("skills")
+            .join("role-skill")
+            .exists());
     }
 
     #[test]

@@ -1021,7 +1021,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 ));
             }
 
-            if (snap.provider == "opencode" || snap.provider == "claude")
+            if (snap.provider == "opencode"
+                || snap.provider == "claude"
+                || snap.provider == "antigravity")
                 && (snap.process_id.is_none() || process_alive == Some(true))
             {
                 let current_status = snap.current_status.lock().unwrap().clone();

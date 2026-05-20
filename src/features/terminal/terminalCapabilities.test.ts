@@ -18,7 +18,7 @@ const baseContext: TerminalCapabilityContext = {
 };
 
 describe("terminal capability broker", () => {
-  it("ignores non-opencode providers", () => {
+  it("ignores providers without frontend terminal capability responses", () => {
     const plan = planTerminalCapabilityResponses("gemini", "\u001b[6n", baseContext);
     expect(plan.outgoingInputs).toEqual([]);
     expect(plan.normalizedOutput).toBe("\u001b[6n");
@@ -41,6 +41,18 @@ describe("terminal capability broker", () => {
       "\u001b[?2027;0$y",
       "\u001b[?2031;0$y",
       "\u001b[?2026;0$y",
+      "\u001b[4;600;900t",
+      "\u001b[I",
+    ]);
+    expect(plan.focusReported).toBe(true);
+  });
+
+  it("replies to Antigravity terminal probes so its TUI can track resize state", () => {
+    const data = "\u001b[6n\u001b[14t\u001b[?1004h";
+    const plan = planTerminalCapabilityResponses("antigravity", data, baseContext);
+
+    expect(plan.outgoingInputs).toEqual([
+      "\u001b[1;1R",
       "\u001b[4;600;900t",
       "\u001b[I",
     ]);
