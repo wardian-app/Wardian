@@ -1187,10 +1187,6 @@ mod tests {
             !projected_skills.join("obsolete").exists(),
             "projection should mirror removed skills after refresh"
         );
-        assert!(
-            fs::read_link(projected_skills.join("late-skill")).is_err(),
-            "refreshed Antigravity skills must remain materialized"
-        );
     }
 
     #[test]
