@@ -1552,10 +1552,7 @@ mod tests {
             .join("skills")
             .join("wardian-skills")
             .join("wardian-cli");
-        let deployed_skill = source
-            .join(".agents")
-            .join("skills")
-            .join("wardian-cli");
+        let deployed_skill = source.join(".agents").join("skills").join("wardian-cli");
 
         std::fs::create_dir_all(&library_skill).expect("create library skill");
         std::fs::write(library_skill.join("SKILL.md"), "wardian cli instructions")
@@ -1576,7 +1573,8 @@ mod tests {
             .join("skills")
             .join("wardian-cli");
         assert_eq!(
-            std::fs::read_to_string(projected_skill.join("SKILL.md")).expect("read projected skill"),
+            std::fs::read_to_string(projected_skill.join("SKILL.md"))
+                .expect("read projected skill"),
             "wardian cli instructions"
         );
         assert!(

@@ -47,6 +47,8 @@ Antigravity runs directly in the real target workspace.
 
 Antigravity reads `AGENTS.md`. Wardian passes common, class, and agent include roots with repeated `--add-dir <absolute-path>` flags so the CLI can load Wardian-managed context without copying agent files into the repository.
 
+Wardian-managed roots usually live under hidden `.wardian` directories. Antigravity can ignore or under-discover hidden include roots, so Wardian exposes those roots through visible temp projections under the system temp directory before passing them to `agy`. Roots that contain `.agents/skills` are materialized into that projection instead of linked directly, because Antigravity does not reliably discover skills that are nested links back into hidden Wardian storage. Skill deploy/remove operations refresh live Antigravity projections, and the library skill watcher refreshes projections after skill-file changes while it is active. Restarting the agent rebuilds the projection from the canonical Wardian roots.
+
 ### Session and Status Handling
 
 Wardian launches visible Antigravity agents with `agy --prompt-interactive ""` so the CLI starts in interactive mode without an initial task. Headless workflow runs use `agy --print` and, when resuming, `--conversation <conversation-id>`. Provider options include `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout <duration>`.

@@ -58,6 +58,8 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - Antigravity reads `AGENTS.md`.
 - Wardian passes common, class, and agent include roots as repeated `--add-dir <absolute-path>` flags.
 - The provider adapter intentionally stays separate from Gemini even though Antigravity stores runtime files under `~/.gemini/antigravity-cli`.
+- Hidden Wardian roots are projected through visible temp paths before they are passed to `agy`. If a projected root contains `.agents/skills`, Wardian materializes that root and follows deployed skill links so Antigravity sees real skill directories instead of junctions or symlinks back into hidden storage.
+- `deploy_skill` and `remove_deployed_skill` refresh live Antigravity projections after the canonical Wardian skill tree changes. The library skill watcher also refreshes projections after skill-file changes while it is active. Agent restart remains the full rebuild path for projections.
 
 ### Session and telemetry behavior
 

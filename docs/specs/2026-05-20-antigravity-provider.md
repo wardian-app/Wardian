@@ -50,6 +50,8 @@ agy --conversation <conversation-id> --print "<prompt>"
 
 Wardian discovers Antigravity conversation identity from `~/.gemini/antigravity-cli/cache/last_conversations.json` or the newest conversation under `brain/`. It stores the provider conversation id in `resume_session`, watches the transcript JSONL for live status, and uses completed `MODEL` `PLANNER_RESPONSE` records as provider-adapted transcript text for `wardian agent watch`.
 
+Hidden Wardian context roots are exposed to Antigravity through visible temp projections before Wardian passes them with `--add-dir`. Projection roots containing `.agents/skills` are materialized instead of linked directly so deployed Wardian skills do not remain nested junctions or symlinks back into hidden storage. Skill deploy/remove operations refresh live Antigravity projections, and library skill watch events refresh projected skill contents while the watcher is active.
+
 ## Consequences
 
 - Gemini CLI behavior remains unchanged and selectable.

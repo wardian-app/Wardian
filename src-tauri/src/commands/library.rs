@@ -8,7 +8,7 @@ use crate::manager::log_debug;
 use crate::state::{AppState, LibraryWatchRegistration};
 use crate::utils::fs::{copy_dir_all, get_wardian_home};
 use wardian_core::models::{
-    DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
+    AgentConfig, DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
     SkillDeployment,
 };
 
@@ -506,6 +506,49 @@ where
     Ok(())
 }
 
+fn refresh_antigravity_skill_projections_for_configs(
+    configs: impl IntoIterator<Item = AgentConfig>,
+) {
+    for config in configs {
+        if config.provider != "antigravity" {
+            continue;
+        }
+
+        let mut directories = config
+            .system_include_directories
+            .clone()
+            .unwrap_or_default();
+        if let Some(user_dirs) = config.include_directories.as_ref() {
+            for dir in user_dirs {
+                if !directories.contains(dir) {
+                    directories.push(dir.clone());
+                }
+            }
+        }
+
+        if directories.is_empty() {
+            continue;
+        }
+
+        let _ = crate::utils::fs::project_antigravity_include_directories(
+            &config.session_id,
+            directories,
+        );
+    }
+}
+
+async fn refresh_live_antigravity_skill_projections(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .filter_map(|agent| agent.config.lock().ok().map(|config| config.clone()))
+            .collect::<Vec<_>>()
+    };
+    refresh_antigravity_skill_projections_for_configs(configs);
+}
+
 fn list_deployed_skill_names(target_type: &str, target_id: &str) -> Result<Vec<String>, String> {
     let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
     let mut skills = Vec::new();
@@ -707,17 +750,19 @@ fn deployment_matches_source(
 
 #[tauri::command]
 pub async fn deploy_skill(
-    _app: AppHandle,
+    app: AppHandle,
     source_path: String,
     target_type: String,
     target_id: String,
 ) -> Result<(), String> {
-    deploy_skill_from_library(&source_path, &target_type, &target_id)
+    deploy_skill_from_library(&source_path, &target_type, &target_id)?;
+    refresh_live_antigravity_skill_projections(&app).await;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn remove_deployed_skill(
-    _app: AppHandle,
+    app: AppHandle,
     target_type: String,
     target_id: String,
     skill_name: String,
@@ -729,6 +774,7 @@ pub async fn remove_deployed_skill(
         fs::remove_dir_all(&dst_dir).map_err(|e| e.to_string())?;
     }
 
+    refresh_live_antigravity_skill_projections(&app).await;
     Ok(())
 }
 
@@ -978,6 +1024,10 @@ pub async fn library_watch(
                 }
             }
 
+            if task_library_type == "skills" {
+                refresh_live_antigravity_skill_projections(&app_handle).await;
+            }
+
             let _ = app_handle.emit(
                 "library-changed",
                 LibraryChangedPayload {
@@ -1079,6 +1129,67 @@ mod tests {
         assert_eq!(
             list_deployed_skill_names("agent", "agent-1").expect("list skills"),
             vec!["planner".to_string()]
+        );
+    }
+
+    #[test]
+    fn refresh_antigravity_skill_projections_picks_up_live_skill_changes() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _env_guard = WardianHomeGuard;
+
+        let hidden = temp.path().join(".wardian");
+        let common = hidden.join("common");
+        let skills = common.join(".agents").join("skills");
+        let library = hidden.join("library").join("skills");
+        let obsolete = skills.join("obsolete");
+        let late_source = library.join("wardian-skills").join("late-skill");
+        let late_deployed = skills.join("late-skill");
+        fs::create_dir_all(&obsolete).expect("obsolete skill");
+        fs::write(obsolete.join("SKILL.md"), "obsolete").expect("obsolete file");
+        let session_id = format!(
+            "antigravity-live-skills-{}",
+            temp.path()
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+
+        let config = AgentConfig {
+            provider: "antigravity".to_string(),
+            session_id,
+            system_include_directories: Some(vec![common.to_string_lossy().to_string()]),
+            ..Default::default()
+        };
+
+        refresh_antigravity_skill_projections_for_configs(vec![config.clone()]);
+        let projected = crate::utils::fs::project_antigravity_include_directories(
+            &config.session_id,
+            vec![common.to_string_lossy().to_string()],
+        );
+        let projected_skills = PathBuf::from(&projected[0]).join(".agents").join("skills");
+        assert!(projected_skills.join("obsolete").join("SKILL.md").is_file());
+
+        fs::create_dir_all(&late_source).expect("late source skill");
+        fs::write(late_source.join("SKILL.md"), "late").expect("late source file");
+        create_directory_link(&late_source, &late_deployed).expect("deploy late skill link");
+        fs::remove_dir_all(&obsolete).expect("remove obsolete skill");
+
+        refresh_antigravity_skill_projections_for_configs(vec![config]);
+
+        assert_eq!(
+            fs::read_to_string(projected_skills.join("late-skill").join("SKILL.md"))
+                .expect("late skill file"),
+            "late"
+        );
+        assert!(
+            !projected_skills.join("obsolete").exists(),
+            "projection should mirror removed skills after refresh"
+        );
+        assert!(
+            fs::read_link(projected_skills.join("late-skill")).is_err(),
+            "refreshed Antigravity skills must remain materialized"
         );
     }
 
