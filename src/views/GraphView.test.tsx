@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import { GraphView } from "./GraphView";
@@ -121,6 +121,28 @@ describe("GraphView", () => {
     expect(screen.getByTestId("agent-context-menu")).toBeInTheDocument();
     expect(screen.getByText("Rename")).toBeInTheDocument();
     expect(screen.getByText("Query")).toBeInTheDocument();
+  });
+
+  it("preserves multi-selection actions when right-clicking a selected graph node", async () => {
+    render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a", "b"])} />);
+
+    fireEvent.contextMenu(screen.getByTestId("mock-graph-node"));
+    fireEvent.click(screen.getByTestId("context-pause"));
+
+    expect(handlers.onSelectionChange).not.toHaveBeenCalled();
+    expect(handlers.onPause).toHaveBeenCalledWith("a");
+    await waitFor(() => expect(handlers.onPause).toHaveBeenCalledWith("b"));
+  });
+
+  it("dismisses graph context menu when clicking elsewhere in the graph view", () => {
+    render(<GraphView {...defaultProps} />);
+
+    fireEvent.contextMenu(screen.getByTestId("mock-graph-node"));
+    expect(screen.getByTestId("agent-context-menu")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("graph-view"));
+
+    expect(screen.queryByTestId("agent-context-menu")).not.toBeInTheDocument();
   });
 
   it("toggles relationship lenses", () => {

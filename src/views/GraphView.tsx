@@ -65,7 +65,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(
     Array.from(props.selectedAgentIds)[0] ?? null,
   );
-  const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
 
   const projection = useMemo(() => buildAgentGraph({
     agents: props.allAgents,
@@ -104,15 +104,26 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   };
 
   const openContextMenu = (agentId: string, x: number, y: number) => {
-    selectAgent(agentId);
-    setContextMenu({ agentId, x, y });
+    const selectedIds = Array.from(props.selectedAgentIds);
+    const agentIds = props.selectedAgentIds.has(agentId) && selectedIds.length > 1
+      ? selectedIds
+      : [agentId];
+
+    setInspectedAgentId(agentId);
+    if (agentIds.length === 1) {
+      props.onSelectionChange(new Set([agentId]));
+    }
+    setContextMenu({ agentId, agentIds, x, y });
   };
 
   return (
     <div
       data-testid="graph-view"
       className="graph-view"
-      onClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (!isInsideContextMenu(event.target)) setContextMenu(null);
+      }}
       onContextMenu={(event) => event.stopPropagation()}
     >
       <div className="graph-toolbar">
@@ -226,6 +237,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           x={contextMenu.x}
           y={contextMenu.y}
           agentId={contextMenu.agentId}
+          agentIds={contextMenu.agentIds}
           offAgentIds={props.offAgentIds}
           watchlists={props.watchlists}
           teams={props.teams}
@@ -250,4 +262,8 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
 
 function relatedEdges(edges: AgentGraphEdge[], agentId: string) {
   return edges.filter((edge) => edge.source === agentId || edge.target === agentId);
+}
+
+function isInsideContextMenu(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest('[data-testid="agent-context-menu"]'));
 }

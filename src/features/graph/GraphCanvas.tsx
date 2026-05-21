@@ -28,12 +28,50 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   onContextMenu,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const graphRef = useRef<Graph | null>(null);
+  const rendererRef = useRef<Sigma | null>(null);
+  const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu });
+
+  useEffect(() => {
+    handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu };
+  }, [onSelectAgent, onOpenAgent, onContextMenu]);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const graph = new Graph();
     const container = containerRef.current;
+    const renderer = new Sigma(graph, container, {
+      allowInvalidContainer: true,
+      enableEdgeEvents: true,
+      renderEdgeLabels: false,
+    });
+    graphRef.current = graph;
+    rendererRef.current = renderer;
+
+    renderer.on("clickNode", ({ node }: SigmaNodePayload) => handlersRef.current.onSelectAgent(node));
+    renderer.on("doubleClickNode", ({ node }: SigmaNodePayload) => handlersRef.current.onOpenAgent(node));
+    renderer.on("rightClickNode", ({ node, event }: SigmaPointerPayload) => {
+      const original = event?.original ?? event?.originalEvent;
+      original?.preventDefault();
+      const point = pointerPosition(original);
+      handlersRef.current.onContextMenu(node, point.x, point.y);
+    });
+
+    return () => {
+      renderer.kill();
+      rendererRef.current = null;
+      graphRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const graph = graphRef.current;
+    const renderer = rendererRef.current;
+    const container = containerRef.current;
+    if (!graph || !renderer || !container) return;
+
+    graph.clear();
 
     for (const node of projection.nodes) {
       graph.addNode(node.id, {
@@ -56,23 +94,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       });
     }
 
-    const renderer = new Sigma(graph, container, {
-      allowInvalidContainer: true,
-      enableEdgeEvents: true,
-      renderEdgeLabels: false,
-    });
-
-    renderer.on("clickNode", ({ node }: SigmaNodePayload) => onSelectAgent(node));
-    renderer.on("doubleClickNode", ({ node }: SigmaNodePayload) => onOpenAgent(node));
-    renderer.on("rightClickNode", ({ node, event }: SigmaPointerPayload) => {
-      const original = event?.original ?? event?.originalEvent;
-      original?.preventDefault();
-      const point = pointerPosition(original);
-      onContextMenu(node, point.x, point.y);
-    });
-
-    return () => renderer.kill();
-  }, [projection, onSelectAgent, onOpenAgent, onContextMenu]);
+    renderer.refresh();
+  }, [projection]);
 
   return <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas" />;
 };
