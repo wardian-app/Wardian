@@ -45,6 +45,7 @@ export interface AppSettings {
   auto_patch_gemini: boolean;
   terminal_font_size: number;
   terminal_font_family: string | null;
+  grid_card_display_mode: 'terminal' | 'chat';
 }
 
 export interface AppSettingsOverrides {
@@ -52,6 +53,7 @@ export interface AppSettingsOverrides {
   auto_patch_gemini?: boolean;
   terminal_font_size?: number;
   terminal_font_family?: string | null;
+  grid_card_display_mode?: 'terminal' | 'chat';
 }
 
 export interface SettingsDocument<TSettings, TOverrides> {

@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from "react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
+import { AgentChatView } from "../features/grid/AgentChatView";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
 import type { Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { useLayoutStore } from "../store/useLayoutStore";
+import { useSettingsStore } from "../store/useSettingsStore";
 import { useGridResize } from "../features/grid/useGridResize";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
@@ -82,6 +84,7 @@ export const GridView: React.FC<GridViewProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { layout, resetLayout, gridStacked } = useLayoutStore();
+  const gridCardDisplayMode = useSettingsStore((state) => state.grid_card_display_mode);
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
 
@@ -244,19 +247,28 @@ export const GridView: React.FC<GridViewProps> = ({
                </div>
             </div>
 
-            <div className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text flex-1 relative min-h-[200px] block`}>
+            <div className="terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text flex-1 relative min-h-[200px] block">
               <div 
                 className="absolute inset-4 select-text"
                 onClick={(e) => e.stopPropagation()}
               >
-                <AgentTerminal 
-                  sessionId={agentId} 
-                  provider={agent.provider}
-                  isMaximized={isAgentMaximized}
-                  theme={theme}
-                  onTerminalFocus={() => onTerminalFocus?.(agentId)}
-                  onTitleChange={(title) => handleTitleChange(agentId, title)} 
-                />
+                {gridCardDisplayMode === 'chat' ? (
+                  <AgentChatView
+                    sessionId={agentId}
+                    provider={agent.provider}
+                    isMaximized={isAgentMaximized}
+                    theme={theme}
+                  />
+                ) : (
+                  <AgentTerminal
+                    sessionId={agentId}
+                    provider={agent.provider}
+                    isMaximized={isAgentMaximized}
+                    theme={theme}
+                    onTerminalFocus={() => onTerminalFocus?.(agentId)}
+                    onTitleChange={(title) => handleTitleChange(agentId, title)}
+                  />
+                )}
               </div>
             </div>
           </div>

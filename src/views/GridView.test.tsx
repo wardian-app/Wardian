@@ -3,6 +3,7 @@ import { act, render, screen } from '@testing-library/react';
 import { GridView } from './GridView';
 import type { AgentConfig, AgentTelemetry } from '../types';
 import { useLayoutStore } from '../store/useLayoutStore';
+import { useSettingsStore } from '../store/useSettingsStore';
 
 vi.mock('../features/terminal/AgentTerminal', () => ({
   AgentTerminal: ({
@@ -20,6 +21,14 @@ vi.mock('../features/terminal/AgentTerminal', () => ({
       Terminal {sessionId}
     </div>
   ),
+}));
+
+vi.mock('../features/grid/AgentChatView', () => ({
+  AgentChatView: ({
+    sessionId,
+  }: {
+    sessionId: string;
+  }) => <div data-testid={`chat-${sessionId}`}>Chat {sessionId}</div>,
 }));
 
 const agents: AgentConfig[] = [
@@ -75,6 +84,11 @@ function renderGrid(
     />
   );
 }
+
+beforeEach(() => {
+  localStorage.clear();
+  useSettingsStore.setState({ grid_card_display_mode: 'terminal' });
+});
 
 describe('GridView maximize behavior', () => {
   it('reports the owning agent when its terminal receives focus', () => {
@@ -147,6 +161,26 @@ describe('GridView maximize behavior', () => {
     expect(root.style.gridAutoRows).not.toBe('100%');
     expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+  });
+
+  it('renders terminal cards when Grid card display is terminal', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('terminal');
+
+    renderGrid(null, agents);
+
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
+  });
+
+  it('renders chat cards when Grid card display is chat', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('chat');
+
+    renderGrid(null, agents);
+
+    expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-agent-2')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
   });
 
   it('gives a single visible agent the full grid width instead of a stale narrow track', () => {
