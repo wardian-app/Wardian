@@ -695,3 +695,212 @@ select option {
   color: var(--color-wardian-text);
   padding: 8px;
 }
+
+/* ── Communication Graph ─────────────────────────────── */
+.graph-view {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  color: var(--color-wardian-text);
+  background: var(--color-wardian-bg);
+}
+
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-wardian-border);
+  background: var(--color-wardian-card);
+}
+
+.graph-scope {
+  min-width: 120px;
+}
+
+.graph-scope-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-wardian-text);
+}
+
+.graph-scope-count {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--color-wardian-text-muted);
+}
+
+.graph-lenses,
+.graph-status-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.graph-lens {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 6px;
+  color: var(--color-wardian-text-muted);
+  background: var(--color-wardian-input-bg);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.graph-lens.active {
+  color: var(--color-wardian-accent);
+  border-color: var(--color-wardian-accent);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
+}
+
+.graph-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--color-wardian-text-muted);
+}
+
+.graph-legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-wardian-text-muted);
+}
+
+.graph-legend-dot--idle { background: var(--color-wardian-success); }
+.graph-legend-dot--processing { background: var(--color-wardian-processing); }
+.graph-legend-dot--action { background: var(--color-wardian-warning); }
+.graph-legend-dot--off { background: var(--color-wardian-text-muted); }
+.graph-legend-dot--error { background: var(--color-wardian-error); }
+
+.graph-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  flex: 1;
+  min-height: 0;
+}
+
+.graph-canvas-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--color-wardian-border);
+}
+
+.graph-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+}
+
+.graph-empty-state {
+  display: flex;
+  height: 100%;
+  min-height: 320px;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-wardian-text-muted);
+  border: 1px dashed var(--color-wardian-border);
+}
+
+.graph-inspector {
+  min-width: 0;
+  padding: 14px;
+  overflow: auto;
+  background: var(--color-wardian-card);
+}
+
+.graph-inspector h2 {
+  margin: 4px 0 6px;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--color-wardian-text);
+}
+
+.graph-inspector p {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--color-wardian-text-muted);
+}
+
+.graph-inspector-path {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.graph-telemetry {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.graph-telemetry div {
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 6px;
+  background: var(--color-wardian-input-bg);
+}
+
+.graph-telemetry dt {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--color-wardian-text-muted);
+  text-transform: uppercase;
+}
+
+.graph-telemetry dd {
+  margin: 2px 0 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-wardian-text);
+}
+
+.graph-relationships ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.graph-relationships li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 6px;
+  background: var(--color-wardian-input-bg);
+}
+
+.graph-relationships span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-wardian-text);
+}
+
+.graph-relationships small {
+  font-size: 10px;
+  color: var(--color-wardian-text-muted);
+}
+
+.graph-open-grid {
+  margin-top: 12px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 6px;
+  color: var(--color-wardian-accent);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
+  font-size: 11px;
+  font-weight: 700;
+}
