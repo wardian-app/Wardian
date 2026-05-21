@@ -87,7 +87,7 @@ function renderGrid(
 
 beforeEach(() => {
   localStorage.clear();
-  useSettingsStore.setState({ grid_card_display_mode: 'terminal' });
+  useSettingsStore.setState({ gridCardDisplayMode: 'terminal' });
 });
 
 describe('GridView maximize behavior', () => {

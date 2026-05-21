@@ -254,7 +254,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setTerminalFontSize,
     terminalFontFamily,
     setTerminalFontFamily,
-    grid_card_display_mode,
+    gridCardDisplayMode,
     setGridCardDisplayMode,
     shell_id,
     agent_session_persistence,
@@ -376,7 +376,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     await useSettingsStore.getState().saveAppSettings();
   };
 
-  const handleGridCardDisplayChange = async (value: typeof grid_card_display_mode) => {
+  const handleGridCardDisplayChange = async (value: typeof gridCardDisplayMode) => {
     setGridCardDisplayMode(value);
     await useSettingsStore.getState().saveAppSettings();
   };
@@ -560,8 +560,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           <SettingRow key={row.id} label={row.label} detail={row.detail}>
             <select
               aria-label="Grid card display"
-              value={grid_card_display_mode}
-              onChange={(event) => void handleGridCardDisplayChange(event.target.value as typeof grid_card_display_mode)}
+              value={gridCardDisplayMode}
+              onChange={(event) => void handleGridCardDisplayChange(event.target.value as typeof gridCardDisplayMode)}
               className={optionClass}
             >
               <option value="terminal">Terminal</option>

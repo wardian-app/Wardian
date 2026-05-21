@@ -427,6 +427,24 @@ describe("AgentChatView", () => {
     expect(screen.getByText("const ready = true;")).toBeInTheDocument();
   });
 
+  it("renders unsafe markdown links as plain text", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "unsafe-link-message",
+        kind: "message",
+        role: "assistant",
+        text: "Safe [docs](https://example.test/docs) and unsafe [run](javascript:alert).",
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByRole("link", { name: "docs" })).toHaveAttribute("href", "https://example.test/docs");
+    expect(screen.queryByRole("link", { name: "run" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("assistant message")).toHaveTextContent("[run](javascript:alert)");
+  });
+
   it("copies messages, code blocks, activity output, and grouped file paths", async () => {
     writeTextMock.mockResolvedValue(undefined);
     invokeMock.mockResolvedValue([

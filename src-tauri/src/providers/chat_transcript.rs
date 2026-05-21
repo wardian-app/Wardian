@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use serde_json::{json, Value};
-use wardian_core::models::{AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus};
+use wardian_core::models::chat::{
+    AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
+};
 
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 

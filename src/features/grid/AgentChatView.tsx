@@ -1010,10 +1010,16 @@ function renderInlineMarkdown(content: string): ReactNode {
         </strong>,
       );
     } else {
+      const safeUrl = safeMarkdownLinkUrl(match[2]);
+      if (!safeUrl) {
+        parts.push(renderTextWithBreaks(match[0], `unsafe-link-${match.index}`));
+        lastIndex = match.index + match[0].length;
+        continue;
+      }
       parts.push(
         <a
           className="break-all font-medium text-[var(--color-wardian-accent)] underline decoration-[color-mix(in_srgb,var(--color-wardian-accent),transparent_55%)] underline-offset-2"
-          href={match[2]}
+          href={safeUrl}
           key={`link-${match.index}`}
           rel="noreferrer"
           target="_blank"
@@ -1030,6 +1036,16 @@ function renderInlineMarkdown(content: string): ReactNode {
   }
 
   return parts.length > 0 ? parts : content;
+}
+
+function safeMarkdownLinkUrl(rawUrl: string | undefined): string | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "file:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function renderTextWithBreaks(content: string, keyPrefix: string): ReactNode {

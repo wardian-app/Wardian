@@ -118,7 +118,7 @@ interface SettingsState {
   autoPatchGemini: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
-  grid_card_display_mode: GridCardDisplayMode;
+  gridCardDisplayMode: GridCardDisplayMode;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -154,7 +154,7 @@ interface SettingsState {
 
 type PersistedSettingsState = Pick<
   SettingsState,
-  'theme' | 'autoPatchGemini' | 'terminalFontSize' | 'terminalFontFamily' | 'grid_card_display_mode'
+  'theme' | 'autoPatchGemini' | 'terminalFontSize' | 'terminalFontFamily' | 'gridCardDisplayMode'
 >;
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -246,7 +246,7 @@ function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
     auto_patch_gemini: state.autoPatchGemini,
     terminal_font_size: state.terminalFontSize,
     terminal_font_family: state.terminalFontFamily.trim() || null,
-    grid_card_display_mode: state.grid_card_display_mode,
+    grid_card_display_mode: state.gridCardDisplayMode,
   });
 }
 
@@ -333,7 +333,7 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
     state.autoPatchGemini !== DEFAULT_APP_SETTINGS.auto_patch_gemini ||
     normalizeTerminalFontSize(state.terminalFontSize) !== DEFAULT_APP_SETTINGS.terminal_font_size ||
     state.terminalFontFamily.trim() !== '' ||
-    state.grid_card_display_mode !== DEFAULT_APP_SETTINGS.grid_card_display_mode
+    state.gridCardDisplayMode !== DEFAULT_APP_SETTINGS.grid_card_display_mode
   );
 }
 
@@ -344,7 +344,7 @@ export const useSettingsStore = create<SettingsState>()(
       autoPatchGemini: false,
       terminalFontSize: defaultTerminalFontSize(),
       terminalFontFamily: '',
-      grid_card_display_mode: 'terminal',
+      gridCardDisplayMode: 'terminal',
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -380,10 +380,10 @@ export const useSettingsStore = create<SettingsState>()(
           app_settings_overrides: trimmed ? { ...state.app_settings_overrides, terminal_font_family: trimmed } : rest,
         };
       }),
-      setGridCardDisplayMode: (grid_card_display_mode) => set((state) => {
-        const normalized = normalizeGridCardDisplayMode(grid_card_display_mode);
+      setGridCardDisplayMode: (gridCardDisplayMode) => set((state) => {
+        const normalized = normalizeGridCardDisplayMode(gridCardDisplayMode);
         return {
-          grid_card_display_mode: normalized,
+          gridCardDisplayMode: normalized,
           app_settings_overrides: { ...state.app_settings_overrides, grid_card_display_mode: normalized },
         };
       }),
@@ -468,7 +468,7 @@ export const useSettingsStore = create<SettingsState>()(
             autoPatchGemini: Boolean(settings.auto_patch_gemini),
             terminalFontSize: normalizeTerminalFontSize(settings.terminal_font_size),
             terminalFontFamily: settings.terminal_font_family?.trim() ?? '',
-            grid_card_display_mode: normalizeGridCardDisplayMode(settings.grid_card_display_mode),
+            gridCardDisplayMode: normalizeGridCardDisplayMode(settings.grid_card_display_mode),
             app_settings_overrides: normalizeAppOverrides(overrides),
             app_settings_loaded: true,
           });
@@ -483,7 +483,7 @@ export const useSettingsStore = create<SettingsState>()(
           auto_patch_gemini: get().autoPatchGemini,
           terminal_font_size: normalizeTerminalFontSize(get().terminalFontSize),
           terminal_font_family: get().terminalFontFamily.trim() || null,
-          grid_card_display_mode: normalizeGridCardDisplayMode(get().grid_card_display_mode),
+          grid_card_display_mode: normalizeGridCardDisplayMode(get().gridCardDisplayMode),
         };
         const settings: SettingsDocument<AppSettings, AppSettingsOverrides> = {
           schema_version: 2,
@@ -498,7 +498,7 @@ export const useSettingsStore = create<SettingsState>()(
           autoPatchGemini: Boolean(saved.auto_patch_gemini),
           terminalFontSize: normalizeTerminalFontSize(saved.terminal_font_size),
           terminalFontFamily: saved.terminal_font_family?.trim() ?? '',
-          grid_card_display_mode: normalizeGridCardDisplayMode(saved.grid_card_display_mode),
+          gridCardDisplayMode: normalizeGridCardDisplayMode(saved.grid_card_display_mode),
           app_settings_overrides: normalizeAppOverrides(overrides),
           app_settings_loaded: true,
         });
@@ -584,15 +584,15 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'wardian-settings',
-      version: 1,
+      version: 2,
       migrate: (persistedState) => {
-        const state = persistedState as Partial<PersistedSettingsState>;
+        const state = persistedState as Partial<PersistedSettingsState> & { grid_card_display_mode?: GridCardDisplayMode };
         return {
           theme: state.theme ?? 'system',
           autoPatchGemini: state.autoPatchGemini ?? false,
           terminalFontSize: normalizeTerminalFontSize(state.terminalFontSize ?? defaultTerminalFontSize()),
           terminalFontFamily: state.terminalFontFamily?.trim() ?? '',
-          grid_card_display_mode: normalizeGridCardDisplayMode(state.grid_card_display_mode),
+          gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode ?? state.grid_card_display_mode),
         };
       },
       partialize: (state) => ({
@@ -600,7 +600,7 @@ export const useSettingsStore = create<SettingsState>()(
         autoPatchGemini: state.autoPatchGemini,
         terminalFontSize: normalizeTerminalFontSize(state.terminalFontSize),
         terminalFontFamily: state.terminalFontFamily.trim(),
-        grid_card_display_mode: normalizeGridCardDisplayMode(state.grid_card_display_mode),
+        gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode),
       }),
     }
   )

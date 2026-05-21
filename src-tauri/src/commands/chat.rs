@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::manager::opencode::opencode_database_path;
@@ -7,7 +8,11 @@ use crate::state::AppState;
 use tauri::State;
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
 use wardian_core::identity::normalize_status;
-use wardian_core::models::{AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus};
+use wardian_core::models::chat::{
+    AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
+};
+
+const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 #[tauri::command]
 pub async fn load_agent_chat_transcript(
@@ -250,7 +255,7 @@ fn load_provider_log_chat_events(
     let Some(path) = log_path else {
         return Vec::new();
     };
-    let Ok(content) = std::fs::read_to_string(path) else {
+    let Ok(content) = read_provider_log_tail(path) else {
         return Vec::new();
     };
 
@@ -262,6 +267,30 @@ fn load_provider_log_chat_events(
             event
         })
         .collect()
+}
+
+fn read_provider_log_tail(path: &Path) -> std::io::Result<String> {
+    read_provider_log_tail_with_limit(path, PROVIDER_LOG_TAIL_BYTES)
+}
+
+fn read_provider_log_tail_with_limit(path: &Path, tail_bytes: u64) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len <= tail_bytes {
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        return Ok(content);
+    }
+
+    let start = file_len.saturating_sub(tail_bytes);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity(tail_bytes as usize);
+    file.read_to_end(&mut bytes)?;
+    let content = String::from_utf8_lossy(&bytes);
+    Ok(content
+        .split_once('\n')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default())
 }
 
 fn load_opencode_db_chat_events(
@@ -897,6 +926,25 @@ Do you want to proceed?
             Some("Rendered from the provider log")
         );
         assert_eq!(chat_events[0].metadata["provider_log"], true);
+    }
+
+    #[test]
+    fn reads_provider_log_tail_from_line_boundary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        let stale_line = format!(
+            "{}{}",
+            "x".repeat(512),
+            r#"{"type":"response_item","turn_id":"old","payload":{"type":"message","role":"assistant","content":"stale"}}"#,
+        );
+        let latest_line = r#"{"type":"response_item","turn_id":"turn-2","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Recent provider log message"}]}}"#;
+        std::fs::write(&log_path, format!("{stale_line}\n{latest_line}\n")).expect("write log");
+
+        let content = read_provider_log_tail_with_limit(&log_path, 256).expect("tail content");
+
+        assert!(!content.contains("stale"));
+        assert!(content.contains("Recent provider log message"));
+        assert!(content.starts_with('{'));
     }
 
     #[test]

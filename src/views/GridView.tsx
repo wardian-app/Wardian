@@ -85,7 +85,7 @@ export const GridView: React.FC<GridViewProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { layout, resetLayout, gridStacked } = useLayoutStore();
-  const gridCardDisplayMode = useSettingsStore((state) => state.grid_card_display_mode);
+  const gridCardDisplayMode = useSettingsStore((state) => state.gridCardDisplayMode);
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
 
