@@ -116,6 +116,22 @@ describe("GraphView", () => {
     expect(screen.getByText("Coder / codex")).toBeInTheDocument();
   });
 
+  it("hides inspector and reopens it from a graph node", () => {
+    render(<GraphView {...defaultProps} />);
+
+    expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide inspector" }));
+
+    expect(screen.queryByRole("heading", { name: "Alpha" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show inspector" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("mock-graph-node"));
+
+    expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show inspector" })).not.toBeInTheDocument();
+  });
+
   it("opens existing context menu from graph node", () => {
     render(<GraphView {...defaultProps} />);
 

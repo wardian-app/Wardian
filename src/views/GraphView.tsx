@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { PanelRightOpen, X } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
@@ -56,6 +57,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(
     Array.from(props.selectedAgentIds)[0] ?? null,
   );
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
 
   const projection = useMemo(() => buildAgentGraph({
@@ -91,6 +93,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
 
   const selectAgent = (agentId: string) => {
     setInspectedAgentId(agentId);
+    setInspectorOpen(true);
     props.onSelectionChange(new Set([agentId]));
   };
 
@@ -135,9 +138,20 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
             </button>
           ))}
         </div>
+        {!inspectorOpen && (
+          <button
+            type="button"
+            className="graph-icon-button"
+            aria-label="Show inspector"
+            title="Show inspector"
+            onClick={() => setInspectorOpen(true)}
+          >
+            <PanelRightOpen size={15} strokeWidth={2} />
+          </button>
+        )}
       </div>
 
-      <div className="graph-body">
+      <div className={`graph-body ${inspectorOpen ? "" : "graph-body--inspector-hidden"}`}>
         <div className="graph-canvas-shell">
           {projection.nodes.length === 0 ? (
             <div className="graph-empty-state">No agents in graph scope</div>
@@ -150,17 +164,29 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
             />
           )}
         </div>
-        <aside
-          className="graph-inspector"
-          onContextMenu={(event) => {
-            if (!inspectedAgent) return;
-            event.preventDefault();
-            openContextMenu(inspectedAgent.id, event.clientX, event.clientY);
-          }}
-        >
-          {inspectedAgent ? (
-            <>
-              <div className="label-small">Inspector</div>
+        {inspectorOpen && (
+          <aside
+            className="graph-inspector"
+            onContextMenu={(event) => {
+              if (!inspectedAgent) return;
+              event.preventDefault();
+              openContextMenu(inspectedAgent.id, event.clientX, event.clientY);
+            }}
+          >
+            {inspectedAgent ? (
+              <>
+                <div className="graph-inspector-header">
+                  <div className="label-small">Inspector</div>
+                  <button
+                    type="button"
+                    className="graph-icon-button"
+                    aria-label="Hide inspector"
+                    title="Hide inspector"
+                    onClick={() => setInspectorOpen(false)}
+                  >
+                    <X size={14} strokeWidth={2.2} />
+                  </button>
+                </div>
               <h2>{inspectedAgent.label}</h2>
               <p>{inspectedAgent.agent.agent_class} / {inspectedAgent.agent.provider ?? "unknown"}</p>
               <p>
@@ -208,11 +234,12 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               <button type="button" className="graph-open-grid" onClick={() => props.onOpenAgentInGrid(inspectedAgent.id)}>
                 Open in Grid
               </button>
-            </>
-          ) : (
-            <p>Select an agent node to inspect relationships.</p>
-          )}
-        </aside>
+              </>
+            ) : (
+              <p>Select an agent node to inspect relationships.</p>
+            )}
+          </aside>
+        )}
       </div>
 
       {contextMenu && (
