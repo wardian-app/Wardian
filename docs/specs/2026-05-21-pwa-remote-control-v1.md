@@ -137,6 +137,7 @@ Initial rate-limit targets:
 
 - Pairing offers: at most 3 created per 10 minutes per desktop user session.
 - Pairing submissions: at most 10 attempts per offer.
+- Pairing status checks: at most 120 per minute per pending pairing request.
 - Authentication challenges: at most 5 issued per minute per device.
 - Failed authentication signatures: lock the device for 10 minutes after 5
   failures in 10 minutes.
@@ -208,8 +209,11 @@ Re-authentication:
 
 1. The phone asks for an authentication challenge.
 2. Wardian returns a single-use challenge bound to the device id, canonical
-   origin, nonce, timestamp, and intended audience.
-3. The phone signs the challenge with its paired device private key.
+   origin, nonce, timestamp, intended audience, and current desktop gateway
+   identity fingerprint.
+3. The phone compares the returned desktop gateway identity fingerprint with
+   the fingerprint accepted during pairing, then signs the challenge with its
+   paired device private key.
 4. Wardian verifies the signature, challenge freshness, nonce uniqueness, device
    status, origin, and host.
 5. Wardian creates a server-side session, sets the opaque session cookie, and

@@ -1,15 +1,15 @@
 use crate::remote::models::{
     AuthChallengeRequest, AuthChallengeResponse, AuthSessionRequest, AuthSessionResponse,
-    DeviceRecord, PairingSubmitRequest, PairingSubmitResponse, RemoteAgentActionRequest,
-    RemoteAuditRecord, RemoteGatewayConfig, RemoteSessionRecord, RemoteWebSocketTicketRequest,
-    RemoteWebSocketTicketResponse, RemoteWorkflowRunRequest, RemoteWorkflowStopRequest,
-    REMOTE_AUDIT_SCHEMA_VERSION,
+    DeviceRecord, PairingSubmitRequest, PairingSubmitResponse, PendingPairingDecision,
+    PendingPairingRequestRecord, RemoteAgentActionRequest, RemoteAuditRecord, RemoteGatewayConfig,
+    RemoteSessionRecord, RemoteWebSocketTicketRequest, RemoteWebSocketTicketResponse,
+    RemoteWorkflowRunRequest, RemoteWorkflowStopRequest, REMOTE_AUDIT_SCHEMA_VERSION,
 };
 use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Json, Path as AxumPath, State,
+        DefaultBodyLimit, Json, Path as AxumPath, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -82,6 +82,7 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/remote/api/health", get(remote_health))
         .route("/remote/api/session", get(current_remote_session))
         .route("/remote/api/pairing/submit", post(submit_pairing))
+        .route("/remote/api/pairing/{request_id}", get(pairing_status))
         .route("/remote/api/auth/challenge", post(create_auth_challenge))
         .route("/remote/api/auth/session", post(create_auth_session))
         .route("/remote/api/agents", get(list_remote_agents))
@@ -91,6 +92,7 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/remote/api/workflows/stop", post(stop_workflow))
         .route("/remote/api/ws-ticket", post(create_ws_ticket))
         .route("/remote/api/status-stream", get(status_stream_upgrade))
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(RemoteGatewayContext { app, config })
 }
 
@@ -207,10 +209,10 @@ async fn submit_pairing(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
     Json(request): Json<PairingSubmitRequest>,
-) -> Result<Json<PairingSubmitResponse>, RemoteGatewayError> {
+) -> Result<Response, RemoteGatewayError> {
     let origin = require_audited_request_boundary(&ctx.config, &headers, true, "submit_pairing")?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    {
+    let offer = {
         let state = ctx.app.state::<crate::state::AppState>();
         let mut runtime = state.remote_runtime.lock().await;
         if let Err(error) = check_runtime_rate_limit(
@@ -255,7 +257,8 @@ async fn submit_pairing(
             );
             return Err(RemoteGatewayError::bad_request("pairing_offer_invalid"));
         }
-    }
+        offer
+    };
 
     let public_key_der = decode_base64_standard(&request.public_key_spki_der_base64)
         .map_err(|_| RemoteGatewayError::bad_request("invalid_device_public_key"))?;
@@ -268,10 +271,9 @@ async fn submit_pairing(
     }
 
     let public_key_fingerprint = crate::remote::crypto::sha256_fingerprint(&public_key_der);
-    let paired_at = millis_to_rfc3339(now_ms);
     let device_id = format!("dev_{}", crate::remote::crypto::random_url_token(18));
     let label = sanitize_device_label(&request.device_label);
-    let mut store = crate::remote::storage::load_device_store()
+    let store = crate::remote::storage::load_device_store()
         .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
     if store.devices.iter().any(|device| {
         device.revoked_at.is_none() && device.public_key_fingerprint == public_key_fingerprint
@@ -282,26 +284,64 @@ async fn submit_pairing(
         );
         return Err(RemoteGatewayError::bad_request("device_already_paired"));
     }
-    store.devices.push(DeviceRecord {
-        device_id: device_id.clone(),
-        label,
-        public_key_spki_der_base64: request.public_key_spki_der_base64.trim().to_string(),
-        public_key_fingerprint: public_key_fingerprint.clone(),
-        created_at: paired_at.clone(),
-        last_used_at: None,
-        revoked_at: None,
-    });
-    crate::remote::storage::save_device_store(&store)
-        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
+    let pending = {
+        let state = ctx.app.state::<crate::state::AppState>();
+        let mut runtime = state.remote_runtime.lock().await;
+        crate::remote::auth::create_pending_pairing_request(
+            &mut runtime,
+            &offer,
+            &device_id,
+            &label,
+            request.public_key_spki_der_base64.trim(),
+            &public_key_fingerprint,
+            now_ms,
+        )
+    };
     audit_gateway_event_without_session(
         Some(&origin),
         GatewayAuditEvent::accepted("pairing", "submit").target("device", &device_id),
     );
-    Ok(Json(PairingSubmitResponse {
-        device_id,
-        public_key_fingerprint,
-        paired_at,
-    }))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(pairing_response_from_pending_record(&pending)),
+    )
+        .into_response())
+}
+
+async fn pairing_status(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    AxumPath(request_id): AxumPath<String>,
+) -> Result<Json<PairingSubmitResponse>, RemoteGatewayError> {
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "pairing_status")?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let request_id = request_id.trim().to_string();
+    let state = ctx.app.state::<crate::state::AppState>();
+    let pending = {
+        let mut runtime = state.remote_runtime.lock().await;
+        crate::remote::auth::prune_expired_runtime_state(&mut runtime, now_ms);
+        let pending = runtime
+            .pending_pairing_requests
+            .get(&request_id)
+            .cloned()
+            .ok_or_else(|| RemoteGatewayError::not_found("pending_pairing_not_found"))?;
+        if let Err(error) = check_runtime_rate_limit(
+            &mut runtime,
+            &format!("pairing_status:{request_id}"),
+            now_ms,
+            120,
+            60_000,
+        ) {
+            audit_gateway_event_without_session(
+                Some(&origin),
+                GatewayAuditEvent::rejected("pairing", "status", "rate_limited")
+                    .target("pairing_request", &request_id),
+            );
+            return Err(error);
+        }
+        pending
+    };
+    Ok(Json(pairing_response_from_pending_record(&pending)))
 }
 
 async fn create_auth_challenge(
@@ -344,6 +384,7 @@ async fn create_auth_challenge(
         challenge_id: challenge.challenge_id,
         device_id: challenge.device_id,
         origin: challenge.canonical_origin,
+        server_identity_fingerprint: ctx.config.gateway_identity_fingerprint.clone(),
         nonce: challenge.nonce,
         expires_at: millis_to_rfc3339(challenge.expires_at_ms),
         audience: "wardian_remote_pwa".to_string(),
@@ -359,16 +400,19 @@ async fn create_auth_session(
         require_audited_request_boundary(&ctx.config, &headers, true, "create_auth_session")?;
     let device = active_remote_device(request.device_id.trim())?;
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let failure_rate_limit_key = format!("auth_session_failure:{}", device.device_id);
     let challenge = {
         let state = ctx.app.state::<crate::state::AppState>();
         let mut runtime = state.remote_runtime.lock().await;
-        if let Err(error) = check_runtime_rate_limit(
+        if let Err(error) = crate::remote::auth::check_rate_limit_available(
             &mut runtime,
-            &format!("auth_session:{}", device.device_id),
+            &failure_rate_limit_key,
             now_ms,
             5,
             10 * 60_000,
-        ) {
+        )
+        .map_err(|_| RemoteGatewayError::too_many_requests("rate_limited"))
+        {
             audit_gateway_event_without_session(
                 Some(&origin),
                 GatewayAuditEvent::rejected("authentication", "session", "rate_limited")
@@ -419,6 +463,17 @@ async fn create_auth_session(
     )
     .is_err()
     {
+        {
+            let state = ctx.app.state::<crate::state::AppState>();
+            let mut runtime = state.remote_runtime.lock().await;
+            let _ = crate::remote::auth::check_rate_limit(
+                &mut runtime,
+                &failure_rate_limit_key,
+                now_ms,
+                5,
+                10 * 60_000,
+            );
+        }
         audit_gateway_event_without_session(
             Some(&origin),
             GatewayAuditEvent::rejected("authentication", "session", "invalid_auth_signature")
@@ -475,6 +530,7 @@ async fn run_agent_action(
         require_audited_remote_session(&ctx, &headers, &origin, "agent_action", &request.action)
             .await?;
     require_mutation_rate_limit(&ctx, &session, &origin, "agent_action", &request.action).await?;
+    require_agent_action_specific_rate_limit(&ctx, &session, &origin, &request.action).await?;
     if let Err(error) = require_csrf_header(&session, &headers) {
         audit_gateway_event(
             &session,
@@ -504,6 +560,44 @@ async fn run_agent_action(
             .target("agent", &request.target),
     );
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn require_agent_action_specific_rate_limit(
+    ctx: &RemoteGatewayContext,
+    session: &RemoteSessionRecord,
+    origin: &str,
+    action: &str,
+) -> Result<(), RemoteGatewayError> {
+    let Some((max_attempts, window_ms)) = remote_agent_action_specific_limit(action) else {
+        return Ok(());
+    };
+    let state = ctx.app.state::<crate::state::AppState>();
+    let mut runtime = state.remote_runtime.lock().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match crate::remote::auth::check_rate_limit(
+        &mut runtime,
+        &format!("agent_action:{action}:{}", session.session_id),
+        now_ms,
+        max_attempts,
+        window_ms,
+    ) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            audit_gateway_event(
+                session,
+                origin,
+                GatewayAuditEvent::rejected("agent_action", action, "rate_limited"),
+            );
+            Err(RemoteGatewayError::too_many_requests("rate_limited"))
+        }
+    }
+}
+
+fn remote_agent_action_specific_limit(action: &str) -> Option<(usize, i64)> {
+    match action {
+        "clear" | "kill" => Some((10, 10 * 60_000)),
+        _ => None,
+    }
 }
 
 async fn list_remote_workflows(
@@ -731,6 +825,16 @@ async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) 
         send_status_socket_error(&mut socket, "invalid_websocket_ticket").await;
         return;
     }
+    {
+        let mut runtime = state.remote_runtime.lock().await;
+        if crate::remote::auth::try_open_status_stream(&mut runtime, &ticket_record.session_id)
+            .is_err()
+        {
+            drop(runtime);
+            send_status_socket_error(&mut socket, "websocket_connection_limit").await;
+            return;
+        }
+    }
 
     'stream: loop {
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -774,6 +878,8 @@ async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) 
             }
         }
     }
+    let mut runtime = state.remote_runtime.lock().await;
+    crate::remote::auth::close_status_stream(&mut runtime, &ticket_record.session_id);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -980,6 +1086,24 @@ fn session_response_from_record(session: &RemoteSessionRecord) -> AuthSessionRes
     }
 }
 
+fn pairing_response_from_pending_record(
+    request: &PendingPairingRequestRecord,
+) -> PairingSubmitResponse {
+    let status = match request.decision {
+        PendingPairingDecision::Pending => "pending",
+        PendingPairingDecision::Approved => "approved",
+        PendingPairingDecision::Rejected => "rejected",
+    };
+    PairingSubmitResponse {
+        status: status.to_string(),
+        pairing_request_id: request.request_id.clone(),
+        device_id: request.device_id.clone(),
+        public_key_fingerprint: request.public_key_fingerprint.clone(),
+        paired_at: request.paired_at.clone(),
+        expires_at: millis_to_rfc3339(request.expires_at_ms),
+    }
+}
+
 fn require_csrf_header(
     session: &RemoteSessionRecord,
     headers: &HeaderMap,
@@ -1046,7 +1170,7 @@ fn active_remote_device(device_id: &str) -> Result<DeviceRecord, RemoteGatewayEr
         .devices
         .into_iter()
         .find(|device| device.device_id == device_id && device.revoked_at.is_none())
-        .ok_or_else(|| RemoteGatewayError::bad_request("device_not_found"))
+        .ok_or_else(|| RemoteGatewayError::not_found("device_not_found"))
 }
 
 fn update_device_last_used(device_id: &str, last_used_at: &str) -> Result<(), RemoteGatewayError> {
@@ -1406,6 +1530,19 @@ mod tests {
             validate_remote_stream("terminal").expect_err("unsupported stream"),
             "unsupported_stream"
         );
+    }
+
+    #[test]
+    fn destructive_agent_actions_have_endpoint_specific_limits() {
+        assert_eq!(
+            remote_agent_action_specific_limit("kill"),
+            Some((10, 10 * 60_000))
+        );
+        assert_eq!(
+            remote_agent_action_specific_limit("clear"),
+            Some((10, 10 * 60_000))
+        );
+        assert_eq!(remote_agent_action_specific_limit("send_prompt"), None);
     }
 
     #[test]

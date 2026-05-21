@@ -267,8 +267,65 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
       public_key_spki_der_base64: publicKeySpkiDer.toString("base64"),
     }),
   });
-  await assertStatus(pairingSubmit, 200, "pairing submit");
-  const pairedDevice = await pairingSubmit.json();
+  await assertStatus(pairingSubmit, 202, "pairing submit");
+  const pendingPairing = await pairingSubmit.json();
+  assert.equal(pendingPairing.status, "pending");
+  assert.ok(pendingPairing.pairing_request_id);
+
+  const preApprovalChallenge = await fetch(`${baseUrl}/remote/api/auth/challenge`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: canonicalOrigin,
+    },
+    body: JSON.stringify({ device_id: pendingPairing.device_id }),
+  });
+  assert.equal(preApprovalChallenge.status, 404);
+
+  const approval = await session.driver.executeAsyncScript((requestId, done) => {
+    window.__TAURI_INTERNALS__.invoke("approve_remote_pairing_request", { requestId }).then(
+      (devices) => done({ ok: true, devices }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, pendingPairing.pairing_request_id);
+  assert.equal(approval.ok, true, `approve_remote_pairing_request failed: ${approval.error}`);
+  const pairingAuditRecords = readRemoteAuditRecords(harness);
+  assert.equal(
+    pairingAuditRecords.some(
+      (record) =>
+        record.origin === canonicalOrigin &&
+        record.event_type === "pairing" &&
+        record.action === "create" &&
+        record.target_type === "pairing_offer" &&
+        record.target_id === pairing.offer.pairing_offer_id &&
+        record.outcome === "accepted",
+    ),
+    true,
+    "pairing offer creation was not written to the remote audit log",
+  );
+  assert.equal(
+    pairingAuditRecords.some(
+      (record) =>
+        record.origin === canonicalOrigin &&
+        record.event_type === "pairing" &&
+        record.action === "approve" &&
+        record.device_id === pendingPairing.device_id &&
+        record.target_type === "device" &&
+        record.target_id === pendingPairing.device_id &&
+        record.outcome === "accepted",
+    ),
+    true,
+    "pairing approval was not written to the remote audit log",
+  );
+
+  const pairingStatus = await fetch(`${baseUrl}/remote/api/pairing/${pendingPairing.pairing_request_id}`, {
+    headers: {
+      Origin: canonicalOrigin,
+    },
+  });
+  await assertStatus(pairingStatus, 200, "pairing status");
+  const pairedDevice = await pairingStatus.json();
+  assert.equal(pairedDevice.status, "approved");
   assert.ok(pairedDevice.device_id);
 
   const challengeResponse = await fetch(`${baseUrl}/remote/api/auth/challenge`, {

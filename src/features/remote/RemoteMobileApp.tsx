@@ -13,17 +13,15 @@ export const RemoteMobileApp: React.FC = () => {
   const workflows = useRemoteStore((state) => state.workflows);
   const status = useRemoteStore((state) => state.status);
   const load = useRemoteStore((state) => state.load);
+  const disconnectStatusStream = useRemoteStore((state) => state.disconnectStatusStream);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   useEffect(() => {
-    if (status === "session_expired") return;
-    // Polling keeps this shell usable until the WebSocket status stream is wired into the store.
-    const id = window.setInterval(() => void load(), 5000);
-    return () => window.clearInterval(id);
-  }, [load, status]);
+    return () => disconnectStatusStream();
+  }, [disconnectStatusStream]);
 
   if (status === "loading") {
     return (
@@ -37,7 +35,19 @@ export const RemoteMobileApp: React.FC = () => {
   }
 
   if (status === "session_expired") {
-    return <RemotePairingView state="session_expired" actionLabel="Re-authenticate" onAction={() => window.location.reload()} />;
+    return <RemotePairingView state="session_expired" actionLabel="Re-authenticate" onAction={() => void load()} />;
+  }
+
+  if (status === "pairing_pending") {
+    return <RemotePairingView state="pending" />;
+  }
+
+  if (status === "pairing_expired") {
+    return <RemotePairingView state="expired" actionLabel="Retry" onAction={() => void load()} />;
+  }
+
+  if (status === "device_revoked") {
+    return <RemotePairingView state="revoked" />;
   }
 
   if (status === "unreachable") {

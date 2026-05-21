@@ -27,9 +27,11 @@ pub struct RemoteGatewayConfig {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteRuntimeState {
     pub pairing_offers: HashMap<String, PairingOfferRecord>,
+    pub pending_pairing_requests: HashMap<String, PendingPairingRequestRecord>,
     pub auth_challenges: HashMap<String, AuthChallengeRecord>,
     pub sessions: HashMap<String, RemoteSessionRecord>,
     pub websocket_tickets: HashMap<String, WebSocketTicketRecord>,
+    pub active_status_streams: HashMap<String, usize>,
     pub rate_limits: HashMap<String, RateLimitBucket>,
 }
 
@@ -40,6 +42,28 @@ pub struct PairingOfferRecord {
     pub canonical_origin: String,
     pub expires_at_ms: i64,
     pub used: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingPairingDecision {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPairingRequestRecord {
+    pub request_id: String,
+    pub pairing_offer_id: String,
+    pub device_id: String,
+    pub device_label: String,
+    pub public_key_spki_der_base64: String,
+    pub public_key_fingerprint: String,
+    pub canonical_origin: String,
+    pub submitted_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub decision: PendingPairingDecision,
+    pub paired_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +153,7 @@ pub struct AuthChallengeResponse {
     pub challenge_id: String,
     pub device_id: String,
     pub origin: String,
+    pub server_identity_fingerprint: String,
     pub nonce: String,
     pub expires_at: String,
     pub audience: String,
@@ -144,9 +169,22 @@ pub struct PairingSubmitRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingSubmitResponse {
+    pub status: String,
+    pub pairing_request_id: String,
     pub device_id: String,
     pub public_key_fingerprint: String,
-    pub paired_at: String,
+    pub paired_at: Option<String>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemotePendingPairingRequest {
+    pub request_id: String,
+    pub device_label: String,
+    pub public_key_fingerprint: String,
+    pub canonical_origin: String,
+    pub submitted_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

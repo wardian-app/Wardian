@@ -18,6 +18,15 @@ export interface PairingQrPayload {
   server_identity_fingerprint: string;
 }
 
+export interface PairingSubmitResponse {
+  status: "pending" | "approved" | "rejected";
+  pairing_request_id: string;
+  device_id: string;
+  public_key_fingerprint: string;
+  paired_at: string | null;
+  expires_at: string;
+}
+
 export interface RemoteDeviceRecord {
   device_id: string;
   label: string;
@@ -26,6 +35,15 @@ export interface RemoteDeviceRecord {
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+}
+
+export interface RemotePendingPairingRequest {
+  request_id: string;
+  device_label: string;
+  public_key_fingerprint: string;
+  canonical_origin: string;
+  submitted_at: string;
+  expires_at: string;
 }
 
 export interface RemoteAgentSummary {
@@ -63,6 +81,16 @@ export interface AuthSessionResponse {
   csrf_nonce: string;
   expires_at: string;
   absolute_expires_at: string;
+}
+
+export interface AuthChallengeResponse {
+  challenge_id: string;
+  device_id: string;
+  origin: string;
+  server_identity_fingerprint: string;
+  nonce: string;
+  expires_at: string;
+  audience: string;
 }
 
 export interface RemoteWebSocketTicketResponse {

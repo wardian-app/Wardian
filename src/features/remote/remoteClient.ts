@@ -1,5 +1,7 @@
 import type {
+  AuthChallengeResponse,
   AuthSessionResponse,
+  PairingSubmitResponse,
   RemoteAgentActionRequest,
   RemoteAgentSummary,
   RemoteWebSocketTicketResponse,
@@ -9,6 +11,7 @@ import type {
 } from "../../types";
 
 const REMOTE_CSRF_HEADER_NAME = "x-wardian-csrf";
+const REMOTE_STATUS_STREAM_PATH = "/remote/api/status-stream";
 
 export class RemoteRequestError extends Error {
   constructor(
@@ -66,6 +69,40 @@ export const remoteClient = {
     this.setCsrfNonce(session.csrf_nonce);
     return session;
   },
+  async submitPairing(request: {
+    pairing_offer_id: string;
+    nonce: string;
+    device_label: string;
+    public_key_spki_der_base64: string;
+  }) {
+    return remoteJson<PairingSubmitResponse>("/remote/api/pairing/submit", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+  },
+  async pairingStatus(pairingRequestId: string) {
+    return remoteJson<PairingSubmitResponse>(
+      `/remote/api/pairing/${encodeURIComponent(pairingRequestId)}`,
+    );
+  },
+  async createAuthChallenge(deviceId: string) {
+    return remoteJson<AuthChallengeResponse>("/remote/api/auth/challenge", {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+  },
+  async createAuthSession(request: {
+    challenge_id: string;
+    device_id: string;
+    signature_der_base64: string;
+  }) {
+    const session = await remoteJson<AuthSessionResponse>("/remote/api/auth/session", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    this.setCsrfNonce(session.csrf_nonce);
+    return session;
+  },
   async listAgents() {
     const result = await remoteJson<{ agents: RemoteAgentSummary[] }>("/remote/api/agents");
     return result.agents;
@@ -107,5 +144,42 @@ export const remoteClient = {
       method: "POST",
       body: JSON.stringify({ stream: "agent_status" }),
     });
+  },
+  async openStatusStream(handlers: {
+    onAgents: (agents: RemoteAgentSummary[]) => void;
+    onSessionExpired: () => void;
+    onError?: () => void;
+    onClose?: () => void;
+  }) {
+    const ticket = await this.createStatusStreamTicket();
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${window.location.host}${REMOTE_STATUS_STREAM_PATH}`);
+
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({ ticket: ticket.ticket }));
+    });
+    socket.addEventListener("message", (event) => {
+      let data:
+        | { type: "agent_status"; agents: RemoteAgentSummary[] }
+        | { type: "error"; code: string };
+      try {
+        data = JSON.parse(String(event.data));
+      } catch {
+        handlers.onError?.();
+        return;
+      }
+      if (data.type === "agent_status") {
+        handlers.onAgents(data.agents);
+        return;
+      }
+      if (data.code === "session_expired" || data.code === "invalid_websocket_ticket") {
+        handlers.onSessionExpired();
+        return;
+      }
+      handlers.onError?.();
+    });
+    socket.addEventListener("error", () => handlers.onError?.());
+    socket.addEventListener("close", () => handlers.onClose?.());
+    return socket;
   },
 };

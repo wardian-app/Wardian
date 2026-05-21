@@ -21,6 +21,10 @@ workflows, filesystem access, provider CLIs, PTYs, and telemetry.
 6. Scan the code from the phone and approve the device on the desktop.
 7. Open the remote URL from the phone while connected to the same tailnet.
 
+The pairing code is short-lived and single use. The phone generates its own
+device key during pairing, then waits for explicit desktop approval before it
+can create a remote session.
+
 ## Security Model
 
 The Wardian desktop is the host. The phone is only a remote control surface, and

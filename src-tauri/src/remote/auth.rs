@@ -1,8 +1,10 @@
 use crate::remote::crypto::random_url_token;
 use crate::remote::models::{
-    AuthChallengeRecord, PairingOfferRecord, PairingQrPayload, RateLimitBucket, RemoteRuntimeState,
-    RemoteSessionRecord, WebSocketTicketRecord,
+    AuthChallengeRecord, PairingOfferRecord, PairingQrPayload, PendingPairingDecision,
+    PendingPairingRequestRecord, RateLimitBucket, RemoteRuntimeState, RemoteSessionRecord,
+    WebSocketTicketRecord,
 };
+use std::collections::HashSet;
 use subtle::ConstantTimeEq;
 
 const PAIRING_OFFER_TTL_MS: i64 = 120_000;
@@ -10,8 +12,10 @@ const AUTH_CHALLENGE_TTL_MS: i64 = 60_000;
 const ACCESS_SESSION_TTL_MS: i64 = 15 * 60 * 1000;
 const ABSOLUTE_SESSION_TTL_MS: i64 = 12 * 60 * 60 * 1000;
 const WEBSOCKET_TICKET_TTL_MS: i64 = 60_000;
+const PENDING_PAIRING_TTL_MS: i64 = 120_000;
 const RATE_LIMIT_RETAIN_MS: i64 = 10 * 60 * 1000;
 const MAX_RATE_LIMIT_BUCKETS: usize = 1024;
+const MAX_ACTIVE_STATUS_STREAMS_PER_SESSION: usize = 3;
 
 pub fn create_pairing_offer(
     runtime: &mut RemoteRuntimeState,
@@ -60,6 +64,78 @@ pub fn consume_pairing_offer(
     Ok(offer.clone())
 }
 
+pub fn create_pending_pairing_request(
+    runtime: &mut RemoteRuntimeState,
+    offer: &PairingOfferRecord,
+    device_id: &str,
+    device_label: &str,
+    public_key_spki_der_base64: &str,
+    public_key_fingerprint: &str,
+    now_ms: i64,
+) -> PendingPairingRequestRecord {
+    prune_expired_runtime_state(runtime, now_ms);
+    let request = PendingPairingRequestRecord {
+        request_id: random_url_token(18),
+        pairing_offer_id: offer.offer_id.clone(),
+        device_id: device_id.to_string(),
+        device_label: device_label.to_string(),
+        public_key_spki_der_base64: public_key_spki_der_base64.to_string(),
+        public_key_fingerprint: public_key_fingerprint.to_string(),
+        canonical_origin: offer.canonical_origin.clone(),
+        submitted_at_ms: now_ms,
+        expires_at_ms: offer.expires_at_ms.min(now_ms + PENDING_PAIRING_TTL_MS),
+        decision: PendingPairingDecision::Pending,
+        paired_at: None,
+    };
+    runtime
+        .pending_pairing_requests
+        .insert(request.request_id.clone(), request.clone());
+    request
+}
+
+pub fn pending_pairing_request_is_active(
+    request: &PendingPairingRequestRecord,
+    now_ms: i64,
+) -> bool {
+    request.decision == PendingPairingDecision::Pending && now_ms <= request.expires_at_ms
+}
+
+pub fn mark_pending_pairing_approved(
+    runtime: &mut RemoteRuntimeState,
+    request_id: &str,
+    paired_at: &str,
+    now_ms: i64,
+) -> Result<PendingPairingRequestRecord, String> {
+    prune_expired_runtime_state(runtime, now_ms);
+    let request = runtime
+        .pending_pairing_requests
+        .get_mut(request_id)
+        .ok_or_else(|| "pending_pairing_not_found".to_string())?;
+    if !pending_pairing_request_is_active(request, now_ms) {
+        return Err("pending_pairing_not_active".to_string());
+    }
+    request.decision = PendingPairingDecision::Approved;
+    request.paired_at = Some(paired_at.to_string());
+    Ok(request.clone())
+}
+
+pub fn mark_pending_pairing_rejected(
+    runtime: &mut RemoteRuntimeState,
+    request_id: &str,
+    now_ms: i64,
+) -> Result<(), String> {
+    prune_expired_runtime_state(runtime, now_ms);
+    let request = runtime
+        .pending_pairing_requests
+        .get_mut(request_id)
+        .ok_or_else(|| "pending_pairing_not_found".to_string())?;
+    if !pending_pairing_request_is_active(request, now_ms) {
+        return Err("pending_pairing_not_active".to_string());
+    }
+    request.decision = PendingPairingDecision::Rejected;
+    Ok(())
+}
+
 pub fn create_session_record(device_id: &str, now_ms: i64) -> RemoteSessionRecord {
     RemoteSessionRecord {
         session_id: random_url_token(32),
@@ -79,6 +155,9 @@ pub fn create_session(
     now_ms: i64,
 ) -> RemoteSessionRecord {
     prune_expired_runtime_state(runtime, now_ms);
+    runtime
+        .sessions
+        .retain(|_, session| session.device_id != device_id);
     let session = create_session_record(device_id, now_ms);
     runtime
         .sessions
@@ -180,10 +259,45 @@ pub fn check_rate_limit(
     check_rate_limit_bucket(bucket, now_ms, max_attempts, window_ms)
 }
 
+pub fn check_rate_limit_available(
+    runtime: &mut RemoteRuntimeState,
+    key: &str,
+    now_ms: i64,
+    max_attempts: usize,
+    window_ms: i64,
+) -> Result<(), String> {
+    prune_rate_limit_buckets(runtime, now_ms);
+    let Some(bucket) = runtime.rate_limits.get_mut(key) else {
+        return Ok(());
+    };
+    if bucket
+        .locked_until_ms
+        .is_some_and(|locked_until_ms| now_ms < locked_until_ms)
+    {
+        return Err("rate_limited".to_string());
+    }
+    if bucket
+        .locked_until_ms
+        .is_some_and(|locked_until_ms| now_ms >= locked_until_ms)
+    {
+        bucket.locked_until_ms = None;
+        bucket.attempts.clear();
+    }
+    prune_bucket_window(bucket, now_ms, window_ms);
+    if bucket.attempts.len() >= max_attempts.max(1) {
+        bucket.locked_until_ms = Some(now_ms + window_ms);
+        return Err("rate_limited".to_string());
+    }
+    Ok(())
+}
+
 pub fn prune_expired_runtime_state(runtime: &mut RemoteRuntimeState, now_ms: i64) {
     runtime
         .pairing_offers
         .retain(|_, offer| !offer.used && now_ms <= offer.expires_at_ms);
+    runtime.pending_pairing_requests.retain(|_, request| {
+        now_ms <= request.expires_at_ms && request.decision != PendingPairingDecision::Rejected
+    });
     runtime
         .auth_challenges
         .retain(|_, challenge| !challenge.used && now_ms <= challenge.expires_at_ms);
@@ -193,6 +307,10 @@ pub fn prune_expired_runtime_state(runtime: &mut RemoteRuntimeState, now_ms: i64
     runtime
         .websocket_tickets
         .retain(|_, ticket| !ticket.used && now_ms <= ticket.expires_at_ms);
+    let active_session_ids = runtime.sessions.keys().cloned().collect::<HashSet<_>>();
+    runtime
+        .active_status_streams
+        .retain(|session_id, _| active_session_ids.contains(session_id));
     prune_rate_limit_buckets(runtime, now_ms);
 }
 
@@ -241,13 +359,7 @@ fn check_rate_limit_bucket(
         bucket.attempts.clear();
     }
 
-    while bucket
-        .attempts
-        .front()
-        .is_some_and(|attempt_ms| now_ms.saturating_sub(*attempt_ms) >= window_ms)
-    {
-        bucket.attempts.pop_front();
-    }
+    prune_bucket_window(bucket, now_ms, window_ms);
 
     if bucket.attempts.len() >= max_attempts.max(1) {
         bucket.locked_until_ms = Some(now_ms + window_ms);
@@ -256,6 +368,16 @@ fn check_rate_limit_bucket(
 
     bucket.attempts.push_back(now_ms);
     Ok(())
+}
+
+fn prune_bucket_window(bucket: &mut RateLimitBucket, now_ms: i64, window_ms: i64) {
+    while bucket
+        .attempts
+        .front()
+        .is_some_and(|attempt_ms| now_ms.saturating_sub(*attempt_ms) >= window_ms)
+    {
+        bucket.attempts.pop_front();
+    }
 }
 
 pub fn create_websocket_ticket(
@@ -297,6 +419,31 @@ pub fn consume_websocket_ticket(
     }
     record.used = true;
     Ok(record.clone())
+}
+
+pub fn try_open_status_stream(
+    runtime: &mut RemoteRuntimeState,
+    session_id: &str,
+) -> Result<(), String> {
+    let active = runtime
+        .active_status_streams
+        .entry(session_id.to_string())
+        .or_insert(0);
+    if *active >= MAX_ACTIVE_STATUS_STREAMS_PER_SESSION {
+        return Err("websocket_connection_limit".to_string());
+    }
+    *active += 1;
+    Ok(())
+}
+
+pub fn close_status_stream(runtime: &mut RemoteRuntimeState, session_id: &str) {
+    let Some(active) = runtime.active_status_streams.get_mut(session_id) else {
+        return;
+    };
+    *active = active.saturating_sub(1);
+    if *active == 0 {
+        runtime.active_status_streams.remove(session_id);
+    }
 }
 
 fn millis_to_rfc3339(ms: i64) -> String {
@@ -360,6 +507,34 @@ mod tests {
         let stored = runtime.sessions.get(&session.session_id).expect("session");
         assert!(!session_is_active(stored, 1_001_000));
         assert!(!csrf_nonce_matches(stored, &session.csrf_nonce));
+    }
+
+    #[test]
+    fn create_session_replaces_existing_session_for_device() {
+        let mut runtime = RemoteRuntimeState::default();
+        let first = create_session(&mut runtime, "dev-1", 1_000_000);
+        let second = create_session(&mut runtime, "dev-1", 1_001_000);
+
+        assert_ne!(first.session_id, second.session_id);
+        assert!(!runtime.sessions.contains_key(&first.session_id));
+        assert!(runtime.sessions.contains_key(&second.session_id));
+    }
+
+    #[test]
+    fn status_stream_count_is_limited_per_session_and_closes() {
+        let mut runtime = RemoteRuntimeState::default();
+
+        assert!(try_open_status_stream(&mut runtime, "sess-1").is_ok());
+        assert!(try_open_status_stream(&mut runtime, "sess-1").is_ok());
+        assert!(try_open_status_stream(&mut runtime, "sess-1").is_ok());
+        assert_eq!(
+            try_open_status_stream(&mut runtime, "sess-1").expect_err("fourth stream rejected"),
+            "websocket_connection_limit"
+        );
+
+        close_status_stream(&mut runtime, "sess-1");
+
+        assert!(try_open_status_stream(&mut runtime, "sess-1").is_ok());
     }
 
     #[test]
@@ -451,6 +626,21 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_availability_does_not_record_successful_attempts() {
+        let mut runtime = RemoteRuntimeState::default();
+
+        assert!(check_rate_limit_available(&mut runtime, "auth:dev-1", 1_000, 2, 60_000).is_ok());
+        assert!(check_rate_limit_available(&mut runtime, "auth:dev-1", 2_000, 2, 60_000).is_ok());
+        assert!(check_rate_limit(&mut runtime, "auth:dev-1", 3_000, 2, 60_000).is_ok());
+        assert!(check_rate_limit(&mut runtime, "auth:dev-1", 4_000, 2, 60_000).is_ok());
+        assert_eq!(
+            check_rate_limit_available(&mut runtime, "auth:dev-1", 5_000, 2, 60_000)
+                .expect_err("filled bucket rejected before recording another attempt"),
+            "rate_limited"
+        );
+    }
+
+    #[test]
     fn prune_expired_runtime_state_removes_used_expired_and_revoked_records() {
         let mut runtime = RemoteRuntimeState::default();
         let now = 1_000_000;
@@ -461,12 +651,8 @@ mod tests {
             now,
         )
         .expect("offer");
-        let challenge = create_auth_challenge(
-            &mut runtime,
-            "dev-1",
-            "https://wardian.tailnet.ts.net",
-            now,
-        );
+        let challenge =
+            create_auth_challenge(&mut runtime, "dev-1", "https://wardian.tailnet.ts.net", now);
         let mut session = create_session(&mut runtime, "dev-1", now);
         let ticket = create_websocket_ticket(
             &mut runtime,
@@ -486,9 +672,57 @@ mod tests {
         prune_expired_runtime_state(&mut runtime, now + 1);
 
         assert!(runtime.pairing_offers.is_empty());
+        assert!(runtime.pending_pairing_requests.is_empty());
         assert!(runtime.auth_challenges.is_empty());
         assert!(runtime.websocket_tickets.is_empty());
         assert!(runtime.sessions.is_empty());
+    }
+
+    #[test]
+    fn pending_pairing_requires_explicit_approval_or_rejection() {
+        let mut runtime = RemoteRuntimeState::default();
+        let now = 1_000_000;
+        let offer = create_pairing_offer(
+            &mut runtime,
+            "https://wardian.tailnet.ts.net",
+            "server-fp",
+            now,
+        )
+        .expect("offer");
+        let offer_record =
+            consume_pairing_offer(&mut runtime, &offer.pairing_offer_id, now + 1).expect("offer");
+        let request = create_pending_pairing_request(
+            &mut runtime,
+            &offer_record,
+            "dev-1",
+            "Pixel phone",
+            "spki",
+            "fp:phone",
+            now + 2,
+        );
+
+        assert!(pending_pairing_request_is_active(&request, now + 2));
+        assert_eq!(
+            runtime
+                .pending_pairing_requests
+                .get(&request.request_id)
+                .expect("pending request")
+                .decision,
+            PendingPairingDecision::Pending
+        );
+
+        let approved = mark_pending_pairing_approved(
+            &mut runtime,
+            &request.request_id,
+            "2026-05-21T00:00:00.000Z",
+            now + 3,
+        )
+        .expect("approved");
+        assert_eq!(approved.decision, PendingPairingDecision::Approved);
+        assert_eq!(
+            approved.paired_at.as_deref(),
+            Some("2026-05-21T00:00:00.000Z")
+        );
     }
 
     #[test]
@@ -496,14 +730,9 @@ mod tests {
         let mut runtime = RemoteRuntimeState::default();
 
         for idx in 0..MAX_RATE_LIMIT_BUCKETS {
-            assert!(check_rate_limit(
-                &mut runtime,
-                &format!("auth:{idx}"),
-                1_000,
-                1,
-                60_000
-            )
-            .is_ok());
+            assert!(
+                check_rate_limit(&mut runtime, &format!("auth:{idx}"), 1_000, 1, 60_000).is_ok()
+            );
         }
 
         assert_eq!(
