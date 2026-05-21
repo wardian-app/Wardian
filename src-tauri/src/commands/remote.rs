@@ -221,6 +221,7 @@ mod tests {
 
     #[test]
     fn saving_enabled_config_persists_canonical_origin() {
+        let _lock = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
         let previous_home = std::env::var_os("WARDIAN_HOME");
         unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
