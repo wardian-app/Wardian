@@ -1,5 +1,6 @@
 const CACHE_NAME = "wardian-remote-app-shell-v1";
 const APP_SHELL = ["/remote", "/manifest.webmanifest", "/icon.png"];
+const ASSET_PREFIX = "/assets/";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
@@ -25,6 +26,23 @@ self.addEventListener("fetch", (event) => {
 
   if (event.request.mode === "navigate") {
     event.respondWith(fetch(event.request).catch(() => caches.match("/remote")));
+    return;
+  }
+
+  if (url.pathname.startsWith(ASSET_PREFIX)) {
+    event.respondWith(
+      caches.open(CACHE_NAME).then(async (cache) => {
+        try {
+          const response = await fetch(event.request);
+          if (response.ok) {
+            await cache.put(event.request, response.clone());
+          }
+          return response;
+        } catch {
+          return cache.match(event.request);
+        }
+      }),
+    );
     return;
   }
 

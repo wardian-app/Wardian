@@ -40,9 +40,15 @@ pub fn spawn_remote_gateway(app: AppHandle) {
         let Some(config) = crate::remote::storage::load_remote_config().ok().flatten() else {
             return;
         };
-        if !config.enabled {
-            return;
-        }
+        spawn_remote_gateway_for_config(app, config);
+    });
+}
+
+pub fn spawn_remote_gateway_for_config(app: AppHandle, config: RemoteGatewayConfig) {
+    if !config.enabled {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
         if let Err(error) = run_remote_gateway(app, config).await {
             crate::utils::logging::log_debug(&format!(
                 "[Wardian] remote gateway unavailable: {error}"
@@ -187,6 +193,41 @@ fn static_asset_path_for_route(route_path: &str) -> Result<String, &'static str>
         path if path.starts_with("assets/") => Ok(path.to_string()),
         _ => Err("asset_path_forbidden"),
     }
+}
+
+fn active_gateway_config_for_bound_server(
+    loaded_config: Option<RemoteGatewayConfig>,
+    bound_config: &RemoteGatewayConfig,
+) -> Result<RemoteGatewayConfig, RemoteGatewayError> {
+    let config = loaded_config
+        .ok_or_else(|| RemoteGatewayError::service_unavailable("remote_access_disabled"))?;
+    if !config.enabled {
+        return Err(RemoteGatewayError::service_unavailable(
+            "remote_access_disabled",
+        ));
+    }
+    validate_gateway_bind_config(&config)
+        .map_err(|_| RemoteGatewayError::service_unavailable("remote_gateway_invalid"))?;
+    if config.loopback_port != bound_config.loopback_port
+        || !config
+            .loopback_host
+            .eq_ignore_ascii_case(&bound_config.loopback_host)
+        || config.canonical_origin != bound_config.canonical_origin
+        || config.gateway_identity_fingerprint != bound_config.gateway_identity_fingerprint
+    {
+        return Err(RemoteGatewayError::service_unavailable(
+            "remote_gateway_reconfigured",
+        ));
+    }
+    Ok(config)
+}
+
+fn load_active_gateway_config_for_bound_server(
+    bound_config: &RemoteGatewayConfig,
+) -> Result<RemoteGatewayConfig, RemoteGatewayError> {
+    let loaded_config = crate::remote::storage::load_remote_config()
+        .map_err(|_| RemoteGatewayError::service_unavailable("remote_config_unavailable"))?;
+    active_gateway_config_for_bound_server(loaded_config, bound_config)
 }
 
 async fn current_remote_session(
@@ -937,11 +978,21 @@ fn require_audited_request_boundary(
     require_origin: bool,
     action: &'static str,
 ) -> Result<String, RemoteGatewayError> {
-    match require_request_boundary(config, headers, require_origin) {
-        Ok(origin) => Ok(origin),
+    let config = match load_active_gateway_config_for_bound_server(config) {
+        Ok(config) => config,
         Err(error) => {
             audit_gateway_event_without_session(
                 canonical_origin_for_audit(config).as_deref(),
+                GatewayAuditEvent::rejected("gateway_policy", action, error.code),
+            );
+            return Err(error);
+        }
+    };
+    match require_request_boundary(&config, headers, require_origin) {
+        Ok(origin) => Ok(origin),
+        Err(error) => {
+            audit_gateway_event_without_session(
+                canonical_origin_for_audit(&config).as_deref(),
                 GatewayAuditEvent::rejected("gateway_policy", action, error.code),
             );
             Err(error)
@@ -1356,6 +1407,13 @@ impl RemoteGatewayError {
         }
     }
 
+    fn service_unavailable(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+        }
+    }
+
     fn not_found(code: &'static str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -1687,6 +1745,30 @@ mod tests {
             static_asset_path_for_route("/assets/../secret").expect_err("traversal rejected"),
             "asset_path_forbidden"
         );
+    }
+
+    #[test]
+    fn active_gateway_config_rejects_disabled_or_rebound_saved_config() {
+        let bound = config();
+        assert_eq!(
+            active_gateway_config_for_bound_server(Some(bound.clone()), &bound)
+                .expect("enabled matching config"),
+            bound
+        );
+
+        let mut disabled = config();
+        disabled.enabled = false;
+        let error = active_gateway_config_for_bound_server(Some(disabled), &config())
+            .expect_err("disabled config rejected");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "remote_access_disabled");
+
+        let mut rebound = config();
+        rebound.loopback_port += 1;
+        let error = active_gateway_config_for_bound_server(Some(rebound), &config())
+            .expect_err("rebound config rejected");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "remote_gateway_reconfigured");
     }
 
     #[test]

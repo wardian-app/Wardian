@@ -1,10 +1,17 @@
 import React from "react";
 import { ShieldAlert } from "lucide-react";
 
-type RemotePairingState = "expired" | "pending" | "revoked" | "session_expired" | "unreachable";
+type RemotePairingState =
+  | "expired"
+  | "identity_changed"
+  | "pending"
+  | "revoked"
+  | "session_expired"
+  | "unreachable";
 
 const labels: Record<RemotePairingState, string> = {
   expired: "Pairing expired.",
+  identity_changed: "Gateway identity changed. Scan a fresh QR code to re-pair.",
   pending: "Waiting for desktop approval.",
   revoked: "This device has been revoked.",
   session_expired: "Session expired. Re-authentication is required.",

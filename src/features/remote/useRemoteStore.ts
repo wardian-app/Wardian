@@ -18,6 +18,7 @@ type RemoteStatus =
   | "session_expired"
   | "pairing_pending"
   | "pairing_expired"
+  | "gateway_identity_changed"
   | "device_revoked";
 
 interface RemoteState {
@@ -43,7 +44,13 @@ const statusFromError = (error: unknown): RemoteStatus =>
   error instanceof RemoteRequestError && error.status === 401 ? "session_expired" : "unreachable";
 
 class RemotePairingExpiredError extends Error {}
-class RemotePairingRejectedError extends Error {}
+type RemotePairingRejectedReason = "pairing_rejected" | "server_identity_mismatch";
+
+class RemotePairingRejectedError extends Error {
+  constructor(readonly reason: RemotePairingRejectedReason) {
+    super(reason);
+  }
+}
 
 const sendPromptToTargets = async (prompt: string, agentIds: string[]) => {
   const results = await Promise.allSettled(agentIds.map((target) => remoteClient.sendPrompt(target, prompt)));
@@ -223,7 +230,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     } catch (error) {
       closeStatusStream();
       if (error instanceof RemotePairingRejectedError) {
-        set({ status: "device_revoked" });
+        set({
+          status:
+            error.reason === "server_identity_mismatch"
+              ? "gateway_identity_changed"
+              : "device_revoked",
+        });
         return;
       }
       if (error instanceof RemotePairingExpiredError) {

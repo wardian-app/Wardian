@@ -386,7 +386,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByRole("button", { name: "Re-authenticate" })).toBeVisible();
   });
 
-  it("clears the stored phone identity when the desktop fingerprint changes", async () => {
+  it("clears the stored phone identity and asks for a fresh QR code when the desktop fingerprint changes", async () => {
     vi.mocked(loadStoredRemoteIdentity).mockResolvedValue({
       device_id: "dev-1",
       public_key_fingerprint: "phone-fp",
@@ -420,7 +420,8 @@ describe("RemoteMobileApp", () => {
 
     render(<RemoteMobileApp />);
 
-    expect(await screen.findByText("This device has been revoked.")).toBeVisible();
+    expect(await screen.findByText("Gateway identity changed. Scan a fresh QR code to re-pair.")).toBeVisible();
+    expect(screen.queryByText("This device has been revoked.")).not.toBeInTheDocument();
     expect(clearStoredRemoteIdentity).toHaveBeenCalled();
     expect(signRemoteAuthChallenge).not.toHaveBeenCalled();
     expect(fetchMock.mock.calls.some(([url]) => url === "/remote/api/auth/session")).toBe(false);
