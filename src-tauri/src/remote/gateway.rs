@@ -1,7 +1,7 @@
 use crate::remote::models::{
-    RemoteAgentActionRequest, RemoteAuditRecord, RemoteGatewayConfig, RemoteSessionRecord,
-    RemoteWebSocketTicketRequest, RemoteWebSocketTicketResponse, RemoteWorkflowRunRequest,
-    RemoteWorkflowStopRequest, REMOTE_AUDIT_SCHEMA_VERSION,
+    AuthSessionResponse, RemoteAgentActionRequest, RemoteAuditRecord, RemoteGatewayConfig,
+    RemoteSessionRecord, RemoteWebSocketTicketRequest, RemoteWebSocketTicketResponse,
+    RemoteWorkflowRunRequest, RemoteWorkflowStopRequest, REMOTE_AUDIT_SCHEMA_VERSION,
 };
 use axum::{
     extract::{
@@ -67,6 +67,7 @@ fn loopback_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
     Router::new()
         .route("/remote/api/health", get(remote_health))
+        .route("/remote/api/session", get(current_remote_session))
         .route("/remote/api/pairing/submit", post(submit_pairing))
         .route("/remote/api/auth/challenge", post(create_auth_challenge))
         .route("/remote/api/auth/session", post(create_auth_session))
@@ -88,6 +89,25 @@ struct RemoteGatewayContext {
 
 async fn remote_health() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "ok": true }))
+}
+
+async fn current_remote_session(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+) -> Result<Json<AuthSessionResponse>, RemoteGatewayError> {
+    let origin = require_request_boundary(&ctx.config, &headers, false)?;
+    let session = require_remote_session(&ctx, &headers).await?;
+    audit_gateway_event(
+        &session,
+        &origin,
+        "session_read",
+        "current_session",
+        None,
+        None,
+        "accepted",
+        None,
+    );
+    Ok(Json(session_response_from_record(&session)))
 }
 
 async fn submit_pairing(
@@ -603,6 +623,14 @@ fn remote_session_cookie_value(headers: &HeaderMap) -> Result<String, RemoteGate
         .ok_or_else(|| RemoteGatewayError::unauthorized("missing_session_cookie"))
 }
 
+fn session_response_from_record(session: &RemoteSessionRecord) -> AuthSessionResponse {
+    AuthSessionResponse {
+        csrf_nonce: session.csrf_nonce.clone(),
+        expires_at: millis_to_rfc3339(session.expires_at_ms),
+        absolute_expires_at: millis_to_rfc3339(session.absolute_expires_at_ms),
+    }
+}
+
 fn require_csrf_header(
     session: &RemoteSessionRecord,
     headers: &HeaderMap,
@@ -918,6 +946,16 @@ mod tests {
             status_stream_client_message_action(None),
             StatusStreamClientMessageAction::Close
         );
+    }
+
+    #[test]
+    fn session_response_exposes_csrf_nonce_and_lifetimes() {
+        let session = session_record("sess-1", "dev-1", "csrf-1");
+        let response = session_response_from_record(&session);
+
+        assert_eq!(response.csrf_nonce, "csrf-1");
+        assert!(response.expires_at.ends_with('Z'));
+        assert!(response.absolute_expires_at.ends_with('Z'));
     }
 
     #[test]

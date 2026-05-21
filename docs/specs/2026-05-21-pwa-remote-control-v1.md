@@ -340,6 +340,9 @@ HTTP APIs handle discrete actions such as agent control and workflow run
 requests. WebSockets provide live roster, status, queue, and workflow updates.
 WebSocket connections require authenticated upgrade protection and must close
 immediately when the device or session is revoked.
+Polling may be used only as a temporary development fallback while the mobile
+shell is incomplete; v1 must consume the WebSocket status stream before the
+remote route is considered shippable.
 
 Browser credentials are only the opaque session cookie and the in-memory
 session-bound CSRF nonce. Persistent device identity is the non-extractable
@@ -392,6 +395,8 @@ The implementation plan must include automated tests for:
 - Successful remote workflow run/stop through the gateway.
 - Audit log creation for remote actions.
 - Audit log creation for sensitive reads.
+- Mobile PWA status updates through a single-use WebSocket ticket rather than
+  polling-only refresh.
 - Offline PWA behavior that does not queue mutating actions.
 
 Browser E2E tests can prove mobile UI behavior and mock remote gateway flows.

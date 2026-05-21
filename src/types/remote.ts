@@ -27,3 +27,45 @@ export interface RemoteDeviceRecord {
   last_used_at: string | null;
   revoked_at: string | null;
 }
+
+export interface RemoteAgentSummary {
+  session_id: string;
+  session_name: string;
+  agent_class: string;
+  provider: string;
+  workspace: string;
+  status: string;
+  latest_text: string | null;
+}
+
+export interface RemoteAgentActionRequest {
+  action: string;
+  target: string;
+  prompt?: string;
+}
+
+export interface RemoteWorkflowSummary {
+  id: string;
+  name: string;
+  node_count: number;
+}
+
+export interface RemoteWorkflowRunRequest {
+  workflow_id: string;
+  payload?: unknown;
+}
+
+export interface RemoteWorkflowStopRequest {
+  run_instance_id: string;
+}
+
+export interface AuthSessionResponse {
+  csrf_nonce: string;
+  expires_at: string;
+  absolute_expires_at: string;
+}
+
+export interface RemoteWebSocketTicketResponse {
+  ticket: string;
+  expires_at: string;
+}
