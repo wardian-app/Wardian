@@ -1,5 +1,7 @@
 export const viteWatchIgnored = [
   "**/src-tauri/**",
+  "**/target/**",
+  /(^|[/\\])target[/\\]/,
   "**/.learnings/**",
   "**/.gemini/**",
   "**/tmp/**",
