@@ -24,6 +24,7 @@ import {
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
 import { ColumnPicker } from "./ColumnPicker";
+import { isUserFacingProviderName, providerDisplayName } from "../../features/agents/providerOptions";
 import { useLayoutStore } from "../../store/useLayoutStore";
 import { SidebarResizeHandle } from "../../components/SidebarResizeHandle";
 
@@ -36,6 +37,11 @@ type DropPosition = "before" | "after";
 type DropTarget =
   | { type: "agent"; agentId: string; position: DropPosition }
   | { type: "team"; teamId: string; position: "before" | "inside" | "after" };
+
+function formatProviderName(provider: string | null | undefined): string {
+  if (!provider) return "–";
+  return isUserFacingProviderName(provider) ? providerDisplayName(provider) : provider;
+}
 
 function SortableHeader({ columnId, sort, onSort, label }: {
   columnId: SortableColumnId;
@@ -750,7 +756,7 @@ export default function AgentWatchlist({
             </span>
           );
           if (col.id === 'provider_model') {
-            const provider = agent.provider ?? '–';
+            const provider = formatProviderName(agent.provider);
             const model = agent.model ? ` · ${agent.model}` : '';
             return (
               <span key="provider_model" className="label-small text-muted truncate overflow-hidden">
