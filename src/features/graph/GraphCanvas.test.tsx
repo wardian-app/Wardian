@@ -94,9 +94,41 @@ describe("GraphCanvas", () => {
     expect(mocks.graphology.addNode).toHaveBeenCalledWith("a", expect.objectContaining({
       label: "Alpha",
       color: "var(--color-wardian-success)",
+      forceLabel: true,
     }));
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--b", "a", "b", expect.objectContaining({
       label: "same_team",
+    }));
+  });
+
+  it("forces only selected labels while an agent is selected", () => {
+    render(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          nodes: [
+            { ...projection.nodes[0], selected: true },
+            {
+              ...projection.nodes[0],
+              id: "b",
+              label: "Beta",
+              selected: false,
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.graphology.addNode).toHaveBeenCalledWith("a", expect.objectContaining({
+      forceLabel: true,
+      highlighted: true,
+    }));
+    expect(mocks.graphology.addNode).toHaveBeenCalledWith("b", expect.objectContaining({
+      forceLabel: false,
+      highlighted: false,
     }));
   });
 

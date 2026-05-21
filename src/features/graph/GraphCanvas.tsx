@@ -83,6 +83,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     if (!graph || !renderer || !container) return;
 
     graph.clear();
+    const hasSelectedNode = projection.nodes.some((node) => node.selected);
 
     for (const node of projection.nodes) {
       if (!node.recent) continue;
@@ -107,7 +108,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         size: node.size,
         color: resolveGraphColor(node.color, container),
         highlighted: node.selected,
-        forceLabel: node.selected,
+        forceLabel: !hasSelectedNode || node.selected,
         zIndex: 1,
       });
     }
