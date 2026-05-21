@@ -33,7 +33,7 @@ Categories:
 - **Appearance**: app theme.
 - **Terminal**: terminal font and shell defaults.
 - **Agent Runtime**: default provider, regular agent session behavior, and
-  Codex runtime defaults.
+  provider-specific runtime defaults such as the Codex subsection.
 - **Provider Utilities**: provider-specific maintenance actions such as Gemini
   patching.
 - **Advanced**: settings file and diagnostics information.
@@ -98,8 +98,8 @@ resumed from `Off`:
 Workflow Agent nodes use their own node-level run mode and do not inherit this
 global regular-agent setting.
 
-Codex runtime defaults apply when Codex agents do not set explicit advanced
-sandbox or approval overrides.
+The **Codex** subsection contains Codex-specific runtime defaults. These apply
+when Codex agents do not set explicit advanced sandbox or approval overrides.
 
 ## Provider Utilities
 

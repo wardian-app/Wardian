@@ -27,6 +27,7 @@ type SettingsCategory =
 type SettingsRowDefinition = {
   id: string;
   category: SettingsCategory;
+  subgroup?: string;
   label: string;
   detail: string;
   keywords: string[];
@@ -108,21 +109,24 @@ const rowDefinitions: SettingsRowDefinition[] = [
   {
     id: "codex-sandbox",
     category: "Agent Runtime",
-    label: "Codex sandbox",
-    detail: "Used when Codex agents do not set an explicit override.",
+    subgroup: "Codex",
+    label: "Sandbox",
+    detail: "Default for Codex agents without an explicit override.",
     keywords: ["codex", "sandbox", "runtime", "permissions"],
   },
   {
     id: "codex-approval",
     category: "Agent Runtime",
-    label: "Codex approval",
+    subgroup: "Codex",
+    label: "Approval",
     detail: "Default approval policy for Codex launches.",
     keywords: ["codex", "approval", "runtime", "permissions"],
   },
   {
     id: "codex-full-auto",
     category: "Agent Runtime",
-    label: "Codex autonomous mode",
+    subgroup: "Codex",
+    label: "Autonomous mode",
     detail: "Maps to Codex full-auto execution when enabled.",
     keywords: ["codex", "full auto", "autonomous"],
   },
@@ -184,6 +188,33 @@ const SettingRow: React.FC<{
     </div>
   </div>
 );
+
+const renderRowsWithSubgroups = (
+  rows: SettingsRowDefinition[],
+  renderRow: (row: SettingsRowDefinition) => React.ReactNode,
+) => {
+  let activeSubgroup: string | undefined;
+  return rows.flatMap((row) => {
+    const nodes: React.ReactNode[] = [];
+    if (row.subgroup && row.subgroup !== activeSubgroup) {
+      activeSubgroup = row.subgroup;
+      nodes.push(
+        <div
+          key={`${row.subgroup}-subgroup`}
+          role="heading"
+          aria-level={4}
+          className="border-b border-wardian-border bg-wardian-bg/45 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-neutral"
+        >
+          {row.subgroup}
+        </div>,
+      );
+    } else if (!row.subgroup) {
+      activeSubgroup = undefined;
+    }
+    nodes.push(renderRow(row));
+    return nodes;
+  });
+};
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   const dialogRef = useRef<HTMLElement | null>(null);
@@ -697,7 +728,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                       <h3 className="text-sm font-semibold text-primary">{group.category}</h3>
                     </div>
                     <div className="overflow-hidden rounded-lg border border-wardian-border bg-wardian-card-bg-muted/45">
-                      {group.rows.map(renderRow)}
+                      {renderRowsWithSubgroups(group.rows, renderRow)}
                     </div>
                     {group.category === "Terminal" && (
                       <div className="mt-4 flex items-center justify-end gap-3">

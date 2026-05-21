@@ -86,8 +86,20 @@ describe("SettingsModal", () => {
       target: { value: "codex" },
     });
 
-    expect(screen.getByText("Codex sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Sandbox")).toBeInTheDocument();
     expect(screen.queryByText("Theme")).not.toBeInTheDocument();
+  });
+
+  it("groups Codex-specific controls inside Agent Runtime", () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent Runtime" }));
+
+    const agentRuntime = screen.getByRole("region", { name: "Agent Runtime" });
+    expect(within(agentRuntime).getByRole("heading", { name: "Codex" })).toBeInTheDocument();
+    expect(within(agentRuntime).getByText("Sandbox")).toBeInTheDocument();
+    expect(within(agentRuntime).getByText("Approval")).toBeInTheDocument();
+    expect(within(agentRuntime).getByText("Autonomous mode")).toBeInTheDocument();
   });
 
   it("resets app settings to defaults through the backend app settings file", async () => {
