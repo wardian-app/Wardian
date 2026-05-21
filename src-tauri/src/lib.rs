@@ -438,6 +438,8 @@ pub fn run() {
             commands::remote::load_remote_gateway_config,
             commands::remote::revoke_remote_device,
             commands::remote::save_remote_gateway_config,
+            #[cfg(debug_assertions)]
+            commands::remote::debug_create_remote_session,
             commands::settings::load_shell_settings,
             commands::settings::get_settings_folder_path,
             commands::settings::get_update_eligibility,

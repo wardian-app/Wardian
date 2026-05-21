@@ -107,6 +107,63 @@ pub async fn create_remote_pairing_offer(
     )
 }
 
+#[cfg(any(debug_assertions, test))]
+fn millis_to_rfc3339(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[cfg(any(debug_assertions, test))]
+fn debug_session_response_from_record(
+    session: &crate::remote::models::RemoteSessionRecord,
+) -> crate::remote::models::AuthSessionResponse {
+    crate::remote::models::AuthSessionResponse {
+        csrf_nonce: session.csrf_nonce.clone(),
+        expires_at: millis_to_rfc3339(session.expires_at_ms),
+        absolute_expires_at: millis_to_rfc3339(session.absolute_expires_at_ms),
+    }
+}
+
+#[cfg(any(debug_assertions, test))]
+fn create_debug_remote_session_record(
+    device_id: &str,
+    session_id: Option<&str>,
+    now_ms: i64,
+) -> Result<crate::remote::models::RemoteSessionRecord, String> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() {
+        return Err("remote_debug_device_required".to_string());
+    }
+
+    let mut session = crate::remote::auth::create_session_record(device_id, now_ms);
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        session.session_id = session_id.to_string();
+    }
+    Ok(session)
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_create_remote_session(
+    app: tauri::AppHandle,
+    device_id: String,
+    session_id: Option<String>,
+) -> Result<crate::remote::models::AuthSessionResponse, String> {
+    if !cfg!(debug_assertions) {
+        return Err("debug commands are disabled in production builds".to_string());
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let session =
+        create_debug_remote_session_record(&device_id, session_id.as_deref(), now_ms)?;
+    let response = debug_session_response_from_record(&session);
+    let state = app.state::<crate::state::AppState>();
+    let mut runtime = state.remote_runtime.lock().await;
+    runtime.sessions.insert(session.session_id.clone(), session);
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +270,19 @@ mod tests {
             revoke_device_in_store(store, "missing", "2026-05-21T00:05:00.000Z"),
             Err("remote_device_not_found".to_string())
         );
+    }
+
+    #[test]
+    fn debug_session_record_requires_device_and_uses_requested_session_id() {
+        assert!(create_debug_remote_session_record(" ", Some("sess-1"), 1_000_000).is_err());
+
+        let session =
+            create_debug_remote_session_record("dev-1", Some("sess-1"), 1_000_000)
+                .expect("session");
+
+        assert_eq!(session.device_id, "dev-1");
+        assert_eq!(session.session_id, "sess-1");
+        assert!(!session.csrf_nonce.is_empty());
+        assert!(session.expires_at_ms > 1_000_000);
     }
 }
