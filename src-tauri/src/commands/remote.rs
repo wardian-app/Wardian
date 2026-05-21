@@ -155,8 +155,7 @@ pub async fn debug_create_remote_session(
     }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let session =
-        create_debug_remote_session_record(&device_id, session_id.as_deref(), now_ms)?;
+    let session = create_debug_remote_session_record(&device_id, session_id.as_deref(), now_ms)?;
     let response = debug_session_response_from_record(&session);
     let state = app.state::<crate::state::AppState>();
     let mut runtime = state.remote_runtime.lock().await;
@@ -276,9 +275,8 @@ mod tests {
     fn debug_session_record_requires_device_and_uses_requested_session_id() {
         assert!(create_debug_remote_session_record(" ", Some("sess-1"), 1_000_000).is_err());
 
-        let session =
-            create_debug_remote_session_record("dev-1", Some("sess-1"), 1_000_000)
-                .expect("session");
+        let session = create_debug_remote_session_record("dev-1", Some("sess-1"), 1_000_000)
+            .expect("session");
 
         assert_eq!(session.device_id, "dev-1");
         assert_eq!(session.session_id, "sess-1");

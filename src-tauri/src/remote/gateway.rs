@@ -100,12 +100,7 @@ async fn current_remote_session(
     audit_gateway_event(
         &session,
         &origin,
-        "session_read",
-        "current_session",
-        None,
-        None,
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("session_read", "current_session"),
     );
     Ok(Json(session_response_from_record(&session)))
 }
@@ -141,12 +136,7 @@ async fn list_remote_agents(
     audit_gateway_event(
         &session,
         &origin,
-        "roster_read",
-        "list_agents",
-        None,
-        None,
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("roster_read", "list_agents"),
     );
     Ok(Json(serde_json::json!({ "agents": agents })))
 }
@@ -162,12 +152,8 @@ async fn run_agent_action(
         audit_gateway_event(
             &session,
             &origin,
-            "agent_action",
-            &request.action,
-            Some("agent"),
-            Some(&request.target),
-            "rejected",
-            Some(error.code),
+            GatewayAuditEvent::rejected("agent_action", &request.action, error.code)
+                .target("agent", &request.target),
         );
         return Err(error);
     }
@@ -179,24 +165,16 @@ async fn run_agent_action(
         audit_gateway_event(
             &session,
             &origin,
-            "agent_action",
-            &request.action,
-            Some("agent"),
-            Some(&request.target),
-            "rejected",
-            Some(code),
+            GatewayAuditEvent::rejected("agent_action", &request.action, code)
+                .target("agent", &request.target),
         );
         return Err(RemoteGatewayError::bad_request(code));
     }
     audit_gateway_event(
         &session,
         &origin,
-        "agent_action",
-        &request.action,
-        Some("agent"),
-        Some(&request.target),
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("agent_action", &request.action)
+            .target("agent", &request.target),
     );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -214,12 +192,7 @@ async fn list_remote_workflows(
             audit_gateway_event(
                 &session,
                 &origin,
-                "workflow_read",
-                "list_workflows",
-                None,
-                None,
-                "rejected",
-                Some(code),
+                GatewayAuditEvent::rejected("workflow_read", "list_workflows", code),
             );
             return Err(RemoteGatewayError::bad_request(code));
         }
@@ -227,12 +200,7 @@ async fn list_remote_workflows(
     audit_gateway_event(
         &session,
         &origin,
-        "workflow_read",
-        "list_workflows",
-        None,
-        None,
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("workflow_read", "list_workflows"),
     );
     Ok(Json(serde_json::json!({ "workflows": workflows })))
 }
@@ -248,12 +216,8 @@ async fn run_workflow(
         audit_gateway_event(
             &session,
             &origin,
-            "workflow_action",
-            "run",
-            Some("workflow"),
-            Some(&request.workflow_id),
-            "rejected",
-            Some(error.code),
+            GatewayAuditEvent::rejected("workflow_action", "run", error.code)
+                .target("workflow", &request.workflow_id),
         );
         return Err(error);
     }
@@ -262,12 +226,8 @@ async fn run_workflow(
         audit_gateway_event(
             &session,
             &origin,
-            "workflow_action",
-            "run",
-            Some("workflow"),
-            Some(&request.workflow_id),
-            "rejected",
-            Some(code),
+            GatewayAuditEvent::rejected("workflow_action", "run", code)
+                .target("workflow", &request.workflow_id),
         );
         return Err(RemoteGatewayError::bad_request(code));
     }
@@ -283,24 +243,16 @@ async fn run_workflow(
         audit_gateway_event(
             &session,
             &origin,
-            "workflow_action",
-            "run",
-            Some("workflow"),
-            Some(&request.workflow_id),
-            "rejected",
-            Some(code),
+            GatewayAuditEvent::rejected("workflow_action", "run", code)
+                .target("workflow", &request.workflow_id),
         );
         return Err(RemoteGatewayError::bad_request(code));
     }
     audit_gateway_event(
         &session,
         &origin,
-        "workflow_action",
-        "run",
-        Some("workflow"),
-        Some(&request.workflow_id),
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("workflow_action", "run")
+            .target("workflow", &request.workflow_id),
     );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -316,12 +268,8 @@ async fn stop_workflow(
         audit_gateway_event(
             &session,
             &origin,
-            "workflow_action",
-            "stop",
-            Some("workflow_run"),
-            Some(&request.run_instance_id),
-            "rejected",
-            Some(error.code),
+            GatewayAuditEvent::rejected("workflow_action", "stop", error.code)
+                .target("workflow_run", &request.run_instance_id),
         );
         return Err(error);
     }
@@ -330,12 +278,8 @@ async fn stop_workflow(
         audit_gateway_event(
             &session,
             &origin,
-            "workflow_action",
-            "stop",
-            Some("workflow_run"),
-            Some(&request.run_instance_id),
-            "rejected",
-            Some(code),
+            GatewayAuditEvent::rejected("workflow_action", "stop", code)
+                .target("workflow_run", &request.run_instance_id),
         );
         return Err(RemoteGatewayError::bad_request(code));
     }
@@ -343,12 +287,8 @@ async fn stop_workflow(
     audit_gateway_event(
         &session,
         &origin,
-        "workflow_action",
-        "stop",
-        Some("workflow_run"),
-        Some(&request.run_instance_id),
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("workflow_action", "stop")
+            .target("workflow_run", &request.run_instance_id),
     );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -364,12 +304,8 @@ async fn create_ws_ticket(
         audit_gateway_event(
             &session,
             &origin,
-            "websocket_ticket",
-            "create",
-            Some("stream"),
-            Some(&request.stream),
-            "rejected",
-            Some(error.code),
+            GatewayAuditEvent::rejected("websocket_ticket", "create", error.code)
+                .target("stream", &request.stream),
         );
         return Err(error);
     }
@@ -379,12 +315,8 @@ async fn create_ws_ticket(
             audit_gateway_event(
                 &session,
                 &origin,
-                "websocket_ticket",
-                "create",
-                Some("stream"),
-                Some(&request.stream),
-                "rejected",
-                Some(code),
+                GatewayAuditEvent::rejected("websocket_ticket", "create", code)
+                    .target("stream", &request.stream),
             );
             return Err(RemoteGatewayError::bad_request(code));
         }
@@ -402,12 +334,7 @@ async fn create_ws_ticket(
     audit_gateway_event(
         &session,
         &origin,
-        "websocket_ticket",
-        "create",
-        Some("stream"),
-        Some(stream),
-        "accepted",
-        None,
+        GatewayAuditEvent::accepted("websocket_ticket", "create").target("stream", stream),
     );
     Ok(Json(RemoteWebSocketTicketResponse {
         ticket: ticket.ticket,
@@ -645,26 +572,48 @@ fn require_csrf_header(
     Err(RemoteGatewayError::unauthorized("csrf_failed"))
 }
 
-fn audit_gateway_event(
-    session: &RemoteSessionRecord,
-    origin: &str,
-    event_type: &str,
-    action: &str,
-    target_type: Option<&str>,
-    target_id: Option<&str>,
-    outcome: &str,
-    error_code: Option<&str>,
-) {
-    let record = build_gateway_audit_record(
-        session,
-        origin,
-        event_type,
-        action,
-        target_type,
-        target_id,
-        outcome,
-        error_code,
-    );
+#[derive(Clone, Copy)]
+struct GatewayAuditEvent<'a> {
+    event_type: &'a str,
+    action: &'a str,
+    target_type: Option<&'a str>,
+    target_id: Option<&'a str>,
+    outcome: &'a str,
+    error_code: Option<&'a str>,
+}
+
+impl<'a> GatewayAuditEvent<'a> {
+    fn accepted(event_type: &'a str, action: &'a str) -> Self {
+        Self {
+            event_type,
+            action,
+            target_type: None,
+            target_id: None,
+            outcome: "accepted",
+            error_code: None,
+        }
+    }
+
+    fn rejected(event_type: &'a str, action: &'a str, error_code: &'a str) -> Self {
+        Self {
+            event_type,
+            action,
+            target_type: None,
+            target_id: None,
+            outcome: "rejected",
+            error_code: Some(error_code),
+        }
+    }
+
+    fn target(mut self, target_type: &'a str, target_id: &'a str) -> Self {
+        self.target_type = Some(target_type);
+        self.target_id = Some(target_id);
+        self
+    }
+}
+
+fn audit_gateway_event(session: &RemoteSessionRecord, origin: &str, event: GatewayAuditEvent<'_>) {
+    let record = build_gateway_audit_record(session, origin, event);
     if let Err(error) = crate::remote::audit::append_audit_record(&record) {
         crate::utils::logging::log_debug(&format!("[Wardian] remote audit append failed: {error}"));
     }
@@ -673,12 +622,7 @@ fn audit_gateway_event(
 fn build_gateway_audit_record(
     session: &RemoteSessionRecord,
     origin: &str,
-    event_type: &str,
-    action: &str,
-    target_type: Option<&str>,
-    target_id: Option<&str>,
-    outcome: &str,
-    error_code: Option<&str>,
+    event: GatewayAuditEvent<'_>,
 ) -> RemoteAuditRecord {
     RemoteAuditRecord {
         schema_version: REMOTE_AUDIT_SCHEMA_VERSION,
@@ -688,12 +632,12 @@ fn build_gateway_audit_record(
         device_id: Some(session.device_id.clone()),
         session_id: Some(session.session_id.clone()),
         origin: Some(origin.to_string()),
-        event_type: event_type.to_string(),
-        action: action.to_string(),
-        target_type: target_type.map(str::to_string),
-        target_id: target_id.map(str::to_string),
-        outcome: outcome.to_string(),
-        error_code: error_code.map(str::to_string),
+        event_type: event.event_type.to_string(),
+        action: event.action.to_string(),
+        target_type: event.target_type.map(str::to_string),
+        target_id: event.target_id.map(str::to_string),
+        outcome: event.outcome.to_string(),
+        error_code: event.error_code.map(str::to_string),
     }
 }
 
@@ -964,12 +908,7 @@ mod tests {
         let record = build_gateway_audit_record(
             &session,
             "https://wardian.tailnet.ts.net",
-            "agent_action",
-            "pause",
-            Some("agent"),
-            Some("agent-1"),
-            "accepted",
-            None,
+            GatewayAuditEvent::accepted("agent_action", "pause").target("agent", "agent-1"),
         );
 
         assert_eq!(record.schema_version, REMOTE_AUDIT_SCHEMA_VERSION);
