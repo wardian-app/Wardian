@@ -2,6 +2,7 @@ pub mod commands;
 pub mod control;
 pub mod manager;
 pub mod providers;
+pub mod remote;
 pub mod state;
 pub mod utils;
 pub mod workflow_engine;
@@ -430,6 +431,9 @@ pub fn run() {
             commands::library::library_watch,
             commands::library::library_unwatch,
             commands::patch::run_gemini_patch,
+            commands::remote::load_remote_access_status,
+            commands::remote::load_remote_gateway_config,
+            commands::remote::save_remote_gateway_config,
             commands::settings::load_shell_settings,
             commands::settings::get_settings_folder_path,
             commands::settings::get_update_eligibility,

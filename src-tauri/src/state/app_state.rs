@@ -36,6 +36,8 @@ pub struct AppState {
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
     pub ask_requests: Mutex<HashMap<String, AskRequestRecord>>,
+    // Live-only remote-control authentication and ticket records.
+    pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,7 @@ impl Default for AppState {
             library_watchers: Mutex::new(HashMap::new()),
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
+            remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
         }
     }
 }
