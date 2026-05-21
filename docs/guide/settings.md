@@ -12,7 +12,9 @@ pane or main workspace view.
 ## Storage
 
 Settings in this screen are global. Wardian stores durable settings under
-`<WARDIAN_HOME>/settings/`:
+`<WARDIAN_HOME>/settings/`. These files store sparse user overrides, not the
+entire resolved settings object. Missing fields inherit Wardian's current
+computed defaults for the app and operating system.
 
 - `settings/app.json`: app preferences such as theme, terminal font size,
   terminal font family, and Gemini auto-patch.
@@ -102,6 +104,8 @@ global regular-agent setting.
 
 The **Codex** subsection contains Codex-specific runtime defaults. These apply
 when Codex agents do not set explicit advanced sandbox or approval overrides.
+Wardian's default Codex policy is workspace write access with approval prompts
+and autonomous mode off.
 
 ## Provider Utilities
 

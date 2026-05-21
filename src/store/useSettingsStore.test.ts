@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import {
+  DEFAULT_CODEX_RUNTIME_POLICY,
   defaultTerminalFontFamily,
   defaultTerminalFontSize,
   LINUX_TERMINAL_FONT_FAMILY,
@@ -76,7 +77,10 @@ describe('default provider settings', () => {
 
     expect(mockedInvoke).toHaveBeenCalledWith('save_shell_settings', {
       settings: expect.objectContaining({
-        default_provider: 'gemini',
+        schema_version: 2,
+        overrides: expect.objectContaining({
+          default_provider: 'gemini',
+        }),
       }),
     });
     expect(useSettingsStore.getState().default_provider).toBe('gemini');
@@ -96,10 +100,23 @@ describe('default provider settings', () => {
 
     expect(mockedInvoke).toHaveBeenCalledWith('save_shell_settings', {
       settings: expect.objectContaining({
-        default_provider: 'antigravity',
+        schema_version: 2,
+        overrides: expect.objectContaining({
+          default_provider: 'antigravity',
+        }),
       }),
     });
     expect(useSettingsStore.getState().default_provider).toBe('antigravity');
+  });
+});
+
+describe('Codex runtime defaults', () => {
+  it('defaults Codex to workspace access with approval prompts', () => {
+    expect(DEFAULT_CODEX_RUNTIME_POLICY).toEqual({
+      sandbox_mode: 'workspace-write',
+      approval_policy: 'on-request',
+      full_auto: false,
+    });
   });
 });
 
@@ -136,22 +153,22 @@ describe('app settings persistence', () => {
       terminal_font_family: null,
     });
 
-    useSettingsStore.setState({
-      theme: 'light',
-      autoPatchGemini: true,
-      terminalFontSize: 12,
-      terminalFontFamily: '',
-    });
+    useSettingsStore.getState().setTheme('light');
+    useSettingsStore.getState().setAutoPatchGemini(true);
+    useSettingsStore.getState().setTerminalFontSize(12);
+    useSettingsStore.getState().setTerminalFontFamily('');
 
     await useSettingsStore.getState().saveAppSettings();
 
     expect(mockedInvoke).toHaveBeenCalledWith('save_app_settings', {
-      settings: {
-        theme: 'light',
-        auto_patch_gemini: true,
-        terminal_font_size: 12,
-        terminal_font_family: null,
-      },
+      settings: expect.objectContaining({
+        schema_version: 2,
+        overrides: expect.objectContaining({
+          theme: 'light',
+          auto_patch_gemini: true,
+          terminal_font_size: 12,
+        }),
+      }),
     });
     expect(useSettingsStore.getState().theme).toBe('light');
     expect(useSettingsStore.getState().terminalFontSize).toBe(12);

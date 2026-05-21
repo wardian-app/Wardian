@@ -523,17 +523,26 @@ mod tests {
 
         let args = p.get_spawn_args(&config, false);
 
-        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
-        assert!(!args.contains(&"--sandbox".to_string()));
-        assert!(!args.contains(&"--ask-for-approval".to_string()));
+        assert!(!args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args.contains(&"workspace-write".to_string()));
+        assert!(args.contains(&"--ask-for-approval".to_string()));
+        assert!(args.contains(&"on-request".to_string()));
         assert!(!args.contains(&"--full-auto".to_string()));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn full_auto_disables_windows_elevated_sandbox_backend() {
+    fn explicit_full_auto_disables_windows_elevated_sandbox_backend() {
         let p = make_provider();
-        let config = AgentConfig::default();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                full_auto: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
 
         let args = p.get_spawn_args(&config, false);
 
@@ -591,8 +600,8 @@ mod tests {
         let effective = effective_codex_runtime_policy(&config, &policy);
 
         assert!(!effective.full_auto);
-        assert_eq!(effective.sandbox_mode, "danger-full-access");
-        assert_eq!(effective.approval_policy, "never");
+        assert_eq!(effective.sandbox_mode, "workspace-write");
+        assert_eq!(effective.approval_policy, "on-request");
     }
 
     #[test]

@@ -102,6 +102,15 @@ describe("SettingsModal", () => {
     expect(within(agentRuntime).getByText("Autonomous mode")).toBeInTheDocument();
   });
 
+  it("shows Codex autonomous mode as an explicit off/on selection", () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent Runtime" }));
+
+    expect(screen.getByLabelText("Codex autonomous mode")).toHaveValue("false");
+    expect(screen.getByRole("option", { name: "On: bypass approvals and sandbox" })).toBeInTheDocument();
+  });
+
   it("resets app settings to defaults through the backend app settings file", async () => {
     render(<SettingsModal isOpen onClose={vi.fn()} />);
 
@@ -111,7 +120,10 @@ describe("SettingsModal", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
         settings: expect.objectContaining({
-          theme: "system",
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            theme: "system",
+          }),
         }),
       });
     });
@@ -130,7 +142,10 @@ describe("SettingsModal", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("save_shell_settings", {
         settings: expect.objectContaining({
-          default_provider: "codex",
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            default_provider: "codex",
+          }),
         }),
       });
     });
@@ -154,9 +169,12 @@ describe("SettingsModal", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("save_shell_settings", {
         settings: expect.objectContaining({
-          shell_id: "custom",
-          custom_executable: "C:/Tools/custom-shell.exe",
-          custom_args: "--login",
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            shell_id: "custom",
+            custom_executable: "C:/Tools/custom-shell.exe",
+            custom_args: "--login",
+          }),
         }),
       });
     });

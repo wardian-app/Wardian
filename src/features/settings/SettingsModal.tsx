@@ -127,7 +127,7 @@ const rowDefinitions: SettingsRowDefinition[] = [
     category: "Agent Runtime",
     subgroup: "Codex",
     label: "Autonomous mode",
-    detail: "Maps to Codex full-auto execution when enabled.",
+    detail: "Bypasses approvals and sandbox when enabled.",
     keywords: ["codex", "full auto", "autonomous"],
   },
   {
@@ -602,9 +602,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               onChange={(event) => setCodexSandboxMode(event.target.value as typeof codex_runtime_policy.sandbox_mode)}
               className={optionClass}
             >
-              <option value="danger-full-access">Full access</option>
               <option value="workspace-write">Workspace write</option>
               <option value="read-only">Read only</option>
+              <option value="danger-full-access">Full access</option>
             </select>
           </SettingRow>
         );
@@ -617,23 +617,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               onChange={(event) => setCodexApprovalPolicy(event.target.value as typeof codex_runtime_policy.approval_policy)}
               className={optionClass}
             >
-              <option value="never">Never</option>
               <option value="on-request">On request</option>
               <option value="on-failure">On failure</option>
               <option value="untrusted">Untrusted</option>
+              <option value="never">Never</option>
             </select>
           </SettingRow>
         );
       case "codex-full-auto":
         return (
           <SettingRow key={row.id} label={row.label} detail={row.detail}>
-            <input
-              type="checkbox"
-              aria-label="Autonomous full access, no prompts"
-              checked={codex_runtime_policy.full_auto}
-              onChange={(event) => setCodexFullAuto(event.target.checked)}
-              className="h-4 w-4"
-            />
+            <select
+              aria-label="Codex autonomous mode"
+              value={codex_runtime_policy.full_auto ? "true" : "false"}
+              onChange={(event) => setCodexFullAuto(event.target.value === "true")}
+              className={optionClass}
+            >
+              <option value="false">Off</option>
+              <option value="true">On: bypass approvals and sandbox</option>
+            </select>
           </SettingRow>
         );
       case "gemini-patch":

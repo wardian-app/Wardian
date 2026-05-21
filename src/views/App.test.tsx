@@ -216,9 +216,9 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
           agent_session_persistence: "resume",
           default_provider: "auto",
           codex_runtime_policy: {
-            sandbox_mode: "danger-full-access",
-            approval_policy: "never",
-            full_auto: true,
+            sandbox_mode: "workspace-write",
+            approval_policy: "on-request",
+            full_auto: false,
           },
         };
       case "list_available_shells":

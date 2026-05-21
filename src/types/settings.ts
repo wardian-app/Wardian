@@ -16,6 +16,12 @@ export interface CodexRuntimePolicy {
   full_auto: boolean;
 }
 
+export interface CodexRuntimePolicyOverrides {
+  sandbox_mode?: CodexSandboxMode;
+  approval_policy?: CodexApprovalPolicy;
+  full_auto?: boolean;
+}
+
 export interface ShellSettings {
   shell_id: string;
   custom_executable: string | null;
@@ -25,9 +31,31 @@ export interface ShellSettings {
   default_provider?: DefaultProviderSetting;
 }
 
+export interface ShellSettingsOverrides {
+  shell_id?: string;
+  custom_executable?: string | null;
+  custom_args?: string | null;
+  agent_session_persistence?: 'fresh' | 'resume';
+  codex_runtime_policy?: CodexRuntimePolicyOverrides;
+  default_provider?: DefaultProviderSetting;
+}
+
 export interface AppSettings {
   theme: AppThemeSetting;
   auto_patch_gemini: boolean;
   terminal_font_size: number;
   terminal_font_family: string | null;
+}
+
+export interface AppSettingsOverrides {
+  theme?: AppThemeSetting;
+  auto_patch_gemini?: boolean;
+  terminal_font_size?: number;
+  terminal_font_family?: string | null;
+}
+
+export interface SettingsDocument<TSettings, TOverrides> {
+  schema_version: 2;
+  settings: TSettings;
+  overrides: TOverrides;
 }
