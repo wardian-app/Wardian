@@ -1,5 +1,11 @@
 use crate::remote::models::RemoteGatewayConfig;
-use axum::{routing::get, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Router,
+};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tauri::AppHandle;
 
@@ -50,6 +56,9 @@ fn loopback_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
     Router::new()
         .route("/remote/api/health", get(remote_health))
+        .route("/remote/api/pairing/submit", post(submit_pairing))
+        .route("/remote/api/auth/challenge", post(create_auth_challenge))
+        .route("/remote/api/auth/session", post(create_auth_session))
         .with_state(RemoteGatewayContext {
             _app: app,
             _config: config,
@@ -64,6 +73,50 @@ struct RemoteGatewayContext {
 
 async fn remote_health() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "ok": true }))
+}
+
+async fn submit_pairing(
+    State(_ctx): State<RemoteGatewayContext>,
+) -> Result<axum::Json<serde_json::Value>, RemoteGatewayError> {
+    Err(RemoteGatewayError::bad_request(
+        "pairing_approval_not_ready",
+    ))
+}
+
+async fn create_auth_challenge(
+    State(_ctx): State<RemoteGatewayContext>,
+) -> Result<axum::Json<serde_json::Value>, RemoteGatewayError> {
+    Err(RemoteGatewayError::bad_request("device_not_found"))
+}
+
+async fn create_auth_session(
+    State(_ctx): State<RemoteGatewayContext>,
+) -> Result<axum::Json<serde_json::Value>, RemoteGatewayError> {
+    Err(RemoteGatewayError::bad_request("device_not_found"))
+}
+
+struct RemoteGatewayError {
+    status: StatusCode,
+    code: &'static str,
+}
+
+impl RemoteGatewayError {
+    fn bad_request(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code,
+        }
+    }
+}
+
+impl IntoResponse for RemoteGatewayError {
+    fn into_response(self) -> Response {
+        let body = axum::Json(serde_json::json!({
+            "ok": false,
+            "code": self.code,
+        }));
+        (self.status, body).into_response()
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +146,13 @@ mod tests {
     #[test]
     fn gateway_accepts_loopback_bind_host() {
         assert!(validate_gateway_bind_config(&config()).is_ok());
+    }
+
+    #[test]
+    fn gateway_bad_request_errors_preserve_machine_code() {
+        let error = RemoteGatewayError::bad_request("device_not_found");
+
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "device_not_found");
     }
 }

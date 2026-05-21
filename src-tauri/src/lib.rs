@@ -432,6 +432,7 @@ pub fn run() {
             commands::library::library_watch,
             commands::library::library_unwatch,
             commands::patch::run_gemini_patch,
+            commands::remote::create_remote_pairing_offer,
             commands::remote::load_remote_access_status,
             commands::remote::load_remote_gateway_config,
             commands::remote::save_remote_gateway_config,

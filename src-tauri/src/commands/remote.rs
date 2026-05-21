@@ -1,4 +1,5 @@
 use crate::remote::models::{RemoteAccessStatus, RemoteGatewayConfig};
+use tauri::Manager;
 
 fn canonicalized_remote_gateway_config(
     config: &RemoteGatewayConfig,
@@ -46,6 +47,28 @@ pub fn save_remote_gateway_config(
 ) -> Result<RemoteGatewayConfig, String> {
     let config = canonicalized_remote_gateway_config(&config)?;
     crate::remote::storage::save_remote_config(&config)
+}
+
+#[tauri::command]
+pub async fn create_remote_pairing_offer(
+    app: tauri::AppHandle,
+) -> Result<crate::remote::models::PairingQrPayload, String> {
+    let config =
+        crate::remote::storage::load_remote_config()?.ok_or("Remote access is not configured")?;
+    if !config.enabled {
+        return Err("Remote access is disabled".to_string());
+    }
+    validate_remote_gateway_config(&config)?;
+    let origin = crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let state = app.state::<crate::state::AppState>();
+    let mut runtime = state.remote_runtime.lock().await;
+    crate::remote::auth::create_pairing_offer(
+        &mut runtime,
+        origin.raw(),
+        &config.gateway_identity_fingerprint,
+        now_ms,
+    )
 }
 
 #[cfg(test)]
