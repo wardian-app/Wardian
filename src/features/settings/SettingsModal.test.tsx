@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsModal } from "./SettingsModal";
 import { useAppUpdate } from "./useAppUpdate";
@@ -10,7 +11,12 @@ vi.mock("./useAppUpdate", () => ({
   useAppUpdate: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  writeText: vi.fn(),
+}));
+
 const mockInvoke = vi.mocked(invoke);
+const mockWriteText = vi.mocked(writeText);
 const mockUseAppUpdate = vi.mocked(useAppUpdate);
 
 const appUpdateState = (overrides: Partial<AppUpdateState> = {}): AppUpdateState => ({
@@ -64,6 +70,10 @@ describe("SettingsModal", () => {
           return (args as { settings?: unknown } | undefined)?.settings;
         case "run_gemini_patch":
           return "ok";
+        case "get_settings_folder_path":
+          return "C:/Users/test/.wardian/settings";
+        case "reveal_in_explorer":
+          return null;
         default:
           return null;
       }
@@ -213,5 +223,26 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
     expect(checkNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens and copies the settings folder from Advanced", async () => {
+    mockWriteText.mockResolvedValue(undefined);
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings folder" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("get_settings_folder_path");
+      expect(mockInvoke).toHaveBeenCalledWith("reveal_in_explorer", {
+        path: "C:/Users/test/.wardian/settings",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy settings folder path" }));
+
+    await waitFor(() => {
+      expect(mockWriteText).toHaveBeenCalledWith("C:/Users/test/.wardian/settings");
+    });
   });
 });

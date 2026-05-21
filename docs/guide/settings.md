@@ -119,6 +119,8 @@ OpenCode behavior.
 
 ## Troubleshooting
 
+- Use **Advanced > Settings files** to open `<WARDIAN_HOME>/settings/` or copy
+  the folder path for inspection, backup, or manual recovery.
 - If shell options are empty, verify shell binaries are installed and visible in
   your OS PATH.
 - If provider options are disabled elsewhere in Wardian, install the provider

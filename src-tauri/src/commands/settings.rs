@@ -87,6 +87,16 @@ pub fn list_available_shells() -> Result<Vec<ShellOption>, String> {
     Ok(crate::utils::list_available_shells())
 }
 
+fn settings_folder_path_from_home(wardian_home: &std::path::Path) -> String {
+    wardian_home.join("settings").to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+pub fn get_settings_folder_path() -> Result<String, String> {
+    let wardian_home = crate::utils::get_wardian_home().ok_or("Could not find Wardian home")?;
+    Ok(settings_folder_path_from_home(&wardian_home))
+}
+
 #[tauri::command]
 pub fn get_update_eligibility() -> UpdateEligibility {
     resolve_update_eligibility(
@@ -141,4 +151,19 @@ pub fn load_onboarding_hints() -> Result<OnboardingHintsState, String> {
 #[tauri::command]
 pub fn dismiss_onboarding_hint(hint_id: String) -> Result<OnboardingHintsState, String> {
     crate::utils::dismiss_onboarding_hint(hint_id)
+}
+
+#[cfg(test)]
+mod settings_path_tests {
+    use super::settings_folder_path_from_home;
+
+    #[test]
+    fn settings_folder_path_points_under_wardian_home() {
+        let home = std::path::Path::new("/tmp/wardian-home");
+
+        assert_eq!(
+            settings_folder_path_from_home(home).replace('\\', "/"),
+            "/tmp/wardian-home/settings"
+        );
+    }
 }

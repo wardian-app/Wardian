@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, Monitor, Search, X } from "lucide-react";
 import {
   MAX_TERMINAL_FONT_SIZE,
@@ -141,7 +142,7 @@ const rowDefinitions: SettingsRowDefinition[] = [
     id: "settings-files",
     category: "Advanced",
     label: "Settings files",
-    detail: "Global settings live under <WARDIAN_HOME>/settings/.",
+    detail: "Global overrides are stored under <WARDIAN_HOME>/settings/.",
     keywords: ["json", "files", "wardian_home", "advanced"],
   },
 ];
@@ -231,6 +232,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const [runtimeStatus, setRuntimeStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [runtimeMessage, setRuntimeMessage] = useState("");
   const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "saved" | "error">("idle");
+  const [advancedStatus, setAdvancedStatus] = useState<"idle" | "copied" | "error">("idle");
   const [terminalFontSizeDraft, setTerminalFontSizeDraft] = useState("14");
   const appUpdate = useAppUpdate();
 
@@ -402,6 +404,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const handleAutoPatchGeminiChange = async (enabled: boolean) => {
     setAutoPatchGemini(enabled);
     await useSettingsStore.getState().saveAppSettings();
+  };
+
+  const getSettingsFolderPath = async () => invoke<string>("get_settings_folder_path");
+
+  const handleOpenSettingsFolder = async () => {
+    setAdvancedStatus("idle");
+    try {
+      const path = await getSettingsFolderPath();
+      await invoke("reveal_in_explorer", { path });
+    } catch (error) {
+      console.error("Failed to open settings folder", error);
+      setAdvancedStatus("error");
+    }
+  };
+
+  const handleCopySettingsFolderPath = async () => {
+    setAdvancedStatus("idle");
+    try {
+      const path = await getSettingsFolderPath();
+      await writeText(path);
+      setAdvancedStatus("copied");
+    } catch (error) {
+      console.error("Failed to copy settings folder path", error);
+      setAdvancedStatus("error");
+    }
   };
 
   const updateDetail = () => {
@@ -662,9 +689,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       case "settings-files":
         return (
           <SettingRow key={row.id} label={row.label} detail={row.detail}>
-            <code className="rounded bg-wardian-card-bg-muted px-2 py-1 text-xs text-muted-neutral">
-              settings/app.json
-            </code>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                aria-label="Open settings folder"
+                onClick={() => void handleOpenSettingsFolder()}
+                className={buttonClass}
+              >
+                Open Folder
+              </button>
+              <button
+                type="button"
+                aria-label="Copy settings folder path"
+                onClick={() => void handleCopySettingsFolderPath()}
+                className={buttonClass}
+              >
+                Copy Path
+              </button>
+              {advancedStatus !== "idle" && (
+                <span className={`text-xs ${advancedStatus === "error" ? "text-red-400" : "text-muted-neutral"}`}>
+                  {advancedStatus === "copied" ? "Copied." : "Unable to access settings folder."}
+                </span>
+              )}
+            </div>
           </SettingRow>
         );
       default:

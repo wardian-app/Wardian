@@ -431,6 +431,7 @@ pub fn run() {
             commands::library::library_unwatch,
             commands::patch::run_gemini_patch,
             commands::settings::load_shell_settings,
+            commands::settings::get_settings_folder_path,
             commands::settings::get_update_eligibility,
             commands::settings::list_available_shells,
             commands::settings::load_app_settings,
