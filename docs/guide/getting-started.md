@@ -87,7 +87,7 @@ If a provider asks you to sign in again inside Wardian, finish that prompt in th
 
 Open the **Settings** rail item and confirm Wardian has a usable shell. **Auto** is the right default for most first runs.
 
-![Wardian Settings tab showing theme, session persistence, and shell selection controls](../assets/screenshots/settings/runtime-settings.png)
+![Wardian Settings modal showing agent runtime defaults and concise setting descriptions](../assets/screenshots/settings/runtime-settings.png)
 
 If your provider works in one shell but not another, select the shell where the provider command is visible, save the setting, and spawn the agent again. See [Settings](./settings.md) for shell and provider runtime notes.
 

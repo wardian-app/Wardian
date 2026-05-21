@@ -7,7 +7,6 @@ import { ConfigureAgentPanel } from "../features/agents/ConfigureAgentPanel";
 import { SpawnAgentPanel } from "../features/agents/SpawnAgentPanel";
 import { ClassManagerPanel } from "../features/agents/ClassManagerPanel";
 import { CommandPanel } from "../features/commands/CommandPanel";
-import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
 import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
 import { GitPanel } from "../features/git/GitPanel";
@@ -118,9 +117,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
           />
         )}
 
-        {activeTab === "settings" && (
-          <SettingsPanel />
-        )}
       </div>
       {!leftCollapsed && (
         <SidebarResizeHandle

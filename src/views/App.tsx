@@ -31,6 +31,7 @@ import { SidebarContentPane } from "../layout/SidebarContentPane";
 import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
 import type { ViewMode } from "../layout/titlebar/CustomTitleBar";
 import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
+import { SettingsModal } from "../features/settings/SettingsModal";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { PlaceholderView } from "./PlaceholderView";
@@ -319,7 +320,7 @@ function AppBody() {
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
-  const { theme } = useSettingsStore();
+  const { theme, autoPatchGemini, app_settings_loaded, loadAppSettings } = useSettingsStore();
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [teams, setTeams] = useState<AgentTeam[]>([]);
@@ -331,6 +332,12 @@ function AppBody() {
     kind: WorkflowLaunchKind;
   } | null>(null);
   const hasAutoPatched = useRef(false);
+
+  useEffect(() => {
+    if (!app_settings_loaded) {
+      void loadAppSettings();
+    }
+  }, [app_settings_loaded, loadAppSettings]);
 
   useEffect(() => {
     if (import.meta.env.DEV) {
@@ -391,11 +398,14 @@ function AppBody() {
       } catch { /* first run */ }
     })();
 
-    if (useSettingsStore.getState().autoPatchGemini && !hasAutoPatched.current) {
+  }, [loadWatchlistState]);
+
+  useEffect(() => {
+    if (app_settings_loaded && autoPatchGemini && !hasAutoPatched.current) {
       hasAutoPatched.current = true;
       invoke('run_gemini_patch').catch(e => console.error("Auto patch failed:", e));
     }
-  }, [loadWatchlistState]);
+  }, [app_settings_loaded, autoPatchGemini]);
 
   const persistWatchlistState = useCallback(async (state: WatchlistState) => {
     const normalized = normalizeWatchlistState(state);
@@ -510,10 +520,13 @@ function AppBody() {
   const leftSidebarWidth = useLayoutStore((s) => s.leftSidebarWidth);
   const rightSidebarWidth = useLayoutStore((s) => s.rightSidebarWidth);
   const userTerminalOpen = useLayoutStore((s) => s.userTerminalOpen);
+  const settingsOpen = useLayoutStore((s) => s.settingsOpen);
   const userTerminalHeight = useLayoutStore((s) => s.userTerminalHeight);
   const setUserTerminalOpen = useLayoutStore((s) => s.setUserTerminalOpen);
+  const setSettingsOpen = useLayoutStore((s) => s.setSettingsOpen);
   const setUserTerminalHeight = useLayoutStore((s) => s.setUserTerminalHeight);
   const toggleUserTerminal = useLayoutStore((s) => s.toggleUserTerminal);
+  const toggleSettings = useLayoutStore((s) => s.toggleSettings);
 
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -1063,7 +1076,9 @@ function AppBody() {
           setActiveTab={setActiveTab}
           setCollapsed={setLeftCollapsed}
           userTerminalOpen={userTerminalOpen}
+          settingsOpen={settingsOpen}
           onToggleUserTerminal={toggleUserTerminal}
+          onToggleSettings={toggleSettings}
         />
         <SidebarContentPane 
           activeTab={activeTab}
@@ -1208,6 +1223,9 @@ function AppBody() {
               onHeightChange={setUserTerminalHeight}
               onHide={() => setUserTerminalOpen(false)}
             />
+          )}
+          {settingsOpen && (
+            <SettingsModal isOpen={true} onClose={() => setSettingsOpen(false)} />
           )}
         </main>
 

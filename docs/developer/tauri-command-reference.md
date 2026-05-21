@@ -107,8 +107,11 @@ The CLI read-only `team` and `watchlist` commands read `watchlists/index.json` d
 
 - `run_gemini_patch`
 - `list_available_shells`
-- `load_shell_settings`
-- `save_shell_settings`
+- `get_settings_folder_path`
+- `load_shell_settings` returns resolved shell settings plus sparse user overrides.
+- `save_shell_settings` accepts the versioned shell settings document and persists sparse overrides.
+- `load_app_settings` returns resolved app settings plus sparse user overrides.
+- `save_app_settings` accepts the versioned app settings document and persists sparse overrides.
 - `save_agent_session_persistence`
 - `save_opencode_theme`
 

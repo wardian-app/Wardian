@@ -10,7 +10,9 @@ describe("SidebarIconRail density", () => {
         setActiveTab={vi.fn()}
         setCollapsed={vi.fn()}
         userTerminalOpen={false}
+        settingsOpen={false}
         onToggleUserTerminal={vi.fn()}
+        onToggleSettings={vi.fn()}
       />,
     );
 
@@ -28,7 +30,9 @@ describe("SidebarIconRail density", () => {
         setActiveTab={vi.fn()}
         setCollapsed={vi.fn()}
         userTerminalOpen={false}
+        settingsOpen={false}
         onToggleUserTerminal={vi.fn()}
+        onToggleSettings={vi.fn()}
       />,
     );
 

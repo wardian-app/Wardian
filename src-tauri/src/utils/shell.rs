@@ -40,6 +40,46 @@ pub struct ShellSettings {
     pub default_provider: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRuntimePolicyOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_auto: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellSettingsOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_executable: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_args: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_persistence: Option<AgentSessionPersistence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_runtime_policy: Option<CodexRuntimePolicyOverrides>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellSettingsDocument {
+    pub schema_version: u8,
+    pub settings: ShellSettings,
+    pub overrides: ShellSettingsOverrides,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedShellSettings {
+    schema_version: u8,
+    #[serde(default)]
+    overrides: ShellSettingsOverrides,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexRuntimePolicy {
     pub sandbox_mode: String,
@@ -50,9 +90,9 @@ pub struct CodexRuntimePolicy {
 impl Default for CodexRuntimePolicy {
     fn default() -> Self {
         Self {
-            sandbox_mode: "danger-full-access".to_string(),
-            approval_policy: "never".to_string(),
-            full_auto: true,
+            sandbox_mode: "workspace-write".to_string(),
+            approval_policy: "on-request".to_string(),
+            full_auto: false,
         }
     }
 }
@@ -110,18 +150,32 @@ pub fn load_shell_settings() -> Result<ShellSettings, String> {
     load_shell_settings_from_path(&path)
 }
 
+pub fn load_shell_settings_document() -> Result<ShellSettingsDocument, String> {
+    let path = shell_settings_path()?;
+    load_shell_settings_document_from_path(&path)
+}
+
 pub fn save_shell_settings(settings: &ShellSettings) -> Result<ShellSettings, String> {
     let path = shell_settings_path()?;
     save_shell_settings_to_path(&path, settings)
+}
+
+pub fn save_shell_settings_document(
+    document: &ShellSettingsDocument,
+) -> Result<ShellSettingsDocument, String> {
+    let path = shell_settings_path()?;
+    save_shell_settings_document_to_path(&path, document)
 }
 
 pub fn save_agent_session_persistence(
     persistence: AgentSessionPersistence,
 ) -> Result<ShellSettings, String> {
     let path = shell_settings_path()?;
-    let mut settings = load_shell_settings_from_path(&path).unwrap_or_default();
-    settings.agent_session_persistence = persistence;
-    save_shell_settings_to_path(&path, &settings)
+    let mut document = load_shell_settings_document_from_path(&path).unwrap_or_else(|_| {
+        shell_settings_document_from_overrides(ShellSettingsOverrides::default())
+    });
+    document.overrides.agent_session_persistence = Some(persistence);
+    save_shell_settings_document_to_path(&path, &document).map(|document| document.settings)
 }
 
 pub fn load_codex_runtime_policy() -> Result<CodexRuntimePolicy, String> {
@@ -163,28 +217,77 @@ fn shell_settings_path() -> Result<PathBuf, String> {
 }
 
 fn load_shell_settings_from_path(path: &Path) -> Result<ShellSettings, String> {
+    load_shell_settings_document_from_path(path).map(|document| document.settings)
+}
+
+fn load_shell_settings_document_from_path(path: &Path) -> Result<ShellSettingsDocument, String> {
     if !path.exists() {
-        return Ok(ShellSettings::default());
+        return Ok(shell_settings_document_from_overrides(
+            ShellSettingsOverrides::default(),
+        ));
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let settings = serde_json::from_str::<ShellSettings>(&content).map_err(|e| e.to_string())?;
-    Ok(normalize_settings(settings))
+    let value = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?;
+    if value
+        .get("schema_version")
+        .and_then(|version| version.as_u64())
+        == Some(2)
+    {
+        let persisted =
+            serde_json::from_value::<PersistedShellSettings>(value).map_err(|e| e.to_string())?;
+        return Ok(shell_settings_document_from_overrides(persisted.overrides));
+    }
+
+    let settings = serde_json::from_value::<ShellSettings>(value).map_err(|e| e.to_string())?;
+    let normalized = normalize_settings(settings);
+    let old_defaults = legacy_shell_settings_defaults();
+    Ok(ShellSettingsDocument {
+        schema_version: 2,
+        overrides: shell_overrides_from_settings(&normalized, &old_defaults),
+        settings: shell_settings_from_overrides(&shell_overrides_from_settings(
+            &normalized,
+            &old_defaults,
+        )),
+    })
 }
 
 fn save_shell_settings_to_path(
     path: &Path,
     settings: &ShellSettings,
 ) -> Result<ShellSettings, String> {
+    let normalized = normalize_settings(settings.clone());
+    validate_shell_settings(&normalized, &list_available_shells())?;
+    let document = ShellSettingsDocument {
+        schema_version: 2,
+        overrides: shell_overrides_from_settings(&normalized, &ShellSettings::default()),
+        settings: normalized,
+    };
+    save_shell_settings_document_to_path(path, &document).map(|document| document.settings)
+}
+
+fn save_shell_settings_document_to_path(
+    path: &Path,
+    document: &ShellSettingsDocument,
+) -> Result<ShellSettingsDocument, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let normalized = normalize_settings(settings.clone());
+    let normalized_overrides = normalize_shell_overrides(document.overrides.clone());
+    let normalized = shell_settings_from_overrides(&normalized_overrides);
     validate_shell_settings(&normalized, &list_available_shells())?;
-    let content = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
+    let persisted = PersistedShellSettings {
+        schema_version: 2,
+        overrides: normalized_overrides,
+    };
+    let content = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
     std::fs::write(path, content).map_err(|e| e.to_string())?;
-    Ok(normalized)
+    Ok(ShellSettingsDocument {
+        schema_version: 2,
+        settings: normalized,
+        overrides: persisted.overrides,
+    })
 }
 
 fn normalize_settings(mut settings: ShellSettings) -> ShellSettings {
@@ -210,6 +313,168 @@ fn normalize_default_provider(value: &str) -> String {
         trimmed
     } else {
         default_default_provider()
+    }
+}
+
+fn shell_settings_document_from_overrides(
+    overrides: ShellSettingsOverrides,
+) -> ShellSettingsDocument {
+    let overrides = normalize_shell_overrides(overrides);
+    ShellSettingsDocument {
+        schema_version: 2,
+        settings: shell_settings_from_overrides(&overrides),
+        overrides,
+    }
+}
+
+fn shell_settings_from_overrides(overrides: &ShellSettingsOverrides) -> ShellSettings {
+    let defaults = ShellSettings::default();
+    normalize_settings(ShellSettings {
+        shell_id: overrides.shell_id.clone().unwrap_or(defaults.shell_id),
+        custom_executable: overrides
+            .custom_executable
+            .clone()
+            .unwrap_or(defaults.custom_executable),
+        custom_args: overrides
+            .custom_args
+            .clone()
+            .unwrap_or(defaults.custom_args),
+        agent_session_persistence: overrides
+            .agent_session_persistence
+            .unwrap_or(defaults.agent_session_persistence),
+        codex_runtime_policy: codex_runtime_policy_from_overrides(
+            overrides.codex_runtime_policy.as_ref(),
+        ),
+        default_provider: overrides
+            .default_provider
+            .clone()
+            .unwrap_or(defaults.default_provider),
+    })
+}
+
+fn codex_runtime_policy_from_overrides(
+    overrides: Option<&CodexRuntimePolicyOverrides>,
+) -> CodexRuntimePolicy {
+    let defaults = CodexRuntimePolicy::default();
+    normalize_codex_runtime_policy(CodexRuntimePolicy {
+        sandbox_mode: overrides
+            .and_then(|overrides| overrides.sandbox_mode.clone())
+            .unwrap_or(defaults.sandbox_mode),
+        approval_policy: overrides
+            .and_then(|overrides| overrides.approval_policy.clone())
+            .unwrap_or(defaults.approval_policy),
+        full_auto: overrides
+            .and_then(|overrides| overrides.full_auto)
+            .unwrap_or(defaults.full_auto),
+    })
+}
+
+fn normalize_shell_overrides(mut overrides: ShellSettingsOverrides) -> ShellSettingsOverrides {
+    overrides.shell_id = overrides.shell_id.map(|shell_id| {
+        let trimmed = shell_id.trim();
+        if trimmed.is_empty() {
+            "auto".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    });
+    overrides.custom_executable = overrides
+        .custom_executable
+        .map(|value| value.and_then(|value| trim_to_option(&value)));
+    overrides.custom_args = overrides
+        .custom_args
+        .map(|value| value.and_then(|value| trim_to_option(&value)));
+    overrides.codex_runtime_policy = overrides
+        .codex_runtime_policy
+        .map(normalize_codex_runtime_policy_overrides)
+        .and_then(|policy| {
+            if policy.sandbox_mode.is_none()
+                && policy.approval_policy.is_none()
+                && policy.full_auto.is_none()
+            {
+                None
+            } else {
+                Some(policy)
+            }
+        });
+    overrides.default_provider = overrides
+        .default_provider
+        .map(|provider| normalize_default_provider(&provider));
+    overrides
+}
+
+fn normalize_codex_runtime_policy_overrides(
+    mut policy: CodexRuntimePolicyOverrides,
+) -> CodexRuntimePolicyOverrides {
+    policy.sandbox_mode = policy.sandbox_mode.map(|sandbox_mode| {
+        if CODEX_SANDBOX_MODES.contains(&sandbox_mode.trim()) {
+            sandbox_mode.trim().to_string()
+        } else {
+            CodexRuntimePolicy::default().sandbox_mode
+        }
+    });
+    policy.approval_policy = policy.approval_policy.map(|approval_policy| {
+        if CODEX_APPROVAL_POLICIES.contains(&approval_policy.trim()) {
+            approval_policy.trim().to_string()
+        } else {
+            CodexRuntimePolicy::default().approval_policy
+        }
+    });
+    policy
+}
+
+fn shell_overrides_from_settings(
+    settings: &ShellSettings,
+    defaults: &ShellSettings,
+) -> ShellSettingsOverrides {
+    let codex_runtime_policy = codex_overrides_from_settings(
+        &settings.codex_runtime_policy,
+        &defaults.codex_runtime_policy,
+    );
+    ShellSettingsOverrides {
+        shell_id: (settings.shell_id != defaults.shell_id).then(|| settings.shell_id.clone()),
+        custom_executable: (settings.custom_executable != defaults.custom_executable)
+            .then(|| settings.custom_executable.clone()),
+        custom_args: (settings.custom_args != defaults.custom_args)
+            .then(|| settings.custom_args.clone()),
+        agent_session_persistence: (settings.agent_session_persistence
+            != defaults.agent_session_persistence)
+            .then_some(settings.agent_session_persistence),
+        codex_runtime_policy,
+        default_provider: (settings.default_provider != defaults.default_provider)
+            .then(|| settings.default_provider.clone()),
+    }
+}
+
+fn codex_overrides_from_settings(
+    settings: &CodexRuntimePolicy,
+    defaults: &CodexRuntimePolicy,
+) -> Option<CodexRuntimePolicyOverrides> {
+    let overrides = CodexRuntimePolicyOverrides {
+        sandbox_mode: (settings.sandbox_mode != defaults.sandbox_mode)
+            .then(|| settings.sandbox_mode.clone()),
+        approval_policy: (settings.approval_policy != defaults.approval_policy)
+            .then(|| settings.approval_policy.clone()),
+        full_auto: (settings.full_auto != defaults.full_auto).then_some(settings.full_auto),
+    };
+    if overrides.sandbox_mode.is_none()
+        && overrides.approval_policy.is_none()
+        && overrides.full_auto.is_none()
+    {
+        None
+    } else {
+        Some(overrides)
+    }
+}
+
+fn legacy_shell_settings_defaults() -> ShellSettings {
+    ShellSettings {
+        codex_runtime_policy: CodexRuntimePolicy {
+            sandbox_mode: "danger-full-access".to_string(),
+            approval_policy: "never".to_string(),
+            full_auto: true,
+        },
+        ..ShellSettings::default()
     }
 }
 
@@ -1039,11 +1304,94 @@ mod tests {
         assert_eq!(
             settings.codex_runtime_policy,
             CodexRuntimePolicy {
+                sandbox_mode: "workspace-write".to_string(),
+                approval_policy: "on-request".to_string(),
+                full_auto: false,
+            }
+        );
+    }
+
+    #[test]
+    fn shell_settings_writes_sparse_override_document() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        let settings = ShellSettings {
+            default_provider: "codex".to_string(),
+            codex_runtime_policy: CodexRuntimePolicy {
+                sandbox_mode: "workspace-write".to_string(),
+                approval_policy: "on-request".to_string(),
+                full_auto: false,
+            },
+            ..Default::default()
+        };
+
+        save_shell_settings_to_path(&path, &settings).expect("save settings");
+        let raw = std::fs::read_to_string(&path).expect("read settings");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse settings");
+
+        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["overrides"]["default_provider"], "codex");
+        assert!(json["overrides"].get("codex_runtime_policy").is_none());
+        assert!(json["overrides"].get("shell_id").is_none());
+    }
+
+    #[test]
+    fn shell_settings_loads_sparse_override_document_against_current_defaults() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 2,
+              "overrides": {
+                "codex_runtime_policy": {
+                  "sandbox_mode": "danger-full-access",
+                  "approval_policy": "never",
+                  "full_auto": true
+                }
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(loaded.shell_id, "auto");
+        assert_eq!(loaded.default_provider, "auto");
+        assert_eq!(
+            loaded.codex_runtime_policy,
+            CodexRuntimePolicy {
                 sandbox_mode: "danger-full-access".to_string(),
                 approval_policy: "never".to_string(),
                 full_auto: true,
             }
         );
+    }
+
+    #[test]
+    fn shell_settings_migrates_legacy_dangerous_codex_default_to_safe_default() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "shell_id": "auto",
+              "custom_executable": null,
+              "custom_args": null,
+              "agent_session_persistence": "resume",
+              "codex_runtime_policy": {
+                "sandbox_mode": "danger-full-access",
+                "approval_policy": "never",
+                "full_auto": true
+              },
+              "default_provider": "auto"
+            }"#,
+        )
+        .expect("write settings");
+
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(loaded.codex_runtime_policy, CodexRuntimePolicy::default());
     }
 
     #[test]

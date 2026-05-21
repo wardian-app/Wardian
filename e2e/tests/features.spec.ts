@@ -1,5 +1,22 @@
 import { test, expect, type Page } from "@playwright/test";
 
+async function openSettings(page: Page) {
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  if (!(await dialog.isVisible().catch(() => false))) {
+    await page.locator('[data-testid="sidebar-tab-settings"]').click();
+  }
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+async function closeSettings(page: Page) {
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  if (await dialog.isVisible().catch(() => false)) {
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(dialog).toBeHidden();
+  }
+}
+
 test.describe("Wardian Core Feature Tests", () => {
   test.describe.configure({ mode: "serial" });
 
@@ -17,6 +34,7 @@ test.describe("Wardian Core Feature Tests", () => {
 
   test.beforeEach(async () => {
     await expect(page.locator('[data-testid="app-shell"]')).toBeVisible();
+    await closeSettings(page);
   });
 
   test("1. App renders with main layout", async () => {
@@ -45,10 +63,16 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
   });
 
-  test("5. Sidebar navigation - Settings tab", async () => {
-    await page.locator('[data-testid="sidebar-tab-settings"]').click();
-    await page.waitForTimeout(500);
-    await expect(page.locator('[data-testid="settings-panel"]')).toBeVisible();
+  test("5. Icon rail settings opens a modal without changing the sidebar pane", async () => {
+    await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
+    await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
+
+    const dialog = await openSettings(page);
+    await expect(dialog.getByRole("button", { name: "General" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
   });
 
   test("6. Sidebar navigation - Classes tab", async () => {
@@ -64,26 +88,25 @@ test.describe("Wardian Core Feature Tests", () => {
   });
 
   test("8. Settings - Theme switching", async () => {
-    await page.locator('[data-testid="sidebar-tab-settings"]').click();
-    await page.waitForTimeout(500);
-    
-    await page.locator('[data-testid="theme-dark"]').click();
-    await page.waitForTimeout(300);
-    
-    await page.locator('[data-testid="theme-light"]').click();
-    await page.waitForTimeout(300);
-    
-    await page.locator('[data-testid="theme-system"]').click();
-    await page.waitForTimeout(300);
+    const dialog = await openSettings(page);
+    await dialog.getByRole("button", { name: "Appearance" }).click();
+
+    const themeSelect = dialog.getByLabel("Theme", { exact: true });
+    await themeSelect.selectOption("dark");
+    await expect(themeSelect).toHaveValue("dark");
+    await themeSelect.selectOption("light");
+    await expect(themeSelect).toHaveValue("light");
+    await themeSelect.selectOption("system");
+    await expect(themeSelect).toHaveValue("system");
   });
 
   test("9. Settings - Shell selection", async () => {
-    await page.locator('[data-testid="sidebar-tab-settings"]').click();
-    await page.waitForTimeout(500);
-    
-    const shellSelect = page.locator('[data-testid="shell-select"]');
+    const dialog = await openSettings(page);
+    await dialog.getByRole("button", { name: "Terminal" }).click();
+
+    const shellSelect = dialog.locator('[data-testid="shell-select"]');
     await expect(shellSelect).toBeVisible();
-    
+
     const options = await shellSelect.locator("option").count();
     expect(options).toBeGreaterThan(0);
   });

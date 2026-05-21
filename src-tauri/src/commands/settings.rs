@@ -1,5 +1,5 @@
 use crate::utils::OnboardingHintsState;
-use crate::utils::{ShellOption, ShellSettings};
+use crate::utils::{AppSettingsDocument, ShellOption, ShellSettings, ShellSettingsDocument};
 use serde::Serialize;
 use wardian_core::models::AgentSessionPersistence;
 
@@ -87,6 +87,23 @@ pub fn list_available_shells() -> Result<Vec<ShellOption>, String> {
     Ok(crate::utils::list_available_shells())
 }
 
+fn settings_folder_path_from_home(wardian_home: &std::path::Path) -> String {
+    wardian_home.join("settings").to_string_lossy().into_owned()
+}
+
+fn ensure_settings_folder_path_from_home(wardian_home: &std::path::Path) -> Result<String, String> {
+    let path_string = settings_folder_path_from_home(wardian_home);
+    let path = std::path::PathBuf::from(&path_string);
+    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    Ok(path_string)
+}
+
+#[tauri::command]
+pub fn get_settings_folder_path() -> Result<String, String> {
+    let wardian_home = crate::utils::get_wardian_home().ok_or("Could not find Wardian home")?;
+    ensure_settings_folder_path_from_home(&wardian_home)
+}
+
 #[tauri::command]
 pub fn get_update_eligibility() -> UpdateEligibility {
     resolve_update_eligibility(
@@ -100,13 +117,25 @@ pub fn update_plugins_enabled_for_current_build() -> bool {
 }
 
 #[tauri::command]
-pub fn load_shell_settings() -> Result<ShellSettings, String> {
-    crate::utils::load_shell_settings()
+pub fn load_shell_settings() -> Result<ShellSettingsDocument, String> {
+    crate::utils::load_shell_settings_document()
 }
 
 #[tauri::command]
-pub fn save_shell_settings(settings: ShellSettings) -> Result<ShellSettings, String> {
-    crate::utils::save_shell_settings(&settings)
+pub fn load_app_settings() -> Result<AppSettingsDocument, String> {
+    crate::utils::load_app_settings_document()
+}
+
+#[tauri::command]
+pub fn save_app_settings(settings: AppSettingsDocument) -> Result<AppSettingsDocument, String> {
+    crate::utils::save_app_settings_document(&settings)
+}
+
+#[tauri::command]
+pub fn save_shell_settings(
+    settings: ShellSettingsDocument,
+) -> Result<ShellSettingsDocument, String> {
+    crate::utils::save_shell_settings_document(&settings)
 }
 
 #[tauri::command]
@@ -129,4 +158,29 @@ pub fn load_onboarding_hints() -> Result<OnboardingHintsState, String> {
 #[tauri::command]
 pub fn dismiss_onboarding_hint(hint_id: String) -> Result<OnboardingHintsState, String> {
     crate::utils::dismiss_onboarding_hint(hint_id)
+}
+
+#[cfg(test)]
+mod settings_path_tests {
+    use super::{ensure_settings_folder_path_from_home, settings_folder_path_from_home};
+
+    #[test]
+    fn settings_folder_path_points_under_wardian_home() {
+        let home = std::path::Path::new("/tmp/wardian-home");
+
+        assert_eq!(
+            settings_folder_path_from_home(home).replace('\\', "/"),
+            "/tmp/wardian-home/settings"
+        );
+    }
+
+    #[test]
+    fn settings_folder_path_can_be_created_before_opening() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = std::path::PathBuf::from(
+            ensure_settings_folder_path_from_home(temp_dir.path()).expect("settings path"),
+        );
+
+        assert!(path.is_dir());
+    }
 }

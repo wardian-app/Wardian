@@ -30,6 +30,7 @@ interface LayoutState {
   leftSidebarWidth: number;
   rightSidebarWidth: number;
   userTerminalOpen: boolean;
+  settingsOpen: boolean;
   userTerminalHeight: number;
   gridStacked: boolean;
   previousColumnTracks: number[] | null;
@@ -38,8 +39,10 @@ interface LayoutState {
   setLeftSidebarWidth: (px: number) => void;
   setRightSidebarWidth: (px: number) => void;
   setUserTerminalOpen: (open: boolean) => void;
+  setSettingsOpen: (open: boolean) => void;
   setUserTerminalHeight: (px: number) => void;
   toggleUserTerminal: () => void;
+  toggleSettings: () => void;
   setGridStacked: (v: boolean) => void;
   setPreviousColumnTracks: (tracks: number[] | null) => void;
   resetLayout: () => void;
@@ -52,6 +55,7 @@ export const useLayoutStore = create<LayoutState>()(
       leftSidebarWidth: DEFAULT_LEFT_SIDEBAR_WIDTH,
       rightSidebarWidth: DEFAULT_RIGHT_SIDEBAR_WIDTH,
       userTerminalOpen: false,
+      settingsOpen: false,
       userTerminalHeight: DEFAULT_USER_TERMINAL_HEIGHT,
       gridStacked: false,
       previousColumnTracks: null,
@@ -60,8 +64,10 @@ export const useLayoutStore = create<LayoutState>()(
       setLeftSidebarWidth: (px) => set({ leftSidebarWidth: clampSidebarWidth(px) }),
       setRightSidebarWidth: (px) => set({ rightSidebarWidth: clampSidebarWidth(px) }),
       setUserTerminalOpen: (userTerminalOpen) => set({ userTerminalOpen }),
+      setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
       setUserTerminalHeight: (px) => set({ userTerminalHeight: clampUserTerminalHeight(px) }),
       toggleUserTerminal: () => set((state) => ({ userTerminalOpen: !state.userTerminalOpen })),
+      toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
       setGridStacked: (gridStacked) => set({ gridStacked }),
       setPreviousColumnTracks: (previousColumnTracks) => set({ previousColumnTracks }),
       resetLayout: () => set({
@@ -69,6 +75,7 @@ export const useLayoutStore = create<LayoutState>()(
         leftSidebarWidth: DEFAULT_LEFT_SIDEBAR_WIDTH,
         rightSidebarWidth: DEFAULT_RIGHT_SIDEBAR_WIDTH,
         userTerminalOpen: false,
+        settingsOpen: false,
         userTerminalHeight: DEFAULT_USER_TERMINAL_HEIGHT,
         gridStacked: false,
         previousColumnTracks: null,
