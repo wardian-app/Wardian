@@ -189,6 +189,7 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
             control::spawn_control_server(app_handle.clone());
+            remote::gateway::spawn_remote_gateway(app_handle.clone());
             manager::init_agent_classes(&app_handle);
 
             start_metrics_supervisor(app.handle().clone());

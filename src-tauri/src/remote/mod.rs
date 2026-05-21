@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod crypto;
+pub mod gateway;
 pub mod models;
 pub mod operations;
 pub mod policy;

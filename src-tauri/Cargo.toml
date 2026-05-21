@@ -29,6 +29,7 @@ terminal-trace = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 hmac = { workspace = true }

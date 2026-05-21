@@ -15,6 +15,7 @@ repository = "https://github.com/wardian-app/Wardian"
 homepage = "https://wardian.org"
 
 [workspace.dependencies]
+axum = { version = "0.8.7", features = ["ws"] }
 base64 = "0.22"
 chrono = "0.4.38"
 dirs = "5.0.1"
