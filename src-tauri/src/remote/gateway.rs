@@ -4,7 +4,10 @@ use crate::remote::models::{
     RemoteWorkflowStopRequest, REMOTE_AUDIT_SCHEMA_VERSION,
 };
 use axum::{
-    extract::{Json, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Json, State,
+    },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -73,6 +76,7 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/remote/api/workflows/run", post(run_workflow))
         .route("/remote/api/workflows/stop", post(stop_workflow))
         .route("/remote/api/ws-ticket", post(create_ws_ticket))
+        .route("/remote/api/status-stream", get(status_stream_upgrade))
         .with_state(RemoteGatewayContext { app, config })
 }
 
@@ -389,6 +393,141 @@ async fn create_ws_ticket(
         ticket: ticket.ticket,
         expires_at: millis_to_rfc3339(ticket.expires_at_ms),
     }))
+}
+
+async fn status_stream_upgrade(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, RemoteGatewayError> {
+    require_request_boundary(&ctx.config, &headers, true)?;
+    Ok(ws.on_upgrade(move |socket| async move {
+        handle_status_socket(ctx, socket).await;
+    }))
+}
+
+async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) {
+    let Some(Ok(first_message)) = socket.recv().await else {
+        return;
+    };
+    let ticket = match parse_status_socket_ticket_message(first_message) {
+        Ok(ticket) => ticket,
+        Err(code) => {
+            send_status_socket_error(&mut socket, code).await;
+            return;
+        }
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let state = ctx.app.state::<crate::state::AppState>();
+    let ticket_record = {
+        let mut runtime = state.remote_runtime.lock().await;
+        match crate::remote::auth::consume_websocket_ticket(&mut runtime, &ticket, now_ms) {
+            Ok(record) => record,
+            Err(_) => {
+                drop(runtime);
+                send_status_socket_error(&mut socket, "invalid_websocket_ticket").await;
+                return;
+            }
+        }
+    };
+    if ticket_record.stream != REMOTE_STATUS_STREAM_NAME
+        || ticket_record.canonical_origin != ctx.config.canonical_origin
+    {
+        send_status_socket_error(&mut socket, "invalid_websocket_ticket").await;
+        return;
+    }
+
+    'stream: loop {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let session_active = {
+            let runtime = state.remote_runtime.lock().await;
+            status_stream_session_is_active(&runtime, &ticket_record.session_id, now_ms)
+        };
+        if !session_active {
+            send_status_socket_error(&mut socket, "session_expired").await;
+            break;
+        }
+
+        let agents = crate::remote::operations::remote_agent_roster(&state).await;
+        let payload = serde_json::json!({
+            "type": "agent_status",
+            "agents": agents,
+        });
+        if socket
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+
+        let next_tick = tokio::time::sleep(std::time::Duration::from_secs(2));
+        tokio::pin!(next_tick);
+        loop {
+            tokio::select! {
+                _ = &mut next_tick => break,
+                message = socket.recv() => {
+                    let action = match message {
+                        Some(Ok(message)) => status_stream_client_message_action(Some(message)),
+                        None | Some(Err(_)) => status_stream_client_message_action(None),
+                    };
+                    match action {
+                        StatusStreamClientMessageAction::IgnoreUntilNextTick => continue,
+                        StatusStreamClientMessageAction::Close => break 'stream,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StatusStreamClientMessageAction {
+    IgnoreUntilNextTick,
+    Close,
+}
+
+fn status_stream_client_message_action(
+    message: Option<Message>,
+) -> StatusStreamClientMessageAction {
+    match message {
+        Some(Message::Close(_)) | None => StatusStreamClientMessageAction::Close,
+        Some(_) => StatusStreamClientMessageAction::IgnoreUntilNextTick,
+    }
+}
+
+fn parse_status_socket_ticket_message(message: Message) -> Result<String, &'static str> {
+    let Message::Text(text) = message else {
+        return Err("invalid_ticket_message");
+    };
+    let value = serde_json::from_str::<serde_json::Value>(text.as_str())
+        .map_err(|_| "invalid_ticket_message")?;
+    let ticket = value
+        .get("ticket")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("invalid_ticket_message")?;
+    Ok(ticket.to_string())
+}
+
+fn status_stream_session_is_active(
+    runtime: &crate::remote::models::RemoteRuntimeState,
+    session_id: &str,
+    now_ms: i64,
+) -> bool {
+    runtime
+        .sessions
+        .get(session_id)
+        .is_some_and(|session| crate::remote::auth::session_is_active(session, now_ms))
+}
+
+async fn send_status_socket_error(socket: &mut WebSocket, code: &'static str) {
+    let payload = serde_json::json!({
+        "type": "error",
+        "code": code,
+    });
+    let _ = socket.send(Message::Text(payload.to_string().into())).await;
 }
 
 fn require_request_boundary(
@@ -725,6 +864,59 @@ mod tests {
         assert_eq!(
             validate_remote_stream("terminal").expect_err("unsupported stream"),
             "unsupported_stream"
+        );
+    }
+
+    #[test]
+    fn status_socket_first_message_requires_text_json_ticket() {
+        let message = axum::extract::ws::Message::Text(r#"{"ticket":"ticket-1"}"#.into());
+        assert_eq!(
+            parse_status_socket_ticket_message(message).expect("ticket message"),
+            "ticket-1"
+        );
+
+        let message = axum::extract::ws::Message::Text(r#"{"ticket":""}"#.into());
+        assert_eq!(
+            parse_status_socket_ticket_message(message).expect_err("empty ticket"),
+            "invalid_ticket_message"
+        );
+    }
+
+    #[test]
+    fn status_stream_session_active_reflects_runtime_revocation() {
+        let mut runtime = crate::remote::models::RemoteRuntimeState::default();
+        let session = crate::remote::auth::create_session(&mut runtime, "dev-1", 1_000_000);
+
+        assert!(status_stream_session_is_active(
+            &runtime,
+            &session.session_id,
+            1_001_000,
+        ));
+
+        crate::remote::auth::revoke_sessions_for_device(&mut runtime, "dev-1");
+
+        assert!(!status_stream_session_is_active(
+            &runtime,
+            &session.session_id,
+            1_002_000,
+        ));
+    }
+
+    #[test]
+    fn status_stream_client_messages_do_not_request_immediate_snapshot() {
+        assert_eq!(
+            status_stream_client_message_action(Some(axum::extract::ws::Message::Text(
+                "ignored".into()
+            ))),
+            StatusStreamClientMessageAction::IgnoreUntilNextTick
+        );
+        assert_eq!(
+            status_stream_client_message_action(Some(axum::extract::ws::Message::Close(None))),
+            StatusStreamClientMessageAction::Close
+        );
+        assert_eq!(
+            status_stream_client_message_action(None),
+            StatusStreamClientMessageAction::Close
         );
     }
 
