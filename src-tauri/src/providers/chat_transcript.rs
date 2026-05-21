@@ -843,6 +843,10 @@ fn fallback_terminal_event(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps provider parser call sites readable while centralizing DTO defaults"
+)]
 fn message_event(
     session_id: &str,
     provider: &str,
@@ -869,6 +873,10 @@ fn message_event(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps provider parser call sites readable while centralizing DTO defaults"
+)]
 fn tool_call_event(
     session_id: &str,
     provider: &str,
