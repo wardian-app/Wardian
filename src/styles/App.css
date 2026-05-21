@@ -707,9 +707,9 @@ select option {
 }
 
 .graph-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr) 26px;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--color-wardian-border);
@@ -735,8 +735,14 @@ select option {
 .graph-lenses {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.graph-toolbar-action {
+  width: 26px;
+  height: 26px;
 }
 
 .graph-lens {

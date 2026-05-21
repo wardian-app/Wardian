@@ -117,14 +117,18 @@ describe("GraphView", () => {
   });
 
   it("hides inspector and reopens it from a graph node", () => {
-    render(<GraphView {...defaultProps} />);
+    const { container } = render(<GraphView {...defaultProps} />);
 
     expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+    expect(container.querySelector(".graph-toolbar-action")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Hide inspector" }));
 
     expect(screen.queryByRole("heading", { name: "Alpha" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show inspector" })).toBeInTheDocument();
+    expect(container.querySelector(".graph-toolbar-action")).toContainElement(
+      screen.getByRole("button", { name: "Show inspector" }),
+    );
 
     fireEvent.click(screen.getByTestId("mock-graph-node"));
 

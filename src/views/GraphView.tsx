@@ -138,17 +138,19 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
             </button>
           ))}
         </div>
-        {!inspectorOpen && (
-          <button
-            type="button"
-            className="graph-icon-button"
-            aria-label="Show inspector"
-            title="Show inspector"
-            onClick={() => setInspectorOpen(true)}
-          >
-            <PanelRightOpen size={15} strokeWidth={2} />
-          </button>
-        )}
+        <div className="graph-toolbar-action">
+          {!inspectorOpen && (
+            <button
+              type="button"
+              className="graph-icon-button"
+              aria-label="Show inspector"
+              title="Show inspector"
+              onClick={() => setInspectorOpen(true)}
+            >
+              <PanelRightOpen size={15} strokeWidth={2} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className={`graph-body ${inspectorOpen ? "" : "graph-body--inspector-hidden"}`}>
