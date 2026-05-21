@@ -895,4 +895,30 @@ describe('AgentWatchlist', () => {
     );
     expect(screen.queryByText('Up')).not.toBeInTheDocument();
   });
+
+  it('formats known provider names in the provider column', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        agents={[
+          {
+            ...sampleAgents[0],
+            provider: 'antigravity',
+            model: 'planner',
+          },
+        ]}
+        prefs={{
+          ...defaultPrefs,
+          columns: defaultPrefs.columns.map((column) =>
+            column.id === 'provider_model' ? { ...column, visible: true } : column,
+          ),
+        }}
+        onPrefsChange={mockOnPrefsChange}
+        interactions={defaultInteractions}
+      />
+    );
+
+    expect(screen.getByText('Antigravity · planner')).toBeInTheDocument();
+    expect(screen.queryByText('antigravity · planner')).not.toBeInTheDocument();
+  });
 });
