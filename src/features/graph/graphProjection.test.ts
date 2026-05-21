@@ -26,7 +26,7 @@ const metric = (session_id: string, current_status = "Idle"): AgentTelemetry => 
 const reasons = (...items: GraphRelationshipReason[]) => new Set<GraphRelationshipReason>(items);
 
 const allReasons = () =>
-  reasons("same_team", "shared_workspace", "shared_worktree_source", "shared_worktree_folder");
+  reasons("same_team", "shared_workspace", "same_worktree");
 
 describe("normalizeGraphPath", () => {
   it("normalizes equivalent Windows-style paths without filesystem access", () => {
@@ -135,9 +135,26 @@ describe("buildAgentGraph", () => {
       id: "a--b",
       source: "a",
       target: "b",
-      reasons: ["shared_workspace", "shared_worktree_source", "shared_worktree_folder"],
-      weight: 3,
+      reasons: ["shared_workspace", "same_worktree"],
+      weight: 2,
     });
+  });
+
+  it("does not create worktree edges from shared source alone", () => {
+    const graph = buildAgentGraph({
+      agents: [
+        agent({ session_id: "a", git_worktree_source: "D:/src/", git_worktree_folder: "D:/wt/a" }),
+        agent({ session_id: "b", git_worktree_source: "d:\\src", git_worktree_folder: "D:/wt/b" }),
+      ],
+      telemetry: {},
+      teams: [],
+      activeList: null,
+      interactions: {},
+      selectedAgentIds: new Set(),
+      enabledReasons: allReasons(),
+    });
+
+    expect(graph.edges).toEqual([]);
   });
 
   it("does not create edges for recent activity, status, provider, class, missing paths, or hidden agents", () => {
@@ -163,6 +180,7 @@ describe("buildAgentGraph", () => {
     });
 
     expect(graph.nodes.find((node) => node.id === "a")?.recent).toBe(true);
+    expect(new Set(graph.nodes.map((node) => node.size))).toEqual(new Set([9]));
     expect(graph.edges).toEqual([]);
   });
 

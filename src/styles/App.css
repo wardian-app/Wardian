@@ -732,8 +732,7 @@ select option {
   color: var(--color-wardian-text-muted);
 }
 
-.graph-lenses,
-.graph-status-legend {
+.graph-lenses {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -757,27 +756,6 @@ select option {
   border-color: var(--color-wardian-accent);
   background: color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
 }
-
-.graph-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  color: var(--color-wardian-text-muted);
-}
-
-.graph-legend-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--color-wardian-text-muted);
-}
-
-.graph-legend-dot--idle { background: var(--color-wardian-success); }
-.graph-legend-dot--processing { background: var(--color-wardian-processing); }
-.graph-legend-dot--action { background: var(--color-wardian-warning); }
-.graph-legend-dot--off { background: var(--color-wardian-text-muted); }
-.graph-legend-dot--error { background: var(--color-wardian-error); }
 
 .graph-body {
   display: grid;

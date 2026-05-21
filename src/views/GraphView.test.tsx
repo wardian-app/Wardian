@@ -94,12 +94,15 @@ describe("GraphView", () => {
     Object.values(handlers).forEach((handler) => handler.mockClear());
   });
 
-  it("renders scope, legend, and graph canvas", () => {
+  it("renders scope, relationship lenses, and graph canvas", () => {
     render(<GraphView {...defaultProps} />);
 
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByText("All Agents")).toBeInTheDocument();
-    expect(screen.getAllByText("Idle").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "same team" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "shared workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "same worktree" })).toBeInTheDocument();
+    expect(screen.queryByText("Action Required")).not.toBeInTheDocument();
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
   });
 

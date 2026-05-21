@@ -3,6 +3,8 @@ import Graph from "graphology";
 import Sigma from "sigma";
 import type { AgentGraphProjection } from "./graphProjection";
 
+const RECENT_HALO_SUFFIX = "__recent_halo";
+
 interface GraphCanvasProps {
   projection: AgentGraphProjection;
   onSelectAgent: (agentId: string) => void;
@@ -45,17 +47,26 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       allowInvalidContainer: true,
       enableEdgeEvents: true,
       renderEdgeLabels: false,
+      zIndex: true,
     });
     graphRef.current = graph;
     rendererRef.current = renderer;
 
-    renderer.on("clickNode", ({ node }: SigmaNodePayload) => handlersRef.current.onSelectAgent(node));
-    renderer.on("doubleClickNode", ({ node }: SigmaNodePayload) => handlersRef.current.onOpenAgent(node));
+    renderer.on("clickNode", ({ node }: SigmaNodePayload) => {
+      const agentId = graphNodeToAgentId(node);
+      if (agentId) handlersRef.current.onSelectAgent(agentId);
+    });
+    renderer.on("doubleClickNode", ({ node }: SigmaNodePayload) => {
+      const agentId = graphNodeToAgentId(node);
+      if (agentId) handlersRef.current.onOpenAgent(agentId);
+    });
     renderer.on("rightClickNode", ({ node, event }: SigmaPointerPayload) => {
+      const agentId = graphNodeToAgentId(node);
+      if (!agentId) return;
       const original = event?.original ?? event?.originalEvent;
       original?.preventDefault();
       const point = pointerPosition(original);
-      handlersRef.current.onContextMenu(node, point.x, point.y);
+      handlersRef.current.onContextMenu(agentId, point.x, point.y);
     });
 
     return () => {
@@ -74,6 +85,21 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     graph.clear();
 
     for (const node of projection.nodes) {
+      if (!node.recent) continue;
+      const color = resolveGraphColor(node.color, container);
+      graph.addNode(`${node.id}${RECENT_HALO_SUFFIX}`, {
+        label: "",
+        x: node.x,
+        y: node.y,
+        size: node.size + 7,
+        color: withAlpha(color, 0.26),
+        highlighted: false,
+        forceLabel: false,
+        zIndex: 0,
+      });
+    }
+
+    for (const node of projection.nodes) {
       graph.addNode(node.id, {
         label: node.label,
         x: node.x,
@@ -82,6 +108,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         color: resolveGraphColor(node.color, container),
         highlighted: node.selected,
         forceLabel: node.selected,
+        zIndex: 1,
       });
     }
 
@@ -107,6 +134,12 @@ function pointerPosition(event: MouseEvent | TouchEvent | undefined) {
   return { x: touch?.clientX ?? 0, y: touch?.clientY ?? 0 };
 }
 
+function graphNodeToAgentId(node: string) {
+  return node.endsWith(RECENT_HALO_SUFFIX)
+    ? node.slice(0, -RECENT_HALO_SUFFIX.length)
+    : node;
+}
+
 function resolveGraphColor(color: string, container: HTMLElement) {
   const match = color.match(/^var\((--[^,\s)]+)(?:,\s*([^)]+))?\)$/);
   if (!match) return color;
@@ -117,4 +150,20 @@ function resolveGraphColor(color: string, container: HTMLElement) {
     .trim();
 
   return computed || match[2]?.trim() || color;
+}
+
+function withAlpha(color: string, alpha: number) {
+  const hex = color.match(/^#([0-9a-f]{6})$/i);
+  if (hex) {
+    const value = hex[1];
+    const r = Number.parseInt(value.slice(0, 2), 16);
+    const g = Number.parseInt(value.slice(2, 4), 16);
+    const b = Number.parseInt(value.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  const rgb = color.match(/^rgba?\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)/i);
+  if (rgb) return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})`;
+
+  return color;
 }

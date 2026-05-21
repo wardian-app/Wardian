@@ -5,8 +5,7 @@ import { getAgentsForList } from "../../layout/watchlist/watchlistUtils";
 export type GraphRelationshipReason =
   | "same_team"
   | "shared_workspace"
-  | "shared_worktree_source"
-  | "shared_worktree_folder";
+  | "same_worktree";
 
 export interface AgentGraphNode {
   id: string;
@@ -58,8 +57,7 @@ export interface BuildAgentGraphInput {
 const REASON_ORDER: GraphRelationshipReason[] = [
   "same_team",
   "shared_workspace",
-  "shared_worktree_source",
-  "shared_worktree_folder",
+  "same_worktree",
 ];
 
 const RECENT_MS = 1000 * 60 * 60 * 24;
@@ -108,7 +106,7 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
       color: statusToColor(status),
       x: position.x,
       y: position.y,
-      size: recent ? 8 : 6,
+      size: 9,
       agent,
       telemetry,
       clusterId: teamByAgent.get(agent.session_id)?.id ?? null,
@@ -161,8 +159,7 @@ function buildEdges(
   }
 
   addPathEdges(visibleAgents, "folder", "shared_workspace", enabledReasons, edgeReasons);
-  addPathEdges(visibleAgents, "git_worktree_source", "shared_worktree_source", enabledReasons, edgeReasons);
-  addPathEdges(visibleAgents, "git_worktree_folder", "shared_worktree_folder", enabledReasons, edgeReasons);
+  addPathEdges(visibleAgents, "git_worktree_folder", "same_worktree", enabledReasons, edgeReasons);
 
   return [...edgeReasons.entries()]
     .map(([id, reasons]) => {
@@ -182,7 +179,7 @@ function buildEdges(
 
 function addPathEdges(
   agents: AgentConfig[],
-  field: "folder" | "git_worktree_source" | "git_worktree_folder",
+  field: "folder" | "git_worktree_folder",
   reason: GraphRelationshipReason,
   enabledReasons: Set<GraphRelationshipReason>,
   edgeReasons: Map<string, Set<GraphRelationshipReason>>,

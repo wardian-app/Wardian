@@ -48,16 +48,7 @@ interface GraphViewProps {
 const ALL_REASONS: GraphRelationshipReason[] = [
   "same_team",
   "shared_workspace",
-  "shared_worktree_source",
-  "shared_worktree_folder",
-];
-
-const STATUS_LEGEND = [
-  { label: "Idle", className: "idle" },
-  { label: "Processing", className: "processing" },
-  { label: "Action Required", className: "action" },
-  { label: "Off", className: "off" },
-  { label: "Error", className: "error" },
+  "same_worktree",
 ];
 
 export const GraphView: React.FC<GraphViewProps> = (props) => {
@@ -142,14 +133,6 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
             >
               {reason.replace(/_/g, " ")}
             </button>
-          ))}
-        </div>
-        <div className="graph-status-legend">
-          {STATUS_LEGEND.map((item) => (
-            <span key={item.label} className="graph-legend-item">
-              <span className={`graph-legend-dot graph-legend-dot--${item.className}`} />
-              {item.label}
-            </span>
           ))}
         </div>
       </div>

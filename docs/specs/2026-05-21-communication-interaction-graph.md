@@ -65,8 +65,7 @@ Relationship reasons are explicit and conservative:
 
 - `same_team`
 - `shared_workspace`
-- `shared_worktree_source`
-- `shared_worktree_folder`
+- `same_worktree`
 
 `agentInteractions` must not imply a communication edge. It only supports a recent-activity visual treatment for the queried agent.
 
@@ -88,8 +87,7 @@ Create an edge for these relationships:
 
 - `same_team`: both agents are members of the same `AgentTeam`.
 - `shared_workspace`: both agents have the same normalized non-empty `folder`.
-- `shared_worktree_source`: both agents have the same normalized non-empty `git_worktree_source`.
-- `shared_worktree_folder`: both agents have the same normalized non-empty `git_worktree_folder`.
+- `same_worktree`: both agents have the same normalized non-empty `git_worktree_folder`.
 
 Do not create edges for these signals:
 
@@ -116,8 +114,8 @@ Examples:
 |---|---:|---|
 | Same `AgentTeam` | Yes | `same_team` |
 | Same normalized `folder` | Yes | `shared_workspace` |
-| Same normalized `git_worktree_source` | Yes | `shared_worktree_source` |
-| Same normalized `git_worktree_folder` | Yes | `shared_worktree_folder` |
+| Same normalized `git_worktree_folder` | Yes | `same_worktree` |
+| Same normalized `git_worktree_source` only | No | Source repository alone does not mean same worktree |
 | Same watchlist only | No | Watchlist is scope, not relationship |
 | Same status, provider, model, class, or query count | No | Similarity is not interaction |
 | Recent activity only | No | Recent activity is node treatment only |
@@ -130,16 +128,16 @@ The Graph tab becomes a full-height operational map. Garden remains a placeholde
 Main surface:
 
 - Sigma canvas with panning, zooming, fit/reset view, and stable node positions.
-- Compact status legend.
-- Lens toggles for relationship types such as team, workspace/worktree, and recent activity.
+- Lens toggles for relationship types: same team, same workspace, and same worktree.
 - Scope indicator for current watchlist versus all agents.
 
 Node treatment:
 
 - Agents are orbs, not cards.
 - Status colors follow Wardian conventions: emerald idle, cyan processing, amber action required, gray off, red error.
+- Agent node size is constant; status does not affect size.
 - Selected and hovered nodes highlight adjacent edges.
-- Recent activity adds a restrained halo or ring.
+- Recent activity adds a restrained glow or halo, not a size change.
 
 Inspector:
 
@@ -182,16 +180,17 @@ Unit tests:
 - Team clusters preserve team membership and order.
 - Team membership creates `same_team` edges only between visible team members.
 - Shared workspace/worktree reasons aggregate into a single edge between an unordered pair of agents.
-- Workspace, worktree source, and worktree folder reasons are computed independently.
+- Same worktree is computed from `git_worktree_folder`; `git_worktree_source` alone does not create a relationship.
 - Path normalization treats `C:\repo`, `C:/repo`, and `C:/repo/` as the same Windows-style path.
 - Empty, missing, or whitespace-only path fields do not create edges.
 - Edges are not created to hidden agents.
 - Recent interaction affects node recency metadata but does not create communication edges.
+- Recent interaction renders as a halo/glow while node size remains constant.
 - Unsupported inference is omitted.
 
 Component tests:
 
-- Graph view renders with agents and status legend.
+- Graph view renders with agents and relationship lenses.
 - Empty graph state is handled.
 - Lens toggles alter visible edge types.
 - Selecting a node opens inspector details.
