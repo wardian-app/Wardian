@@ -16,8 +16,8 @@ Settings in this screen are global. Wardian stores durable settings under
 entire resolved settings object. Missing fields inherit Wardian's current
 computed defaults for the app and operating system.
 
-- `settings/app.json`: app preferences such as theme, terminal font size,
-  terminal font family, and Gemini auto-patch.
+- `settings/app.json`: app preferences such as theme, Grid card display,
+  terminal font size, terminal font family, and Gemini auto-patch.
 - `settings/shell.json`: runtime preferences such as shell selection, default
   provider, regular agent session policy, and Codex runtime defaults.
 
@@ -33,6 +33,7 @@ Categories:
 
 - **General**: app version and update status.
 - **Appearance**: app theme.
+- **Grid**: display mode for agent cards in the main Grid view.
 - **Terminal**: terminal font and shell defaults.
 - **Agent Runtime**: default provider, regular agent session behavior, and
   provider-specific runtime defaults such as the Codex subsection.
@@ -61,6 +62,13 @@ builds and local source-built binaries show the running Wardian version, but
 Settings disables update checks so local builds are not replaced by public
 release installers.
 
+If update checks fail:
+
+- verify internet access to GitHub Releases
+- try **Check Now**
+- install the latest release manually if the running build predates in-app
+  update support
+
 ## Appearance
 
 Theme options:
@@ -71,6 +79,19 @@ Theme options:
 
 Wardian applies the selected mode to the app UI and syncs the OpenCode theme
 preference through backend settings.
+
+## Grid
+
+The **Grid card display** control sets the global display mode for cards in the
+main Grid view:
+
+- **Terminal** shows the provider terminal/TUI, including raw keyboard control,
+  approvals, and raw output.
+- **Chat** shows normalized transcript and activity events for scanning multiple
+  agents, plus a compact prompt composer for standard text input.
+
+Use Terminal mode when you need raw TUI controls, provider-specific keybindings,
+or detailed terminal behavior.
 
 ## Terminal
 
@@ -126,6 +147,8 @@ OpenCode behavior.
 - If provider options are disabled elsewhere in Wardian, install the provider
   CLI and make sure Wardian can see it on the app process PATH. See
   [Provider Readiness](./provider-readiness.md).
+- If Grid chat mode is empty, switch to Terminal mode to inspect the raw
+  provider session and confirm the agent has emitted transcript data.
 - If resume behavior is not what you expect, verify both the global runtime
   policy and any per-agent override.
 - If Gemini skills are missing, run the patch manually and restart the app
@@ -136,6 +159,9 @@ OpenCode behavior.
 - Settings are global only in the current implementation.
 - Shell and runtime policy changes affect future launches and resumes; they do
   not reconfigure an already-running provider process.
+- Grid chat mode handles standard text prompts. Terminal mode is still required
+  for raw TUI controls and provider approval screens that need direct terminal
+  interaction.
 - Workflow Agent nodes have their own execution mode and do not simply inherit
   the regular-agent resume default.
 - Provider utilities are provider-specific.
