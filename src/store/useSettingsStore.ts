@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
+  AppSettings,
+  AppThemeSetting,
   CodexApprovalPolicy,
   CodexRuntimePolicy,
   CodexSandboxMode,
@@ -52,6 +54,10 @@ export function normalizeTerminalFontSize(value: number) {
   return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, Math.round(value)));
 }
 
+function normalizeTheme(value: string | null | undefined): AppThemeSetting {
+  return value === 'dark' || value === 'light' || value === 'system' ? value : 'system';
+}
+
 export function effectiveTerminalFontFamily(value: string | null | undefined) {
   const trimmed = value?.trim() ?? '';
   return trimmed || defaultTerminalFontFamily();
@@ -94,7 +100,7 @@ export function normalizeDefaultProviderSetting(
 }
 
 interface SettingsState {
-  theme: 'dark' | 'light' | 'system';
+  theme: AppThemeSetting;
   autoPatchGemini: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
@@ -105,9 +111,10 @@ interface SettingsState {
   codex_runtime_policy: CodexRuntimePolicy;
   default_provider: DefaultProviderSetting;
   available_shells: ShellOption[];
+  app_settings_loaded: boolean;
   shell_settings_loaded: boolean;
   shells_loaded: boolean;
-  setTheme: (theme: 'dark' | 'light' | 'system') => void;
+  setTheme: (theme: AppThemeSetting) => void;
   setAutoPatchGemini: (enabled: boolean) => void;
   setTerminalFontSize: (value: number) => void;
   setTerminalFontFamily: (value: string) => void;
@@ -119,6 +126,8 @@ interface SettingsState {
   setCodexSandboxMode: (value: CodexSandboxMode) => void;
   setCodexApprovalPolicy: (value: CodexApprovalPolicy) => void;
   setCodexFullAuto: (value: boolean) => void;
+  loadAppSettings: () => Promise<void>;
+  saveAppSettings: () => Promise<void>;
   loadShellSettings: () => Promise<void>;
   loadAvailableShells: () => Promise<void>;
   saveShellSettings: () => Promise<void>;
@@ -134,6 +143,31 @@ const DEFAULT_SHELL_SETTINGS: ShellSettings = {
   default_provider: 'auto',
 };
 
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  theme: 'system',
+  auto_patch_gemini: false,
+  terminal_font_size: defaultTerminalFontSize(),
+  terminal_font_family: null,
+};
+
+function appSettingsAreDefaults(settings: AppSettings) {
+  return (
+    settings.theme === DEFAULT_APP_SETTINGS.theme &&
+    settings.auto_patch_gemini === DEFAULT_APP_SETTINGS.auto_patch_gemini &&
+    normalizeTerminalFontSize(settings.terminal_font_size) === DEFAULT_APP_SETTINGS.terminal_font_size &&
+    (settings.terminal_font_family?.trim() ?? '') === ''
+  );
+}
+
+function stateHasMigratedAppPreferences(state: SettingsState) {
+  return (
+    state.theme !== DEFAULT_APP_SETTINGS.theme ||
+    state.autoPatchGemini !== DEFAULT_APP_SETTINGS.auto_patch_gemini ||
+    normalizeTerminalFontSize(state.terminalFontSize) !== DEFAULT_APP_SETTINGS.terminal_font_size ||
+    state.terminalFontFamily.trim() !== ''
+  );
+}
+
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
@@ -148,6 +182,7 @@ export const useSettingsStore = create<SettingsState>()(
       codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
       default_provider: DEFAULT_SHELL_SETTINGS.default_provider ?? 'auto',
       available_shells: [],
+      app_settings_loaded: false,
       shell_settings_loaded: false,
       shells_loaded: false,
       setTheme: (theme) => set({ theme }),
@@ -172,6 +207,46 @@ export const useSettingsStore = create<SettingsState>()(
       setCodexFullAuto: (full_auto) => set((state) => ({
         codex_runtime_policy: { ...state.codex_runtime_policy, full_auto },
       })),
+      loadAppSettings: async () => {
+        try {
+          const settings = await invoke<AppSettings | null>('load_app_settings');
+          if (!settings) {
+            set({ app_settings_loaded: true });
+            return;
+          }
+          const currentState = get();
+          if (appSettingsAreDefaults(settings) && stateHasMigratedAppPreferences(currentState)) {
+            set({ app_settings_loaded: true });
+            return;
+          }
+          set({
+            theme: normalizeTheme(settings.theme),
+            autoPatchGemini: Boolean(settings.auto_patch_gemini),
+            terminalFontSize: normalizeTerminalFontSize(settings.terminal_font_size),
+            terminalFontFamily: settings.terminal_font_family?.trim() ?? '',
+            app_settings_loaded: true,
+          });
+        } catch (error) {
+          console.error('Failed to load app settings:', error);
+          set({ app_settings_loaded: true });
+        }
+      },
+      saveAppSettings: async () => {
+        const settings: AppSettings = {
+          theme: normalizeTheme(get().theme),
+          auto_patch_gemini: get().autoPatchGemini,
+          terminal_font_size: normalizeTerminalFontSize(get().terminalFontSize),
+          terminal_font_family: get().terminalFontFamily.trim() || null,
+        };
+        const saved = await invoke<AppSettings>('save_app_settings', { settings });
+        set({
+          theme: normalizeTheme(saved.theme),
+          autoPatchGemini: Boolean(saved.auto_patch_gemini),
+          terminalFontSize: normalizeTerminalFontSize(saved.terminal_font_size),
+          terminalFontFamily: saved.terminal_font_family?.trim() ?? '',
+          app_settings_loaded: true,
+        });
+      },
       loadShellSettings: async () => {
         try {
           const settings = await invoke<ShellSettings>('load_shell_settings');

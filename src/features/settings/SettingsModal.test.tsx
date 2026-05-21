@@ -1,0 +1,163 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { SettingsModal } from "./SettingsModal";
+import { useAppUpdate } from "./useAppUpdate";
+import { useSettingsStore } from "../../store/useSettingsStore";
+import type { AppUpdateState } from "./useAppUpdate";
+
+vi.mock("./useAppUpdate", () => ({
+  useAppUpdate: vi.fn(),
+}));
+
+const mockInvoke = vi.mocked(invoke);
+const mockUseAppUpdate = vi.mocked(useAppUpdate);
+
+const appUpdateState = (overrides: Partial<AppUpdateState> = {}): AppUpdateState => ({
+  currentVersion: "0.3.6",
+  availableUpdate: null,
+  status: "up-to-date",
+  errorMessage: "",
+  updatesEnabled: true,
+  updateEligibilityReason: "",
+  updateChannel: "stable",
+  downloadedBytes: 0,
+  contentLength: null,
+  progressPercent: null,
+  checkNow: vi.fn(),
+  downloadAndInstall: vi.fn(),
+  relaunchApp: vi.fn(),
+  ...overrides,
+});
+
+describe("SettingsModal", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    mockUseAppUpdate.mockReturnValue(appUpdateState());
+    useSettingsStore.setState({
+      theme: "dark",
+      autoPatchGemini: false,
+      terminalFontSize: 14,
+      terminalFontFamily: "",
+      shell_id: "auto",
+      custom_executable: "",
+      custom_args: "",
+      agent_session_persistence: "resume",
+      default_provider: "auto",
+      codex_runtime_policy: {
+        sandbox_mode: "workspace-write",
+        approval_policy: "on-request",
+        full_auto: false,
+      },
+      available_shells: [],
+      app_settings_loaded: true,
+      shell_settings_loaded: true,
+      shells_loaded: true,
+    });
+
+    mockInvoke.mockImplementation(async (command, args) => {
+      switch (command) {
+        case "save_app_settings":
+          return (args as { settings?: unknown } | undefined)?.settings;
+        case "save_shell_settings":
+          return (args as { settings?: unknown } | undefined)?.settings;
+        case "run_gemini_patch":
+          return "ok";
+        default:
+          return null;
+      }
+    });
+  });
+
+  it("renders Codex-style category navigation and concise setting details", () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(within(dialog).getByRole("button", { name: "General" })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Agent Runtime" }));
+    expect(screen.getByText("Auto prefers Claude when available.")).toBeInTheDocument();
+  });
+
+  it("filters settings by search text across labels and details", () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByPlaceholderText("Search settings"), {
+      target: { value: "codex" },
+    });
+
+    expect(screen.getByText("Codex sandbox")).toBeInTheDocument();
+    expect(screen.queryByText("Theme")).not.toBeInTheDocument();
+  });
+
+  it("resets app settings to defaults through the backend app settings file", async () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset Theme" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({
+          theme: "system",
+        }),
+      });
+    });
+    expect(useSettingsStore.getState().theme).toBe("system");
+  });
+
+  it("saves runtime settings with backend validation", async () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent Runtime" }));
+    fireEvent.change(screen.getByLabelText("Default provider"), {
+      target: { value: "codex" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent Runtime" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_shell_settings", {
+        settings: expect.objectContaining({
+          default_provider: "codex",
+        }),
+      });
+    });
+  });
+
+  it("shows and saves custom shell details from the terminal category", async () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    fireEvent.change(screen.getByLabelText("Shell / Interpreter"), {
+      target: { value: "custom" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom shell executable"), {
+      target: { value: "C:/Tools/custom-shell.exe" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom shell arguments"), {
+      target: { value: "--login" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Terminal" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_shell_settings", {
+        settings: expect.objectContaining({
+          shell_id: "custom",
+          custom_executable: "C:/Tools/custom-shell.exe",
+          custom_args: "--login",
+        }),
+      });
+    });
+  });
+
+  it("checks for updates from the general category", () => {
+    const checkNow = vi.fn();
+    mockUseAppUpdate.mockReturnValue(appUpdateState({ checkNow }));
+
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+
+    expect(checkNow).toHaveBeenCalledTimes(1);
+  });
+});

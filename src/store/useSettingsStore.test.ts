@@ -11,6 +11,16 @@ import {
 
 const mockedInvoke = vi.mocked(invoke);
 
+function resetAppPreferences() {
+  useSettingsStore.setState({
+    theme: 'system',
+    autoPatchGemini: false,
+    terminalFontSize: 14,
+    terminalFontFamily: '',
+    app_settings_loaded: false,
+  });
+}
+
 describe('terminal appearance defaults', () => {
   it('matches VS Code font family defaults by platform', () => {
     expect(defaultTerminalFontFamily('windows')).toBe(WINDOWS_TERMINAL_FONT_FAMILY);
@@ -90,5 +100,94 @@ describe('default provider settings', () => {
       }),
     });
     expect(useSettingsStore.getState().default_provider).toBe('antigravity');
+  });
+});
+
+describe('app settings persistence', () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+    localStorage.clear();
+    resetAppPreferences();
+  });
+
+  it('loads app preferences from the backend app settings file', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      theme: 'dark',
+      auto_patch_gemini: true,
+      terminal_font_size: 16,
+      terminal_font_family: 'JetBrains Mono, monospace',
+    });
+
+    await useSettingsStore.getState().loadAppSettings();
+
+    expect(mockedInvoke).toHaveBeenCalledWith('load_app_settings');
+    expect(useSettingsStore.getState().theme).toBe('dark');
+    expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
+    expect(useSettingsStore.getState().terminalFontSize).toBe(16);
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('JetBrains Mono, monospace');
+    expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
+  });
+
+  it('saves app preferences through the backend app settings file', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      theme: 'light',
+      auto_patch_gemini: true,
+      terminal_font_size: 12,
+      terminal_font_family: null,
+    });
+
+    useSettingsStore.setState({
+      theme: 'light',
+      autoPatchGemini: true,
+      terminalFontSize: 12,
+      terminalFontFamily: '',
+    });
+
+    await useSettingsStore.getState().saveAppSettings();
+
+    expect(mockedInvoke).toHaveBeenCalledWith('save_app_settings', {
+      settings: {
+        theme: 'light',
+        auto_patch_gemini: true,
+        terminal_font_size: 12,
+        terminal_font_family: null,
+      },
+    });
+    expect(useSettingsStore.getState().theme).toBe('light');
+    expect(useSettingsStore.getState().terminalFontSize).toBe(12);
+  });
+
+  it('keeps migrated local preferences when no backend app settings file exists yet', async () => {
+    useSettingsStore.setState({
+      theme: 'dark',
+      autoPatchGemini: true,
+      terminalFontSize: 16,
+      terminalFontFamily: 'Cascadia Mono, monospace',
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      theme: 'system',
+      auto_patch_gemini: false,
+      terminal_font_size: 14,
+      terminal_font_family: null,
+    });
+
+    await useSettingsStore.getState().loadAppSettings();
+
+    expect(useSettingsStore.getState().theme).toBe('dark');
+    expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
+    expect(useSettingsStore.getState().terminalFontSize).toBe(16);
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
+  });
+
+  it('falls back without error when backend app settings response is empty', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockedInvoke.mockResolvedValueOnce(null);
+
+    await useSettingsStore.getState().loadAppSettings();
+
+    expect(useSettingsStore.getState().theme).toBe('system');
+    expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

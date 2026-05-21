@@ -9,6 +9,7 @@ import type { AgentConfig, AgentClassDefinition, AgentClonePreview, ProviderRead
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useQueueStore } from "../store/useQueueStore";
+import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 
 // Mock window.matchMedia globally for tests
@@ -200,6 +201,32 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return [];
       case "load_workflow_library":
         return { folders: [], rootWorkflowIds: [] };
+      case "load_app_settings":
+        return {
+          theme: "system",
+          auto_patch_gemini: false,
+          terminal_font_size: 14,
+          terminal_font_family: null,
+        };
+      case "load_shell_settings":
+        return {
+          shell_id: "auto",
+          custom_executable: null,
+          custom_args: null,
+          agent_session_persistence: "resume",
+          default_provider: "auto",
+          codex_runtime_policy: {
+            sandbox_mode: "danger-full-access",
+            approval_policy: "never",
+            full_auto: true,
+          },
+        };
+      case "list_available_shells":
+        return [];
+      case "save_shell_settings":
+        return args?.settings;
+      case "run_gemini_patch":
+        return "ok";
       default:
         return null;
     }
@@ -289,6 +316,13 @@ const opencodeAgents: AgentConfig[] = [
 beforeEach(() => {
   vi.clearAllMocks();
   useLayoutStore.getState().resetLayout();
+  useSettingsStore.setState({
+    theme: "system",
+    autoPatchGemini: false,
+    terminalFontSize: 14,
+    terminalFontFamily: "",
+    app_settings_loaded: false,
+  });
   useQueueStore.setState({ items: [], _agentBuffers: {}, _workflowLastOutput: {} });
   delete (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__;
   delete (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -529,6 +563,15 @@ describe("Agent List Management", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("sync_provider_theme_settings", { theme: "dark" });
     });
+  });
+
+  it("loads file-backed app settings on startup", async () => {
+    setupDefaultMocks([], defaultClasses);
+    render(<App />);
+
+    await screen.findByText("No Active Instances");
+
+    expect(mockInvoke).toHaveBeenCalledWith("load_app_settings");
   });
 });
 
@@ -1422,6 +1465,35 @@ describe("Sidebar Navigation", () => {
     expect(await screen.findByTestId("user-terminal-panel")).toBeInTheDocument();
     expect(screen.getByText("Agent Config")).toBeInTheDocument();
     expect(screen.queryByTestId("terminal-panel")).not.toBeInTheDocument();
+  });
+
+  it("opens settings as a modal without changing the active sidebar pane", async () => {
+    setupDefaultMocks([], defaultClasses);
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    expect(screen.getByText("Agent Config")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Application Settings"));
+
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByText("Agent Config")).toBeInTheDocument();
+  });
+
+  it("closes settings from the close button and Escape key", async () => {
+    setupDefaultMocks([], defaultClasses);
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    fireEvent.click(screen.getByTitle("Application Settings"));
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Application Settings"));
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
   });
 
   it("passes the single selected agent workspace to the user terminal", async () => {

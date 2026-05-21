@@ -433,6 +433,8 @@ pub fn run() {
             commands::settings::load_shell_settings,
             commands::settings::get_update_eligibility,
             commands::settings::list_available_shells,
+            commands::settings::load_app_settings,
+            commands::settings::save_app_settings,
             commands::settings::save_shell_settings,
             commands::settings::save_agent_session_persistence,
             commands::settings::sync_provider_theme_settings,

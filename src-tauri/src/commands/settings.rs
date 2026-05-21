@@ -1,4 +1,5 @@
 use crate::utils::OnboardingHintsState;
+use crate::utils::AppSettings;
 use crate::utils::{ShellOption, ShellSettings};
 use serde::Serialize;
 use wardian_core::models::AgentSessionPersistence;
@@ -102,6 +103,16 @@ pub fn update_plugins_enabled_for_current_build() -> bool {
 #[tauri::command]
 pub fn load_shell_settings() -> Result<ShellSettings, String> {
     crate::utils::load_shell_settings()
+}
+
+#[tauri::command]
+pub fn load_app_settings() -> Result<AppSettings, String> {
+    crate::utils::load_app_settings()
+}
+
+#[tauri::command]
+pub fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+    crate::utils::save_app_settings(&settings)
 }
 
 #[tauri::command]
