@@ -16,8 +16,8 @@ interface SigmaNodePayload {
 
 interface SigmaPointerPayload extends SigmaNodePayload {
   event?: {
-    original?: MouseEvent;
-    originalEvent?: MouseEvent;
+    original?: MouseEvent | TouchEvent;
+    originalEvent?: MouseEvent | TouchEvent;
   };
 }
 
@@ -65,7 +65,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     renderer.on("rightClickNode", ({ node, event }: SigmaPointerPayload) => {
       const original = event?.original ?? event?.originalEvent;
       original?.preventDefault();
-      onContextMenu(node, original?.clientX ?? 0, original?.clientY ?? 0);
+      const point = pointerPosition(original);
+      onContextMenu(node, point.x, point.y);
     });
 
     return () => renderer.kill();
@@ -73,3 +74,10 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
   return <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas" />;
 };
+
+function pointerPosition(event: MouseEvent | TouchEvent | undefined) {
+  if (!event) return { x: 0, y: 0 };
+  if ("clientX" in event) return { x: event.clientX, y: event.clientY };
+  const touch = event.touches[0] ?? event.changedTouches[0];
+  return { x: touch?.clientX ?? 0, y: touch?.clientY ?? 0 };
+}
