@@ -133,3 +133,28 @@ pub struct AuthSessionResponse {
     pub expires_at: String,
     pub absolute_expires_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteAgentSummary {
+    pub session_id: String,
+    pub session_name: String,
+    pub agent_class: String,
+    pub provider: String,
+    pub workspace: String,
+    pub status: String,
+    pub latest_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteAgentActionRequest {
+    pub action: String,
+    pub target: String,
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteWorkflowSummary {
+    pub id: String,
+    pub name: String,
+    pub node_count: usize,
+}
