@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 
 pub const REMOTE_SETTINGS_SCHEMA_VERSION: u8 = 1;
 pub const REMOTE_AUDIT_SCHEMA_VERSION: u8 = 1;
+pub const REMOTE_DEVICE_STORE_SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +116,12 @@ pub struct DeviceRecord {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteDeviceStore {
+    pub schema_version: u8,
+    pub devices: Vec<DeviceRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

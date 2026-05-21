@@ -1,4 +1,6 @@
-use crate::remote::models::{RemoteAccessStatus, RemoteGatewayConfig};
+use crate::remote::models::{
+    DeviceRecord, RemoteAccessStatus, RemoteDeviceStore, RemoteGatewayConfig,
+};
 use tauri::Manager;
 
 fn canonicalized_remote_gateway_config(
@@ -47,6 +49,40 @@ pub fn save_remote_gateway_config(
 ) -> Result<RemoteGatewayConfig, String> {
     let config = canonicalized_remote_gateway_config(&config)?;
     crate::remote::storage::save_remote_config(&config)
+}
+
+#[tauri::command]
+pub fn list_remote_devices() -> Result<Vec<DeviceRecord>, String> {
+    Ok(crate::remote::storage::load_device_store()?.devices)
+}
+
+fn revoke_device_in_store(
+    mut store: RemoteDeviceStore,
+    device_id: &str,
+    revoked_at: &str,
+) -> Result<RemoteDeviceStore, String> {
+    let device = store
+        .devices
+        .iter_mut()
+        .find(|device| device.device_id == device_id)
+        .ok_or_else(|| "remote_device_not_found".to_string())?;
+    device.revoked_at = Some(revoked_at.to_string());
+    Ok(store)
+}
+
+#[tauri::command]
+pub async fn revoke_remote_device(
+    app: tauri::AppHandle,
+    device_id: String,
+) -> Result<Vec<DeviceRecord>, String> {
+    let store = crate::remote::storage::load_device_store()?;
+    let revoked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let store = revoke_device_in_store(store, &device_id, &revoked_at)?;
+    let saved = crate::remote::storage::save_device_store(&store)?;
+    let state = app.state::<crate::state::AppState>();
+    let mut runtime = state.remote_runtime.lock().await;
+    crate::remote::auth::revoke_sessions_for_device(&mut runtime, &device_id);
+    Ok(saved.devices)
 }
 
 #[tauri::command]
@@ -149,5 +185,33 @@ mod tests {
 
         assert_eq!(saved.canonical_origin, "https://wardian.tailnet.ts.net");
         assert_eq!(loaded.canonical_origin, "https://wardian.tailnet.ts.net");
+    }
+
+    #[test]
+    fn revoke_device_in_store_marks_device_and_rejects_unknown_device() {
+        let store = RemoteDeviceStore {
+            schema_version: crate::remote::models::REMOTE_DEVICE_STORE_SCHEMA_VERSION,
+            devices: vec![DeviceRecord {
+                device_id: "dev-1".to_string(),
+                label: "Phone".to_string(),
+                public_key_spki_der_base64: "key".to_string(),
+                public_key_fingerprint: "fp".to_string(),
+                created_at: "2026-05-21T00:00:00Z".to_string(),
+                last_used_at: None,
+                revoked_at: None,
+            }],
+        };
+
+        let revoked = revoke_device_in_store(store.clone(), "dev-1", "2026-05-21T00:05:00.000Z")
+            .expect("known device revoked");
+
+        assert_eq!(
+            revoked.devices[0].revoked_at.as_deref(),
+            Some("2026-05-21T00:05:00.000Z")
+        );
+        assert_eq!(
+            revoke_device_in_store(store, "missing", "2026-05-21T00:05:00.000Z"),
+            Err("remote_device_not_found".to_string())
+        );
     }
 }
