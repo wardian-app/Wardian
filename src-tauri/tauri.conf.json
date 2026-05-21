@@ -16,6 +16,8 @@
         "title": "Wardian",
         "width": 800,
         "height": 600,
+        "minWidth": 320,
+        "minHeight": 240,
         "maximized": true,
         "decorations": false,
         "transparent": true

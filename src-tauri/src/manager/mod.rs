@@ -364,14 +364,20 @@ pub(crate) fn macos_extended_path() -> String {
     }
 }
 
-pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
-    let mut configs: Vec<AgentConfig> = Vec::new();
+pub(crate) fn state_configs_snapshot(
+    agents: &HashMap<String, ActiveAgent>,
+    order: &[String],
+) -> Vec<AgentConfig> {
+    let mut configs = Vec::new();
     for id in order {
         if let Some(agent) = agents.get(id) {
             configs.push(agent.config.lock().unwrap().clone());
         }
     }
+    configs
+}
 
+pub(crate) fn save_state_snapshot(_app: &AppHandle, configs: &[AgentConfig]) {
     if let Ok(json) = serde_json::to_string_pretty(&configs) {
         if let Some(app_dir) = get_wardian_home() {
             let _ = std::fs::create_dir_all(&app_dir);
@@ -380,6 +386,11 @@ pub fn save_state(_app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order
             let _ = std::fs::write(state_path, json);
         }
     }
+}
+
+pub fn save_state(app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
+    let configs = state_configs_snapshot(agents, order);
+    save_state_snapshot(app, &configs);
 }
 
 pub(crate) fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {
@@ -873,6 +884,32 @@ mod tests {
             #[cfg(windows)]
             job_object: None,
         }
+    }
+
+    #[test]
+    fn state_configs_snapshot_uses_order_without_writing_state() {
+        let mut agents = HashMap::new();
+        let first = test_active_agent("Idle");
+        {
+            let mut config = first.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "First".to_string();
+        }
+        let second = test_active_agent("Idle");
+        {
+            let mut config = second.config.lock().unwrap();
+            config.session_id = "agent-2".to_string();
+            config.session_name = "Second".to_string();
+        }
+        agents.insert("agent-1".to_string(), first);
+        agents.insert("agent-2".to_string(), second);
+
+        let snapshot =
+            state_configs_snapshot(&agents, &["agent-2".to_string(), "missing".to_string()]);
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].session_id, "agent-2");
+        assert_eq!(snapshot[0].session_name, "Second");
     }
 
     #[test]

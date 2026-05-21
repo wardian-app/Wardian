@@ -77,6 +77,16 @@ fn parse_optional_timeout_ms(node_config: &Value) -> Option<u64> {
     (parsed > 0).then_some(parsed)
 }
 
+fn prepare_agent_for_headless_json_run(
+    agent: &mut crate::state::ActiveAgent,
+) -> Option<Box<dyn portable_pty::Child + Send>> {
+    let child = agent.child_process.take();
+    if let Ok(mut status) = agent.current_status.lock() {
+        *status = "Headless".to_string();
+    }
+    child
+}
+
 async fn run_with_optional_timeout<T, F>(
     timeout_ms: Option<u64>,
     label: &str,
@@ -1369,8 +1379,9 @@ pub fn disable_scheduled_trigger(run_id: &str) -> Result<(), String> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        parse_optional_timeout_ms, record_restore_spawn_result, record_scheduled_run_outcome,
-        resolve_command_node_launch, scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
+        parse_optional_timeout_ms, prepare_agent_for_headless_json_run,
+        record_restore_spawn_result, record_scheduled_run_outcome, resolve_command_node_launch,
+        scheduled_trigger_payload, sync_scheduled_runs_for_workflow,
     };
     use crate::utils::ShellLaunchSpec;
     use chrono::Local;
@@ -1481,6 +1492,39 @@ mod tests {
             node_error.as_deref(),
             Some("Failed to restore agent agent-1 after headless run: Codex provider unavailable")
         );
+    }
+
+    #[test]
+    fn prepare_agent_for_headless_json_run_marks_status_and_detaches_child() {
+        let mut active = crate::state::ActiveAgent {
+            config: std::sync::Arc::new(std::sync::Mutex::new(
+                wardian_core::models::AgentConfig::default(),
+            )),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            process_id: None,
+            query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_status: std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::state::AgentWatchState::new("agent-1".to_string(), 4096, 262_144),
+            )),
+            terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        };
+
+        let child = prepare_agent_for_headless_json_run(&mut active);
+
+        assert!(child.is_none());
+        assert_eq!(active.current_status.lock().unwrap().as_str(), "Headless");
     }
 
     #[test]
@@ -2175,31 +2219,42 @@ pub async fn run_workflow(
                                 } else if output_format == "json" {
                                     // --- HEADLESS JSON MODE (Always kills PTY for clean structured output) ---
                                     let state = app.state::<crate::state::AppState>();
-                                    let mut was_online = false;
+                                    let mut child_to_stop = None;
                                     let mut agent_cfg = None;
+                                    let mut state_snapshot = None;
+                                    let mut should_emit_agents_updated = false;
 
                                     {
                                         let mut agents_map = state.agents.lock().await;
                                         if let Some(agent) = agents_map.get_mut(agent_id) {
                                             agent_cfg = Some(agent.config.clone());
-                                            if let Some(mut child) = agent.child_process.take() {
-                                                was_online = true;
-                                                let _ = child.kill();
-                                                let _ = child.wait();
-                                            }
-                                            // Mark status as Headless so the UI shows the purple indicator
-                                            if let Ok(mut status) = agent.current_status.lock() {
-                                                *status = "Headless".to_string();
-                                            }
+                                            child_to_stop =
+                                                prepare_agent_for_headless_json_run(agent);
                                             if let Ok(mut senders) = state.input_senders.write() {
                                                 senders.remove(agent_id);
                                             }
                                             let order = state.agent_order.lock().await;
-                                            crate::manager::save_state(&app, &agents_map, &order);
-                                            let _ = app.emit("agents-updated", ());
-                                            log_debug(&format!("[Wardian] Killed active PTY and set Headless status for {} (was_online={})", agent_id, was_online));
+                                            state_snapshot =
+                                                Some(crate::manager::state_configs_snapshot(
+                                                    &agents_map,
+                                                    &order,
+                                                ));
+                                            should_emit_agents_updated = true;
                                         }
                                     }
+                                    if let Some(snapshot) = state_snapshot {
+                                        crate::manager::save_state_snapshot(&app, &snapshot);
+                                    }
+                                    if should_emit_agents_updated {
+                                        let _ = app.emit("agents-updated", ());
+                                    }
+
+                                    let was_online = child_to_stop.is_some();
+                                    if let Some(mut child) = child_to_stop {
+                                        let _ = child.kill();
+                                        let _ = child.wait();
+                                    }
+                                    log_debug(&format!("[Wardian] Killed active PTY and set Headless status for {} (was_online={})", agent_id, was_online));
 
                                     let run_result = run_with_optional_timeout(
                                         timeout_ms,
@@ -2256,23 +2311,43 @@ pub async fn run_workflow(
                                                 .await,
                                                 &mut node_error,
                                             ) {
-                                                let mut agents_map = state.agents.lock().await;
-                                                if let Some(ref tx) = new_agent.stdin_tx {
+                                                let new_stdin_tx = new_agent.stdin_tx.clone();
+                                                let (state_snapshot, displaced_agent) = {
+                                                    let mut agents_map = state.agents.lock().await;
                                                     if let Ok(mut senders) =
                                                         state.input_senders.write()
                                                     {
-                                                        senders.insert(
-                                                            agent_id.to_string(),
-                                                            tx.clone(),
-                                                        );
+                                                        match new_stdin_tx {
+                                                            Some(tx) => {
+                                                                senders.insert(
+                                                                    agent_id.to_string(),
+                                                                    tx,
+                                                                );
+                                                            }
+                                                            None => {
+                                                                senders.remove(agent_id);
+                                                            }
+                                                        }
                                                     }
+                                                    let displaced_agent = agents_map
+                                                        .insert(agent_id.to_string(), new_agent);
+                                                    let order = state.agent_order.lock().await;
+                                                    (
+                                                        crate::manager::state_configs_snapshot(
+                                                            &agents_map,
+                                                            &order,
+                                                        ),
+                                                        displaced_agent,
+                                                    )
+                                                };
+                                                if let Some(mut displaced) = displaced_agent {
+                                                    crate::manager::terminate_active_agent_process(
+                                                        &mut displaced,
+                                                    );
                                                 }
-                                                agents_map.insert(agent_id.to_string(), new_agent);
-                                                let order = state.agent_order.lock().await;
-                                                crate::manager::save_state(
+                                                crate::manager::save_state_snapshot(
                                                     &app,
-                                                    &agents_map,
-                                                    &order,
+                                                    &state_snapshot,
                                                 );
                                                 let _ = app.emit("agents-updated", ());
                                             }
