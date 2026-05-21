@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 
@@ -54,6 +56,33 @@ function writeRemoteGatewayConfig(harness, port) {
   );
 }
 
+function authSignatureMessage(challenge) {
+  return Buffer.from(
+    `wardian.remote.auth.v1\norigin:${challenge.origin}\ndevice:${challenge.device_id}\nchallenge:${challenge.challenge_id}\nnonce:${challenge.nonce}`,
+  );
+}
+
+function requestWithForgedHost({ port, path: requestPath, method, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: requestPath,
+        method,
+        headers,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode));
+      },
+    );
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 async function waitForGateway(baseUrl, timeoutMs = 15000) {
   const startedAt = Date.now();
   let lastError;
@@ -72,6 +101,11 @@ async function waitForGateway(baseUrl, timeoutMs = 15000) {
   throw new Error(`Timed out waiting for remote gateway: ${lastError}`);
 }
 
+async function assertStatus(response, expectedStatus, label) {
+  if (response.status === expectedStatus) return;
+  throw new Error(`${label} returned ${response.status}: ${await response.text()}`);
+}
+
 test("remote gateway authenticates native app agent reads", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
   try {
@@ -87,6 +121,7 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
   const gatewayPort = await getFreePort();
   writeRemoteGatewayConfig(harness, gatewayPort);
   const baseUrl = `http://127.0.0.1:${gatewayPort}`;
+  const canonicalOrigin = `https://127.0.0.1:${gatewayPort}`;
 
   let session;
   try {
@@ -102,6 +137,14 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
 
   await waitForAppShell(session.driver, 20000);
   await waitForGateway(baseUrl);
+
+  const shell = await fetch(`${baseUrl}/remote`);
+  assert.equal(shell.status, 200);
+  assert.match(await shell.text(), /<div id="root">/);
+
+  const manifest = await fetch(`${baseUrl}/manifest.webmanifest`);
+  assert.equal(manifest.status, 200);
+  assert.equal((await manifest.json()).start_url, "/remote");
 
   const workspacePath = path.join(harness.repoRoot, "e2e-native");
   const sessionId = `e2e-remote-gateway-${RUN_ID}`;
@@ -132,24 +175,68 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
   assert.equal(result.agent.session_id, sessionId);
   assert.equal(result.agent.session_name, sessionName);
 
-  const deviceId = `e2e-device-${RUN_ID}`;
-  const remoteSessionId = `e2e-remote-session-${RUN_ID}`;
-  const sessionResult = await session.driver.executeAsyncScript(
-    (deviceId, sessionId, done) => {
-      window.__TAURI_INTERNALS__.invoke("debug_create_remote_session", {
-        deviceId,
-        sessionId,
-      }).then(
-        (session) => done({ ok: true, session }),
-        (error) => done({ ok: false, error: String(error) }),
-      );
-    },
-    deviceId,
-    remoteSessionId,
-  );
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const publicKeySpkiDer = keys.publicKey.export({ type: "spki", format: "der" });
 
-  assert.equal(sessionResult.ok, true, `debug_create_remote_session failed: ${sessionResult.error}`);
-  assert.ok(sessionResult.session.csrf_nonce);
+  const pairing = await session.driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("create_remote_pairing_offer").then(
+      (offer) => done({ ok: true, offer }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  });
+  assert.equal(pairing.ok, true, `create_remote_pairing_offer failed: ${pairing.error}`);
+
+  const pairingSubmit = await fetch(`${baseUrl}/remote/api/pairing/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: canonicalOrigin,
+    },
+    body: JSON.stringify({
+      pairing_offer_id: pairing.offer.pairing_offer_id,
+      nonce: pairing.offer.nonce,
+      device_label: `E2E phone ${RUN_ID}`,
+      public_key_spki_der_base64: publicKeySpkiDer.toString("base64"),
+    }),
+  });
+  await assertStatus(pairingSubmit, 200, "pairing submit");
+  const pairedDevice = await pairingSubmit.json();
+  assert.ok(pairedDevice.device_id);
+
+  const challengeResponse = await fetch(`${baseUrl}/remote/api/auth/challenge`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: canonicalOrigin,
+    },
+    body: JSON.stringify({ device_id: pairedDevice.device_id }),
+  });
+  await assertStatus(challengeResponse, 200, "auth challenge");
+  const challenge = await challengeResponse.json();
+
+  const signature = crypto.createSign("SHA256").update(authSignatureMessage(challenge)).sign(keys.privateKey);
+  const sessionResponse = await fetch(`${baseUrl}/remote/api/auth/session`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: canonicalOrigin,
+    },
+    body: JSON.stringify({
+      challenge_id: challenge.challenge_id,
+      device_id: pairedDevice.device_id,
+      signature_der_base64: signature.toString("base64"),
+    }),
+  });
+  await assertStatus(sessionResponse, 200, "auth session");
+  const cookie = sessionResponse.headers.get("set-cookie");
+  assert.ok(cookie?.includes(`${REMOTE_SESSION_COOKIE_NAME}=`));
+  assert.ok(cookie.includes("Secure"));
+  assert.ok(cookie.includes("HttpOnly"));
+  assert.ok(cookie.includes("SameSite=Strict"));
+  assert.ok(!cookie.includes("Domain="));
+
+  const sessionBody = await sessionResponse.json();
+  assert.ok(sessionBody.csrf_nonce);
 
   const unauthorized = await fetch(`${baseUrl}/remote/api/agents`);
   assert.equal(unauthorized.status, 401);
@@ -161,7 +248,7 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
 
   const response = await fetch(`${baseUrl}/remote/api/agents`, {
     headers: {
-      Cookie: `${REMOTE_SESSION_COOKIE_NAME}=${remoteSessionId}`,
+      Cookie: cookie,
     },
   });
   assert.equal(response.status, 200);
@@ -170,4 +257,30 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
     body.agents.some((entry) => entry.session_id === sessionId),
     true,
   );
+
+  const missingOriginMutation = await fetch(`${baseUrl}/remote/api/agents/action`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: cookie,
+      "x-wardian-csrf": sessionBody.csrf_nonce,
+    },
+    body: JSON.stringify({ action: "pause", target: sessionId }),
+  });
+  assert.equal(missingOriginMutation.status, 403);
+
+  const forgedHostMutationStatus = await requestWithForgedHost({
+    port: gatewayPort,
+    path: "/remote/api/agents/action",
+    method: "POST",
+    headers: {
+      Host: "forged.tailnet.ts.net",
+      Origin: canonicalOrigin,
+      Cookie: cookie,
+      "Content-Type": "application/json",
+      "x-wardian-csrf": sessionBody.csrf_nonce,
+    },
+    body: JSON.stringify({ action: "pause", target: sessionId }),
+  });
+  assert.equal(forgedHostMutationStatus, 403);
 });

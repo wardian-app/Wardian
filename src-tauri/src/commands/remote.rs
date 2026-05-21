@@ -153,6 +153,9 @@ pub async fn debug_create_remote_session(
     if !cfg!(debug_assertions) {
         return Err("debug commands are disabled in production builds".to_string());
     }
+    if std::env::var("WARDIAN_E2E").ok().as_deref() != Some("1") {
+        return Err("debug remote sessions require WARDIAN_E2E=1".to_string());
+    }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let session = create_debug_remote_session_record(&device_id, session_id.as_deref(), now_ms)?;

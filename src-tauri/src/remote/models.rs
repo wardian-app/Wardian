@@ -135,6 +135,33 @@ pub struct AuthChallengeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingSubmitRequest {
+    pub pairing_offer_id: String,
+    pub nonce: String,
+    pub device_label: String,
+    pub public_key_spki_der_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingSubmitResponse {
+    pub device_id: String,
+    pub public_key_fingerprint: String,
+    pub paired_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthChallengeRequest {
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthSessionRequest {
+    pub challenge_id: String,
+    pub device_id: String,
+    pub signature_der_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthSessionResponse {
     pub csrf_nonce: String,
     pub expires_at: String,

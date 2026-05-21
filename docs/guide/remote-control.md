@@ -31,6 +31,10 @@ Wardian rejects remote-control HTTP access, wildcard origins, non-loopback
 gateway binding, reused pairing offers, reused WebSocket tickets, missing CSRF
 nonces, and revoked devices.
 
+The default remote roster does not include transcript or output text. Remote
+workflow runs also reject arbitrary phone-provided payloads until Wardian has
+workflow-specific input schemas.
+
 Revoke a lost or untrusted phone immediately from Settings. Revocation ends the
 device's active remote sessions and prevents future gateway calls from that
 device.

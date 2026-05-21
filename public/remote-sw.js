@@ -23,9 +23,10 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/remote/api/")) return;
   if (event.request.method !== "GET") return;
 
-  event.respondWith(
-    fetch(event.request).catch(() =>
-      caches.match(event.request).then((cached) => cached || caches.match("/remote")),
-    ),
-  );
+  if (event.request.mode === "navigate") {
+    event.respondWith(fetch(event.request).catch(() => caches.match("/remote")));
+    return;
+  }
+
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
 });

@@ -1,18 +1,24 @@
 use crate::remote::models::{
-    AuthSessionResponse, RemoteAgentActionRequest, RemoteAuditRecord, RemoteGatewayConfig,
-    RemoteSessionRecord, RemoteWebSocketTicketRequest, RemoteWebSocketTicketResponse,
-    RemoteWorkflowRunRequest, RemoteWorkflowStopRequest, REMOTE_AUDIT_SCHEMA_VERSION,
+    AuthChallengeRequest, AuthChallengeResponse, AuthSessionRequest, AuthSessionResponse,
+    DeviceRecord, PairingSubmitRequest, PairingSubmitResponse, RemoteAgentActionRequest,
+    RemoteAuditRecord, RemoteGatewayConfig, RemoteSessionRecord, RemoteWebSocketTicketRequest,
+    RemoteWebSocketTicketResponse, RemoteWorkflowRunRequest, RemoteWorkflowStopRequest,
+    REMOTE_AUDIT_SCHEMA_VERSION,
 };
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Json, State,
+        Json, Path as AxumPath, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
+use base64::Engine;
+use p256::ecdsa::VerifyingKey;
+use p256::pkcs8::DecodePublicKey;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tauri::{AppHandle, Manager};
 
@@ -66,6 +72,12 @@ fn loopback_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 
 fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
     Router::new()
+        .route("/remote", get(serve_remote_shell))
+        .route("/remote/", get(serve_remote_shell))
+        .route("/manifest.webmanifest", get(serve_manifest))
+        .route("/remote-sw.js", get(serve_remote_sw))
+        .route("/icon.png", get(serve_icon))
+        .route("/assets/{*asset_path}", get(serve_asset_path))
         .route("/remote/api/health", get(remote_health))
         .route("/remote/api/session", get(current_remote_session))
         .route("/remote/api/pairing/submit", post(submit_pairing))
@@ -91,12 +103,97 @@ async fn remote_health() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "ok": true }))
 }
 
+async fn serve_remote_shell(
+    State(ctx): State<RemoteGatewayContext>,
+) -> Result<Response, RemoteGatewayError> {
+    serve_tauri_asset(&ctx.app, "index.html")
+}
+
+async fn serve_manifest(
+    State(ctx): State<RemoteGatewayContext>,
+) -> Result<Response, RemoteGatewayError> {
+    serve_tauri_asset(&ctx.app, "manifest.webmanifest")
+}
+
+async fn serve_remote_sw(
+    State(ctx): State<RemoteGatewayContext>,
+) -> Result<Response, RemoteGatewayError> {
+    serve_tauri_asset(&ctx.app, "remote-sw.js")
+}
+
+async fn serve_icon(
+    State(ctx): State<RemoteGatewayContext>,
+) -> Result<Response, RemoteGatewayError> {
+    serve_tauri_asset(&ctx.app, "icon.png")
+}
+
+async fn serve_asset_path(
+    State(ctx): State<RemoteGatewayContext>,
+    AxumPath(asset_path): AxumPath<String>,
+) -> Result<Response, RemoteGatewayError> {
+    let path = static_asset_path_for_route(&format!("/assets/{asset_path}"))
+        .map_err(RemoteGatewayError::bad_request)?;
+    serve_tauri_asset(&ctx.app, &path)
+}
+
+fn serve_tauri_asset(app: &AppHandle, asset_path: &str) -> Result<Response, RemoteGatewayError> {
+    let asset = app
+        .asset_resolver()
+        .get(asset_path.to_string())
+        .ok_or_else(|| RemoteGatewayError::not_found("asset_not_found"))?;
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, asset.mime_type().to_string())
+        .header(
+            header::CACHE_CONTROL,
+            static_asset_cache_control(asset_path),
+        );
+    if let Some(csp_header) = asset.csp_header() {
+        builder = builder.header(header::CONTENT_SECURITY_POLICY, csp_header.to_string());
+    }
+    builder
+        .body(Body::from(asset.bytes))
+        .map_err(|_| RemoteGatewayError::bad_request("asset_response_failed"))
+}
+
+fn static_asset_cache_control(asset_path: &str) -> &'static str {
+    if asset_path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    }
+}
+
+fn static_asset_path_for_route(route_path: &str) -> Result<String, &'static str> {
+    let route_path = route_path.trim();
+    if matches!(route_path, "/remote" | "/remote/") {
+        return Ok("index.html".to_string());
+    }
+    let asset_path = route_path.strip_prefix('/').ok_or("asset_path_forbidden")?;
+    if asset_path.is_empty()
+        || asset_path.starts_with("remote/api/")
+        || asset_path.contains('\\')
+        || asset_path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err("asset_path_forbidden");
+    }
+    match asset_path {
+        "manifest.webmanifest" | "remote-sw.js" | "icon.png" => Ok(asset_path.to_string()),
+        path if path.starts_with("assets/") => Ok(path.to_string()),
+        _ => Err("asset_path_forbidden"),
+    }
+}
+
 async fn current_remote_session(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
 ) -> Result<Json<AuthSessionResponse>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, false)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "current_session")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "session_read", "current_session")
+            .await?;
     audit_gateway_event(
         &session,
         &origin,
@@ -106,31 +203,237 @@ async fn current_remote_session(
 }
 
 async fn submit_pairing(
-    State(_ctx): State<RemoteGatewayContext>,
-) -> Result<axum::Json<serde_json::Value>, RemoteGatewayError> {
-    Err(RemoteGatewayError::bad_request(
-        "pairing_approval_not_ready",
-    ))
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    Json(request): Json<PairingSubmitRequest>,
+) -> Result<Json<PairingSubmitResponse>, RemoteGatewayError> {
+    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "submit_pairing")?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    {
+        let state = ctx.app.state::<crate::state::AppState>();
+        let mut runtime = state.remote_runtime.lock().await;
+        check_runtime_rate_limit(
+            &mut runtime,
+            &format!("pairing_submit:{}", request.pairing_offer_id.trim()),
+            now_ms,
+            10,
+            60_000,
+        )?;
+        let offer = match crate::remote::auth::consume_pairing_offer(
+            &mut runtime,
+            request.pairing_offer_id.trim(),
+            now_ms,
+        ) {
+            Ok(offer) => offer,
+            Err(code) => {
+                audit_gateway_event_without_session(
+                    Some(&origin),
+                    GatewayAuditEvent::rejected(
+                        "pairing",
+                        "submit",
+                        gateway_static_error_code(&code),
+                    ),
+                );
+                return Err(RemoteGatewayError::bad_request(gateway_static_error_code(
+                    &code,
+                )));
+            }
+        };
+        if offer.canonical_origin != ctx.config.canonical_origin
+            || offer.nonce != request.nonce.trim()
+        {
+            audit_gateway_event_without_session(
+                Some(&origin),
+                GatewayAuditEvent::rejected("pairing", "submit", "pairing_offer_invalid"),
+            );
+            return Err(RemoteGatewayError::bad_request("pairing_offer_invalid"));
+        }
+    }
+
+    let public_key_der = decode_base64_standard(&request.public_key_spki_der_base64)
+        .map_err(|_| RemoteGatewayError::bad_request("invalid_device_public_key"))?;
+    if VerifyingKey::from_public_key_der(&public_key_der).is_err() {
+        audit_gateway_event_without_session(
+            Some(&origin),
+            GatewayAuditEvent::rejected("pairing", "submit", "invalid_device_public_key"),
+        );
+        return Err(RemoteGatewayError::bad_request("invalid_device_public_key"));
+    }
+
+    let public_key_fingerprint = crate::remote::crypto::sha256_fingerprint(&public_key_der);
+    let paired_at = millis_to_rfc3339(now_ms);
+    let device_id = format!("dev_{}", crate::remote::crypto::random_url_token(18));
+    let label = sanitize_device_label(&request.device_label);
+    let mut store = crate::remote::storage::load_device_store()
+        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
+    if store.devices.iter().any(|device| {
+        device.revoked_at.is_none() && device.public_key_fingerprint == public_key_fingerprint
+    }) {
+        audit_gateway_event_without_session(
+            Some(&origin),
+            GatewayAuditEvent::rejected("pairing", "submit", "device_already_paired"),
+        );
+        return Err(RemoteGatewayError::bad_request("device_already_paired"));
+    }
+    store.devices.push(DeviceRecord {
+        device_id: device_id.clone(),
+        label,
+        public_key_spki_der_base64: request.public_key_spki_der_base64.trim().to_string(),
+        public_key_fingerprint: public_key_fingerprint.clone(),
+        created_at: paired_at.clone(),
+        last_used_at: None,
+        revoked_at: None,
+    });
+    crate::remote::storage::save_device_store(&store)
+        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
+    audit_gateway_event_without_session(
+        Some(&origin),
+        GatewayAuditEvent::accepted("pairing", "submit").target("device", &device_id),
+    );
+    Ok(Json(PairingSubmitResponse {
+        device_id,
+        public_key_fingerprint,
+        paired_at,
+    }))
 }
 
 async fn create_auth_challenge(
-    State(_ctx): State<RemoteGatewayContext>,
-) -> Result<axum::Json<serde_json::Value>, RemoteGatewayError> {
-    Err(RemoteGatewayError::bad_request("device_not_found"))
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    Json(request): Json<AuthChallengeRequest>,
+) -> Result<Json<AuthChallengeResponse>, RemoteGatewayError> {
+    let origin =
+        require_audited_request_boundary(&ctx.config, &headers, true, "create_auth_challenge")?;
+    let device = active_remote_device(request.device_id.trim())?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let state = ctx.app.state::<crate::state::AppState>();
+    let mut runtime = state.remote_runtime.lock().await;
+    check_runtime_rate_limit(
+        &mut runtime,
+        &format!("auth_challenge:{}", device.device_id),
+        now_ms,
+        5,
+        60_000,
+    )?;
+    let challenge = crate::remote::auth::create_auth_challenge(
+        &mut runtime,
+        &device.device_id,
+        &ctx.config.canonical_origin,
+        now_ms,
+    );
+    audit_gateway_event_without_session(
+        Some(&origin),
+        GatewayAuditEvent::accepted("authentication", "challenge")
+            .target("device", &device.device_id),
+    );
+    Ok(Json(AuthChallengeResponse {
+        challenge_id: challenge.challenge_id,
+        device_id: challenge.device_id,
+        origin: challenge.canonical_origin,
+        nonce: challenge.nonce,
+        expires_at: millis_to_rfc3339(challenge.expires_at_ms),
+        audience: "wardian_remote_pwa".to_string(),
+    }))
 }
 
 async fn create_auth_session(
-    State(_ctx): State<RemoteGatewayContext>,
-) -> Result<axum::Json<serde_json::Value>, RemoteGatewayError> {
-    Err(RemoteGatewayError::bad_request("device_not_found"))
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    Json(request): Json<AuthSessionRequest>,
+) -> Result<Response, RemoteGatewayError> {
+    let origin =
+        require_audited_request_boundary(&ctx.config, &headers, true, "create_auth_session")?;
+    let device = active_remote_device(request.device_id.trim())?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let challenge = {
+        let state = ctx.app.state::<crate::state::AppState>();
+        let mut runtime = state.remote_runtime.lock().await;
+        check_runtime_rate_limit(
+            &mut runtime,
+            &format!("auth_session:{}", device.device_id),
+            now_ms,
+            5,
+            10 * 60_000,
+        )?;
+        match crate::remote::auth::consume_auth_challenge(
+            &mut runtime,
+            request.challenge_id.trim(),
+            now_ms,
+        ) {
+            Ok(challenge) => challenge,
+            Err(code) => {
+                audit_gateway_event_without_session(
+                    Some(&origin),
+                    GatewayAuditEvent::rejected(
+                        "authentication",
+                        "session",
+                        gateway_static_error_code(&code),
+                    )
+                    .target("device", &device.device_id),
+                );
+                return Err(RemoteGatewayError::bad_request(gateway_static_error_code(
+                    &code,
+                )));
+            }
+        }
+    };
+    if challenge.device_id != device.device_id
+        || challenge.canonical_origin != ctx.config.canonical_origin
+    {
+        audit_gateway_event_without_session(
+            Some(&origin),
+            GatewayAuditEvent::rejected("authentication", "session", "auth_challenge_mismatch")
+                .target("device", &device.device_id),
+        );
+        return Err(RemoteGatewayError::bad_request("auth_challenge_mismatch"));
+    }
+    let public_key_der = decode_base64_standard(&device.public_key_spki_der_base64)
+        .map_err(|_| RemoteGatewayError::bad_request("invalid_device_public_key"))?;
+    let signature_der = decode_base64_standard(&request.signature_der_base64)
+        .map_err(|_| RemoteGatewayError::bad_request("invalid_auth_signature"))?;
+    if crate::remote::crypto::verify_p256_sha256_signature(
+        &public_key_der,
+        &auth_signature_message(&challenge),
+        &signature_der,
+    )
+    .is_err()
+    {
+        audit_gateway_event_without_session(
+            Some(&origin),
+            GatewayAuditEvent::rejected("authentication", "session", "invalid_auth_signature")
+                .target("device", &device.device_id),
+        );
+        return Err(RemoteGatewayError::unauthorized("invalid_auth_signature"));
+    }
+
+    let session = {
+        let state = ctx.app.state::<crate::state::AppState>();
+        let mut runtime = state.remote_runtime.lock().await;
+        crate::remote::auth::create_session(&mut runtime, &device.device_id, now_ms)
+    };
+    update_device_last_used(&device.device_id, &millis_to_rfc3339(now_ms))?;
+    audit_gateway_event(
+        &session,
+        &origin,
+        GatewayAuditEvent::accepted("authentication", "session")
+            .target("device", &device.device_id),
+    );
+    let mut response = Json(session_response_from_record(&session)).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        remote_session_cookie_header_value(&session.session_id)?,
+    );
+    Ok(response)
 }
 
 async fn list_remote_agents(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, false)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "list_agents")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "roster_read", "list_agents")
+            .await?;
     let state = ctx.app.state::<crate::state::AppState>();
     let agents = crate::remote::operations::remote_agent_roster(&state).await;
     audit_gateway_event(
@@ -146,8 +449,11 @@ async fn run_agent_action(
     headers: HeaderMap,
     Json(request): Json<RemoteAgentActionRequest>,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, true)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "agent_action")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "agent_action", &request.action)
+            .await?;
+    require_mutation_rate_limit(&ctx, &session, &origin, "agent_action", &request.action).await?;
     if let Err(error) = require_csrf_header(&session, &headers) {
         audit_gateway_event(
             &session,
@@ -183,8 +489,10 @@ async fn list_remote_workflows(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, false)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "list_workflows")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "workflow_read", "list_workflows")
+            .await?;
     let workflows = match crate::remote::operations::remote_workflow_summaries() {
         Ok(workflows) => workflows,
         Err(_) => {
@@ -210,8 +518,10 @@ async fn run_workflow(
     headers: HeaderMap,
     Json(request): Json<RemoteWorkflowRunRequest>,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, true)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "run_workflow")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "workflow_action", "run").await?;
+    require_mutation_rate_limit(&ctx, &session, &origin, "workflow_action", "run").await?;
     if let Err(error) = require_csrf_header(&session, &headers) {
         audit_gateway_event(
             &session,
@@ -231,13 +541,19 @@ async fn run_workflow(
         );
         return Err(RemoteGatewayError::bad_request(code));
     }
-    if crate::workflow_engine::run_workflow(
-        ctx.app.clone(),
-        request.workflow_id.clone(),
-        request.payload.clone(),
-    )
-    .await
-    .is_err()
+    if request.payload.is_some() {
+        let code = "remote_workflow_payload_not_supported";
+        audit_gateway_event(
+            &session,
+            &origin,
+            GatewayAuditEvent::rejected("workflow_action", "run", code)
+                .target("workflow", &request.workflow_id),
+        );
+        return Err(RemoteGatewayError::bad_request(code));
+    }
+    if crate::workflow_engine::run_workflow(ctx.app.clone(), request.workflow_id.clone(), None)
+        .await
+        .is_err()
     {
         let code = "workflow_run_failed";
         audit_gateway_event(
@@ -262,8 +578,10 @@ async fn stop_workflow(
     headers: HeaderMap,
     Json(request): Json<RemoteWorkflowStopRequest>,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, true)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "stop_workflow")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "workflow_action", "stop").await?;
+    require_mutation_rate_limit(&ctx, &session, &origin, "workflow_action", "stop").await?;
     if let Err(error) = require_csrf_header(&session, &headers) {
         audit_gateway_event(
             &session,
@@ -298,8 +616,11 @@ async fn create_ws_ticket(
     headers: HeaderMap,
     Json(request): Json<RemoteWebSocketTicketRequest>,
 ) -> Result<Json<RemoteWebSocketTicketResponse>, RemoteGatewayError> {
-    let origin = require_request_boundary(&ctx.config, &headers, true)?;
-    let session = require_remote_session(&ctx, &headers).await?;
+    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "websocket_ticket")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "websocket_ticket", "create")
+            .await?;
+    require_mutation_rate_limit(&ctx, &session, &origin, "websocket_ticket", "create").await?;
     if let Err(error) = require_csrf_header(&session, &headers) {
         audit_gateway_event(
             &session,
@@ -347,7 +668,7 @@ async fn status_stream_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, RemoteGatewayError> {
-    require_request_boundary(&ctx.config, &headers, true)?;
+    require_audited_request_boundary(&ctx.config, &headers, true, "status_stream_upgrade")?;
     Ok(ws.on_upgrade(move |socket| async move {
         handle_status_socket(ctx, socket).await;
     }))
@@ -477,6 +798,43 @@ async fn send_status_socket_error(socket: &mut WebSocket, code: &'static str) {
     let _ = socket.send(Message::Text(payload.to_string().into())).await;
 }
 
+fn require_audited_request_boundary(
+    config: &RemoteGatewayConfig,
+    headers: &HeaderMap,
+    require_origin: bool,
+    action: &'static str,
+) -> Result<String, RemoteGatewayError> {
+    match require_request_boundary(config, headers, require_origin) {
+        Ok(origin) => Ok(origin),
+        Err(error) => {
+            audit_gateway_event_without_session(
+                canonical_origin_for_audit(config).as_deref(),
+                GatewayAuditEvent::rejected("gateway_policy", action, error.code),
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn require_audited_remote_session(
+    ctx: &RemoteGatewayContext,
+    headers: &HeaderMap,
+    origin: &str,
+    event_type: &str,
+    action: &str,
+) -> Result<RemoteSessionRecord, RemoteGatewayError> {
+    match require_remote_session(ctx, headers).await {
+        Ok(session) => Ok(session),
+        Err(error) => {
+            audit_gateway_event_without_session(
+                Some(origin),
+                GatewayAuditEvent::rejected(event_type, action, error.code),
+            );
+            Err(error)
+        }
+    }
+}
+
 fn require_request_boundary(
     config: &RemoteGatewayConfig,
     headers: &HeaderMap,
@@ -524,16 +882,44 @@ async fn require_remote_session(
     let session_id = remote_session_cookie_value(headers)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let state = ctx.app.state::<crate::state::AppState>();
-    let runtime = state.remote_runtime.lock().await;
+    let mut runtime = state.remote_runtime.lock().await;
     let session = runtime
         .sessions
-        .get(&session_id)
-        .cloned()
+        .get_mut(&session_id)
         .ok_or_else(|| RemoteGatewayError::unauthorized("session_not_found"))?;
-    if !crate::remote::auth::session_is_active(&session, now_ms) {
+    if crate::remote::auth::refresh_session_activity(session, now_ms).is_err() {
         return Err(RemoteGatewayError::unauthorized("session_expired"));
     }
-    Ok(session)
+    Ok(session.clone())
+}
+
+async fn require_mutation_rate_limit(
+    ctx: &RemoteGatewayContext,
+    session: &RemoteSessionRecord,
+    origin: &str,
+    event_type: &str,
+    action: &str,
+) -> Result<(), RemoteGatewayError> {
+    let state = ctx.app.state::<crate::state::AppState>();
+    let mut runtime = state.remote_runtime.lock().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match crate::remote::auth::check_rate_limit(
+        &mut runtime,
+        &format!("mutation:{}", session.session_id),
+        now_ms,
+        120,
+        60_000,
+    ) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            audit_gateway_event(
+                session,
+                origin,
+                GatewayAuditEvent::rejected(event_type, action, "rate_limited"),
+            );
+            Err(RemoteGatewayError::too_many_requests("rate_limited"))
+        }
+    }
 }
 
 fn remote_session_cookie_value(headers: &HeaderMap) -> Result<String, RemoteGatewayError> {
@@ -548,6 +934,15 @@ fn remote_session_cookie_value(headers: &HeaderMap) -> Result<String, RemoteGate
             (name == REMOTE_SESSION_COOKIE_NAME && !value.is_empty()).then(|| value.to_string())
         })
         .ok_or_else(|| RemoteGatewayError::unauthorized("missing_session_cookie"))
+}
+
+fn remote_session_cookie_header_value(
+    session_id: &str,
+) -> Result<axum::http::HeaderValue, RemoteGatewayError> {
+    axum::http::HeaderValue::from_str(&format!(
+        "{REMOTE_SESSION_COOKIE_NAME}={session_id}; Path=/; Secure; HttpOnly; SameSite=Strict"
+    ))
+    .map_err(|_| RemoteGatewayError::bad_request("session_cookie_failed"))
 }
 
 fn session_response_from_record(session: &RemoteSessionRecord) -> AuthSessionResponse {
@@ -570,6 +965,83 @@ fn require_csrf_header(
         return Ok(());
     }
     Err(RemoteGatewayError::unauthorized("csrf_failed"))
+}
+
+fn auth_signature_message(challenge: &crate::remote::models::AuthChallengeRecord) -> Vec<u8> {
+    format!(
+        "wardian.remote.auth.v1\norigin:{}\ndevice:{}\nchallenge:{}\nnonce:{}",
+        challenge.canonical_origin, challenge.device_id, challenge.challenge_id, challenge.nonce
+    )
+    .into_bytes()
+}
+
+fn decode_base64_standard(value: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|error| error.to_string())
+}
+
+fn sanitize_device_label(value: &str) -> String {
+    let label = value.trim();
+    if label.is_empty() {
+        return "Paired device".to_string();
+    }
+    label.chars().take(80).collect()
+}
+
+fn active_remote_device(device_id: &str) -> Result<DeviceRecord, RemoteGatewayError> {
+    let store = crate::remote::storage::load_device_store()
+        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
+    store
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == device_id && device.revoked_at.is_none())
+        .ok_or_else(|| RemoteGatewayError::bad_request("device_not_found"))
+}
+
+fn update_device_last_used(device_id: &str, last_used_at: &str) -> Result<(), RemoteGatewayError> {
+    let mut store = crate::remote::storage::load_device_store()
+        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
+    let Some(device) = store
+        .devices
+        .iter_mut()
+        .find(|device| device.device_id == device_id)
+    else {
+        return Err(RemoteGatewayError::bad_request("device_not_found"));
+    };
+    device.last_used_at = Some(last_used_at.to_string());
+    crate::remote::storage::save_device_store(&store)
+        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
+    Ok(())
+}
+
+fn check_runtime_rate_limit(
+    runtime: &mut crate::remote::models::RemoteRuntimeState,
+    key: &str,
+    now_ms: i64,
+    max_attempts: usize,
+    window_ms: i64,
+) -> Result<(), RemoteGatewayError> {
+    crate::remote::auth::check_rate_limit(runtime, key, now_ms, max_attempts, window_ms)
+        .map_err(|_| RemoteGatewayError::too_many_requests("rate_limited"))
+}
+
+fn gateway_static_error_code(code: &str) -> &'static str {
+    match code {
+        "pairing_offer_not_found" => "pairing_offer_not_found",
+        "pairing_offer_used" => "pairing_offer_used",
+        "pairing_offer_expired" => "pairing_offer_expired",
+        "auth_challenge_not_found" => "auth_challenge_not_found",
+        "auth_challenge_used" => "auth_challenge_used",
+        "auth_challenge_expired" => "auth_challenge_expired",
+        _ => "remote_gateway_error",
+    }
+}
+
+fn canonical_origin_for_audit(config: &RemoteGatewayConfig) -> Option<String> {
+    crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)
+        .ok()
+        .map(|origin| origin.raw().to_string())
 }
 
 #[derive(Clone, Copy)]
@@ -619,6 +1091,13 @@ fn audit_gateway_event(session: &RemoteSessionRecord, origin: &str, event: Gatew
     }
 }
 
+fn audit_gateway_event_without_session(origin: Option<&str>, event: GatewayAuditEvent<'_>) {
+    let record = build_gateway_rejection_audit_record(origin, event);
+    if let Err(error) = crate::remote::audit::append_audit_record(&record) {
+        crate::utils::logging::log_debug(&format!("[Wardian] remote audit append failed: {error}"));
+    }
+}
+
 fn build_gateway_audit_record(
     session: &RemoteSessionRecord,
     origin: &str,
@@ -632,6 +1111,27 @@ fn build_gateway_audit_record(
         device_id: Some(session.device_id.clone()),
         session_id: Some(session.session_id.clone()),
         origin: Some(origin.to_string()),
+        event_type: event.event_type.to_string(),
+        action: event.action.to_string(),
+        target_type: event.target_type.map(str::to_string),
+        target_id: event.target_id.map(str::to_string),
+        outcome: event.outcome.to_string(),
+        error_code: event.error_code.map(str::to_string),
+    }
+}
+
+fn build_gateway_rejection_audit_record(
+    origin: Option<&str>,
+    event: GatewayAuditEvent<'_>,
+) -> RemoteAuditRecord {
+    RemoteAuditRecord {
+        schema_version: REMOTE_AUDIT_SCHEMA_VERSION,
+        event_id: crate::remote::crypto::random_url_token(12),
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        request_id: crate::remote::crypto::random_url_token(12),
+        device_id: None,
+        session_id: None,
+        origin: origin.map(str::to_string),
         event_type: event.event_type.to_string(),
         action: event.action.to_string(),
         target_type: event.target_type.map(str::to_string),
@@ -671,6 +1171,20 @@ impl RemoteGatewayError {
     fn forbidden(code: &'static str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
+            code,
+        }
+    }
+
+    fn too_many_requests(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code,
+        }
+    }
+
+    fn not_found(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
             code,
         }
     }
@@ -900,6 +1414,78 @@ mod tests {
         assert_eq!(response.csrf_nonce, "csrf-1");
         assert!(response.expires_at.ends_with('Z'));
         assert!(response.absolute_expires_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn session_cookie_header_is_host_prefixed_secure_and_http_only() {
+        let header = remote_session_cookie_header_value("sess-1").expect("cookie header");
+        let value = header.to_str().expect("header string");
+
+        assert!(value.starts_with("__Host-wardian_remote_session=sess-1;"));
+        assert!(value.contains("Path=/"));
+        assert!(value.contains("Secure"));
+        assert!(value.contains("HttpOnly"));
+        assert!(value.contains("SameSite=Strict"));
+        assert!(!value.contains("Domain="));
+    }
+
+    #[test]
+    fn auth_signature_message_is_bound_to_origin_device_and_challenge() {
+        let challenge = crate::remote::models::AuthChallengeRecord {
+            challenge_id: "challenge-1".to_string(),
+            device_id: "dev-1".to_string(),
+            nonce: "nonce-1".to_string(),
+            canonical_origin: "https://wardian.tailnet.ts.net".to_string(),
+            expires_at_ms: 1_060_000,
+            used: false,
+        };
+
+        assert_eq!(
+            auth_signature_message(&challenge),
+            b"wardian.remote.auth.v1\norigin:https://wardian.tailnet.ts.net\ndevice:dev-1\nchallenge:challenge-1\nnonce:nonce-1".to_vec()
+        );
+    }
+
+    #[test]
+    fn gateway_rejection_audit_record_has_no_session_identity() {
+        let record = build_gateway_rejection_audit_record(
+            Some("https://wardian.tailnet.ts.net"),
+            GatewayAuditEvent::rejected("gateway_policy", "request_boundary", "origin_forbidden"),
+        );
+
+        assert_eq!(record.schema_version, REMOTE_AUDIT_SCHEMA_VERSION);
+        assert_eq!(record.device_id, None);
+        assert_eq!(record.session_id, None);
+        assert_eq!(
+            record.origin.as_deref(),
+            Some("https://wardian.tailnet.ts.net")
+        );
+        assert_eq!(record.outcome, "rejected");
+        assert_eq!(record.error_code.as_deref(), Some("origin_forbidden"));
+    }
+
+    #[test]
+    fn static_asset_route_maps_remote_shell_to_index_and_rejects_traversal() {
+        assert_eq!(
+            static_asset_path_for_route("/remote").expect("remote shell"),
+            "index.html"
+        );
+        assert_eq!(
+            static_asset_path_for_route("/remote/").expect("remote shell"),
+            "index.html"
+        );
+        assert_eq!(
+            static_asset_path_for_route("/manifest.webmanifest").expect("manifest"),
+            "manifest.webmanifest"
+        );
+        assert_eq!(
+            static_asset_path_for_route("/assets/index.js").expect("asset"),
+            "assets/index.js"
+        );
+        assert_eq!(
+            static_asset_path_for_route("/assets/../secret").expect_err("traversal rejected"),
+            "asset_path_forbidden"
+        );
     }
 
     #[test]

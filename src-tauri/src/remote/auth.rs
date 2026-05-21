@@ -1,6 +1,6 @@
 use crate::remote::crypto::random_url_token;
 use crate::remote::models::{
-    AuthChallengeRecord, PairingOfferRecord, PairingQrPayload, RemoteRuntimeState,
+    AuthChallengeRecord, PairingOfferRecord, PairingQrPayload, RateLimitBucket, RemoteRuntimeState,
     RemoteSessionRecord, WebSocketTicketRecord,
 };
 use subtle::ConstantTimeEq;
@@ -86,6 +86,18 @@ pub fn session_is_active(session: &RemoteSessionRecord, now_ms: i64) -> bool {
     !session.revoked && now_ms <= session.expires_at_ms && now_ms <= session.absolute_expires_at_ms
 }
 
+pub fn refresh_session_activity(
+    session: &mut RemoteSessionRecord,
+    now_ms: i64,
+) -> Result<(), String> {
+    if !session_is_active(session, now_ms) {
+        return Err("session_expired".to_string());
+    }
+    session.last_seen_at_ms = now_ms;
+    session.expires_at_ms = (now_ms + ACCESS_SESSION_TTL_MS).min(session.absolute_expires_at_ms);
+    Ok(())
+}
+
 pub fn csrf_nonce_matches(session: &RemoteSessionRecord, submitted_nonce: &str) -> bool {
     !session.revoked
         && !submitted_nonce.is_empty()
@@ -126,6 +138,74 @@ pub fn create_auth_challenge(
         .auth_challenges
         .insert(challenge_id, challenge.clone());
     challenge
+}
+
+pub fn consume_auth_challenge(
+    runtime: &mut RemoteRuntimeState,
+    challenge_id: &str,
+    now_ms: i64,
+) -> Result<AuthChallengeRecord, String> {
+    let challenge = runtime
+        .auth_challenges
+        .get_mut(challenge_id)
+        .ok_or_else(|| "auth_challenge_not_found".to_string())?;
+    if challenge.used {
+        return Err("auth_challenge_used".to_string());
+    }
+    if now_ms > challenge.expires_at_ms {
+        return Err("auth_challenge_expired".to_string());
+    }
+    challenge.used = true;
+    Ok(challenge.clone())
+}
+
+pub fn check_rate_limit(
+    runtime: &mut RemoteRuntimeState,
+    key: &str,
+    now_ms: i64,
+    max_attempts: usize,
+    window_ms: i64,
+) -> Result<(), String> {
+    let bucket = runtime.rate_limits.entry(key.to_string()).or_default();
+    check_rate_limit_bucket(bucket, now_ms, max_attempts, window_ms)
+}
+
+fn check_rate_limit_bucket(
+    bucket: &mut RateLimitBucket,
+    now_ms: i64,
+    max_attempts: usize,
+    window_ms: i64,
+) -> Result<(), String> {
+    if bucket
+        .locked_until_ms
+        .is_some_and(|locked_until_ms| now_ms < locked_until_ms)
+    {
+        return Err("rate_limited".to_string());
+    }
+
+    if bucket
+        .locked_until_ms
+        .is_some_and(|locked_until_ms| now_ms >= locked_until_ms)
+    {
+        bucket.locked_until_ms = None;
+        bucket.attempts.clear();
+    }
+
+    while bucket
+        .attempts
+        .front()
+        .is_some_and(|attempt_ms| now_ms.saturating_sub(*attempt_ms) >= window_ms)
+    {
+        bucket.attempts.pop_front();
+    }
+
+    if bucket.attempts.len() >= max_attempts.max(1) {
+        bucket.locked_until_ms = Some(now_ms + window_ms);
+        return Err("rate_limited".to_string());
+    }
+
+    bucket.attempts.push_back(now_ms);
+    Ok(())
 }
 
 pub fn create_websocket_ticket(
@@ -254,5 +334,68 @@ mod tests {
             1_000_000,
         );
         assert!(consume_websocket_ticket(&mut runtime, &expired.ticket, 1_061_000).is_err());
+    }
+
+    #[test]
+    fn auth_challenge_is_single_use_and_expires() {
+        let mut runtime = RemoteRuntimeState::default();
+        let challenge = create_auth_challenge(
+            &mut runtime,
+            "dev-1",
+            "https://wardian.tailnet.ts.net",
+            1_000_000,
+        );
+
+        assert!(consume_auth_challenge(&mut runtime, &challenge.challenge_id, 1_001_000).is_ok());
+        assert_eq!(
+            consume_auth_challenge(&mut runtime, &challenge.challenge_id, 1_002_000)
+                .expect_err("used challenge rejected"),
+            "auth_challenge_used"
+        );
+
+        let expired = create_auth_challenge(
+            &mut runtime,
+            "dev-1",
+            "https://wardian.tailnet.ts.net",
+            1_000_000,
+        );
+        assert_eq!(
+            consume_auth_challenge(&mut runtime, &expired.challenge_id, 1_061_000)
+                .expect_err("expired challenge rejected"),
+            "auth_challenge_expired"
+        );
+    }
+
+    #[test]
+    fn session_activity_refreshes_idle_expiry_until_absolute_lifetime() {
+        let mut session = create_session_record("dev-1", 1_000_000);
+        let original_expires_at = session.expires_at_ms;
+        let absolute_expires_at = session.absolute_expires_at_ms;
+
+        refresh_session_activity(&mut session, 1_600_000).expect("refresh before idle expiry");
+
+        assert_eq!(session.last_seen_at_ms, 1_600_000);
+        assert!(session.expires_at_ms > original_expires_at);
+        assert!(session.expires_at_ms <= absolute_expires_at);
+    }
+
+    #[test]
+    fn rate_limit_locks_after_max_attempts_in_window() {
+        let mut runtime = RemoteRuntimeState::default();
+
+        assert!(check_rate_limit(&mut runtime, "auth:dev-1", 1_000, 2, 60_000).is_ok());
+        assert!(check_rate_limit(&mut runtime, "auth:dev-1", 2_000, 2, 60_000).is_ok());
+        assert_eq!(
+            check_rate_limit(&mut runtime, "auth:dev-1", 3_000, 2, 60_000)
+                .expect_err("third attempt locked"),
+            "rate_limited"
+        );
+        assert_eq!(
+            check_rate_limit(&mut runtime, "auth:dev-1", 4_000, 2, 60_000)
+                .expect_err("locked attempt rejected"),
+            "rate_limited"
+        );
+
+        assert!(check_rate_limit(&mut runtime, "auth:dev-1", 65_000, 2, 60_000).is_ok());
     }
 }

@@ -319,12 +319,15 @@ V1 excludes:
 - Public relay.
 - Offline action queueing.
 
-If terminal context is needed, v1 should expose a sanitized transcript or output
-tail rather than raw PTY streaming by default.
+If terminal context is needed, v1 should expose it through an explicit desktop
+setting or endpoint rather than returning transcript tails in the default remote
+roster. The v1 default is to omit transcript/output text from paired-device
+roster responses.
 
-The sanitized transcript/output view is not a secret-scrubbing guarantee. It
-should prefer existing transcript or completion summaries, strip ANSI and OSC
-control sequences, cap returned lines and bytes, and avoid raw PTY streaming.
+Any future sanitized transcript/output view is not a secret-scrubbing
+guarantee. It should prefer existing transcript or completion summaries, strip
+ANSI and OSC control sequences, cap returned lines and bytes, and avoid raw PTY
+streaming.
 
 The PWA service worker should cache only the app shell and static assets needed
 to load the mobile UI. It must not queue agent, workflow, PTY, or revocation
@@ -337,7 +340,10 @@ The phone loads the PWA over HTTPS from the Wardian desktop remote gateway.
 After pairing and re-authentication, the phone receives a short-lived session.
 
 HTTP APIs handle discrete actions such as agent control and workflow run
-requests. WebSockets provide live roster, status, queue, and workflow updates.
+requests. Remote workflow run requests do not accept arbitrary JSON payloads in
+v1; workflow-specific payload schemas are required before phone-submitted
+workflow inputs are accepted. WebSockets provide live roster, status, queue, and
+workflow updates.
 WebSocket connections require authenticated upgrade protection and must close
 immediately when the device or session is revoked.
 Polling may be used only as a temporary development fallback while the mobile

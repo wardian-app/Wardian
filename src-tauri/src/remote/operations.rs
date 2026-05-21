@@ -2,8 +2,6 @@ use crate::remote::models::{RemoteAgentActionRequest, RemoteAgentSummary, Remote
 use crate::state::AppState;
 use tauri::{AppHandle, Manager};
 
-pub const REMOTE_AGENT_LATEST_TEXT_BYTES: usize = 4096;
-
 pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
     let agents = state.agents.lock().await;
     agents
@@ -11,19 +9,6 @@ pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
         .filter_map(|agent| {
             let config = agent.config.lock().ok()?.clone();
             let status = agent.current_status.lock().ok()?.clone();
-            let latest_text = agent
-                .watch_state
-                .lock()
-                .ok()
-                .and_then(|watch| {
-                    watch
-                        .snapshot_since(None, Some(REMOTE_AGENT_LATEST_TEXT_BYTES))
-                        .ok()
-                })
-                .and_then(|snapshot| {
-                    bounded_clean_latest_text(&snapshot.transcript.latest_text)
-                        .or_else(|| bounded_clean_latest_text(&snapshot.output.text))
-                });
 
             Some(RemoteAgentSummary {
                 session_id: config.session_id,
@@ -32,7 +17,7 @@ pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
                 provider: config.provider,
                 workspace: config.folder,
                 status,
-                latest_text,
+                latest_text: None,
             })
         })
         .collect()
@@ -98,29 +83,6 @@ pub fn remote_workflow_summaries() -> Result<Vec<RemoteWorkflowSummary>, String>
             node_count: workflow.nodes.len(),
         })
         .collect())
-}
-
-fn bounded_clean_latest_text(value: &str) -> Option<String> {
-    let clean = crate::state::terminal_text::strip_terminal_controls(value);
-    let trimmed = clean.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(tail_string_by_bytes(
-        trimmed,
-        REMOTE_AGENT_LATEST_TEXT_BYTES,
-    ))
-}
-
-fn tail_string_by_bytes(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_string();
-    }
-    let mut start = value.len().saturating_sub(max_bytes);
-    while start < value.len() && !value.is_char_boundary(start) {
-        start += 1;
-    }
-    value[start..].to_string()
 }
 
 #[cfg(test)]
@@ -219,14 +181,11 @@ mod tests {
         assert_eq!(roster[0].provider, "mock");
         assert_eq!(roster[0].workspace, "<absolute-workspace-path>");
         assert_eq!(roster[0].status, "Idle");
-        assert_eq!(
-            roster[0].latest_text.as_deref(),
-            Some("ready from transcript")
-        );
+        assert_eq!(roster[0].latest_text, None);
     }
 
     #[tokio::test]
-    async fn remote_agent_roster_uses_sanitized_bounded_output_fallback() {
+    async fn remote_agent_roster_omits_latest_text_by_default() {
         let state = AppState::new();
         let agent = test_agent("agent-1", "CoderOne", "Coder", "Processing");
         {
@@ -236,10 +195,8 @@ mod tests {
         insert_agent(&state, agent).await;
 
         let roster = remote_agent_roster(&state).await;
-        let latest = roster[0].latest_text.as_ref().expect("latest text");
 
-        assert!(!latest.contains('\u{1b}'));
-        assert!(latest.len() <= REMOTE_AGENT_LATEST_TEXT_BYTES);
+        assert_eq!(roster[0].latest_text, None);
     }
 
     #[test]
