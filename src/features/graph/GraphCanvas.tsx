@@ -33,6 +33,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     if (!containerRef.current) return;
 
     const graph = new Graph();
+    const container = containerRef.current;
 
     for (const node of projection.nodes) {
       graph.addNode(node.id, {
@@ -40,21 +41,22 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         x: node.x,
         y: node.y,
         size: node.size,
-        color: node.color,
+        color: resolveGraphColor(node.color, container),
         highlighted: node.selected,
         forceLabel: node.selected,
       });
     }
 
+    const edgeColor = resolveGraphColor("var(--color-wardian-border-heavy)", container);
     for (const edge of projection.edges) {
       graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
         size: Math.max(1, edge.weight),
-        color: "var(--color-wardian-border-heavy)",
+        color: edgeColor,
         label: edge.reasons.join(", "),
       });
     }
 
-    const renderer = new Sigma(graph, containerRef.current, {
+    const renderer = new Sigma(graph, container, {
       allowInvalidContainer: true,
       enableEdgeEvents: true,
       renderEdgeLabels: false,
@@ -80,4 +82,16 @@ function pointerPosition(event: MouseEvent | TouchEvent | undefined) {
   if ("clientX" in event) return { x: event.clientX, y: event.clientY };
   const touch = event.touches[0] ?? event.changedTouches[0];
   return { x: touch?.clientX ?? 0, y: touch?.clientY ?? 0 };
+}
+
+function resolveGraphColor(color: string, container: HTMLElement) {
+  const match = color.match(/^var\((--[^,\s)]+)(?:,\s*([^)]+))?\)$/);
+  if (!match) return color;
+
+  const computed = container.ownerDocument.defaultView
+    ?.getComputedStyle(container.ownerDocument.documentElement)
+    .getPropertyValue(match[1])
+    .trim();
+
+  return computed || match[2]?.trim() || color;
 }
