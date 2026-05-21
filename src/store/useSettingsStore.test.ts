@@ -18,6 +18,7 @@ function resetAppPreferences() {
     autoPatchGemini: false,
     terminalFontSize: 14,
     terminalFontFamily: '',
+    app_settings_overrides: {},
     app_settings_loaded: false,
   });
 }
@@ -175,6 +176,118 @@ describe('app settings persistence', () => {
   });
 
   it('keeps migrated local preferences when no backend app settings file exists yet', async () => {
+    useSettingsStore.setState({
+      theme: 'dark',
+      autoPatchGemini: true,
+      terminalFontSize: 16,
+      terminalFontFamily: 'Cascadia Mono, monospace',
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      persisted: false,
+      settings: {
+        theme: 'system',
+        auto_patch_gemini: false,
+        terminal_font_size: 14,
+        terminal_font_family: null,
+      },
+      overrides: {},
+    });
+
+    await useSettingsStore.getState().loadAppSettings();
+
+    expect(useSettingsStore.getState().theme).toBe('dark');
+    expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
+    expect(useSettingsStore.getState().terminalFontSize).toBe(16);
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
+    expect(useSettingsStore.getState().app_settings_overrides).toEqual({
+      theme: 'dark',
+      auto_patch_gemini: true,
+      terminal_font_size: 16,
+      terminal_font_family: 'Cascadia Mono, monospace',
+    });
+  });
+
+  it('uses persisted backend defaults instead of stale local preferences', async () => {
+    useSettingsStore.setState({
+      theme: 'dark',
+      autoPatchGemini: true,
+      terminalFontSize: 16,
+      terminalFontFamily: 'Cascadia Mono, monospace',
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      persisted: true,
+      settings: {
+        theme: 'system',
+        auto_patch_gemini: false,
+        terminal_font_size: 14,
+        terminal_font_family: null,
+      },
+      overrides: {},
+    });
+
+    await useSettingsStore.getState().loadAppSettings();
+
+    expect(useSettingsStore.getState().theme).toBe('system');
+    expect(useSettingsStore.getState().autoPatchGemini).toBe(false);
+    expect(useSettingsStore.getState().terminalFontSize).toBe(14);
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('');
+    expect(useSettingsStore.getState().app_settings_overrides).toEqual({});
+  });
+
+  it('saves migrated local preferences as sparse overrides after loading a missing backend file', async () => {
+    useSettingsStore.setState({
+      theme: 'dark',
+      autoPatchGemini: true,
+      terminalFontSize: 16,
+      terminalFontFamily: 'Cascadia Mono, monospace',
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      persisted: false,
+      settings: {
+        theme: 'system',
+        auto_patch_gemini: false,
+        terminal_font_size: 14,
+        terminal_font_family: null,
+      },
+      overrides: {},
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      persisted: true,
+      settings: {
+        theme: 'dark',
+        auto_patch_gemini: true,
+        terminal_font_size: 16,
+        terminal_font_family: 'Cascadia Mono, monospace',
+      },
+      overrides: {
+        theme: 'dark',
+        auto_patch_gemini: true,
+        terminal_font_size: 16,
+        terminal_font_family: 'Cascadia Mono, monospace',
+      },
+    });
+
+    await useSettingsStore.getState().loadAppSettings();
+    await useSettingsStore.getState().saveAppSettings();
+
+    expect(mockedInvoke).toHaveBeenLastCalledWith('save_app_settings', {
+      settings: expect.objectContaining({
+        schema_version: 2,
+        overrides: {
+          theme: 'dark',
+          auto_patch_gemini: true,
+          terminal_font_size: 16,
+          terminal_font_family: 'Cascadia Mono, monospace',
+        },
+      }),
+    });
+  });
+
+  it('keeps migrated local preferences for legacy default-shaped responses', async () => {
     useSettingsStore.setState({
       theme: 'dark',
       autoPatchGemini: true,

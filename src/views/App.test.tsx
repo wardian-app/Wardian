@@ -573,6 +573,41 @@ describe("Agent List Management", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("load_app_settings");
   });
+
+  it("runs the Gemini patch after file-backed app settings enable it", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
+      switch (cmd) {
+        case "load_app_settings":
+          return {
+            schema_version: 2,
+            persisted: true,
+            settings: {
+              theme: "system",
+              auto_patch_gemini: true,
+              terminal_font_size: 14,
+              terminal_font_family: null,
+            },
+            overrides: {
+              auto_patch_gemini: true,
+            },
+          };
+        case "run_gemini_patch":
+          return "ok";
+        default:
+          return defaultInvoke?.(cmd, args) ?? null;
+      }
+    });
+
+    render(<App />);
+
+    await screen.findByText("No Active Instances");
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("run_gemini_patch");
+    });
+  });
 });
 
 // ── Agent Class Dropdown Tests ─────────────────────────────────────────

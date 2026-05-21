@@ -91,10 +91,17 @@ fn settings_folder_path_from_home(wardian_home: &std::path::Path) -> String {
     wardian_home.join("settings").to_string_lossy().into_owned()
 }
 
+fn ensure_settings_folder_path_from_home(wardian_home: &std::path::Path) -> Result<String, String> {
+    let path_string = settings_folder_path_from_home(wardian_home);
+    let path = std::path::PathBuf::from(&path_string);
+    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    Ok(path_string)
+}
+
 #[tauri::command]
 pub fn get_settings_folder_path() -> Result<String, String> {
     let wardian_home = crate::utils::get_wardian_home().ok_or("Could not find Wardian home")?;
-    Ok(settings_folder_path_from_home(&wardian_home))
+    ensure_settings_folder_path_from_home(&wardian_home)
 }
 
 #[tauri::command]
@@ -155,7 +162,7 @@ pub fn dismiss_onboarding_hint(hint_id: String) -> Result<OnboardingHintsState, 
 
 #[cfg(test)]
 mod settings_path_tests {
-    use super::settings_folder_path_from_home;
+    use super::{ensure_settings_folder_path_from_home, settings_folder_path_from_home};
 
     #[test]
     fn settings_folder_path_points_under_wardian_home() {
@@ -165,5 +172,15 @@ mod settings_path_tests {
             settings_folder_path_from_home(home).replace('\\', "/"),
             "/tmp/wardian-home/settings"
         );
+    }
+
+    #[test]
+    fn settings_folder_path_can_be_created_before_opening() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = std::path::PathBuf::from(
+            ensure_settings_folder_path_from_home(temp_dir.path()).expect("settings path"),
+        );
+
+        assert!(path.is_dir());
     }
 }

@@ -58,4 +58,5 @@ export interface SettingsDocument<TSettings, TOverrides> {
   schema_version: 2;
   settings: TSettings;
   overrides: TOverrides;
+  persisted?: boolean;
 }

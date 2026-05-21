@@ -181,11 +181,13 @@ function appSettingsFromResponse(response: AppSettingsResponse) {
     return {
       settings: response.settings,
       overrides: response.overrides ?? EMPTY_APP_SETTINGS_OVERRIDES,
+      persisted: response.persisted ?? true,
     };
   }
   return {
     settings: response,
     overrides: appOverridesFromSettings(response),
+    persisted: false,
   };
 }
 
@@ -215,6 +217,15 @@ function appOverridesFromSettings(settings: AppSettings): AppSettingsOverrides {
       ? { terminal_font_family: settings.terminal_font_family?.trim() ?? null }
       : {}),
   };
+}
+
+function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
+  return appOverridesFromSettings({
+    theme: state.theme,
+    auto_patch_gemini: state.autoPatchGemini,
+    terminal_font_size: state.terminalFontSize,
+    terminal_font_family: state.terminalFontFamily.trim() || null,
+  });
 }
 
 function codexOverridesFromPolicy(policy: CodexRuntimePolicy): CodexRuntimePolicyOverrides | undefined {
@@ -408,10 +419,13 @@ export const useSettingsStore = create<SettingsState>()(
             set({ app_settings_loaded: true });
             return;
           }
-          const { settings, overrides } = resolved;
+          const { settings, overrides, persisted } = resolved;
           const currentState = get();
-          if (appSettingsAreDefaults(settings) && stateHasMigratedAppPreferences(currentState)) {
-            set({ app_settings_loaded: true });
+          if (!persisted && appSettingsAreDefaults(settings) && stateHasMigratedAppPreferences(currentState)) {
+            set({
+              app_settings_overrides: normalizeAppOverrides(appOverridesFromState(currentState)),
+              app_settings_loaded: true,
+            });
             return;
           }
           set({

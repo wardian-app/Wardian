@@ -34,6 +34,8 @@ pub struct AppSettingsDocument {
     pub schema_version: u8,
     pub settings: AppSettings,
     pub overrides: AppSettingsOverrides,
+    #[serde(default)]
+    pub persisted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +99,7 @@ fn load_app_settings_document_from_path(path: &Path) -> Result<AppSettingsDocume
     if !path.exists() {
         return Ok(app_settings_document_from_overrides(
             AppSettingsOverrides::default(),
+            false,
         ));
     }
 
@@ -109,7 +112,10 @@ fn load_app_settings_document_from_path(path: &Path) -> Result<AppSettingsDocume
     {
         let persisted =
             serde_json::from_value::<PersistedAppSettings>(value).map_err(|e| e.to_string())?;
-        return Ok(app_settings_document_from_overrides(persisted.overrides));
+        return Ok(app_settings_document_from_overrides(
+            persisted.overrides,
+            true,
+        ));
     }
 
     let settings = serde_json::from_value::<AppSettings>(value).map_err(|e| e.to_string())?;
@@ -118,6 +124,7 @@ fn load_app_settings_document_from_path(path: &Path) -> Result<AppSettingsDocume
         schema_version: 2,
         overrides: app_overrides_from_settings(&normalized, &AppSettings::default()),
         settings: normalized,
+        persisted: true,
     })
 }
 
@@ -127,6 +134,7 @@ fn save_app_settings_to_path(path: &Path, settings: &AppSettings) -> Result<AppS
         schema_version: 2,
         overrides: app_overrides_from_settings(&normalized, &AppSettings::default()),
         settings: normalized,
+        persisted: true,
     };
     save_app_settings_document_to_path(path, &document).map(|document| document.settings)
 }
@@ -151,6 +159,7 @@ fn save_app_settings_document_to_path(
         schema_version: 2,
         settings: normalized,
         overrides: persisted.overrides,
+        persisted: true,
     })
 }
 
@@ -169,12 +178,16 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     settings
 }
 
-fn app_settings_document_from_overrides(overrides: AppSettingsOverrides) -> AppSettingsDocument {
+fn app_settings_document_from_overrides(
+    overrides: AppSettingsOverrides,
+    persisted: bool,
+) -> AppSettingsDocument {
     let overrides = normalize_app_overrides(overrides);
     AppSettingsDocument {
         schema_version: 2,
         settings: app_settings_from_overrides(&overrides),
         overrides,
+        persisted,
     }
 }
 
@@ -246,9 +259,13 @@ mod tests {
     #[test]
     fn app_settings_defaults_when_file_missing() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
+        let document =
+            load_app_settings_document_from_path(&temp_dir.path().join("settings/app.json"))
+                .expect("load default document");
         let settings = load_app_settings_from_path(&temp_dir.path().join("settings/app.json"))
             .expect("load defaults");
 
+        assert!(!document.persisted);
         assert_eq!(settings.theme, "system");
         assert!(!settings.auto_patch_gemini);
         assert_eq!(settings.terminal_font_size, 14);
@@ -267,8 +284,10 @@ mod tests {
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
+        let document = load_app_settings_document_from_path(&path).expect("load document");
         let loaded = load_app_settings_from_path(&path).expect("load settings");
 
+        assert!(document.persisted);
         assert_eq!(saved, settings);
         assert_eq!(loaded, settings);
     }
