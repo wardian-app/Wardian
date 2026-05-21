@@ -5,6 +5,7 @@ import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import WebSocket from "ws";
 
 import {
   createNativeHarness,
@@ -106,6 +107,29 @@ async function assertStatus(response, expectedStatus, label) {
   throw new Error(`${label} returned ${response.status}: ${await response.text()}`);
 }
 
+async function assertStatusStreamClosesWithoutTicket(baseUrl, canonicalOrigin, port) {
+  await new Promise((resolve, reject) => {
+    const socket = new WebSocket(`${baseUrl.replace("http:", "ws:")}/remote/api/status-stream`, {
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: canonicalOrigin,
+      },
+    });
+    const timer = setTimeout(() => {
+      socket.terminate();
+      reject(new Error("status stream stayed open without an authentication ticket"));
+    }, 6500);
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
 test("remote gateway authenticates native app agent reads", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
   try {
@@ -137,6 +161,7 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
 
   await waitForAppShell(session.driver, 20000);
   await waitForGateway(baseUrl);
+  await assertStatusStreamClosesWithoutTicket(baseUrl, canonicalOrigin, gatewayPort);
 
   const shell = await fetch(`${baseUrl}/remote`);
   assert.equal(shell.status, 200);

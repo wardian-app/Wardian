@@ -10,6 +10,8 @@ const AUTH_CHALLENGE_TTL_MS: i64 = 60_000;
 const ACCESS_SESSION_TTL_MS: i64 = 15 * 60 * 1000;
 const ABSOLUTE_SESSION_TTL_MS: i64 = 12 * 60 * 60 * 1000;
 const WEBSOCKET_TICKET_TTL_MS: i64 = 60_000;
+const RATE_LIMIT_RETAIN_MS: i64 = 10 * 60 * 1000;
+const MAX_RATE_LIMIT_BUCKETS: usize = 1024;
 
 pub fn create_pairing_offer(
     runtime: &mut RemoteRuntimeState,
@@ -17,6 +19,7 @@ pub fn create_pairing_offer(
     server_fingerprint: &str,
     now_ms: i64,
 ) -> Result<PairingQrPayload, String> {
+    prune_expired_runtime_state(runtime, now_ms);
     let offer_id = random_url_token(18);
     let nonce = random_url_token(18);
     runtime.pairing_offers.insert(
@@ -75,6 +78,7 @@ pub fn create_session(
     device_id: &str,
     now_ms: i64,
 ) -> RemoteSessionRecord {
+    prune_expired_runtime_state(runtime, now_ms);
     let session = create_session_record(device_id, now_ms);
     runtime
         .sessions
@@ -125,6 +129,7 @@ pub fn create_auth_challenge(
     canonical_origin: &str,
     now_ms: i64,
 ) -> AuthChallengeRecord {
+    prune_expired_runtime_state(runtime, now_ms);
     let challenge_id = random_url_token(18);
     let challenge = AuthChallengeRecord {
         challenge_id: challenge_id.clone(),
@@ -166,8 +171,53 @@ pub fn check_rate_limit(
     max_attempts: usize,
     window_ms: i64,
 ) -> Result<(), String> {
+    prune_rate_limit_buckets(runtime, now_ms);
+    if !runtime.rate_limits.contains_key(key) && runtime.rate_limits.len() >= MAX_RATE_LIMIT_BUCKETS
+    {
+        return Err("rate_limit_capacity".to_string());
+    }
     let bucket = runtime.rate_limits.entry(key.to_string()).or_default();
     check_rate_limit_bucket(bucket, now_ms, max_attempts, window_ms)
+}
+
+pub fn prune_expired_runtime_state(runtime: &mut RemoteRuntimeState, now_ms: i64) {
+    runtime
+        .pairing_offers
+        .retain(|_, offer| !offer.used && now_ms <= offer.expires_at_ms);
+    runtime
+        .auth_challenges
+        .retain(|_, challenge| !challenge.used && now_ms <= challenge.expires_at_ms);
+    runtime
+        .sessions
+        .retain(|_, session| session_is_active(session, now_ms));
+    runtime
+        .websocket_tickets
+        .retain(|_, ticket| !ticket.used && now_ms <= ticket.expires_at_ms);
+    prune_rate_limit_buckets(runtime, now_ms);
+}
+
+fn prune_rate_limit_buckets(runtime: &mut RemoteRuntimeState, now_ms: i64) {
+    for bucket in runtime.rate_limits.values_mut() {
+        while bucket
+            .attempts
+            .front()
+            .is_some_and(|attempt_ms| now_ms.saturating_sub(*attempt_ms) >= RATE_LIMIT_RETAIN_MS)
+        {
+            bucket.attempts.pop_front();
+        }
+        if bucket
+            .locked_until_ms
+            .is_some_and(|locked_until_ms| now_ms >= locked_until_ms)
+        {
+            bucket.locked_until_ms = None;
+        }
+    }
+    runtime.rate_limits.retain(|_, bucket| {
+        !bucket.attempts.is_empty()
+            || bucket
+                .locked_until_ms
+                .is_some_and(|locked_until_ms| now_ms < locked_until_ms)
+    });
 }
 
 fn check_rate_limit_bucket(
@@ -215,6 +265,7 @@ pub fn create_websocket_ticket(
     canonical_origin: &str,
     now_ms: i64,
 ) -> WebSocketTicketRecord {
+    prune_expired_runtime_state(runtime, now_ms);
     let ticket = random_url_token(32);
     let record = WebSocketTicketRecord {
         ticket: ticket.clone(),
@@ -397,5 +448,74 @@ mod tests {
         );
 
         assert!(check_rate_limit(&mut runtime, "auth:dev-1", 65_000, 2, 60_000).is_ok());
+    }
+
+    #[test]
+    fn prune_expired_runtime_state_removes_used_expired_and_revoked_records() {
+        let mut runtime = RemoteRuntimeState::default();
+        let now = 1_000_000;
+        let offer = create_pairing_offer(
+            &mut runtime,
+            "https://wardian.tailnet.ts.net",
+            "server-fp",
+            now,
+        )
+        .expect("offer");
+        let challenge = create_auth_challenge(
+            &mut runtime,
+            "dev-1",
+            "https://wardian.tailnet.ts.net",
+            now,
+        );
+        let mut session = create_session(&mut runtime, "dev-1", now);
+        let ticket = create_websocket_ticket(
+            &mut runtime,
+            &session,
+            "agent_status",
+            "https://wardian.tailnet.ts.net",
+            now,
+        );
+
+        consume_pairing_offer(&mut runtime, &offer.pairing_offer_id, now + 1).expect("offer used");
+        consume_auth_challenge(&mut runtime, &challenge.challenge_id, now + 1)
+            .expect("challenge used");
+        consume_websocket_ticket(&mut runtime, &ticket.ticket, now + 1).expect("ticket used");
+        session.revoked = true;
+        runtime.sessions.insert(session.session_id.clone(), session);
+
+        prune_expired_runtime_state(&mut runtime, now + 1);
+
+        assert!(runtime.pairing_offers.is_empty());
+        assert!(runtime.auth_challenges.is_empty());
+        assert!(runtime.websocket_tickets.is_empty());
+        assert!(runtime.sessions.is_empty());
+    }
+
+    #[test]
+    fn rate_limit_rejects_new_keys_when_bucket_cap_is_reached() {
+        let mut runtime = RemoteRuntimeState::default();
+
+        for idx in 0..MAX_RATE_LIMIT_BUCKETS {
+            assert!(check_rate_limit(
+                &mut runtime,
+                &format!("auth:{idx}"),
+                1_000,
+                1,
+                60_000
+            )
+            .is_ok());
+        }
+
+        assert_eq!(
+            check_rate_limit(&mut runtime, "auth:overflow", 2_000, 1, 60_000)
+                .expect_err("new bucket rejected"),
+            "rate_limit_capacity"
+        );
+
+        assert_eq!(
+            check_rate_limit(&mut runtime, "auth:0", 2_000, 1, 60_000)
+                .expect_err("existing bucket keeps normal limit"),
+            "rate_limited"
+        );
     }
 }

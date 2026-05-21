@@ -25,6 +25,7 @@ use tauri::{AppHandle, Manager};
 const REMOTE_SESSION_COOKIE_NAME: &str = "__Host-wardian_remote_session";
 const REMOTE_CSRF_HEADER_NAME: &str = "x-wardian-csrf";
 const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
+const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), String> {
     crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
@@ -675,9 +676,15 @@ async fn status_stream_upgrade(
 }
 
 async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) {
-    let Some(Ok(first_message)) = socket.recv().await else {
-        return;
-    };
+    let first_message =
+        match tokio::time::timeout(WEBSOCKET_FIRST_TICKET_TIMEOUT, socket.recv()).await {
+            Ok(Some(Ok(first_message))) => first_message,
+            Ok(Some(Err(_))) | Ok(None) => return,
+            Err(_) => {
+                send_status_socket_error(&mut socket, "ticket_timeout").await;
+                return;
+            }
+        };
     let ticket = match parse_status_socket_ticket_message(first_message) {
         Ok(ticket) => ticket,
         Err(code) => {
@@ -853,7 +860,7 @@ fn require_request_boundary(
         .get("sec-fetch-site")
         .and_then(|value| value.to_str().ok())
     {
-        if !matches!(fetch_site, "same-origin" | "none") {
+        if fetch_site != "same-origin" {
             return Err(RemoteGatewayError::forbidden("origin_forbidden"));
         }
     }
@@ -982,11 +989,34 @@ fn decode_base64_standard(value: &str) -> Result<Vec<u8>, String> {
 }
 
 fn sanitize_device_label(value: &str) -> String {
-    let label = value.trim();
+    let mut label = String::new();
+    let mut char_count = 0usize;
+    for ch in value.trim().chars() {
+        if ch.is_control() || is_bidirectional_control(ch) {
+            continue;
+        }
+        let sanitized = if ch.is_whitespace() { ' ' } else { ch };
+        if sanitized == ' ' && label.ends_with(' ') {
+            continue;
+        }
+        if char_count >= 80 {
+            break;
+        }
+        label.push(sanitized);
+        char_count += 1;
+    }
+    let label = label.trim();
     if label.is_empty() {
         return "Paired device".to_string();
     }
-    label.chars().take(80).collect()
+    label.to_string()
+}
+
+fn is_bidirectional_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn active_remote_device(device_id: &str) -> Result<DeviceRecord, RemoteGatewayError> {
@@ -1320,6 +1350,11 @@ mod tests {
         let error = require_request_boundary(&config(), &headers, true).expect_err("cross-site");
         assert_eq!(error.status, axum::http::StatusCode::FORBIDDEN);
         assert_eq!(error.code, "origin_forbidden");
+
+        headers.insert("sec-fetch-site", HeaderValue::from_static("none"));
+        let error = require_request_boundary(&config(), &headers, true).expect_err("fetch-none");
+        assert_eq!(error.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "origin_forbidden");
     }
 
     #[test]
@@ -1351,6 +1386,15 @@ mod tests {
             validate_remote_stream("terminal").expect_err("unsupported stream"),
             "unsupported_stream"
         );
+    }
+
+    #[test]
+    fn device_label_strips_control_and_bidirectional_marks() {
+        assert_eq!(
+            sanitize_device_label(" \u{202e}Pixel\u{0007} Phone\u{2066} "),
+            "Pixel Phone"
+        );
+        assert_eq!(sanitize_device_label("\u{202e}\u{0007}"), "Paired device");
     }
 
     #[test]
