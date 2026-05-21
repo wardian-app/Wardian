@@ -15,6 +15,8 @@ pub struct AppSettings {
     pub terminal_font_size: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_font_family: Option<String>,
+    #[serde(default = "default_grid_card_display_mode")]
+    pub grid_card_display_mode: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +29,8 @@ pub struct AppSettingsOverrides {
     pub terminal_font_size: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_font_family: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_card_display_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +56,7 @@ impl Default for AppSettings {
             auto_patch_gemini: false,
             terminal_font_size: default_terminal_font_size(),
             terminal_font_family: None,
+            grid_card_display_mode: default_grid_card_display_mode(),
         }
     }
 }
@@ -62,6 +67,10 @@ fn default_terminal_font_size() -> u8 {
         return 12;
     }
     14
+}
+
+fn default_grid_card_display_mode() -> String {
+    "terminal".to_string()
 }
 
 pub fn load_app_settings() -> Result<AppSettings, String> {
@@ -175,6 +184,7 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     settings.terminal_font_family = settings
         .terminal_font_family
         .and_then(|value| trim_to_option(&value));
+    settings.grid_card_display_mode = normalize_grid_card_display_mode(&settings.grid_card_display_mode);
     settings
 }
 
@@ -205,6 +215,10 @@ fn app_settings_from_overrides(overrides: &AppSettingsOverrides) -> AppSettings 
             .terminal_font_family
             .clone()
             .unwrap_or(defaults.terminal_font_family),
+        grid_card_display_mode: overrides
+            .grid_card_display_mode
+            .clone()
+            .unwrap_or(defaults.grid_card_display_mode),
     })
 }
 
@@ -216,6 +230,9 @@ fn normalize_app_overrides(mut overrides: AppSettingsOverrides) -> AppSettingsOv
     overrides.terminal_font_family = overrides
         .terminal_font_family
         .map(|family| family.and_then(|value| trim_to_option(&value)));
+    overrides.grid_card_display_mode = overrides
+        .grid_card_display_mode
+        .map(|mode| normalize_grid_card_display_mode(&mode));
     overrides
 }
 
@@ -231,6 +248,8 @@ fn app_overrides_from_settings(
             .then_some(settings.terminal_font_size),
         terminal_font_family: (settings.terminal_font_family != defaults.terminal_font_family)
             .then(|| settings.terminal_font_family.clone()),
+        grid_card_display_mode: (settings.grid_card_display_mode != defaults.grid_card_display_mode)
+            .then(|| settings.grid_card_display_mode.clone()),
     }
 }
 
@@ -239,6 +258,13 @@ fn normalize_theme(value: &str) -> String {
         "dark" => "dark".to_string(),
         "light" => "light".to_string(),
         _ => "system".to_string(),
+    }
+}
+
+fn normalize_grid_card_display_mode(value: &str) -> String {
+    match value.trim() {
+        "chat" => "chat".to_string(),
+        _ => "terminal".to_string(),
     }
 }
 
@@ -270,6 +296,7 @@ mod tests {
         assert!(!settings.auto_patch_gemini);
         assert_eq!(settings.terminal_font_size, 14);
         assert_eq!(settings.terminal_font_family, None);
+        assert_eq!(settings.grid_card_display_mode, "terminal");
     }
 
     #[test]
@@ -281,6 +308,7 @@ mod tests {
             auto_patch_gemini: true,
             terminal_font_size: 16,
             terminal_font_family: Some("JetBrains Mono, monospace".to_string()),
+            grid_card_display_mode: "chat".to_string(),
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -301,6 +329,7 @@ mod tests {
             auto_patch_gemini: false,
             terminal_font_size: default_terminal_font_size(),
             terminal_font_family: None,
+            grid_card_display_mode: "terminal".to_string(),
         };
 
         save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -311,6 +340,7 @@ mod tests {
         assert_eq!(json["overrides"]["theme"], "dark");
         assert!(json["overrides"].get("auto_patch_gemini").is_none());
         assert!(json["overrides"].get("terminal_font_size").is_none());
+        assert!(json["overrides"].get("grid_card_display_mode").is_none());
     }
 
     #[test]
@@ -338,6 +368,7 @@ mod tests {
             loaded.terminal_font_family,
             Some("JetBrains Mono, monospace".to_string())
         );
+        assert_eq!(loaded.grid_card_display_mode, "terminal");
     }
 
     #[test]
@@ -351,7 +382,8 @@ mod tests {
               "theme": "blue",
               "auto_patch_gemini": true,
               "terminal_font_size": 4,
-              "terminal_font_family": "   "
+              "terminal_font_family": "   ",
+              "grid_card_display_mode": "cards"
             }"#,
         )
         .expect("write settings");
@@ -362,5 +394,6 @@ mod tests {
         assert!(loaded.auto_patch_gemini);
         assert_eq!(loaded.terminal_font_size, 10);
         assert_eq!(loaded.terminal_font_family, None);
+        assert_eq!(loaded.grid_card_display_mode, "terminal");
     }
 }

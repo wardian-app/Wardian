@@ -1,6 +1,7 @@
 pub mod agent_config;
 pub mod agent_telemetry;
 pub mod app_telemetry;
+pub mod chat;
 pub mod fs;
 pub mod git;
 pub mod library;
@@ -15,6 +16,7 @@ pub use agent_config::{
 };
 pub use agent_telemetry::AgentTelemetry;
 pub use app_telemetry::AppTelemetry;
+pub use chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus};
 pub use fs::*;
 pub use library::*;
 pub use provider::{AgentEvent, AgentProvider};

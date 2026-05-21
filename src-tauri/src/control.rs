@@ -2082,7 +2082,7 @@ mod tests {
         let chunks =
             crate::utils::terminal_input::provider_submit_chunks("codex", "hello\nworld").unwrap();
 
-        assert_eq!(chunks[0], b"hello world".to_vec());
+        assert_eq!(chunks[0], b"hello\nworld".to_vec());
         assert_eq!(chunks[1], b"\r".to_vec());
     }
 
