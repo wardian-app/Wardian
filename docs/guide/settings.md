@@ -77,8 +77,10 @@ shell-hosted commands:
 
 - **Terminal font size** applies immediately to embedded agent terminals.
 - **Terminal font family** can use the platform default or a selected monospace
-  font.
-- **Integrated terminal shell** can be Auto, a discovered shell, or Custom.
+  font. The default option names the font Wardian currently resolves.
+- **Integrated terminal shell** can use Wardian's resolved default shell, a
+  discovered shell, or Custom. The default option names the shell Wardian
+  currently resolves.
 
 Runtime shell changes affect future terminal launches and shell-hosted workflow
 commands.

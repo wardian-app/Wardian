@@ -162,6 +162,30 @@ describe("SettingsModal", () => {
     });
   });
 
+  it("names the resolved default terminal choices", () => {
+    useSettingsStore.setState({
+      shell_id: "auto",
+      terminalFontFamily: "",
+      available_shells: [
+        {
+          id: "powershell",
+          label: "PowerShell",
+          executable: "powershell.exe",
+          default_args: [],
+        },
+      ],
+    });
+
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+
+    expect(screen.getByRole("option", { name: "Default (PowerShell)" })).toBeInTheDocument();
+    expect(screen.getByText("Currently uses PowerShell.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Default (Droid Sans Mono)" })).toBeInTheDocument();
+    expect(screen.getByText("Currently uses Droid Sans Mono.")).toBeInTheDocument();
+  });
+
   it("checks for updates from the general category", () => {
     const checkNow = vi.fn();
     mockUseAppUpdate.mockReturnValue(appUpdateState({ checkNow }));

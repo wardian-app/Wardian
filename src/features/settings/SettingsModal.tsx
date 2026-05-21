@@ -68,7 +68,7 @@ const rowDefinitions: SettingsRowDefinition[] = [
     id: "terminal-font-family",
     category: "Terminal",
     label: "Terminal font family",
-    detail: "Auto uses the platform terminal default.",
+    detail: "Uses the platform terminal font unless overridden.",
     keywords: ["terminal", "font", "family", "monospace"],
   },
   {
@@ -147,7 +147,6 @@ const rowDefinitions: SettingsRowDefinition[] = [
 ];
 
 const terminalFontFamilyOptions = [
-  { label: "Auto", value: "" },
   { label: "Consolas", value: 'Consolas, "Courier New", monospace' },
   { label: "Menlo", value: 'Menlo, Monaco, "Courier New", monospace' },
   { label: "Droid Sans Mono", value: '"Droid Sans Mono", monospace' },
@@ -160,6 +159,12 @@ const optionClass =
 
 const buttonClass =
   "rounded-md border border-wardian-border bg-wardian-bg px-3 py-2 text-xs font-semibold text-primary transition-colors hover:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-60";
+
+const friendlyFontFamilyName = (fontFamily: string) =>
+  fontFamily
+    .split(",")[0]
+    ?.trim()
+    .replace(/^["']|["']$/g, "") || "system monospace";
 
 const SettingRow: React.FC<{
   label: string;
@@ -329,6 +334,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     }))
     .filter((group) => group.rows.length > 0);
 
+  const defaultTerminalFontLabel = friendlyFontFamilyName(defaultTerminalFontFamily());
+  const defaultShellLabel = available_shells[0]?.label;
+
   const updateTheme = async (nextTheme: AppThemeSetting) => {
     setTheme(nextTheme);
     await useSettingsStore.getState().saveAppSettings();
@@ -484,13 +492,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         );
       case "terminal-font-family":
         return (
-          <SettingRow key={row.id} label={row.label} detail={`${row.detail} Current auto: ${defaultTerminalFontFamily()}`}>
+          <SettingRow
+            key={row.id}
+            label={row.label}
+            detail={terminalFontFamily ? row.detail : `Currently uses ${defaultTerminalFontLabel}.`}
+          >
             <select
               aria-label="Terminal font family"
               value={terminalFontFamily}
               onChange={(event) => void handleTerminalFontFamilyChange(event.target.value)}
               className={optionClass}
             >
+              <option value="">{`Default (${defaultTerminalFontLabel})`}</option>
               {terminalFontFamilyOptions.map((option) => (
                 <option key={option.label} value={option.value}>
                   {option.label}
@@ -501,7 +514,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         );
       case "shell":
         return (
-          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+          <SettingRow
+            key={row.id}
+            label={row.label}
+            detail={shell_id === "auto" && defaultShellLabel ? `Currently uses ${defaultShellLabel}.` : row.detail}
+          >
             <select
               data-testid="shell-select"
               aria-label="Shell / Interpreter"
@@ -509,7 +526,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               onChange={(event) => setShellId(event.target.value)}
               className={optionClass}
             >
-              <option value="auto">Auto</option>
+              <option value="auto">{`Default (${defaultShellLabel ?? "detect on launch"})`}</option>
               {available_shells.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.label}
