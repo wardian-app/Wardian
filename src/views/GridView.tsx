@@ -10,6 +10,7 @@ import { useGridResize } from "../features/grid/useGridResize";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
 const MIN_TERMINAL_CARD_WIDTH = 520;
+const MIN_CHAT_CARD_WIDTH = 360;
 
 interface GridViewProps {
   filteredAgents: AgentConfig[];
@@ -138,8 +139,9 @@ export const GridView: React.FC<GridViewProps> = ({
   const visibleRowCount = renderedColumnCount > 0
     ? Math.ceil(visibleAgents.length / renderedColumnCount)
     : 0;
+  const minCardWidth = gridCardDisplayMode === 'chat' ? MIN_CHAT_CARD_WIDTH : MIN_TERMINAL_CARD_WIDTH;
   const gridMinWidth = visibleAgents.length > 0
-    ? `${(renderedColumnCount * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, renderedColumnCount - 1) * 8)}px`
+    ? `${(renderedColumnCount * minCardWidth) + (Math.max(0, renderedColumnCount - 1) * 8)}px`
     : undefined;
 
   const gridStyle: React.CSSProperties = {
@@ -255,8 +257,11 @@ export const GridView: React.FC<GridViewProps> = ({
                 {gridCardDisplayMode === 'chat' ? (
                   <AgentChatView
                     sessionId={agentId}
+                    agent={agent}
                     provider={agent.provider}
                     isMaximized={isAgentMaximized}
+                    status={effectiveStatus}
+                    telemetry={metrics}
                     theme={theme}
                   />
                 ) : (

@@ -73,6 +73,42 @@ pub fn normalize_chat_line(
     }
 }
 
+pub fn visible_chat_text(role: &AgentChatRole, text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut visible = trimmed.to_string();
+    visible = remove_tag_block(&visible, "environment_context");
+    visible = remove_tag_block(&visible, "ADDITIONAL_METADATA");
+    visible = remove_tag_block(&visible, "USER_SETTINGS_CHANGE");
+    visible = remove_tag_block(&visible, "subagent_notification");
+
+    if *role == AgentChatRole::User {
+        if let Some(user_request) = extract_tag_block(trimmed, "USER_REQUEST") {
+            visible = user_request;
+        }
+        visible = visible
+            .lines()
+            .filter(|line| !is_internal_wardian_probe_line(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let visible = visible.trim();
+    if visible.is_empty() {
+        return None;
+    }
+
+    Some(visible.to_string())
+}
+
+fn is_internal_wardian_probe_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("WARDIAN_") && trimmed.ends_with("_PROBE")
+}
+
 fn normalize_codex(
     session_id: &str,
     provider: &str,
@@ -234,21 +270,28 @@ fn normalize_codex_payload(
                 },
             ))
         }
-        "function_call_output" | "custom_tool_call_output" => Some(event(
-            session_id,
-            provider,
-            sequence,
-            AgentChatEventKind::ToolResult,
-            EventFields {
-                role: Some(AgentChatRole::Tool),
-                text: text_from_value(payload),
-                status: Some(AgentChatStatus::Succeeded),
-                turn_id,
-                source: Some(source),
-                metadata: json!({"raw_type": payload_type}),
-                ..Default::default()
-            },
-        )),
+        "function_call_output" | "custom_tool_call_output" => {
+            let raw_text = text_from_value(payload);
+            let subagent_summary = raw_text.as_deref().and_then(subagent_completion_summary);
+            Some(event(
+                session_id,
+                provider,
+                sequence,
+                AgentChatEventKind::ToolResult,
+                EventFields {
+                    role: Some(AgentChatRole::Tool),
+                    text: subagent_summary.clone().or(raw_text),
+                    title: subagent_summary
+                        .as_ref()
+                        .map(|_| "Subagent completed".to_string()),
+                    status: Some(AgentChatStatus::Succeeded),
+                    turn_id,
+                    source: Some(source),
+                    metadata: json!({"raw_type": payload_type}),
+                    ..Default::default()
+                },
+            ))
+        }
         _ => None,
     }
 }
@@ -857,6 +900,7 @@ fn message_event(
     turn_id: Option<String>,
     raw_type: &str,
 ) -> Option<AgentChatEvent> {
+    let text = visible_chat_text(&role, &text)?;
     Some(event(
         session_id,
         provider,
@@ -1035,6 +1079,48 @@ fn text_from_array(items: &[Value]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].trim().to_string())
+}
+
+fn remove_tag_block(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = text;
+    let mut output = String::new();
+
+    while let Some(start) = rest.find(&open) {
+        output.push_str(&rest[..start]);
+        let after_open = start + open.len();
+        if let Some(end) = rest[after_open..].find(&close) {
+            rest = &rest[after_open + end + close.len()..];
+        } else {
+            rest = &rest[after_open..];
+            break;
+        }
+    }
+
+    output.push_str(rest);
+    output
+}
+
+fn subagent_completion_summary(text: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(text).ok()?;
+    let status = parsed.get("status")?.as_object()?;
+    status.values().find_map(|entry| {
+        entry
+            .get("completed")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
 fn content_array(value: &Value) -> Option<&Vec<Value>> {
     value.get("content").and_then(|content| content.as_array())
 }
@@ -1165,6 +1251,29 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_notifications_are_hidden_and_results_are_summarized() {
+        assert!(normalize_chat_line(
+            "agent-1",
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"<subagent_notification>\n{\"agent_path\":\"agent-1\",\"status\":{\"completed\":\"The subagent was spawned successfully.\"}}\n</subagent_notification>"}}"#,
+            1
+        )
+        .is_none());
+
+        let result = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","output":"{\"status\":{\"019e\":{\"completed\":\"The subagent was spawned successfully.\"}},\"timed_out\":false}"}}"#,
+        );
+
+        assert_eq!(result.kind, AgentChatEventKind::ToolResult);
+        assert_eq!(result.title.as_deref(), Some("Subagent completed"));
+        assert_eq!(
+            result.text.as_deref(),
+            Some("The subagent was spawned successfully.")
+        );
+    }
+
+    #[test]
     fn claude_messages_tools_and_local_commands_are_normalized_defensively() {
         let message = one(
             "claude",
@@ -1222,6 +1331,46 @@ mod tests {
         assert_eq!(events[0].text.as_deref(), Some("Gemini answer"));
         assert_eq!(events[1].kind, AgentChatEventKind::ToolCall);
         assert_eq!(events[1].status, Some(AgentChatStatus::ActionRequired));
+    }
+
+    #[test]
+    fn user_prompt_wrappers_are_removed_from_visible_messages() {
+        let gemini_user = one(
+            "gemini",
+            r#"{"type":"user","content":"<USER_REQUEST>\nList 50 numbers.\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is internal.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed model.\n</USER_SETTINGS_CHANGE>"}"#,
+        );
+        assert_eq!(gemini_user.kind, AgentChatEventKind::Message);
+        assert_eq!(gemini_user.role, Some(AgentChatRole::User));
+        assert_eq!(gemini_user.text.as_deref(), Some("List 50 numbers."));
+
+        let codex_user = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"Actual prompt\n<environment_context>\n{\"cwd\":\"D:\\Development\\Wardian\"}\n</environment_context>"}}"#,
+        );
+        assert_eq!(codex_user.text.as_deref(), Some("Actual prompt"));
+    }
+
+    #[test]
+    fn internal_only_user_prompt_is_dropped() {
+        assert!(normalize_chat_line(
+            "agent-1",
+            "gemini",
+            r#"{"type":"user","content":"<USER_REQUEST>\nWARDIAN_ADD_DIR_PROBE\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ninternal\n</ADDITIONAL_METADATA>"}"#,
+            1
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn wardian_named_user_content_is_not_broadly_filtered() {
+        let message = one(
+            "gemini",
+            r#"{"type":"user","content":"<USER_REQUEST>\nWARDIAN_HOME is wrong\n</USER_REQUEST>"}"#,
+        );
+
+        assert_eq!(message.kind, AgentChatEventKind::Message);
+        assert_eq!(message.role, Some(AgentChatRole::User));
+        assert_eq!(message.text.as_deref(), Some("WARDIAN_HOME is wrong"));
     }
 
     #[test]

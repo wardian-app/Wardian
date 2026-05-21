@@ -121,28 +121,12 @@ function activityContent(event: AgentChatEvent): string {
     lines.push(event.text.trimEnd());
   }
 
-  const metadataText = metadataContent(event.metadata);
-  if (!event.text?.trim() && metadataText) {
-    lines.push(metadataText);
-  }
-
   const fallbackStatus = statusLabel(event.status);
   if (lines.length === 0 && fallbackStatus) {
     lines.push(fallbackStatus);
   }
 
   return lines.join("\n\n");
-}
-
-function metadataContent(metadata: Record<string, unknown>): string | null {
-  const keys = Object.keys(metadata);
-  if (keys.length === 0) return null;
-
-  try {
-    return JSON.stringify(metadata, null, 2);
-  } catch {
-    return null;
-  }
 }
 
 function activityTone(event: AgentChatEvent): ActivityTone {

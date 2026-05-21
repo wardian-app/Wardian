@@ -5,11 +5,7 @@ const OPENCODE_SUBMIT_KEY: &[u8] = b"\x1b[13u";
 use tokio::sync::mpsc::Sender;
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
-    prompt
-        .replace("\r\n", " ")
-        .replace('\n', " ")
-        .trim()
-        .to_string()
+    prompt.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
 }
 
 pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
@@ -69,10 +65,10 @@ mod tests {
     };
 
     #[test]
-    fn normalize_prompt_flattens_newlines_and_trims() {
+    fn normalize_prompt_preserves_newlines_and_trims() {
         assert_eq!(
             normalize_prompt_for_terminal_submit("  alpha\nbeta\r\ngamma  "),
-            "alpha beta gamma"
+            "alpha\nbeta\ngamma"
         );
     }
 
@@ -87,7 +83,7 @@ mod tests {
         let first = rx.recv().await.expect("first payload");
         let second = rx.recv().await.expect("second payload");
 
-        assert_eq!(String::from_utf8(first).expect("utf8"), "hello world");
+        assert_eq!(String::from_utf8(first).expect("utf8"), "hello\nworld");
         assert_eq!(second, b"\r".to_vec());
     }
 

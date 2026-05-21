@@ -198,6 +198,15 @@ describe('GridView maximize behavior', () => {
     const root = container.firstElementChild as HTMLElement;
     expect(root.style.minWidth).toBe('520px');
   });
+
+  it('uses a narrower minimum width for chat cards', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('chat');
+
+    const { container } = renderGrid(null, [agents[0]]);
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.minWidth).toBe('360px');
+  });
 });
 
 describe('GridView density', () => {
@@ -250,6 +259,16 @@ describe('GridView stacked mode', () => {
     const { container } = renderGrid(null, agents);
     const grid = container.firstElementChild as HTMLElement;
     expect(grid.style.minWidth).toBe('520px');
+  });
+
+  it('uses the chat minimum width when gridStacked is true in chat mode', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('chat');
+    act(() => useLayoutStore.getState().setGridStacked(true));
+
+    const { container } = renderGrid(null, agents);
+
+    const grid = container.firstElementChild as HTMLElement;
+    expect(grid.style.minWidth).toBe('360px');
   });
 
   it('renders per-cell stack-exit handles when gridStacked is true', () => {

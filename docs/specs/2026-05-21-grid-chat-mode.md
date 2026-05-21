@@ -149,6 +149,17 @@ Required surfaces:
 - Terminal fallback events are generated only when no structured source can
   explain useful output.
 
+Initial transcript implementation:
+
+- `load_agent_chat_transcript(session_id)` reads the active agent's discovered
+  provider log path when available, normalizes it through the provider transcript
+  parser, and merges it with current watch status.
+- Watch transcript and raw terminal output are used as fallback only when the
+  provider log does not contain structured message, tool, approval, or error
+  events.
+- Raw terminal fallback renders as a compact expandable row in chat mode rather
+  than as a full-height output block.
+
 The existing assistant-text extraction in `providers/transcript.rs` is a useful
 starting point, but it currently returns only assistant transcript messages. Chat
 mode needs user prompts, tool calls, tool results, approvals, status transitions,
@@ -291,17 +302,23 @@ language highlighting as a follow-up.
 
 ## Input Behavior
 
-The first chat-mode slice is read-only. Users send prompts, type into TUIs, and
-answer provider approval prompts through raw terminal mode.
+The first chat-mode slice was read-only. The next slice adds a standard text
+composer for provider prompts while keeping terminal mode as the authoritative
+fallback for raw TUI control.
 
 Rules:
 
-- Chat mode does not render a prompt composer in v1.
-- Chat mode does not send provider input in v1.
+- Chat mode renders a compact composer at the bottom of the card.
+- Chat mode submits text through the same `submit_prompt_to_agent` command used
+  by the command panel, so provider-specific submit sequences remain centralized.
+- Successful sends render an optimistic user bubble until the provider
+  transcript confirms the message.
+- The composer is disabled while the agent is off, paused, headless, in an
+  error state, or actively processing.
 - The terminal remains the authoritative fallback for provider states that
   require raw keyboard interaction.
-- Approval responses are not implemented in chat mode until each provider has a
-  clear, tested response path.
+- Action-required states may be answered through the composer, but dedicated
+  approve/deny controls are not part of this slice.
 
 ## Error Handling
 
@@ -369,8 +386,7 @@ Screenshots:
    - Add `grid_card_display_mode`.
    - Add Settings control.
    - Switch Grid card body based on the setting.
-   - Render a read-only footer in chat mode that points users back to terminal
-     mode for input.
+   - Render a chat composer that reuses backend provider submit behavior.
 
 6. **Polish and documentation**
    - Update `docs/guide/grid.md` and `docs/guide/settings.md`.
@@ -379,8 +395,9 @@ Screenshots:
 
 ## Decisions
 
-- The first implementation is read-only. Chat mode renders transcript and
-  activity state only; terminal mode handles input and approval responses.
+- Chat mode now accepts standard prompt text. Terminal mode still handles raw
+  keyboard workflows and remains the fallback for provider-specific TUI
+  interactions.
 - The first implementation uses a Settings-level global display preference.
 - Card-level overrides are a follow-up after the global mode proves useful.
 

@@ -73,14 +73,15 @@ describe("activityBlocks", () => {
     expect(model.defaultCollapsed).toBe(false);
   });
 
-  it("falls back to metadata content when text is absent", () => {
+  it("uses status text instead of raw metadata when text is absent", () => {
     const model = toActivityBlock(event({
-      kind: "approval",
+      kind: "status",
+      status: "succeeded",
       metadata: { decision: "pending", reason: "write access requested" },
     }));
 
-    expect(model.title).toBe("Approval");
-    expect(model.tone).toBe("warning");
-    expect(model.content).toContain("\"decision\": \"pending\"");
+    expect(model.title).toBe("Status");
+    expect(model.tone).toBe("success");
+    expect(model.content).toBe("succeeded");
   });
 });
