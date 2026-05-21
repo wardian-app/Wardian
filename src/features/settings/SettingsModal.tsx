@@ -10,6 +10,7 @@ import {
   useSettingsStore,
 } from "../../store/useSettingsStore";
 import { useAppUpdate } from "./useAppUpdate";
+import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import type { AppThemeSetting } from "../../types/settings";
 
 interface SettingsModalProps {
@@ -23,6 +24,7 @@ type SettingsCategory =
   | "Terminal"
   | "Agent Runtime"
   | "Provider Utilities"
+  | "Remote Access"
   | "Advanced";
 
 type SettingsRowDefinition = {
@@ -40,6 +42,7 @@ const categories: SettingsCategory[] = [
   "Terminal",
   "Agent Runtime",
   "Provider Utilities",
+  "Remote Access",
   "Advanced",
 ];
 
@@ -137,6 +140,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "Auto-patch Gemini CLI",
     detail: "Helps Gemini discover Wardian skills.",
     keywords: ["gemini", "patch", "provider"],
+  },
+  {
+    id: "remote-access",
+    category: "Remote Access",
+    label: "Remote Access",
+    detail: "Pair a phone over Tailscale HTTPS.",
+    keywords: ["remote", "phone", "pwa", "tailscale", "pairing"],
   },
   {
     id: "settings-files",
@@ -714,6 +724,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             </div>
           </SettingRow>
         );
+      case "remote-access":
+        return <RemoteAccessSettings key={row.id} />;
       default:
         return null;
     }

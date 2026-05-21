@@ -89,6 +89,40 @@ describe("SettingsModal", () => {
     expect(screen.getByText("Auto prefers Claude when available.")).toBeInTheDocument();
   });
 
+  it("exposes remote access settings from the settings navigation", async () => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      switch (command) {
+        case "load_remote_access_status":
+          return "enabled";
+        case "load_remote_gateway_config":
+          return {
+            schema_version: 1,
+            enabled: true,
+            canonical_origin: "https://wardian.tailnet.ts.net",
+            loopback_host: "127.0.0.1",
+            loopback_port: 41241,
+            gateway_identity_public_key: "pub",
+            gateway_identity_fingerprint: "fp",
+          };
+        case "list_remote_devices":
+          return [];
+        case "save_app_settings":
+          return (args as { settings?: unknown } | undefined)?.settings;
+        case "save_shell_settings":
+          return (args as { settings?: unknown } | undefined)?.settings;
+        default:
+          return null;
+      }
+    });
+
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+
+    expect(await screen.findByText("https://wardian.tailnet.ts.net")).toBeInTheDocument();
+    expect(screen.getByText(/full remote control/i)).toBeInTheDocument();
+  });
+
   it("filters settings by search text across labels and details", () => {
     render(<SettingsModal isOpen onClose={vi.fn()} />);
 
