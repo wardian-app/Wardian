@@ -465,6 +465,31 @@ describe("Native window layout bridge", () => {
     expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
     expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
   });
+
+  it("ignores transient tiny Tauri resize payloads that would collapse the app shell", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    (window as { __TAURI__?: unknown }).__TAURI__ = {};
+    Object.defineProperty(window, "outerWidth", { configurable: true, value: 980 });
+    Object.defineProperty(window, "outerHeight", { configurable: true, value: 680 });
+    const resizeListeners: Array<(event: { payload: { type?: string; width: number; height: number } }) => void> = [];
+    mockGetCurrentWindow.mockReturnValue({
+      onResized: vi.fn((listener) => {
+        resizeListeners.push(listener as (event: { payload: { type?: string; width: number; height: number } }) => void);
+        return Promise.resolve(vi.fn());
+      }),
+    } as unknown as ReturnType<typeof getCurrentWindow>);
+
+    render(<App />);
+    await waitFor(() => expect(resizeListeners).toHaveLength(1));
+
+    act(() => {
+      resizeListeners[0]({ payload: { type: "Physical", width: 980, height: 680 } });
+      resizeListeners[0]({ payload: { type: "Physical", width: 144, height: 19 } });
+    });
+
+    expect(document.documentElement.style.getPropertyValue("--wardian-native-window-width")).toBe("980px");
+    expect(document.documentElement.style.getPropertyValue("--wardian-native-window-height")).toBe("680px");
+  });
 });
 
 // ── List Management Tests ──────────────────────────────────────────────

@@ -1,7 +1,7 @@
 use crate::manager;
 use crate::providers::ProviderFactory;
-use crate::state::AppState;
-use std::collections::BTreeMap;
+use crate::state::{ActiveAgent, AppState};
+use std::collections::{BTreeMap, HashMap};
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
@@ -120,6 +120,94 @@ fn clone_unique_name(
             return candidate;
         }
         index += 1;
+    }
+}
+
+fn detach_agent_for_kill(
+    agents: &mut HashMap<String, ActiveAgent>,
+    order: &mut Vec<String>,
+    input_senders: &std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    session_id: &str,
+) -> Option<ActiveAgent> {
+    let agent = agents.remove(session_id)?;
+    if let Ok(mut senders) = input_senders.write() {
+        senders.remove(session_id);
+    }
+    order.retain(|id| id != session_id);
+    Some(agent)
+}
+
+async fn lock_agent_lifecycle(
+    state: &AppState,
+    session_id: &str,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    let lifecycle_lock = {
+        let mut locks = state.agent_lifecycle_locks.lock().await;
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    lifecycle_lock.lock_owned().await
+}
+
+struct PreparedAgentClear {
+    termination: ActiveAgent,
+    config: AgentConfig,
+    init_timestamp: Option<String>,
+}
+
+fn take_agent_runtime_for_termination(agent: &mut ActiveAgent) -> ActiveAgent {
+    ActiveAgent {
+        config: agent.config.clone(),
+        child_process: agent.child_process.take(),
+        background_processes: std::mem::take(&mut agent.background_processes),
+        pty_master: agent.pty_master.take(),
+        stdin_tx: agent.stdin_tx.take(),
+        output_buffer: agent.output_buffer.clone(),
+        process_id: agent.process_id.take(),
+        query_count: agent.query_count.clone(),
+        init_timestamp: agent.init_timestamp.clone(),
+        current_status: agent.current_status.clone(),
+        last_status_at: agent.last_status_at.clone(),
+        watch_state: agent.watch_state.clone(),
+        terminal_title: agent.terminal_title.clone(),
+        last_output_at: agent.last_output_at.clone(),
+        log_path: agent.log_path.clone(),
+        log_last_modified: agent.log_last_modified.clone(),
+        #[cfg(windows)]
+        job_object: agent.job_object.take(),
+    }
+}
+
+fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
+    let termination = take_agent_runtime_for_termination(agent);
+    let config = agent.config.lock().unwrap().clone();
+    let init_timestamp = agent.init_timestamp.lock().unwrap().clone();
+
+    if let Ok(mut buf) = agent.output_buffer.lock() {
+        buf.clear();
+    }
+    if let Ok(mut title) = agent.terminal_title.lock() {
+        title.clear();
+    }
+    if let Ok(mut status) = agent.current_status.lock() {
+        *status = "Processing...".to_string();
+    }
+    if let Ok(mut count) = agent.query_count.lock() {
+        *count = 0;
+    }
+    if let Ok(mut log_path) = agent.log_path.lock() {
+        *log_path = None;
+    }
+    if let Ok(mut log_last_modified) = agent.log_last_modified.lock() {
+        *log_last_modified = None;
+    }
+
+    PreparedAgentClear {
+        termination,
+        config,
+        init_timestamp,
     }
 }
 
@@ -808,6 +896,7 @@ fn promote_fresh_provider_session_after_resume(
     }
 }
 
+#[cfg(test)]
 fn sync_resumed_input_sender(
     state: &AppState,
     session_id: &str,
@@ -881,6 +970,7 @@ fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
     }
 }
 
+#[cfg(test)]
 fn mark_agent_paused_off(agent: &mut crate::state::ActiveAgent) {
     agent.pty_master = None;
     agent.stdin_tx = None;
@@ -1875,16 +1965,23 @@ pub async fn kill_agent(
         "[WARDIAN] kill_agent called for session: {}",
         session_id
     ));
-    let mut agents = state.agents.lock().await;
-    let mut order = state.agent_order.lock().await;
+    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let (agent, state_snapshot) = {
+        let mut agents = state.agents.lock().await;
+        let mut order = state.agent_order.lock().await;
+        let agent =
+            detach_agent_for_kill(&mut agents, &mut order, &state.input_senders, &session_id);
+        let state_snapshot = agent
+            .is_some()
+            .then(|| manager::state_configs_snapshot(&agents, &order));
+        (agent, state_snapshot)
+    };
+    if let Some(snapshot) = state_snapshot {
+        manager::save_state_snapshot(&app, &snapshot);
+    }
+
     #[allow(unused_mut)]
-    if let Some(mut agent) = agents.remove(&session_id) {
-        // Remove from input_senders immediately
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
-        order.retain(|id| id != &session_id);
-        manager::save_state(&app, &agents, &order);
+    if let Some(mut agent) = agent {
         manager::terminate_active_agent_process(&mut agent);
 
         // Phase 2: Remove from SQLite
@@ -1927,28 +2024,46 @@ pub async fn pause_agent(
         "[WARDIAN] pause_agent called for session: {}",
         session_id
     ));
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
+    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let (mut termination, state_snapshot, status_arc) = {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
 
-    if let Some(agent) = agents.get_mut(&session_id) {
-        manager::terminate_active_agent_process(agent);
+        let Some(agent) = agents.get_mut(&session_id) else {
+            return Err(format!("Agent {} not found", session_id));
+        };
 
-        // For opencode: capture the real ses_xxx session ID from the log so
-        // resume can pass --session ses_xxx rather than the internal UUID.
-        capture_opencode_pause_resume_session(agent);
-        manager::set_agent_status(&app, &session_id, &agent.current_status, "Off");
-        mark_agent_paused_off(agent);
+        let termination = take_agent_runtime_for_termination(agent);
+        let status_arc = agent.current_status.clone();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.is_off = true;
+        }
 
-        // Remove from input_senders
         if let Ok(mut senders) = state.input_senders.write() {
             senders.remove(&session_id);
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
-    }
+        let state_snapshot = manager::state_configs_snapshot(&agents, &order);
+        (termination, state_snapshot, status_arc)
+    };
+    manager::save_state_snapshot(&app, &state_snapshot);
+    manager::set_agent_status(&app, &session_id, &status_arc, "Off");
+
+    manager::terminate_active_agent_process(&mut termination);
+
+    // For opencode: capture the real ses_xxx session ID from the log so
+    // resume can pass --session ses_xxx rather than the internal UUID.
+    capture_opencode_pause_resume_session(&termination);
+
+    let state_snapshot = {
+        let agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        manager::state_configs_snapshot(&agents, &order)
+    };
+    manager::save_state_snapshot(&app, &state_snapshot);
+
+    let _ = app.emit("agents-updated", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1961,6 +2076,7 @@ pub async fn resume_agent(
         "[WARDIAN] resume_agent called for session: {}",
         session_id
     ));
+    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     let snapshot = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -1987,19 +2103,38 @@ pub async fn resume_agent(
     promote_fresh_provider_session_after_resume(&config.provider, &mut new_active);
 
     let stdin_tx = new_active.stdin_tx.clone();
-    let mut old_agent = {
+    let mut pending_new_active = Some(new_active);
+    let (mut old_agent, state_snapshot) = {
         let mut agents = state.agents.lock().await;
         let order = state.agent_order.lock().await;
-        let Some(old_agent) = agents.remove(&session_id) else {
-            manager::terminate_active_agent_process(&mut new_active);
+        if !agents.contains_key(&session_id) {
+            drop(order);
+            drop(agents);
+            if let Some(mut active) = pending_new_active {
+                manager::terminate_active_agent_process(&mut active);
+            }
             return Err(format!("Agent {} not found", session_id));
         };
-        agents.insert(session_id.clone(), new_active);
-        manager::save_state(&app, &agents, &order);
-        old_agent
+        let inserted = pending_new_active
+            .take()
+            .expect("new active agent should still be pending");
+        let old_agent = agents
+            .insert(session_id.clone(), inserted)
+            .expect("agent should exist after contains check");
+        if let Ok(mut senders) = state.input_senders.write() {
+            match stdin_tx {
+                Some(tx) => {
+                    senders.insert(session_id.clone(), tx);
+                }
+                None => {
+                    senders.remove(&session_id);
+                }
+            }
+        }
+        (old_agent, manager::state_configs_snapshot(&agents, &order))
     };
+    manager::save_state_snapshot(&app, &state_snapshot);
 
-    sync_resumed_input_sender(&state, &session_id, stdin_tx);
     manager::terminate_active_agent_process(&mut old_agent);
 
     let _ = app.emit(
@@ -2024,163 +2159,183 @@ pub async fn clear_agent_session(
         "[WARDIAN] clear_agent_session called for session: {}",
         session_id
     ));
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-
-    if let Some(agent) = agents.get_mut(&session_id) {
-        // 1. Terminate the old agent's process tree immediately.
-        manager::terminate_active_agent_process(agent);
-
-        // 2. Prepare fresh config (new provider session ID for Claude, clear resume IDs)
-        let mut config = agent.config.lock().unwrap().clone();
-        let previous_codex_provider_sessions = if config.provider == "codex" {
-            let mut sessions = codex_cleared_provider_sessions(&config);
-            if let Some(session_id) = config
-                .resume_session
-                .clone()
-                .filter(|session_id| !session_id.trim().is_empty())
-            {
-                if !sessions.iter().any(|existing| existing == &session_id) {
-                    sessions.push(session_id);
-                }
-            }
-            if let Some(session_id) = manager::latest_codex_session_index_entry(&config.session_id)
-                .ok()
-                .flatten()
-                .map(|(provider_session_id, _updated_at)| provider_session_id)
-                .filter(|session_id| !session_id.trim().is_empty())
-            {
-                if !sessions.iter().any(|existing| existing == &session_id) {
-                    sessions.push(session_id);
-                }
-            }
-            sessions
-        } else {
-            Vec::new()
+    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let mut prepared = {
+        let mut agents = state.agents.lock().await;
+        let Some(agent) = agents.get_mut(&session_id) else {
+            return Err(format!("Agent {} not found", session_id));
         };
-        prepare_clear_config(&mut config)?;
-        if config.provider == "codex" {
-            config
-                .codex_config_mut_preserve_encoding()
-                .cleared_provider_sessions = previous_codex_provider_sessions.clone();
-            config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
-        }
 
-        // For providers that bootstrap via obtain_session_id (e.g. Gemini), run the same
-        // bootstrap after clear so the fresh session gets a trackable provider session ID.
-        // Without this, resume_session stays None and log/status tracking breaks.
-        if provider_needs_obtain_session_id_on_clear(&config.provider) {
-            let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
-            match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config)).await {
-                Ok(new_session_id) if !new_session_id.is_empty() => {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] clear_agent_session: obtained fresh {} session ID: {}",
-                        config.provider, new_session_id
-                    ));
-                    config.resume_session = Some(new_session_id);
-                }
-                Ok(_) => {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] clear_agent_session: obtain_session_id returned empty ID for {}",
-                        config.provider
-                    ));
-                }
-                Err(e) => {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] clear_agent_session: failed to obtain fresh {} session ID: {}",
-                        config.provider, e
-                    ));
-                }
-            }
+        let prepared = prepare_agent_for_clear(agent);
+        if let Ok(mut senders) = state.input_senders.write() {
+            senders.remove(&session_id);
         }
+        prepared
+    };
 
-        // 3. Reset UI and in-memory buffers
-        if let Ok(mut buf) = agent.output_buffer.lock() {
-            buf.clear();
-        }
-        if let Ok(mut title) = agent.terminal_title.lock() {
-            title.clear();
-        }
-        if let Ok(mut status) = agent.current_status.lock() {
-            *status = "Processing...".to_string();
-        }
-        if let Ok(mut count) = agent.query_count.lock() {
-            *count = 0;
-        }
-        if let Ok(mut log_path) = agent.log_path.lock() {
-            *log_path = None;
-        }
-        if let Ok(mut log_last_modified) = agent.log_last_modified.lock() {
-            *log_last_modified = None;
-        }
+    // 1. Terminate the old agent's process tree outside the global agent lock.
+    manager::terminate_active_agent_process(&mut prepared.termination);
 
-        let _ = app.emit(
-            "agent-terminal-cleared",
-            terminal_cleared_payload(&session_id),
-        );
-
-        // 5. Spawn a FRESH process (is_restored = false)
-        // This ensures Claude uses --session-id and others start clean.
-        let born = agent.init_timestamp.lock().unwrap().clone();
-        let new_active = manager::spawn_agent(app.clone(), config, false, born).await?;
-
+    // 2. Prepare fresh config (new provider session ID for Claude, clear resume IDs)
+    let mut config = prepared.config.clone();
+    let previous_codex_provider_sessions = if config.provider == "codex" {
+        let mut sessions = codex_cleared_provider_sessions(&config);
+        if let Some(session_id) = config
+            .resume_session
+            .clone()
+            .filter(|session_id| !session_id.trim().is_empty())
         {
-            let mut new_config = new_active.config.lock().unwrap();
-            let mut old_config = agent.config.lock().unwrap();
-            if provider_uses_manual_session_id(&old_config.provider) {
-                if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take()
-                {
-                    new_config.resume_session = Some(fresh_provider_session_id);
-                }
-            }
-            *old_config = new_config.clone();
-        }
-
-        // 6. Register new input sender
-        if let Some(ref tx) = new_active.stdin_tx {
-            if let Ok(mut senders) = state.input_senders.write() {
-                senders.insert(session_id.clone(), tx.clone());
+            if !sessions.iter().any(|existing| existing == &session_id) {
+                sessions.push(session_id);
             }
         }
-
-        // 7. Update agent metadata in SQLite
+        if let Some(session_id) = manager::latest_codex_session_index_entry(&config.session_id)
+            .ok()
+            .flatten()
+            .map(|(provider_session_id, _updated_at)| provider_session_id)
+            .filter(|session_id| !session_id.trim().is_empty())
         {
-            let config = agent.config.lock().unwrap();
-            let born = agent.init_timestamp.lock().unwrap();
-            let workspace = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id)
-                .to_string_lossy()
-                .to_string();
-            let project = wardian_core::db::project_name_from_workspace(&workspace);
-            let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
-                session_id: &config.session_id,
-                session_name: &config.session_name,
-                agent_class: &config.agent_class,
-                provider: &config.provider,
-                workspace: Some(&workspace),
-                project: project.as_deref(),
-                is_off: config.is_off,
-                created_at: born.as_deref(),
-            });
+            if !sessions.iter().any(|existing| existing == &session_id) {
+                sessions.push(session_id);
+            }
         }
-
-        // 8. Swap the struct
-        let _ = std::mem::replace(agent, new_active);
-        manager::save_state(&app, &agents, &order);
-
-        // 9. Force a frontend refresh and terminal resize to clear glitches
-        let _ = app.emit("agents-updated", ());
-        let _ = app.emit(
-            "agent-terminal-resize",
-            serde_json::json!({ "session_id": session_id, "rows": 24, "cols": 80 }),
-        );
-        let _ = app.emit(
-            "agent-pty-output-ready",
-            serde_json::json!({ "session_id": session_id }),
-        );
-        Ok(())
+        sessions
     } else {
-        Err(format!("Agent {} not found", session_id))
+        Vec::new()
+    };
+    prepare_clear_config(&mut config)?;
+    if config.provider == "codex" {
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions = previous_codex_provider_sessions.clone();
+        config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
     }
+
+    // For providers that bootstrap via obtain_session_id (e.g. Gemini), run the same
+    // bootstrap after clear so the fresh session gets a trackable provider session ID.
+    // Without this, resume_session stays None and log/status tracking breaks.
+    if provider_needs_obtain_session_id_on_clear(&config.provider) {
+        let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+        match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config)).await {
+            Ok(new_session_id) if !new_session_id.is_empty() => {
+                manager::log_debug(&format!(
+                    "[WARDIAN] clear_agent_session: obtained fresh {} session ID: {}",
+                    config.provider, new_session_id
+                ));
+                config.resume_session = Some(new_session_id);
+            }
+            Ok(_) => {
+                manager::log_debug(&format!(
+                    "[WARDIAN] clear_agent_session: obtain_session_id returned empty ID for {}",
+                    config.provider
+                ));
+            }
+            Err(e) => {
+                manager::log_debug(&format!(
+                    "[WARDIAN] clear_agent_session: failed to obtain fresh {} session ID: {}",
+                    config.provider, e
+                ));
+            }
+        }
+    }
+
+    let _ = app.emit(
+        "agent-terminal-cleared",
+        terminal_cleared_payload(&session_id),
+    );
+
+    // 5. Spawn a FRESH process (is_restored = false) outside the global agent lock.
+    // This ensures Claude uses --session-id and others start clean.
+    let new_active =
+        manager::spawn_agent(app.clone(), config, false, prepared.init_timestamp.clone()).await?;
+
+    {
+        let mut new_config = new_active.config.lock().unwrap();
+        if provider_uses_manual_session_id(&prepared.config.provider) {
+            if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
+                new_config.resume_session = Some(fresh_provider_session_id);
+            }
+        }
+    }
+
+    let new_stdin_tx = new_active.stdin_tx.clone();
+    let db_snapshot = {
+        let config = new_active.config.lock().unwrap();
+        let born = new_active.init_timestamp.lock().unwrap();
+        let workspace = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id)
+            .to_string_lossy()
+            .to_string();
+        let project = wardian_core::db::project_name_from_workspace(&workspace);
+        (
+            config.session_id.clone(),
+            config.session_name.clone(),
+            config.agent_class.clone(),
+            config.provider.clone(),
+            workspace,
+            project,
+            config.is_off,
+            born.clone(),
+        )
+    };
+
+    let mut pending_new_active = Some(new_active);
+    let (state_snapshot, mut displaced_agent) = {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        let Some(agent) = agents.get_mut(&session_id) else {
+            drop(order);
+            drop(agents);
+            if let Some(mut active) = pending_new_active {
+                manager::terminate_active_agent_process(&mut active);
+            }
+            return Err(format!("Agent {} not found", session_id));
+        };
+        let inserted = pending_new_active
+            .take()
+            .expect("new active agent should still be pending");
+        let displaced_agent = std::mem::replace(agent, inserted);
+
+        if let Ok(mut senders) = state.input_senders.write() {
+            match new_stdin_tx {
+                Some(tx) => {
+                    senders.insert(session_id.clone(), tx);
+                }
+                None => {
+                    senders.remove(&session_id);
+                }
+            }
+        };
+        (
+            manager::state_configs_snapshot(&agents, &order),
+            displaced_agent,
+        )
+    };
+    manager::terminate_active_agent_process(&mut displaced_agent);
+    manager::save_state_snapshot(&app, &state_snapshot);
+
+    // 7. Update agent metadata in SQLite after the replacement is committed.
+    let _ = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: &db_snapshot.0,
+        session_name: &db_snapshot.1,
+        agent_class: &db_snapshot.2,
+        provider: &db_snapshot.3,
+        workspace: Some(&db_snapshot.4),
+        project: db_snapshot.5.as_deref(),
+        is_off: db_snapshot.6,
+        created_at: db_snapshot.7.as_deref(),
+    });
+
+    // 9. Force a frontend refresh and terminal resize to clear glitches
+    let _ = app.emit("agents-updated", ());
+    let _ = app.emit(
+        "agent-terminal-resize",
+        serde_json::json!({ "session_id": session_id, "rows": 24, "cols": 80 }),
+    );
+    let _ = app.emit(
+        "agent-pty-output-ready",
+        serde_json::json!({ "session_id": session_id }),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -2681,18 +2836,19 @@ mod tests {
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
-        collect_agent_worktrees, disable_worktree_config, enable_worktree_config,
-        ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
-        generated_agent_name, insert_new_agent_order, mark_agent_paused_off,
-        normalize_clone_folder_override, normalize_spawn_folder,
-        persisted_resume_session_for_provider, prepare_clear_config,
-        prepare_restored_config_for_spawn, prepare_resume_config,
+        collect_agent_worktrees, detach_agent_for_kill, disable_worktree_config,
+        enable_worktree_config, ensure_provider_available_before_session_bootstrap,
+        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
+        lock_agent_lifecycle, mark_agent_paused_off, normalize_clone_folder_override,
+        normalize_spawn_folder, persisted_resume_session_for_provider, prepare_agent_for_clear,
+        prepare_clear_config, prepare_restored_config_for_spawn, prepare_resume_config,
         prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         reserve_spawn_session_name, resolve_agent_worktree_branch_name,
         resolve_agent_worktree_path, resolve_requested_spawn_session_name,
         restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        terminal_cleared_payload, AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection,
+        take_agent_runtime_for_termination, terminal_cleared_payload, AgentOrderPlacement,
+        CloneProfileCopyPlan, CloneProfileSelection,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -4283,6 +4439,109 @@ mod tests {
 
         sync_resumed_input_sender(&state, "agent-1", None);
         assert!(!state.input_senders.read().unwrap().contains_key("agent-1"));
+    }
+
+    #[test]
+    fn detach_agent_for_kill_removes_live_state_and_input_sender() {
+        let mut agents = std::collections::HashMap::new();
+        let mut order = vec!["agent-1".to_string(), "agent-2".to_string()];
+        let input_senders = std::sync::RwLock::new(std::collections::HashMap::new());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+        let agent = make_test_agent();
+        agent.config.lock().unwrap().session_id = "agent-1".to_string();
+        agents.insert("agent-1".to_string(), agent);
+        agents.insert("agent-2".to_string(), make_test_agent());
+
+        let detached = detach_agent_for_kill(&mut agents, &mut order, &input_senders, "agent-1")
+            .expect("agent should be detached");
+
+        assert_eq!(detached.config.lock().unwrap().session_id, "agent-1");
+        assert!(!agents.contains_key("agent-1"));
+        assert!(agents.contains_key("agent-2"));
+        assert_eq!(order, vec!["agent-2".to_string()]);
+        assert!(!input_senders.read().unwrap().contains_key("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn lock_agent_lifecycle_serializes_same_session() {
+        let state = Arc::new(AppState::new());
+        let first_guard = lock_agent_lifecycle(&state, "agent-1").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state_for_task = Arc::clone(&state);
+
+        let waiter = tokio::spawn(async move {
+            let _second_guard = lock_agent_lifecycle(&state_for_task, "agent-1").await;
+            tx.send(()).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(rx.try_recv().is_err());
+
+        drop(first_guard);
+        rx.recv()
+            .await
+            .expect("second lifecycle lock should acquire");
+        waiter.await.unwrap();
+    }
+
+    #[test]
+    fn take_agent_runtime_for_termination_detaches_process_related_state() {
+        let mut active = make_test_agent();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        active.stdin_tx = Some(tx);
+        active.process_id = Some(12345);
+        active.pty_master = None;
+
+        let detached = take_agent_runtime_for_termination(&mut active);
+
+        assert_eq!(detached.process_id, Some(12345));
+        assert!(detached.stdin_tx.is_some());
+        assert_eq!(active.process_id, None);
+        assert!(active.stdin_tx.is_none());
+        assert!(active.child_process.is_none());
+        assert!(active.background_processes.is_empty());
+    }
+
+    #[test]
+    fn prepare_agent_for_clear_resets_visible_runtime_without_terminating_inline() {
+        let mut active = make_test_agent();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        active.stdin_tx = Some(tx);
+        active.process_id = Some(12345);
+        active.output_buffer.lock().unwrap().push_str("old output");
+        *active.terminal_title.lock().unwrap() = "Old Title".to_string();
+        *active.current_status.lock().unwrap() = "Idle".to_string();
+        *active.query_count.lock().unwrap() = 5;
+        *active.log_path.lock().unwrap() = Some(std::path::PathBuf::from("D:/tmp/agent.log"));
+        *active.log_last_modified.lock().unwrap() = Some(std::time::SystemTime::now());
+        *active.init_timestamp.lock().unwrap() = Some("2026-05-20T00:00:00Z".to_string());
+
+        let prepared = prepare_agent_for_clear(&mut active);
+
+        assert_eq!(prepared.termination.process_id, Some(12345));
+        assert_eq!(
+            prepared.config.session_id,
+            active.config.lock().unwrap().session_id
+        );
+        assert_eq!(
+            prepared.init_timestamp.as_deref(),
+            Some("2026-05-20T00:00:00Z")
+        );
+        assert_eq!(active.process_id, None);
+        assert!(active.stdin_tx.is_none());
+        assert_eq!(active.output_buffer.lock().unwrap().as_str(), "");
+        assert_eq!(active.terminal_title.lock().unwrap().as_str(), "");
+        assert_eq!(
+            active.current_status.lock().unwrap().as_str(),
+            "Processing..."
+        );
+        assert_eq!(*active.query_count.lock().unwrap(), 0);
+        assert!(active.log_path.lock().unwrap().is_none());
+        assert!(active.log_last_modified.lock().unwrap().is_none());
     }
 
     #[test]

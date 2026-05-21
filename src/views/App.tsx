@@ -71,6 +71,8 @@ const ACTIVE_STATUSES = new Set(["Processing...", "Headless", "Action Needed"]);
 const NATIVE_WINDOW_WIDTH_VAR = "--wardian-native-window-width";
 const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
 const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
+const MIN_NATIVE_WINDOW_WIDTH_PX = 320;
+const MIN_NATIVE_WINDOW_HEIGHT_PX = 240;
 
 type NativeWindowResizePayload = {
   width?: number;
@@ -85,10 +87,14 @@ type NativeWindowCssSize = {
 let syntheticNativeResizeDepth = 0;
 let lastNativeResizePayloadAtMs = 0;
 
-function toCssPixelLength(value: number | undefined) {
+function toCssPixelValue(value: number | undefined) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
   const deviceScale = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
-  return `${Math.max(1, Math.round(value / deviceScale))}px`;
+  return Math.max(1, Math.round(value / deviceScale));
+}
+
+function toCssPixelLength(value: number) {
+  return `${value}px`;
 }
 
 function hasTauriGlobal() {
@@ -117,12 +123,13 @@ function setNativeWindowCssSize(size: NativeWindowCssSize) {
 }
 
 function applyNativeWindowSizeFromPayload(payload: NativeWindowResizePayload | undefined) {
-  const width = toCssPixelLength(payload?.width);
-  const height = toCssPixelLength(payload?.height);
+  const width = toCssPixelValue(payload?.width);
+  const height = toCssPixelValue(payload?.height);
   if (!width || !height) return false;
+  if (width < MIN_NATIVE_WINDOW_WIDTH_PX || height < MIN_NATIVE_WINDOW_HEIGHT_PX) return false;
 
   lastNativeResizePayloadAtMs = Date.now();
-  setNativeWindowCssSize({ width, height });
+  setNativeWindowCssSize({ width: toCssPixelLength(width), height: toCssPixelLength(height) });
   return true;
 }
 

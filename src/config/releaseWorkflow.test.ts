@@ -85,6 +85,13 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow.match(/--config src-tauri\/tauri\.updater\.conf\.json/g)).toHaveLength(3);
   });
 
+  it("keeps native window minimums aligned with the frontend resize guard", () => {
+    const windowConfig = JSON.parse(tauriConfig).app.windows[0];
+
+    expect(windowConfig.minWidth).toBe(320);
+    expect(windowConfig.minHeight).toBe(240);
+  });
+
   it("validates updater metadata before publishing releases", () => {
     expect(releaseWorkflow).toContain("Validate updater metadata");
     expect(releaseWorkflow).toContain("latest.json");
