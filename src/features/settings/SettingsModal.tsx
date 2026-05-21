@@ -707,7 +707,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         </aside>
 
         <div className="flex min-w-0 flex-col overflow-hidden">
-          <header className="flex items-center gap-3 border-b border-wardian-border px-6 py-4">
+          <header className="relative flex items-start gap-3 border-b border-wardian-border px-6 py-4 pr-16">
             <div className="min-w-0 flex-1">
               <h2 className="text-xl font-semibold text-primary">Settings</h2>
               <div className="mt-3 flex max-w-xl items-center gap-2 rounded-md border border-wardian-border bg-wardian-input-bg px-3 py-2">
@@ -725,7 +725,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               type="button"
               aria-label="Close settings"
               onClick={onClose}
-              className="rounded-lg border border-transparent p-2 text-muted-neutral transition-colors hover:border-wardian-border hover:text-primary"
+              className="absolute right-6 top-4 rounded-lg border border-transparent p-2 text-muted-neutral transition-colors hover:border-wardian-border hover:text-primary"
             >
               <X className="h-4 w-4" strokeWidth={2} />
             </button>
