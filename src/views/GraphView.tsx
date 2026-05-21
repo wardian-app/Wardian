@@ -109,7 +109,12 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   };
 
   return (
-    <div data-testid="graph-view" className="graph-view" onContextMenu={(event) => event.stopPropagation()}>
+    <div
+      data-testid="graph-view"
+      className="graph-view"
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.stopPropagation()}
+    >
       <div className="graph-toolbar">
         <div className="graph-scope">
           <div className="label-small">Scope</div>
