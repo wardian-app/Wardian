@@ -213,13 +213,19 @@ async fn submit_pairing(
     {
         let state = ctx.app.state::<crate::state::AppState>();
         let mut runtime = state.remote_runtime.lock().await;
-        check_runtime_rate_limit(
+        if let Err(error) = check_runtime_rate_limit(
             &mut runtime,
             &format!("pairing_submit:{}", request.pairing_offer_id.trim()),
             now_ms,
             10,
             60_000,
-        )?;
+        ) {
+            audit_gateway_event_without_session(
+                Some(&origin),
+                GatewayAuditEvent::rejected("pairing", "submit", "rate_limited"),
+            );
+            return Err(error);
+        }
         let offer = match crate::remote::auth::consume_pairing_offer(
             &mut runtime,
             request.pairing_offer_id.trim(),
@@ -309,13 +315,20 @@ async fn create_auth_challenge(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let state = ctx.app.state::<crate::state::AppState>();
     let mut runtime = state.remote_runtime.lock().await;
-    check_runtime_rate_limit(
+    if let Err(error) = check_runtime_rate_limit(
         &mut runtime,
         &format!("auth_challenge:{}", device.device_id),
         now_ms,
         5,
         60_000,
-    )?;
+    ) {
+        audit_gateway_event_without_session(
+            Some(&origin),
+            GatewayAuditEvent::rejected("authentication", "challenge", "rate_limited")
+                .target("device", &device.device_id),
+        );
+        return Err(error);
+    }
     let challenge = crate::remote::auth::create_auth_challenge(
         &mut runtime,
         &device.device_id,
@@ -349,13 +362,20 @@ async fn create_auth_session(
     let challenge = {
         let state = ctx.app.state::<crate::state::AppState>();
         let mut runtime = state.remote_runtime.lock().await;
-        check_runtime_rate_limit(
+        if let Err(error) = check_runtime_rate_limit(
             &mut runtime,
             &format!("auth_session:{}", device.device_id),
             now_ms,
             5,
             10 * 60_000,
-        )?;
+        ) {
+            audit_gateway_event_without_session(
+                Some(&origin),
+                GatewayAuditEvent::rejected("authentication", "session", "rate_limited")
+                    .target("device", &device.device_id),
+            );
+            return Err(error);
+        }
         match crate::remote::auth::consume_auth_challenge(
             &mut runtime,
             request.challenge_id.trim(),

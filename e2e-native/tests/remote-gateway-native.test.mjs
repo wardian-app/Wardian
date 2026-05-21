@@ -130,6 +130,49 @@ async function assertStatusStreamClosesWithoutTicket(baseUrl, canonicalOrigin, p
   });
 }
 
+function readRemoteAuditRecords(harness) {
+  const auditPath = path.join(harness.isolatedHome, "remote-access", "audit.jsonl");
+  if (!fs.existsSync(auditPath)) return [];
+  return fs
+    .readFileSync(auditPath, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function assertPreAuthRateLimitIsAudited(baseUrl, canonicalOrigin, deviceId, harness) {
+  let rateLimited = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const response = await fetch(`${baseUrl}/remote/api/auth/challenge`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: canonicalOrigin,
+      },
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+    if (response.status === 429) {
+      rateLimited = true;
+      break;
+    }
+    await assertStatus(response, 200, `extra auth challenge ${attempt}`);
+  }
+  assert.equal(rateLimited, true, "auth challenge rate limit was not reached");
+  const records = readRemoteAuditRecords(harness);
+  assert.equal(
+    records.some(
+      (record) =>
+        record.origin === canonicalOrigin &&
+        record.event_type === "authentication" &&
+        record.action === "challenge" &&
+        record.outcome === "rejected" &&
+        record.error_code === "rate_limited",
+    ),
+    true,
+    "auth challenge rate-limit rejection was not written to the remote audit log",
+  );
+}
+
 test("remote gateway authenticates native app agent reads", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
   try {
@@ -262,6 +305,8 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
 
   const sessionBody = await sessionResponse.json();
   assert.ok(sessionBody.csrf_nonce);
+
+  await assertPreAuthRateLimitIsAudited(baseUrl, canonicalOrigin, pairedDevice.device_id, harness);
 
   const unauthorized = await fetch(`${baseUrl}/remote/api/agents`);
   assert.equal(unauthorized.status, 401);

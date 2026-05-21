@@ -150,9 +150,6 @@ pub async fn debug_create_remote_session(
     device_id: String,
     session_id: Option<String>,
 ) -> Result<crate::remote::models::AuthSessionResponse, String> {
-    if !cfg!(debug_assertions) {
-        return Err("debug commands are disabled in production builds".to_string());
-    }
     if std::env::var("WARDIAN_E2E").ok().as_deref() != Some("1") {
         return Err("debug remote sessions require WARDIAN_E2E=1".to_string());
     }
