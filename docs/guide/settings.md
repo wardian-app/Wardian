@@ -88,7 +88,8 @@ main Grid view:
 - **Terminal** shows the provider terminal/TUI, including raw keyboard control,
   approvals, and raw output.
 - **Chat** shows normalized transcript and activity events for scanning multiple
-  agents, plus a compact prompt composer for standard text input.
+  agents, plus a compact prompt composer and clickable approval choices when
+  Wardian recognizes an action-required prompt.
 
 Use Terminal mode when you need raw TUI controls, provider-specific keybindings,
 or detailed terminal behavior.
@@ -159,9 +160,9 @@ OpenCode behavior.
 - Settings are global only in the current implementation.
 - Shell and runtime policy changes affect future launches and resumes; they do
   not reconfigure an already-running provider process.
-- Grid chat mode handles standard text prompts. Terminal mode is still required
-  for raw TUI controls and provider approval screens that need direct terminal
-  interaction.
+- Grid chat mode handles standard text prompts and recognized approval choices.
+  Terminal mode is still required for raw TUI controls and provider approval
+  screens that need direct terminal interaction.
 - Workflow Agent nodes have their own execution mode and do not simply inherit
   the regular-agent resume default.
 - Provider utilities are provider-specific.

@@ -174,7 +174,56 @@ describe("AgentChatView", () => {
 
     expect(await screen.findByText("Approval required")).toBeInTheDocument();
     expect(screen.getByText(/\$ Get-ChildItem -Path include/)).toBeInTheDocument();
-    expect(screen.getByText("Action required. Respond below or switch to terminal mode.")).toBeInTheDocument();
+    expect(screen.getByText("Action required. Choose a response or type below.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send approval response y: Yes" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send approval response n: No" })).toBeInTheDocument();
+  });
+
+  it("submits numbered approval choices through the provider submit command", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "load_agent_chat_transcript") {
+        return Promise.resolve([
+          event({
+            id: "approval-required",
+            kind: "approval",
+            role: null,
+            title: "Bash",
+            text: [
+              "Requesting permission for: cargo test -p Wardian",
+              "",
+              "Do you want to proceed?",
+              "> 1. Yes",
+              "  2. Yes, and always allow in this conversation for commands that start with",
+              "     'cargo test'",
+              "  3. No",
+            ].join("\n"),
+            command: "cargo test -p Wardian",
+            status: "action_required",
+            sequence: 1,
+          }),
+        ]);
+      }
+      if (command === "submit_prompt_to_agent") {
+        expect(args).toEqual({ sessionId: "agent-1", prompt: "2" });
+        return Promise.resolve(undefined);
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<AgentChatView sessionId="agent-1" status="Action Required" />);
+
+    const allowButton = await screen.findByRole("button", {
+      name: /Send approval response 2: Yes, and always allow/,
+    });
+    fireEvent.click(allowButton);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      sessionId: "agent-1",
+      prompt: "2",
+    }));
+    await waitFor(() => {
+      expect(within(screen.getByLabelText("user message")).getByText("2")).toBeInTheDocument();
+    });
   });
 
   it("groups adjacent work events and surfaces changed files", async () => {

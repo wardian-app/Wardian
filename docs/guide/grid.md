@@ -32,7 +32,7 @@ Grid cards can render either:
 
 Change this globally in **Settings > Grid > Grid card display**. The setting applies to the entire main Grid view. Card-level overrides are not available yet.
 
-Chat mode sends ordinary text through the same provider submit path used by Wardian's command tools. Use **Enter** to send and **Shift+Enter** for a newline in the composer. Switch back to Terminal mode when you need raw TUI controls, provider-specific keybindings, or detailed terminal behavior.
+Chat mode sends ordinary text through the same provider submit path used by Wardian's command tools. Use **Enter** to send and **Shift+Enter** for a newline in the composer. When Wardian recognizes an action-required prompt with approval choices, Chat mode renders those choices as buttons that submit the matching response. Switch back to Terminal mode when you need raw TUI controls, provider-specific keybindings, or detailed terminal behavior.
 
 ![Grid chat mode showing normalized agent messages, action-needed output, and prompt composers](../assets/screenshots/grid-chat/chat-composer.png)
 
@@ -40,7 +40,7 @@ Chat mode sends ordinary text through the same provider submit path used by Ward
 
 - Grid only shows agents that have active or restorable Wardian sessions.
 - Chat mode depends on provider transcript/watch data. If a provider does not expose structured activity, Wardian falls back to retained terminal output where possible.
-- Action-required prompts can be answered from the chat composer when the provider accepts text input. Terminal mode remains the fallback for provider-specific approval screens.
+- Action-required prompts can be answered from the chat composer or clickable approval choices when the provider accepts text input. Terminal mode remains the fallback for provider-specific approval screens.
 - Terminal state is preserved across common remounts, but provider TUIs can still repaint after resize or reconnect events.
 - Use [Command Panel](./command-panel.md) for repeatable fan-out messages instead of typing the same text into each terminal.
 

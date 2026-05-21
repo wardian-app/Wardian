@@ -48,6 +48,7 @@ type ChatRow =
   | { kind: "work_group"; id: string; events: AgentChatEvent[]; changedPaths: string[] };
 
 type CopyState = "idle" | "copied" | "error";
+type ApprovalChoice = { value: string; label: string };
 
 export function AgentChatView({
   sessionId,
@@ -111,15 +112,15 @@ export function AgentChatView({
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const disabledReason = inputDisabledReason(status ?? telemetry?.current_status ?? null, isSubmitting);
 
-  const handleSubmit = async () => {
-    const prompt = draft.trim();
+  const submitPrompt = async (promptValue: string, clearDraft: boolean) => {
+    const prompt = promptValue.trim();
     if (!prompt || disabledReason) return;
 
     setIsSubmitting(true);
     setSubmitError(null);
     try {
       await submitInputToAgent(sessionId, prompt);
-      setDraft("");
+      if (clearDraft) setDraft("");
       setPendingMessages((pending) => [
         ...pending,
         createPendingUserMessage(sessionId, agent?.provider ?? provider ?? providerFromEvents(events), prompt, maxSequence(events)),
@@ -130,6 +131,14 @@ export function AgentChatView({
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleSubmit = () => {
+    void submitPrompt(draft, true);
+  };
+
+  const handleApprovalSubmit = (response: string) => {
+    void submitPrompt(response, false);
   };
 
   return (
@@ -147,7 +156,15 @@ export function AgentChatView({
           <ol className="space-y-2" data-testid="agent-chat-transcript">
             {chatRows.map((row) => (
               <li key={row.kind === "event" ? row.event.id : row.id}>
-                {row.kind === "work_group" ? <WorkGroupRow row={row} /> : <TranscriptEvent event={row.event} />}
+                {row.kind === "work_group" ? (
+                  <WorkGroupRow row={row} />
+                ) : (
+                  <TranscriptEvent
+                    event={row.event}
+                    isSubmitting={isSubmitting}
+                    onApprovalSubmit={handleApprovalSubmit}
+                  />
+                )}
               </li>
             ))}
           </ol>
@@ -166,8 +183,20 @@ export function AgentChatView({
   );
 }
 
-function TranscriptEvent({ event }: { event: AgentChatEvent }) {
-  return event.kind === "message" ? <MessageEvent event={event} /> : <ActivityEvent event={event} />;
+function TranscriptEvent({
+  event,
+  isSubmitting,
+  onApprovalSubmit,
+}: {
+  event: AgentChatEvent;
+  isSubmitting: boolean;
+  onApprovalSubmit: (response: string) => void;
+}) {
+  return event.kind === "message" ? (
+    <MessageEvent event={event} />
+  ) : (
+    <ActivityEvent event={event} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />
+  );
 }
 
 function MessageEvent({ event }: { event: AgentChatEvent }) {
@@ -238,11 +267,19 @@ function MessageBlockView({ block }: { block: MessageBlock }) {
   return <div className="break-words">{renderInlineMarkdown(block.content)}</div>;
 }
 
-function ActivityEvent({ event }: { event: AgentChatEvent }) {
+function ActivityEvent({
+  event,
+  isSubmitting,
+  onApprovalSubmit,
+}: {
+  event: AgentChatEvent;
+  isSubmitting: boolean;
+  onApprovalSubmit: (response: string) => void;
+}) {
   const block = toActivityBlock(event);
   if (event.kind === "status") return <StatusRow event={event} block={block} />;
   if (event.kind === "terminal_output") return <TerminalFallback block={block} />;
-  return <ActivityRow block={block} />;
+  return <ActivityRow event={event} block={block} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />;
 }
 
 function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }) {
@@ -335,10 +372,21 @@ function StatusRow({ event, block }: { event: AgentChatEvent; block: ActivityBlo
   );
 }
 
-function ActivityRow({ block }: { block: ActivityBlockModel }) {
+function ActivityRow({
+  event,
+  block,
+  isSubmitting,
+  onApprovalSubmit,
+}: {
+  event: AgentChatEvent;
+  block: ActivityBlockModel;
+  isSubmitting: boolean;
+  onApprovalSubmit: (response: string) => void;
+}) {
   const [expanded, setExpanded] = useState(!block.defaultCollapsed);
   const visibleContent = expanded ? block.content : previewContent(block.content);
   const isApproval = block.kind === "approval" || block.tone === "warning";
+  const approvalChoices = isApproval ? parseApprovalChoices(event.text ?? block.content) : [];
 
   return (
     <article className={`border-l-2 bg-[var(--color-wardian-card-bg-muted)] px-3 py-2 ${TONE_CLASSES[block.tone]}`}>
@@ -365,7 +413,24 @@ function ActivityRow({ block }: { block: ActivityBlockModel }) {
       </div>
       {isApproval ? (
         <div className="mt-2 rounded border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_45%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_92%)] px-2 py-1 text-[11px] leading-4 text-muted-neutral">
-          Action required. Respond below or switch to terminal mode.
+          {approvalChoices.length > 0 ? "Action required. Choose a response or type below." : "Action required. Respond below or switch to terminal mode."}
+        </div>
+      ) : null}
+      {approvalChoices.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5" aria-label="Approval choices">
+          {approvalChoices.map((choice) => (
+            <button
+              type="button"
+              key={`${choice.value}-${choice.label}`}
+              aria-label={`Send approval response ${choice.value}: ${choice.label}`}
+              className="inline-flex max-w-full items-center gap-1.5 rounded border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_35%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] px-2 py-1 text-left text-[11px] font-semibold leading-4 text-primary transition-colors hover:bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isSubmitting}
+              onClick={() => onApprovalSubmit(choice.value)}
+            >
+              <span className="shrink-0 font-mono text-[var(--color-wardian-warning)]">{choice.value}</span>
+              <span className="min-w-0 truncate">{choice.label}</span>
+            </button>
+          ))}
         </div>
       ) : null}
       <pre className="mt-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-words rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] p-2 text-[12px] leading-5 text-primary">
@@ -373,6 +438,53 @@ function ActivityRow({ block }: { block: ActivityBlockModel }) {
       </pre>
     </article>
   );
+}
+
+function parseApprovalChoices(text: string): ApprovalChoice[] {
+  const numbered = parseNumberedApprovalChoices(text);
+  if (numbered.length > 0) return numbered;
+
+  if (!looksLikeApprovalPrompt(text)) return [];
+  return [
+    { value: "y", label: "Yes" },
+    { value: "n", label: "No" },
+  ];
+}
+
+function parseNumberedApprovalChoices(text: string): ApprovalChoice[] {
+  const choices: ApprovalChoice[] = [];
+  let current: ApprovalChoice | null = null;
+
+  text.replace(/\r\n|\r/g, "\n").split("\n").forEach((line) => {
+    const match = line.match(/^\s*(?:[>*-]\s*)?(\d{1,2})[.)]\s+(.+?)\s*$/);
+    if (match) {
+      current = { value: match[1], label: normalizeApprovalLabel(match[2]) };
+      choices.push(current);
+      return;
+    }
+
+    if (current && shouldAppendApprovalContinuation(line)) {
+      current.label = normalizeApprovalLabel(`${current.label} ${line.trim()}`);
+    }
+  });
+
+  return choices.filter((choice) => choice.label.length > 0);
+}
+
+function normalizeApprovalLabel(label: string): string {
+  return label.replace(/\s+/g, " ").trim();
+}
+
+function shouldAppendApprovalContinuation(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^(esc|ctrl|tab|enter|shift|navigate)\b/i.test(trimmed)) return false;
+  if (/^(command|do you want|requesting permission|action required)\b/i.test(trimmed)) return false;
+  return !/^[─-]{3,}$/.test(trimmed);
+}
+
+function looksLikeApprovalPrompt(text: string): boolean {
+  return /\b(action required|approval|required permission|requesting permission|do you want to proceed|approve|deny)\b/i.test(text);
 }
 
 function TerminalFallback({ block }: { block: ActivityBlockModel }) {
