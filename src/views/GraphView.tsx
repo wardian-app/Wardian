@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { PanelRightOpen, X } from "lucide-react";
+import { PanelRightOpen, RotateCcw, X } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
@@ -58,6 +58,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     Array.from(props.selectedAgentIds)[0] ?? null,
   );
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [resetSignal, setResetSignal] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
 
   const projection = useMemo(() => buildAgentGraph({
@@ -139,6 +140,15 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           ))}
         </div>
         <div className="graph-toolbar-action">
+          <button
+            type="button"
+            className="graph-icon-button"
+            aria-label="Reset graph view"
+            title="Reset graph view"
+            onClick={() => setResetSignal((value) => value + 1)}
+          >
+            <RotateCcw size={14} strokeWidth={2.2} />
+          </button>
           {!inspectorOpen && (
             <button
               type="button"
@@ -160,6 +170,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           ) : (
             <GraphCanvas
               projection={projection}
+              resetSignal={resetSignal}
               onSelectAgent={selectAgent}
               onOpenAgent={props.onOpenAgentInGrid}
               onContextMenu={openContextMenu}
@@ -224,7 +235,14 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                       const neighborId = edge.source === inspectedAgent.id ? edge.target : edge.source;
                       const neighbor = projection.nodes.find((node) => node.id === neighborId);
                       return (
-                        <li key={edge.id}>
+                        <li
+                          key={edge.id}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            openContextMenu(neighborId, event.clientX, event.clientY);
+                          }}
+                        >
                           <span>{neighbor?.label ?? neighborId}</span>
                           <small>{edge.reasons.join(", ").replace(/_/g, " ")}</small>
                         </li>

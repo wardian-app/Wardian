@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
 import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProjection";
@@ -12,6 +12,7 @@ const EDGE_REASON_COLORS: Record<GraphRelationshipReason, string> = {
 
 interface GraphCanvasProps {
   projection: AgentGraphProjection;
+  resetSignal?: number;
   onSelectAgent: (agentId: string) => void;
   onOpenAgent: (agentId: string) => void;
   onContextMenu: (agentId: string, x: number, y: number) => void;
@@ -23,13 +24,24 @@ interface SigmaNodePayload {
 
 interface SigmaPointerPayload extends SigmaNodePayload {
   event?: {
+    x?: number;
+    y?: number;
     original?: MouseEvent | TouchEvent;
     originalEvent?: MouseEvent | TouchEvent;
   };
 }
 
+interface SigmaEdgePayload {
+  edge: string;
+  event?: {
+    x?: number;
+    y?: number;
+  };
+}
+
 export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   projection,
+  resetSignal = 0,
   onSelectAgent,
   onOpenAgent,
   onContextMenu,
@@ -37,11 +49,17 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
   const rendererRef = useRef<Sigma | null>(null);
+  const projectionRef = useRef(projection);
   const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu });
+  const [tooltip, setTooltip] = useState<{ x: number; y: number; title: string; detail?: string } | null>(null);
 
   useEffect(() => {
     handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu };
   }, [onSelectAgent, onOpenAgent, onContextMenu]);
+
+  useEffect(() => {
+    projectionRef.current = projection;
+  }, [projection]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -73,6 +91,25 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       const point = pointerPosition(original);
       handlersRef.current.onContextMenu(agentId, point.x, point.y);
     });
+    renderer.on("enterNode", ({ node, event }: SigmaPointerPayload) => {
+      const agentId = graphNodeToAgentId(node);
+      const graphNode = projectionRef.current.nodes.find((candidate) => candidate.id === agentId);
+      if (!graphNode) return;
+      const point = sigmaPointerPosition(event);
+      setTooltip({ x: point.x, y: point.y, title: graphNode.label, detail: graphNode.status });
+    });
+    renderer.on("leaveNode", () => setTooltip(null));
+    renderer.on("enterEdge", ({ edge, event }: SigmaEdgePayload) => {
+      const graphEdge = projectionRef.current.edges.find((candidate) => candidate.id === edge);
+      if (!graphEdge) return;
+      const point = sigmaPointerPosition(event);
+      setTooltip({
+        x: point.x,
+        y: point.y,
+        title: graphEdge.reasons.map(formatRelationshipReason).join(", "),
+      });
+    });
+    renderer.on("leaveEdge", () => setTooltip(null));
 
     return () => {
       renderer.kill();
@@ -131,7 +168,27 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     renderer.refresh();
   }, [projection]);
 
-  return <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas" />;
+  const previousResetSignalRef = useRef(resetSignal);
+  useEffect(() => {
+    if (previousResetSignalRef.current === resetSignal) return;
+    previousResetSignalRef.current = resetSignal;
+    void rendererRef.current?.getCamera().animatedReset({ duration: 220 });
+  }, [resetSignal]);
+
+  return (
+    <div className="graph-canvas-frame">
+      <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas" />
+      {tooltip && (
+        <div
+          className="graph-tooltip"
+          style={{ left: tooltip.x + 12, top: tooltip.y + 12 }}
+        >
+          <strong>{tooltip.title}</strong>
+          {tooltip.detail && <span>{tooltip.detail}</span>}
+        </div>
+      )}
+    </div>
+  );
 };
 
 function pointerPosition(event: MouseEvent | TouchEvent | undefined) {
@@ -139,6 +196,10 @@ function pointerPosition(event: MouseEvent | TouchEvent | undefined) {
   if ("clientX" in event) return { x: event.clientX, y: event.clientY };
   const touch = event.touches[0] ?? event.changedTouches[0];
   return { x: touch?.clientX ?? 0, y: touch?.clientY ?? 0 };
+}
+
+function sigmaPointerPosition(event: { x?: number; y?: number } | undefined) {
+  return { x: event?.x ?? 0, y: event?.y ?? 0 };
 }
 
 function graphNodeToAgentId(node: string) {
@@ -157,6 +218,10 @@ function resolveGraphColor(color: string, container: HTMLElement) {
     .trim();
 
   return computed || match[2]?.trim() || color;
+}
+
+function formatRelationshipReason(reason: GraphRelationshipReason) {
+  return reason.replace(/_/g, " ");
 }
 
 function withAlpha(color: string, alpha: number) {

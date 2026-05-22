@@ -531,7 +531,6 @@ pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     apply_managed_cli_path_to_pty(cmd);
 }
 
-#[cfg(windows)]
 pub(crate) fn apply_managed_cli_path_to_pty(cmd: &mut CommandBuilder) {
     if let Some(path) =
         crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
@@ -540,10 +539,6 @@ pub(crate) fn apply_managed_cli_path_to_pty(cmd: &mut CommandBuilder) {
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) fn apply_managed_cli_path_to_pty(_cmd: &mut CommandBuilder) {}
-
-#[cfg(windows)]
 pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Command) {
     if let Some(path) =
         crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
@@ -551,9 +546,6 @@ pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Comman
         cmd.env("PATH", path);
     }
 }
-
-#[cfg(not(windows))]
-pub(crate) fn apply_managed_cli_path_to_process(_cmd: &mut tokio::process::Command) {}
 
 #[cfg(windows)]
 pub(crate) fn quote_cmd_arg(value: &str) -> String {
@@ -659,7 +651,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn terminal_identity_env_includes_managed_cli_path() {
         let _guard = crate::utils::wardian_test_env_lock();
@@ -667,7 +658,12 @@ mod tests {
         let previous_path = std::env::var_os("PATH");
         let home = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", home.path());
-        std::env::set_var("PATH", r"C:\Windows\System32");
+        let existing_path = if cfg!(windows) {
+            r"C:\Windows\System32"
+        } else {
+            "/usr/bin"
+        };
+        std::env::set_var("PATH", existing_path);
 
         let mut cmd = CommandBuilder::new("pwsh");
         apply_terminal_identity_env(&mut cmd);
@@ -678,7 +674,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(path.starts_with(&home.path().join("bin").display().to_string()));
-        assert!(path.ends_with(r"C:\Windows\System32"));
+        assert!(path.ends_with(existing_path));
 
         match previous_home {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),

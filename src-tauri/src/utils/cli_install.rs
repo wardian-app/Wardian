@@ -113,13 +113,20 @@ where
         InstallOutcome::AlreadyInstalled(launcher)
     };
 
-    let is_default_home = wardian_core::paths::wardian_home()
-        .as_deref()
-        .is_some_and(|home| home == target_home);
-    if std::env::var_os("WARDIAN_HOME").is_none() && is_default_home {
+    if should_update_user_path_for_target(target_home) {
         update_path(&target_dir)?;
     }
     Ok(outcome)
+}
+
+fn default_wardian_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".wardian"))
+}
+
+fn should_update_user_path_for_target(target_home: &Path) -> bool {
+    default_wardian_home()
+        .as_deref()
+        .is_some_and(|home| home == target_home)
 }
 
 fn bundled_cli_source_path(resources_dir: &Path) -> PathBuf {
@@ -221,6 +228,31 @@ pub(crate) fn child_path_with_cli_bin(current_path: Option<&str>) -> Option<Stri
         Some(bin_value)
     } else {
         Some(format!("{bin_value};{current_path}"))
+    }
+}
+
+#[cfg(unix)]
+fn path_contains_dir(path_value: &str, dir: &Path) -> bool {
+    let target = dir.to_string_lossy();
+    path_value
+        .split(':')
+        .any(|segment| !segment.trim().is_empty() && segment == target)
+}
+
+#[cfg(unix)]
+pub(crate) fn child_path_with_cli_bin(current_path: Option<&str>) -> Option<String> {
+    let bin_dir = wardian_core::paths::cli_bin_dir()?;
+    let bin_value = bin_dir.display().to_string();
+    let current_path = current_path.unwrap_or("");
+
+    if path_contains_dir(current_path, &bin_dir) {
+        return Some(current_path.to_string());
+    }
+
+    if current_path.trim().is_empty() {
+        Some(bin_value)
+    } else {
+        Some(format!("{bin_value}:{current_path}"))
     }
 }
 
@@ -447,6 +479,21 @@ mod tests {
             b"debug cli"
         );
         assert_eq!(path_updates, 0);
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[test]
+    fn user_path_update_depends_on_target_home_not_current_env_presence() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let default_home = default_wardian_home().expect("default home");
+        std::env::set_var("WARDIAN_HOME", &default_home);
+
+        assert!(should_update_user_path_for_target(&default_home));
 
         match previous_home {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),

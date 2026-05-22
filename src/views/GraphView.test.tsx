@@ -7,9 +7,11 @@ import { GraphView } from "./GraphView";
 
 vi.mock("../features/graph/GraphCanvas", () => ({
   GraphCanvas: ({
+    resetSignal,
     onSelectAgent,
     onContextMenu,
   }: {
+    resetSignal?: number;
     onSelectAgent: (id: string) => void;
     onContextMenu: (id: string, x: number, y: number) => void;
   }) => (
@@ -21,7 +23,7 @@ vi.mock("../features/graph/GraphCanvas", () => ({
         onContextMenu("a", 12, 24);
       }}
     >
-      node-a
+      node-a reset-{resetSignal ?? 0}
     </button>
   ),
 }));
@@ -161,6 +163,18 @@ describe("GraphView", () => {
     expect(screen.getByText("Query")).toBeInTheDocument();
   });
 
+  it("opens the context menu for a relationship row's neighbor agent", () => {
+    render(<GraphView {...defaultProps} />);
+
+    const betaRow = screen.getByText("Beta").closest("li");
+    expect(betaRow).toBeInTheDocument();
+
+    fireEvent.contextMenu(betaRow!, { clientX: 33, clientY: 44 });
+
+    expect(handlers.onSelectionChange).toHaveBeenCalledWith(new Set(["b"]));
+    expect(screen.getByTestId("agent-context-menu")).toBeInTheDocument();
+  });
+
   it("preserves multi-selection actions when right-clicking a selected graph node", async () => {
     render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a", "b"])} />);
 
@@ -190,6 +204,14 @@ describe("GraphView", () => {
     expect(workspaceLens).toHaveClass("active");
     fireEvent.click(workspaceLens);
     expect(workspaceLens).not.toHaveClass("active");
+  });
+
+  it("signals the graph canvas to reset its camera", () => {
+    render(<GraphView {...defaultProps} />);
+
+    expect(screen.getByTestId("mock-graph-node")).toHaveTextContent("reset-0");
+    fireEvent.click(screen.getByRole("button", { name: "Reset graph view" }));
+    expect(screen.getByTestId("mock-graph-node")).toHaveTextContent("reset-1");
   });
 
   it("shows empty state when no agents are visible", () => {

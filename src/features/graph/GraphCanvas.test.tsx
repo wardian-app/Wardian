@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Sigma from "sigma";
 import type { AgentGraphProjection } from "./graphProjection";
@@ -6,6 +6,7 @@ import { GraphCanvas } from "./GraphCanvas";
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (payload: unknown) => void>(),
+  animatedReset: vi.fn(),
   kill: vi.fn(),
   refresh: vi.fn(),
   graphology: {
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("sigma", () => ({
   default: vi.fn().mockImplementation(() => ({
     on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
+    getCamera: () => ({ animatedReset: mocks.animatedReset }),
     kill: mocks.kill,
     refresh: mocks.refresh,
   })),
@@ -71,6 +73,7 @@ const recentProjection: AgentGraphProjection = {
 describe("GraphCanvas", () => {
   beforeEach(() => {
     mocks.handlers.clear();
+    mocks.animatedReset.mockClear();
     mocks.kill.mockClear();
     mocks.refresh.mockClear();
     mocks.graphology.clear.mockClear();
@@ -264,6 +267,33 @@ describe("GraphCanvas", () => {
     expect(onSelectAgent).toHaveBeenCalledWith("a");
   });
 
+  it("shows node and edge tooltips on hover", () => {
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    act(() => {
+      mocks.handlers.get("enterNode")?.({ node: "a", event: { x: 11, y: 22 } });
+    });
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+    expect(screen.getByText("Idle")).toBeInTheDocument();
+
+    act(() => {
+      mocks.handlers.get("leaveNode")?.({ node: "a", event: { x: 11, y: 22 } });
+    });
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+
+    act(() => {
+      mocks.handlers.get("enterEdge")?.({ edge: "a--b", event: { x: 33, y: 44 } });
+    });
+    expect(screen.getByText("same team")).toBeInTheDocument();
+  });
+
   it("refreshes graph data without recreating the sigma renderer on projection changes", () => {
     const { rerender } = render(
       <GraphCanvas
@@ -290,6 +320,32 @@ describe("GraphCanvas", () => {
     expect(mocks.graphology.clear).toHaveBeenCalledTimes(2);
     expect(mocks.refresh).toHaveBeenCalledTimes(2);
     expect(mocks.kill).not.toHaveBeenCalled();
+  });
+
+  it("resets the sigma camera when the reset signal changes", () => {
+    const { rerender } = render(
+      <GraphCanvas
+        projection={projection}
+        resetSignal={0}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.animatedReset).not.toHaveBeenCalled();
+
+    rerender(
+      <GraphCanvas
+        projection={projection}
+        resetSignal={1}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.animatedReset).toHaveBeenCalledWith({ duration: 220 });
   });
 
   it("kills sigma on unmount", () => {
