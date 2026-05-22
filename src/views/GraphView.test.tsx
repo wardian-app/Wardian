@@ -1,4 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import { GraphView } from "./GraphView";
@@ -100,10 +102,23 @@ describe("GraphView", () => {
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByText("All Agents")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "shared workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "same worktree" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "same team" })).toHaveClass("graph-lens--same-team");
+    expect(screen.getByRole("button", { name: "shared workspace" })).toHaveClass("graph-lens--shared-workspace");
+    expect(screen.getByRole("button", { name: "same worktree" })).toHaveClass("graph-lens--same-worktree");
     expect(screen.queryByText("Action Required")).not.toBeInTheDocument();
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
+  });
+
+  it("centers relationship lenses against the graph canvas area", () => {
+    const { container } = render(<GraphView {...defaultProps} />);
+
+    expect(container.querySelector(".graph-view")).toHaveClass("graph-view--inspector-open");
+    expect(container.querySelector(".graph-toolbar")).toHaveClass("graph-toolbar--canvas-centered");
+
+    const appCss = readFileSync(resolve(process.cwd(), "src/styles/App.css"), "utf8");
+    expect(appCss).toMatch(/\.graph-toolbar--canvas-centered\s*\{[^}]*position:\s*relative;/s);
+    expect(appCss).toMatch(/\.graph-view--inspector-open\s+\.graph-toolbar--canvas-centered\s+\.graph-lenses\s*\{[^}]*right:\s*var\(--graph-inspector-width\);/s);
+    expect(appCss).toMatch(/\.graph-lenses\s*\{[^}]*position:\s*absolute;[^}]*left:\s*0;[^}]*right:\s*0;/s);
   });
 
   it("opens inspector when a node is selected", () => {

@@ -1,9 +1,14 @@
 import React, { useEffect, useRef } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
-import type { AgentGraphProjection } from "./graphProjection";
+import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProjection";
 
 const RECENT_HALO_SUFFIX = "__recent_halo";
+const EDGE_REASON_COLORS: Record<GraphRelationshipReason, string> = {
+  same_team: "var(--color-wardian-accent)",
+  shared_workspace: "var(--color-wardian-processing)",
+  same_worktree: "var(--color-wardian-warning)",
+};
 
 interface GraphCanvasProps {
   projection: AgentGraphProjection;
@@ -113,12 +118,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       });
     }
 
-    const edgeColor = resolveGraphColor("var(--color-wardian-border-heavy)", container);
     for (const edge of projection.edges) {
+      const primaryReason = edge.reasons[0] ?? "same_team";
       graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
-        size: Math.max(1, edge.weight),
-        color: edgeColor,
+        size: edge.reasons.length > 1 ? Math.max(3.25, edge.weight + 1.25) : Math.max(1.75, edge.weight),
+        color: resolveGraphColor(EDGE_REASON_COLORS[primaryReason], container),
         label: edge.reasons.join(", "),
+        type: "line",
       });
     }
 

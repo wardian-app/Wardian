@@ -696,8 +696,9 @@ select option {
   padding: 8px;
 }
 
-/* ── Communication Graph ─────────────────────────────── */
+/* ── Relationship Graph ─────────────────────────────── */
 .graph-view {
+  --graph-inspector-width: 280px;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -707,17 +708,25 @@ select option {
 }
 
 .graph-toolbar {
-  display: grid;
-  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr) 26px;
+  display: flex;
+  position: relative;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--color-wardian-border);
   background: var(--color-wardian-card);
 }
 
+.graph-toolbar--canvas-centered {
+  position: relative;
+}
+
 .graph-scope {
   min-width: 120px;
+  max-width: 220px;
+  position: relative;
+  z-index: 1;
 }
 
 .graph-scope-label {
@@ -734,18 +743,31 @@ select option {
 
 .graph-lenses {
   display: flex;
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
   align-items: center;
   justify-content: center;
   gap: 6px;
   flex-wrap: wrap;
+  pointer-events: none;
+}
+
+.graph-view--inspector-open .graph-toolbar--canvas-centered .graph-lenses {
+  right: var(--graph-inspector-width);
 }
 
 .graph-toolbar-action {
   width: 26px;
   height: 26px;
+  position: relative;
+  z-index: 1;
 }
 
 .graph-lens {
+  --graph-lens-color: var(--color-wardian-accent);
   height: 26px;
   padding: 0 9px;
   border: 1px solid var(--color-wardian-border);
@@ -755,12 +777,21 @@ select option {
   font-size: 10px;
   font-weight: 700;
   text-transform: capitalize;
+  pointer-events: auto;
+}
+
+.graph-lens--shared-workspace {
+  --graph-lens-color: var(--color-wardian-processing);
+}
+
+.graph-lens--same-worktree {
+  --graph-lens-color: var(--color-wardian-warning);
 }
 
 .graph-lens.active {
-  color: var(--color-wardian-accent);
-  border-color: var(--color-wardian-accent);
-  background: color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
+  color: var(--graph-lens-color);
+  border-color: var(--graph-lens-color);
+  background: color-mix(in srgb, var(--graph-lens-color), transparent 90%);
 }
 
 .graph-icon-button {
@@ -784,7 +815,7 @@ select option {
 
 .graph-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) var(--graph-inspector-width);
   flex: 1;
   min-height: 0;
 }

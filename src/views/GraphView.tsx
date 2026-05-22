@@ -113,14 +113,14 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   return (
     <div
       data-testid="graph-view"
-      className="graph-view"
+      className={`graph-view ${inspectorOpen ? "graph-view--inspector-open" : "graph-view--inspector-hidden"}`}
       onClick={(event) => {
         event.stopPropagation();
         if (!isInsideContextMenu(event.target)) setContextMenu(null);
       }}
       onContextMenu={(event) => event.stopPropagation()}
     >
-      <div className="graph-toolbar">
+      <div className="graph-toolbar graph-toolbar--canvas-centered">
         <div className="graph-scope">
           <div className="label-small">Scope</div>
           <div className="graph-scope-label">{projection.scopeLabel}</div>
@@ -131,7 +131,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
             <button
               key={reason}
               type="button"
-              className={`graph-lens ${enabledReasons.has(reason) ? "active" : ""}`}
+              className={`graph-lens graph-lens--${reason.replace(/_/g, "-")} ${enabledReasons.has(reason) ? "active" : ""}`}
               onClick={() => toggleReason(reason)}
             >
               {reason.replace(/_/g, " ")}

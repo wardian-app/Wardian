@@ -101,6 +101,71 @@ describe("GraphCanvas", () => {
     }));
   });
 
+  it("styles edge relationships by reason and makes multi-reason edges thicker", () => {
+    render(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          edges: [
+            {
+              id: "team",
+              source: "a",
+              target: "b",
+              reasons: ["same_team"],
+              weight: 1,
+            },
+            {
+              id: "workspace",
+              source: "a",
+              target: "c",
+              reasons: ["shared_workspace"],
+              weight: 1,
+            },
+            {
+              id: "worktree",
+              source: "a",
+              target: "d",
+              reasons: ["same_worktree"],
+              weight: 1,
+            },
+            {
+              id: "multi",
+              source: "a",
+              target: "e",
+              reasons: ["shared_workspace", "same_worktree"],
+              weight: 2,
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("team", "a", "b", expect.objectContaining({
+      color: "var(--color-wardian-accent)",
+      size: 1.75,
+      type: "line",
+    }));
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("workspace", "a", "c", expect.objectContaining({
+      color: "var(--color-wardian-processing)",
+      size: 1.75,
+      type: "line",
+    }));
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("worktree", "a", "d", expect.objectContaining({
+      color: "var(--color-wardian-warning)",
+      size: 1.75,
+      type: "line",
+    }));
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("multi", "a", "e", expect.objectContaining({
+      color: "var(--color-wardian-processing)",
+      label: "shared_workspace, same_worktree",
+      size: 3.25,
+      type: "line",
+    }));
+  });
+
   it("forces only selected labels while an agent is selected", () => {
     render(
       <GraphCanvas
