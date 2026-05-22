@@ -21,6 +21,8 @@ The fixed header at the top of the application acts as the global navigation and
 
 ![Wardian Dashboard view showing compact agent status rows and quick controls](../assets/screenshots/dashboard/system-summary.png)
 
+The **Graph** mode maps agents as status-colored nodes with relationship edges for same team, shared workspace, and same worktree. Use the centered relationship lenses to focus the map, and open the inspector or context menu from any node to use the same agent actions available in the roster.
+
 ### 2. Left Sidebar (Control & Context)
 
 The Left Sidebar provides the "Context" for your work. It consists of:
@@ -70,6 +72,7 @@ Wardian preserves terminal state across grid remounts so interactive TUIs, inclu
 
 - [Grid](./grid.md)
 - [Dashboard](./dashboard.md)
+- [Graph](./graph.md)
 - [Watchlists](./watchlists.md)
 - [Command Panel](./command-panel.md)
 - [Source Control](./source-control.md)
