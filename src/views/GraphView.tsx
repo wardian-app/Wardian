@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { PanelRightOpen, RotateCcw, X } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
@@ -78,6 +78,25 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     props.selectedAgentIds,
     enabledReasons,
   ]);
+  const projectionNodeIds = useMemo(
+    () => new Set(projection.nodes.map((node) => node.id)),
+    [projection.nodes],
+  );
+
+  useEffect(() => {
+    const selectedIds = Array.from(props.selectedAgentIds);
+    const selectedAgentId = selectedIds.length === 1 ? selectedIds[0] : null;
+
+    if (selectedAgentId && projectionNodeIds.has(selectedAgentId)) {
+      setInspectedAgentId((current) => current === selectedAgentId ? current : selectedAgentId);
+      return;
+    }
+
+    setInspectedAgentId((current) => {
+      if (current && projectionNodeIds.has(current)) return current;
+      return projection.nodes[0]?.id ?? null;
+    });
+  }, [projection.nodes, projectionNodeIds, props.selectedAgentIds]);
 
   const inspectedAgent = projection.nodes.find((node) => node.id === inspectedAgentId) ?? projection.nodes[0] ?? null;
   const relationshipEdges = inspectedAgent ? relatedEdges(projection.edges, inspectedAgent.id) : [];

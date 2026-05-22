@@ -133,6 +133,17 @@ describe("GraphView", () => {
     expect(screen.getByText("Coder / codex")).toBeInTheDocument();
   });
 
+  it("keeps the inspector aligned with external single-agent selection changes", () => {
+    const { rerender } = render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+    expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+
+    rerender(<GraphView {...defaultProps} selectedAgentIds={new Set(["b"])} />);
+
+    expect(screen.getByRole("heading", { name: "Beta" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Alpha" })).not.toBeInTheDocument();
+  });
+
   it("hides inspector and reopens it from a graph node", () => {
     const { container } = render(<GraphView {...defaultProps} />);
 
