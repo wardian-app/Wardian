@@ -46,6 +46,7 @@ describe("SettingsModal", () => {
       autoPatchGemini: false,
       terminalFontSize: 14,
       terminalFontFamily: "",
+      gridCardDisplayMode: "terminal",
       shell_id: "auto",
       custom_executable: "",
       custom_args: "",
@@ -222,6 +223,30 @@ describe("SettingsModal", () => {
         }),
       });
     });
+  });
+
+  it("loads and saves the Grid card display preference", async () => {
+    useSettingsStore.setState({ gridCardDisplayMode: "chat" });
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Grid" }));
+
+    const select = screen.getByLabelText("Grid card display");
+    expect(select).toHaveValue("chat");
+
+    fireEvent.change(select, { target: { value: "terminal" } });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            grid_card_display_mode: "terminal",
+          }),
+        }),
+      });
+    });
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe("terminal");
   });
 
   it("names the resolved default terminal choices", () => {

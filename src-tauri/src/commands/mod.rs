@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod chat;
 pub mod class;
 pub mod debug;
 pub mod fs;
@@ -12,6 +13,7 @@ pub mod watchlist;
 pub mod workflow;
 
 pub use agent::*;
+pub use chat::*;
 pub use class::*;
 pub use debug::*;
 pub use fs::*;

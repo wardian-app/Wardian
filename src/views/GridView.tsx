@@ -1,13 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
+import { AgentChatView } from "../features/grid/AgentChatView";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
 import type { Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { useLayoutStore } from "../store/useLayoutStore";
+import { useSettingsStore } from "../store/useSettingsStore";
 import { useGridResize } from "../features/grid/useGridResize";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
 const MIN_TERMINAL_CARD_WIDTH = 520;
+const MIN_CHAT_CARD_WIDTH = 360;
 
 interface GridViewProps {
   filteredAgents: AgentConfig[];
@@ -82,6 +85,7 @@ export const GridView: React.FC<GridViewProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { layout, resetLayout, gridStacked } = useLayoutStore();
+  const gridCardDisplayMode = useSettingsStore((state) => state.gridCardDisplayMode);
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
 
@@ -135,8 +139,9 @@ export const GridView: React.FC<GridViewProps> = ({
   const visibleRowCount = renderedColumnCount > 0
     ? Math.ceil(visibleAgents.length / renderedColumnCount)
     : 0;
+  const minCardWidth = gridCardDisplayMode === 'chat' ? MIN_CHAT_CARD_WIDTH : MIN_TERMINAL_CARD_WIDTH;
   const gridMinWidth = visibleAgents.length > 0
-    ? `${(renderedColumnCount * MIN_TERMINAL_CARD_WIDTH) + (Math.max(0, renderedColumnCount - 1) * 8)}px`
+    ? `${(renderedColumnCount * minCardWidth) + (Math.max(0, renderedColumnCount - 1) * 8)}px`
     : undefined;
 
   const gridStyle: React.CSSProperties = {
@@ -244,19 +249,31 @@ export const GridView: React.FC<GridViewProps> = ({
                </div>
             </div>
 
-            <div className={`terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text flex-1 relative min-h-[200px] block`}>
+            <div className="terminal-container p-4 overflow-hidden min-h-0 bg-wardian-bg transition-colors duration-300 select-text flex-1 relative min-h-[200px] block">
               <div 
                 className="absolute inset-4 select-text"
                 onClick={(e) => e.stopPropagation()}
               >
-                <AgentTerminal 
-                  sessionId={agentId} 
-                  provider={agent.provider}
-                  isMaximized={isAgentMaximized}
-                  theme={theme}
-                  onTerminalFocus={() => onTerminalFocus?.(agentId)}
-                  onTitleChange={(title) => handleTitleChange(agentId, title)} 
-                />
+                {gridCardDisplayMode === 'chat' ? (
+                  <AgentChatView
+                    sessionId={agentId}
+                    agent={agent}
+                    provider={agent.provider}
+                    isMaximized={isAgentMaximized}
+                    status={effectiveStatus}
+                    telemetry={metrics}
+                    theme={theme}
+                  />
+                ) : (
+                  <AgentTerminal
+                    sessionId={agentId}
+                    provider={agent.provider}
+                    isMaximized={isAgentMaximized}
+                    theme={theme}
+                    onTerminalFocus={() => onTerminalFocus?.(agentId)}
+                    onTitleChange={(title) => handleTitleChange(agentId, title)}
+                  />
+                )}
               </div>
             </div>
           </div>

@@ -1,6 +1,49 @@
 export type ProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "mock";
 export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode";
 
+export type GridCardDisplayMode = "terminal" | "chat";
+
+export type AgentChatEventKind =
+    | "message"
+    | "tool_call"
+    | "tool_result"
+    | "approval"
+    | "status"
+    | "terminal_output"
+    | "error";
+
+export type AgentChatRole = "user" | "assistant" | "system" | "tool";
+
+export type AgentChatStatus =
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "action_required"
+    | "cancelled"
+    | "idle"
+    | "processing"
+    | "unknown";
+
+export interface AgentChatEvent {
+    id: string;
+    session_id: string;
+    provider: string;
+    kind: AgentChatEventKind;
+    role: AgentChatRole | null;
+    text: string | null;
+    title: string | null;
+    status: AgentChatStatus | null;
+    turn_id: string | null;
+    source: string | null;
+    command: string | null;
+    exit_code: number | null;
+    path: string | null;
+    language: string | null;
+    created_at: string | null;
+    sequence: number | null;
+    metadata: Record<string, unknown>;
+}
+
 export interface ProviderReadiness {
     provider: UserFacingProviderName;
     display_name: string;

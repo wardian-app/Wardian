@@ -1,4 +1,5 @@
 pub mod antigravity;
+pub mod chat_transcript;
 pub mod claude;
 pub mod codex;
 pub mod factory;

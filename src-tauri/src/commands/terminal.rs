@@ -623,12 +623,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_prompt_normalization_flattens_newlines_for_submit() {
+    fn terminal_prompt_normalization_preserves_newlines_for_submit() {
         let normalized = crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
             "Line one\nLine two\r\nLine three",
         );
 
-        assert_eq!(normalized, "Line one Line two Line three");
+        assert_eq!(normalized, "Line one\nLine two\nLine three");
     }
 
     #[test]
