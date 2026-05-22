@@ -525,6 +525,9 @@ pub(crate) fn interactive_provider_launch(
 pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM", "xterm-256color");
+    if let Some(home) = crate::utils::fs::get_wardian_home() {
+        cmd.env("WARDIAN_HOME", home);
+    }
 }
 
 #[cfg(windows)]
@@ -629,6 +632,29 @@ mod tests {
         match previous_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[test]
+    fn terminal_identity_env_includes_resolved_wardian_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let mut cmd = CommandBuilder::new("claude");
+        apply_terminal_identity_env(&mut cmd);
+
+        let wardian_home = cmd
+            .get_env("WARDIAN_HOME")
+            .expect("WARDIAN_HOME env")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(wardian_home, home.path().display().to_string());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
         }
     }
 
