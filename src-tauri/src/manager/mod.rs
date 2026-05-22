@@ -528,6 +528,7 @@ pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     if let Some(home) = crate::utils::fs::get_wardian_home() {
         cmd.env("WARDIAN_HOME", home);
     }
+    apply_managed_cli_path_to_pty(cmd);
 }
 
 #[cfg(windows)]
@@ -655,6 +656,37 @@ mod tests {
         match previous_home {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),
             None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_identity_env_includes_managed_cli_path() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_path = std::env::var_os("PATH");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var("PATH", r"C:\Windows\System32");
+
+        let mut cmd = CommandBuilder::new("pwsh");
+        apply_terminal_identity_env(&mut cmd);
+
+        let path = cmd
+            .get_env("PATH")
+            .expect("PATH env")
+            .to_string_lossy()
+            .to_string();
+        assert!(path.starts_with(&home.path().join("bin").display().to_string()));
+        assert!(path.ends_with(r"C:\Windows\System32"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
     }
 

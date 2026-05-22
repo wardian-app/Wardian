@@ -23,11 +23,42 @@ pub fn launcher_file_name() -> &'static str {
 }
 
 pub fn install_cli_from_resources(_resources_dir: &Path) -> Result<InstallOutcome, String> {
-    install_cli_from_resources_with_path_update(_resources_dir, ensure_cli_bin_on_path)
+    let target_home = wardian_core::paths::wardian_home()
+        .ok_or_else(|| "Could not resolve Wardian home".to_string())?;
+    install_cli_from_resources_to_home_with_path_update(
+        _resources_dir,
+        &target_home,
+        ensure_cli_bin_on_path,
+    )
 }
 
+pub fn install_cli_from_resources_to_home(
+    resources_dir: &Path,
+    target_home: &Path,
+) -> Result<InstallOutcome, String> {
+    install_cli_from_resources_to_home_with_path_update(
+        resources_dir,
+        target_home,
+        ensure_cli_bin_on_path,
+    )
+}
+
+#[cfg(test)]
 fn install_cli_from_resources_with_path_update<F>(
     resources_dir: &Path,
+    update_path: F,
+) -> Result<InstallOutcome, String>
+where
+    F: FnMut(&Path) -> Result<(), String>,
+{
+    let target_home = wardian_core::paths::wardian_home()
+        .ok_or_else(|| "Could not resolve Wardian home".to_string())?;
+    install_cli_from_resources_to_home_with_path_update(resources_dir, &target_home, update_path)
+}
+
+fn install_cli_from_resources_to_home_with_path_update<F>(
+    resources_dir: &Path,
+    target_home: &Path,
     mut update_path: F,
 ) -> Result<InstallOutcome, String>
 where
@@ -41,12 +72,8 @@ where
         ));
     }
 
-    let launcher = wardian_core::paths::cli_bin_path()
-        .ok_or_else(|| "Could not resolve Wardian CLI install path".to_string())?;
-    let target_dir = launcher
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "Could not resolve Wardian CLI install directory".to_string())?;
+    let target_dir = target_home.join("bin");
+    let launcher = target_dir.join(launcher_file_name());
     let target = target_dir.join(bundled_cli_file_name());
 
     std::fs::create_dir_all(&target_dir)
@@ -86,7 +113,10 @@ where
         InstallOutcome::AlreadyInstalled(launcher)
     };
 
-    if std::env::var_os("WARDIAN_HOME").is_none() {
+    let is_default_home = wardian_core::paths::wardian_home()
+        .as_deref()
+        .is_some_and(|home| home == target_home);
+    if std::env::var_os("WARDIAN_HOME").is_none() && is_default_home {
         update_path(&target_dir)?;
     }
     Ok(outcome)
@@ -382,6 +412,46 @@ mod tests {
         assert_eq!(path_updates, 0);
 
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn installer_can_target_explicit_app_home_without_user_path_update() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::remove_var("WARDIAN_HOME");
+
+        let app_home = TempDir::new().unwrap();
+        let resources = TempDir::new().unwrap();
+        let source_dir = resources.path().join("bin");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(bundled_cli_file_name()), b"debug cli").unwrap();
+
+        let mut path_updates = 0;
+        let outcome = install_cli_from_resources_to_home_with_path_update(
+            resources.path(),
+            app_home.path(),
+            |_bin_dir| {
+                path_updates += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let target_dir = app_home.path().join("bin");
+        assert_eq!(
+            outcome,
+            InstallOutcome::Installed(target_dir.join(launcher_file_name()))
+        );
+        assert_eq!(
+            std::fs::read(target_dir.join(bundled_cli_file_name())).unwrap(),
+            b"debug cli"
+        );
+        assert_eq!(path_updates, 0);
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 
     #[test]

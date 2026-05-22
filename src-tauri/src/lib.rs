@@ -177,12 +177,15 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             if let Ok(resource_dir) = app.path().resource_dir() {
-                if let Err(err) =
-                    crate::utils::cli_install::install_cli_from_resources(&resource_dir)
-                {
-                    crate::utils::logging::log_debug(&format!(
-                        "[Wardian] CLI install skipped: {err}"
-                    ));
+                if let Some(app_home) = crate::utils::fs::get_wardian_home() {
+                    if let Err(err) = crate::utils::cli_install::install_cli_from_resources_to_home(
+                        &resource_dir,
+                        &app_home,
+                    ) {
+                        crate::utils::logging::log_debug(&format!(
+                            "[Wardian] CLI install skipped: {err}"
+                        ));
+                    }
                 }
             }
 
