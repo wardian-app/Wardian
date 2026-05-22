@@ -64,6 +64,10 @@ vi.mock("../features/terminal/UserTerminalPanel", () => ({
   ),
 }));
 
+vi.mock("../features/graph/GraphCanvas", () => ({
+  GraphCanvas: () => <div data-testid="graph-canvas" />,
+}));
+
 // Cast invoke to mock for test control
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -1433,6 +1437,18 @@ describe("View Mode Toggle", () => {
     await screen.findByText("No Active Instances");
     expect(screen.getByText("Grid")).toBeInTheDocument();
     expect(screen.getByText("Dashboard")).toBeInTheDocument();
+  });
+
+  it("renders the graph view instead of the graph placeholder", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+    await screen.findByTestId("agent-grid");
+
+    fireEvent.click(screen.getByText("Graph"));
+
+    expect(screen.queryByText(/Advanced graph features coming/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+    expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
   });
 });
 

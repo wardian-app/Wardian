@@ -13,6 +13,7 @@ Use this index to find the guide that matches the task you are trying to finish.
 
 - [Grid](./grid.md): interact with active agent terminals.
 - [Dashboard](./dashboard.md): compare live agent health and quick controls.
+- [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.
 - [Queue](./queue.md): triage completed agent and workflow outcomes.
 - [Class Management](./class-management.md): define the blueprints used when spawning agents.

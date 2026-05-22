@@ -15,6 +15,33 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
     wardian_core::paths::wardian_home_for_manifest(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
+pub fn ensure_process_wardian_home_env() -> Option<std::path::PathBuf> {
+    let home = get_wardian_home()?;
+    if std::env::var("WARDIAN_HOME")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        unsafe { std::env::set_var("WARDIAN_HOME", &home) };
+    }
+    Some(home)
+}
+
+#[cfg(test)]
+mod process_home_env_contract_tests {
+    #[test]
+    fn ensure_process_wardian_home_env_sets_missing_env_to_resolved_app_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        let resolved = super::ensure_process_wardian_home_env().expect("resolved home");
+        let env_home = std::env::var("WARDIAN_HOME").expect("WARDIAN_HOME env");
+
+        assert_eq!(std::path::PathBuf::from(env_home), resolved);
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+    }
+}
+
 pub fn get_default_user_dir() -> std::path::PathBuf {
     dirs::home_dir().unwrap_or_else(|| {
         if cfg!(windows) {

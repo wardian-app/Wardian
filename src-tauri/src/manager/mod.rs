@@ -357,11 +357,12 @@ pub(crate) fn macos_extended_path() -> String {
         "{home}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:{home}/.npm-global/bin:{home}/.volta/bin",
         home = home
     );
-    if existing.is_empty() {
+    let extended = if existing.is_empty() {
         format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", extra)
     } else {
         format!("{}:{}", extra, existing)
-    }
+    };
+    crate::utils::cli_install::child_path_with_cli_bin(Some(&extended)).unwrap_or(extended)
 }
 
 pub(crate) fn state_configs_snapshot(
@@ -525,9 +526,12 @@ pub(crate) fn interactive_provider_launch(
 pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM", "xterm-256color");
+    if let Some(home) = crate::utils::fs::get_wardian_home() {
+        cmd.env("WARDIAN_HOME", home);
+    }
+    apply_managed_cli_path_to_pty(cmd);
 }
 
-#[cfg(windows)]
 pub(crate) fn apply_managed_cli_path_to_pty(cmd: &mut CommandBuilder) {
     if let Some(path) =
         crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
@@ -536,10 +540,6 @@ pub(crate) fn apply_managed_cli_path_to_pty(cmd: &mut CommandBuilder) {
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) fn apply_managed_cli_path_to_pty(_cmd: &mut CommandBuilder) {}
-
-#[cfg(windows)]
 pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Command) {
     if let Some(path) =
         crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
@@ -547,9 +547,6 @@ pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Comman
         cmd.env("PATH", path);
     }
 }
-
-#[cfg(not(windows))]
-pub(crate) fn apply_managed_cli_path_to_process(_cmd: &mut tokio::process::Command) {}
 
 #[cfg(windows)]
 pub(crate) fn quote_cmd_arg(value: &str) -> String {
@@ -621,6 +618,64 @@ mod tests {
             .to_string();
         assert!(path.starts_with(&home.path().join("bin").display().to_string()));
         assert!(path.ends_with(r"C:\Windows\System32"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[test]
+    fn terminal_identity_env_includes_resolved_wardian_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let mut cmd = CommandBuilder::new("claude");
+        apply_terminal_identity_env(&mut cmd);
+
+        let wardian_home = cmd
+            .get_env("WARDIAN_HOME")
+            .expect("WARDIAN_HOME env")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(wardian_home, home.path().display().to_string());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[test]
+    fn terminal_identity_env_includes_managed_cli_path() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_path = std::env::var_os("PATH");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        let existing_path = if cfg!(windows) {
+            r"C:\Windows\System32"
+        } else {
+            "/usr/bin"
+        };
+        std::env::set_var("PATH", existing_path);
+
+        let mut cmd = CommandBuilder::new("pwsh");
+        apply_terminal_identity_env(&mut cmd);
+
+        let path = cmd
+            .get_env("PATH")
+            .expect("PATH env")
+            .to_string_lossy()
+            .to_string();
+        assert!(path.starts_with(&home.path().join("bin").display().to_string()));
+        assert!(path.ends_with(existing_path));
 
         match previous_home {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),

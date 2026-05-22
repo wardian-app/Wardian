@@ -714,6 +714,9 @@ pub async fn obtain_session_id(
 }
 
 fn apply_headless_identity_env(cmd: &mut tokio::process::Command, wardian_session_id: &str) {
+    if let Some(home) = crate::utils::fs::get_wardian_home() {
+        cmd.env("WARDIAN_HOME", home);
+    }
     if !wardian_session_id.trim().is_empty() {
         cmd.env("WARDIAN_SESSION_ID", wardian_session_id);
     }
@@ -841,6 +844,29 @@ mod tests {
             key.to_string_lossy() == "WARDIAN_SESSION_ID"
                 && value.map(|value| value.to_string_lossy()) == Some("wardian-session-123".into())
         }));
+    }
+
+    #[test]
+    fn headless_identity_env_includes_resolved_wardian_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        let mut cmd = crate::utils::process::new_headless_command("node");
+
+        apply_headless_identity_env(&mut cmd, "wardian-session-123");
+
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(envs.iter().any(|(key, value)| {
+            key.to_string_lossy() == "WARDIAN_HOME"
+                && value.map(|value| value.to_string_lossy())
+                    == Some(home.path().display().to_string().into())
+        }));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 
     #[test]
