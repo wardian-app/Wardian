@@ -6,6 +6,7 @@ pub mod fs;
 pub mod git;
 pub mod library;
 pub mod patch;
+pub mod remote;
 pub mod settings;
 pub mod terminal;
 pub mod watchlist;

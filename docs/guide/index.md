@@ -32,5 +32,6 @@ Use this index to find the guide that matches the task you are trying to finish.
 ## Configure and Automate
 
 - [Settings](./settings.md): tune shell, provider, session, and theme behavior.
+- [Remote Control](./remote-control.md): pair a phone with the Wardian desktop over Tailscale HTTPS.
 - [Workflow View](./workflows.md): build and run visual automations from the app.
 - [Workflow Reference](../workflows/index.md): learn workflow triggers, nodes, scheduling, and troubleshooting.

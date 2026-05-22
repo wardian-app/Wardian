@@ -115,6 +115,21 @@ The CLI read-only `team` and `watchlist` commands read `watchlists/index.json` d
 - `save_agent_session_persistence`
 - `save_opencode_theme`
 
+## Remote Access (`commands/remote.rs`)
+
+- `load_remote_access_status`
+- `load_remote_gateway_config`
+- `save_remote_gateway_config`
+- `create_remote_pairing_offer`
+- `list_remote_devices`
+- `list_pending_remote_pairing_requests`
+- `approve_remote_pairing_request`
+- `reject_remote_pairing_request`
+- `revoke_remote_device`
+
+Debug builds also register `debug_create_remote_session` for native gateway
+tests. It is not registered in release builds.
+
 ## Git (`commands/git.rs`)
 
 - `git_status`

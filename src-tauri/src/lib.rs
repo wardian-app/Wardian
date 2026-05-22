@@ -2,6 +2,7 @@ pub mod commands;
 pub mod control;
 pub mod manager;
 pub mod providers;
+pub mod remote;
 pub mod state;
 pub mod utils;
 pub mod workflow_engine;
@@ -193,6 +194,7 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
             control::spawn_control_server(app_handle.clone());
+            remote::gateway::spawn_remote_gateway(app_handle.clone());
             manager::init_agent_classes(&app_handle);
 
             start_metrics_supervisor(app.handle().clone());
@@ -436,6 +438,17 @@ pub fn run() {
             commands::library::library_watch,
             commands::library::library_unwatch,
             commands::patch::run_gemini_patch,
+            commands::remote::approve_remote_pairing_request,
+            commands::remote::create_remote_pairing_offer,
+            commands::remote::list_pending_remote_pairing_requests,
+            commands::remote::list_remote_devices,
+            commands::remote::load_remote_access_status,
+            commands::remote::load_remote_gateway_config,
+            commands::remote::reject_remote_pairing_request,
+            commands::remote::revoke_remote_device,
+            commands::remote::save_remote_gateway_config,
+            #[cfg(debug_assertions)]
+            commands::remote::debug_create_remote_session,
             commands::settings::load_shell_settings,
             commands::settings::get_settings_folder_path,
             commands::settings::get_update_eligibility,

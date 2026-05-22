@@ -100,16 +100,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             onClassesUpdated={onClassesUpdated}
           />
         )}
-        {activeTab === "ssh" && (
-          <div className="flex flex-col items-center justify-center h-full text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="w-16 h-16 mb-4 text-gray-700/40 placeholder-icon-container block">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
-            </div>
-            <h3 className="text-sm font-bold text-primary mb-2 tracking-wide">Remote Nodes</h3>
-            <p className="text-xs text-muted italic px-4">SSH Manager and remote execution capabilities are arriving in Phase 4.</p>
-          </div>
-        )}
-
         {activeTab === "workflows" && (
           <WorkflowSidebar
             onOpenWorkflowBuilder={onOpenWorkflowBuilder}

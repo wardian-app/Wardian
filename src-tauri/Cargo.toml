@@ -29,6 +29,12 @@ terminal-trace = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+hmac = { workspace = true }
+p256 = { workspace = true }
+rand = { workspace = true }
 tauri = { version = "=2.11.2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -37,7 +43,6 @@ tokio = { version = "1.49.0", features = ["io-util", "net", "process", "sync", "
 uuid = { version = "1.21.0", features = ["v4"] }
 portable-pty = "0.9.0"
 sysinfo = "0.38.2"
-chrono = "0.4.38"
 dirs = "5.0.1"
 shlex = "1.3.0"
 tauri-plugin-clipboard-manager = "2.3.2"
@@ -50,6 +55,8 @@ same-file = "1.0.6"
 tauri-plugin-dialog = "2"
 wardian-core = { path = "../crates/wardian-core" }
 tauri-plugin-process = "2.3.1"
+sha2 = { workspace = true }
+subtle = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 win32job = "2.0.3"
