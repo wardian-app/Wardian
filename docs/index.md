@@ -24,6 +24,8 @@ This folder contains the public Wardian user guides, workflow references, and de
 - [Queue](./guide/queue.md)
 - [Source Control](./guide/source-control.md)
 - [Settings](./guide/settings.md)
+- [Remote Control](./guide/remote-control.md)
+- [Remote Access With Tailscale](./guide/remote-access-tailscale.md)
 
 ## Workflow Guides
 

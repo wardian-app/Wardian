@@ -11,6 +11,10 @@ workflows, filesystem access, provider CLIs, PTYs, and telemetry.
 - A trusted HTTPS origin such as `https://<machine>.<tailnet>.ts.net`.
 - Remote access configured to bind only to the Wardian loopback gateway.
 
+For Tailscale setup, MagicDNS naming, Tailscale Serve, Tailscale SSH, and the
+difference between private Serve and public Funnel access, see
+[Remote Access With Tailscale](./remote-access-tailscale.md).
+
 ## Enable Remote Access
 
 1. Open Settings.

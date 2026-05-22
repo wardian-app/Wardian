@@ -74,6 +74,8 @@ export default defineConfig({
           text: "Configure and Automate",
           items: [
             { text: "Settings", link: "/guide/settings" },
+            { text: "Remote Control", link: "/guide/remote-control" },
+            { text: "Remote Access With Tailscale", link: "/guide/remote-access-tailscale" },
             { text: "Workflow View", link: "/guide/workflows" },
             { text: "Workflow Reference", link: "/workflows/" },
           ],
