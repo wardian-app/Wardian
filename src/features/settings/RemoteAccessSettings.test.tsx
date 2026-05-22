@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -150,7 +150,11 @@ describe("RemoteAccessSettings", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("revoke_remote_device", { deviceId: "dev-1" });
     });
-    expect(screen.getByText(/revoked/i)).toBeVisible();
+    await waitFor(() => {
+      expect(screen.queryByText("Phone")).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText(/revoked/i)).not.toBeInTheDocument();
+    expect(screen.getByText("No paired devices.")).toBeVisible();
   });
 
   it("requires explicit desktop approval for pending phone pairing requests", async () => {
@@ -206,5 +210,53 @@ describe("RemoteAccessSettings", () => {
       });
     });
     expect(screen.getByText("Pixel phone")).toBeVisible();
+  });
+
+  it("refreshes pending pairing approvals while a pairing code is active", async () => {
+    let pendingPolls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "load_remote_access_status":
+          return "enabled";
+        case "load_remote_gateway_config":
+          return enabledConfig;
+        case "list_remote_devices":
+          return [];
+        case "list_pending_remote_pairing_requests":
+          pendingPolls += 1;
+          return pendingPolls > 2
+            ? [
+                {
+                  request_id: "pairing-request-1",
+                  device_label: "Pixel phone",
+                  public_key_fingerprint: "fp:phone",
+                  canonical_origin: "https://wardian.tailnet.ts.net",
+                  submitted_at: "2026-05-21T00:01:00.000Z",
+                  expires_at: "2026-05-21T00:02:00.000Z",
+                },
+              ]
+            : [];
+        case "create_remote_pairing_offer":
+          return {
+            gateway_origin: "https://wardian.tailnet.ts.net",
+            pairing_offer_id: "offer-1",
+            expires_at: "2026-05-21T00:02:00.000Z",
+            nonce: "nonce",
+            server_identity_fingerprint: "fp",
+          };
+        default:
+          return null;
+      }
+    });
+
+    render(<RemoteAccessSettings />);
+
+    await screen.findByText("Remote Access");
+    fireEvent.click(screen.getByRole("button", { name: /create pairing code/i }));
+
+    await screen.findByText(/offer-1/);
+    expect(screen.queryByText("Pixel phone")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByText("Pixel phone")).toBeVisible(), { timeout: 2500 });
   });
 });

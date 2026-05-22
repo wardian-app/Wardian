@@ -77,6 +77,13 @@ async function dispatchFetch(listener: (event: unknown) => void, request: Reques
 }
 
 describe("remote service worker", () => {
+  it("pre-caches the remote install icon assets", () => {
+    const script = readFileSync(join(process.cwd(), "public", "remote-sw.js"), "utf8");
+
+    expect(script).toContain('"/icon.png"');
+    expect(script).toContain('"/icon-maskable.png"');
+  });
+
   it("runtime-caches successful remote asset responses for flaky network reuse", async () => {
     const assetUrl = "https://wardian.tailnet.ts.net/assets/index-abcd.js";
     const fetchMock = vi.fn(async () => new Response("asset-v1", { status: 200 })) as unknown as typeof fetch;

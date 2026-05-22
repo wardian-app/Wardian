@@ -2,6 +2,7 @@ import React, { useEffect } from "react";
 import "../../styles/App.css";
 import { RefreshCw, Smartphone } from "lucide-react";
 import { RemoteAgentCard } from "./RemoteAgentCard";
+import { RemoteAgentConversationView } from "./RemoteAgentConversationView";
 import { RemoteCommandBar } from "./RemoteCommandBar";
 import { RemotePairingView } from "./RemotePairingView";
 import { RemoteQueueView } from "./RemoteQueueView";
@@ -12,6 +13,7 @@ export const RemoteMobileApp: React.FC = () => {
   const agents = useRemoteStore((state) => state.agents);
   const workflows = useRemoteStore((state) => state.workflows);
   const status = useRemoteStore((state) => state.status);
+  const activeAgentId = useRemoteStore((state) => state.activeAgentId);
   const load = useRemoteStore((state) => state.load);
   const disconnectStatusStream = useRemoteStore((state) => state.disconnectStatusStream);
 
@@ -56,6 +58,11 @@ export const RemoteMobileApp: React.FC = () => {
 
   if (status === "unreachable") {
     return <RemotePairingView state="unreachable" actionLabel="Retry" onAction={() => void load()} />;
+  }
+
+  const activeAgent = agents.find((agent) => agent.session_id === activeAgentId);
+  if (activeAgent) {
+    return <RemoteAgentConversationView agent={activeAgent} />;
   }
 
   return (

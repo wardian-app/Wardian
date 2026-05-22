@@ -1,6 +1,7 @@
 import type {
   AuthChallengeResponse,
   AuthSessionResponse,
+  AgentChatEvent,
   PairingSubmitResponse,
   RemoteAgentActionRequest,
   RemoteAgentSummary,
@@ -106,6 +107,12 @@ export const remoteClient = {
   async listAgents() {
     const result = await remoteJson<{ agents: RemoteAgentSummary[] }>("/remote/api/agents");
     return result.agents;
+  },
+  async loadAgentChat(sessionId: string) {
+    const result = await remoteJson<{ events: AgentChatEvent[] }>(
+      `/remote/api/agents/${encodeURIComponent(sessionId)}/chat`,
+    );
+    return result.events;
   },
   async sendPrompt(target: string, prompt: string) {
     const request: RemoteAgentActionRequest = { action: "send_prompt", target, prompt };

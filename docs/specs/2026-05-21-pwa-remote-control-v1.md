@@ -195,7 +195,9 @@ Pairing:
    the desktop gateway.
 6. The desktop shows an explicit confirmation prompt with the incoming device
    label, device public-key fingerprint, gateway origin, and full-control
-   warning.
+   warning. While a pairing offer is active, the desktop settings UI refreshes
+   pending pairing approvals automatically so the user does not need a manual
+   refresh after the phone submits its request.
 7. On approval, Wardian stores the device public key, device label, created time,
    last-used time, and revocation state under Wardian settings.
 8. The phone pins the accepted desktop gateway identity for future
@@ -285,6 +287,7 @@ The gateway should expose a small, explicit API surface for the mobile PWA:
 - Authentication and pairing.
 - Device list and revocation.
 - Agent roster and status.
+- Selected-agent chat transcript reads.
 - Agent action requests.
 - Queue/completion state.
 - Workflow list and run/stop requests.
@@ -302,14 +305,16 @@ device id and remote session id.
 The v1 PWA should be a simplified mobile command surface, not a responsive copy
 of the full desktop shell.
 
-The primary screen is a single-column command grid:
+The primary screen is a single-column command grid that opens a selected-agent
+conversation view:
 
 - Stacked agent cards.
 - Agent name, status, provider, class, and workspace/project.
 - Latest thought, transcript summary, or completion summary when available.
-- Card expansion for details.
-- Send prompt to one agent.
-- Broadcast or send to selected agents.
+- Tap an agent card to open a mobile conversation view.
+- The conversation view reads the same normalized chat transcript model used by
+  desktop grid chat mode and sends prompts through the same backend action path.
+- Broadcast from the roster remains available for multi-agent dispatch.
 - Pause/resume, clear, kill/delete, and clone where backend support is already
   straightforward.
 - Queue/completion triage as a tab or filter.

@@ -1,5 +1,5 @@
 const CACHE_NAME = "wardian-remote-app-shell-v1";
-const APP_SHELL = ["/remote", "/manifest.webmanifest", "/icon.png"];
+const APP_SHELL = ["/remote", "/manifest.webmanifest", "/icon.png", "/icon-maskable.png"];
 const ASSET_PREFIX = "/assets/";
 
 self.addEventListener("install", (event) => {

@@ -19,6 +19,13 @@ pub async fn load_agent_chat_transcript(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<AgentChatEvent>, String> {
+    load_agent_chat_transcript_for_state(&state, session_id).await
+}
+
+pub async fn load_agent_chat_transcript_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<Vec<AgentChatEvent>, String> {
     let session_id = session_id.trim().to_string();
     if session_id.is_empty() {
         return Err("session_id is required".to_string());

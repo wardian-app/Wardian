@@ -1,6 +1,7 @@
 use crate::remote::models::{RemoteAgentActionRequest, RemoteAgentSummary, RemoteWorkflowSummary};
 use crate::state::AppState;
 use tauri::{AppHandle, Manager};
+use wardian_core::models::chat::AgentChatEvent;
 
 pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
     let agents = state.agents.lock().await;
@@ -21,6 +22,13 @@ pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
             })
         })
         .collect()
+}
+
+pub async fn remote_agent_chat_transcript(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Vec<AgentChatEvent>, String> {
+    crate::commands::chat::load_agent_chat_transcript_for_state(state, session_id.to_string()).await
 }
 
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
@@ -197,6 +205,33 @@ mod tests {
         let roster = remote_agent_roster(&state).await;
 
         assert_eq!(roster[0].latest_text, None);
+    }
+
+    #[tokio::test]
+    async fn remote_agent_chat_transcript_returns_normalized_messages() {
+        let state = AppState::new();
+        let agent = test_agent("agent-1", "CoderOne", "Coder", "Idle");
+        {
+            let mut watch = agent.watch_state.lock().expect("watch state");
+            watch.push_transcript(WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Use the shared chat transcript model.".to_string(),
+                provider: "mock".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                source: Some("model".to_string()),
+            });
+        }
+        insert_agent(&state, agent).await;
+
+        let transcript = remote_agent_chat_transcript(&state, "agent-1")
+            .await
+            .expect("remote chat transcript");
+
+        assert!(transcript.iter().any(|event| {
+            event.kind == wardian_core::models::chat::AgentChatEventKind::Message
+                && event.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
+                && event.text.as_deref() == Some("Use the shared chat transcript model.")
+        }));
     }
 
     #[test]

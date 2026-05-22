@@ -1,7 +1,7 @@
 import React from "react";
 import { Folder, MessageSquareCode } from "lucide-react";
 
-export type SidebarTab = "explorer" | "git" | "agent-config" | "command" | "classes" | "workflows" | "ssh";
+export type SidebarTab = "explorer" | "git" | "agent-config" | "command" | "classes" | "workflows";
 
 interface SidebarIconRailProps {
   activeTab: SidebarTab;
@@ -97,15 +97,6 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       >
         {activeTab === "workflows" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
         <svg className="w-6 h-6 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
-      </button>
-
-      <button
-        onClick={() => handleTabClick("ssh")}
-        className={`relative p-3 rounded-xl transition-all group ${activeTab === "ssh" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
-        title="Remote Connections"
-      >
-        {activeTab === "ssh" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
-        <svg className="w-6 h-6 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.345 6.347c5.858-5.857 15.352-5.857 21.213 0"></path></svg>
       </button>
 
       <div className="mt-auto flex flex-col gap-3">

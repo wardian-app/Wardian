@@ -84,6 +84,7 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/manifest.webmanifest", get(serve_manifest))
         .route("/remote-sw.js", get(serve_remote_sw))
         .route("/icon.png", get(serve_icon))
+        .route("/icon-maskable.png", get(serve_maskable_icon))
         .route("/assets/{*asset_path}", get(serve_asset_path))
         .route("/remote/api/health", get(remote_health))
         .route("/remote/api/session", get(current_remote_session))
@@ -92,6 +93,10 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/remote/api/auth/challenge", post(create_auth_challenge))
         .route("/remote/api/auth/session", post(create_auth_session))
         .route("/remote/api/agents", get(list_remote_agents))
+        .route(
+            "/remote/api/agents/{session_id}/chat",
+            get(load_remote_agent_chat),
+        )
         .route("/remote/api/agents/action", post(run_agent_action))
         .route("/remote/api/workflows", get(list_remote_workflows))
         .route("/remote/api/workflows/run", post(run_workflow))
@@ -134,6 +139,12 @@ async fn serve_icon(
     State(ctx): State<RemoteGatewayContext>,
 ) -> Result<Response, RemoteGatewayError> {
     serve_tauri_asset(&ctx.app, "icon.png")
+}
+
+async fn serve_maskable_icon(
+    State(ctx): State<RemoteGatewayContext>,
+) -> Result<Response, RemoteGatewayError> {
+    serve_tauri_asset(&ctx.app, "icon-maskable.png")
 }
 
 async fn serve_asset_path(
@@ -189,7 +200,9 @@ fn static_asset_path_for_route(route_path: &str) -> Result<String, &'static str>
         return Err("asset_path_forbidden");
     }
     match asset_path {
-        "manifest.webmanifest" | "remote-sw.js" | "icon.png" => Ok(asset_path.to_string()),
+        "manifest.webmanifest" | "remote-sw.js" | "icon.png" | "icon-maskable.png" => {
+            Ok(asset_path.to_string())
+        }
         path if path.starts_with("assets/") => Ok(path.to_string()),
         _ => Err("asset_path_forbidden"),
     }
@@ -559,6 +572,27 @@ async fn list_remote_agents(
         GatewayAuditEvent::accepted("roster_read", "list_agents"),
     );
     Ok(Json(serde_json::json!({ "agents": agents })))
+}
+
+async fn load_remote_agent_chat(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "load_agent_chat")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "chat_read", "load_agent_chat")
+            .await?;
+    let state = ctx.app.state::<crate::state::AppState>();
+    let events = crate::remote::operations::remote_agent_chat_transcript(&state, &session_id)
+        .await
+        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_failed"))?;
+    audit_gateway_event(
+        &session,
+        &origin,
+        GatewayAuditEvent::accepted("chat_read", "load_agent_chat").target("agent", &session_id),
+    );
+    Ok(Json(serde_json::json!({ "events": events })))
 }
 
 async fn run_agent_action(
@@ -1736,6 +1770,10 @@ mod tests {
         assert_eq!(
             static_asset_path_for_route("/manifest.webmanifest").expect("manifest"),
             "manifest.webmanifest"
+        );
+        assert_eq!(
+            static_asset_path_for_route("/icon-maskable.png").expect("maskable icon"),
+            "icon-maskable.png"
         );
         assert_eq!(
             static_asset_path_for_route("/assets/index.js").expect("asset"),

@@ -24,6 +24,9 @@ const pairingUrlForOffer = (pairing: PairingQrPayload): string => {
   return url.toString();
 };
 
+const activeRemoteDevices = (records: RemoteDeviceRecord[] | null | undefined): RemoteDeviceRecord[] =>
+  (records ?? []).filter((device) => !device.revoked_at);
+
 export const RemoteAccessSettings: React.FC = () => {
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
   const [config, setConfig] = useState<RemoteGatewayConfig | null>(null);
@@ -49,7 +52,7 @@ export const RemoteAccessSettings: React.FC = () => {
       ]);
       setStatus(loadedStatus);
       setConfig(loadedConfig);
-      setDevices(loadedDevices ?? []);
+      setDevices(activeRemoteDevices(loadedDevices));
       setPendingPairings(loadedPendingPairings ?? []);
     } catch (err) {
       setError(`Unable to load remote access settings: ${String(err)}`);
@@ -58,9 +61,28 @@ export const RemoteAccessSettings: React.FC = () => {
     }
   }, []);
 
+  const refreshPendingPairings = useCallback(async () => {
+    try {
+      setPendingPairings(
+        (await invoke<RemotePendingPairingRequest[] | null>("list_pending_remote_pairing_requests")) ?? [],
+      );
+    } catch (err) {
+      setError(`Unable to refresh pending pairings: ${String(err)}`);
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!pairing) return;
+    void refreshPendingPairings();
+    const intervalId = window.setInterval(() => {
+      void refreshPendingPairings();
+    }, 1_000);
+    return () => window.clearInterval(intervalId);
+  }, [pairing, refreshPendingPairings]);
 
   useEffect(() => {
     if (!pairing) {
@@ -100,7 +122,9 @@ export const RemoteAccessSettings: React.FC = () => {
     setError("");
     setRevokingDeviceId(device.device_id);
     try {
-      setDevices(await invoke<RemoteDeviceRecord[]>("revoke_remote_device", { deviceId: device.device_id }));
+      setDevices(
+        activeRemoteDevices(await invoke<RemoteDeviceRecord[]>("revoke_remote_device", { deviceId: device.device_id })),
+      );
     } catch (err) {
       setError(`Unable to revoke ${device.label}: ${String(err)}`);
     } finally {
@@ -112,7 +136,9 @@ export const RemoteAccessSettings: React.FC = () => {
     setError("");
     setReviewingPairingId(request.request_id);
     try {
-      setDevices(await invoke<RemoteDeviceRecord[]>("approve_remote_pairing_request", { requestId: request.request_id }));
+      setDevices(
+        activeRemoteDevices(await invoke<RemoteDeviceRecord[]>("approve_remote_pairing_request", { requestId: request.request_id })),
+      );
       setPendingPairings((requests) => requests.filter((candidate) => candidate.request_id !== request.request_id));
     } catch (err) {
       setError(`Unable to approve ${request.device_label}: ${String(err)}`);
@@ -269,29 +295,24 @@ export const RemoteAccessSettings: React.FC = () => {
           <div className="text-xs text-muted-neutral">No paired devices.</div>
         ) : (
           <div className="divide-y divide-wardian-border">
-            {devices.map((device) => {
-              const revoked = Boolean(device.revoked_at);
-              return (
-                <div key={device.device_id} className="flex items-center justify-between gap-3 py-2 text-xs">
-                  <div className="min-w-0">
-                    <div className="truncate font-medium text-primary">{device.label}</div>
-                    <div className="mt-0.5 truncate font-mono text-muted-neutral">{device.public_key_fingerprint}</div>
-                    <div className={revoked ? "mt-0.5 text-wardian-error" : "mt-0.5 text-muted-neutral"}>
-                      {revoked ? `Revoked ${device.revoked_at}` : `Paired ${device.created_at}`}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label={`Revoke ${device.label}`}
-                    onClick={() => void revokeDevice(device)}
-                    disabled={revoked || revokingDeviceId === device.device_id}
-                    className={iconButtonClass}
-                  >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  </button>
+            {devices.map((device) => (
+              <div key={device.device_id} className="flex items-center justify-between gap-3 py-2 text-xs">
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-primary">{device.label}</div>
+                  <div className="mt-0.5 truncate font-mono text-muted-neutral">{device.public_key_fingerprint}</div>
+                  <div className="mt-0.5 text-muted-neutral">Paired {device.created_at}</div>
                 </div>
-              );
-            })}
+                <button
+                  type="button"
+                  aria-label={`Revoke ${device.label}`}
+                  onClick={() => void revokeDevice(device)}
+                  disabled={revokingDeviceId === device.device_id}
+                  className={iconButtonClass}
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>
