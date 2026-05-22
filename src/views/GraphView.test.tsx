@@ -208,6 +208,15 @@ describe("GraphView", () => {
     expect(screen.queryByTestId("agent-context-menu")).not.toBeInTheDocument();
   });
 
+  it("suppresses the native context menu on empty graph background", () => {
+    render(<GraphView {...defaultProps} />);
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+
+    fireEvent(screen.getByTestId("graph-view"), event);
+
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   it("toggles relationship lenses", () => {
     render(<GraphView {...defaultProps} />);
     const workspaceLens = screen.getByRole("button", { name: "shared workspace" });

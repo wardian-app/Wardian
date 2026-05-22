@@ -52,6 +52,7 @@ export interface BuildAgentGraphInput {
   interactions: AgentInteractions;
   selectedAgentIds: Set<string>;
   enabledReasons: Set<GraphRelationshipReason>;
+  offAgentIds?: Set<string>;
 }
 
 const REASON_ORDER: GraphRelationshipReason[] = [
@@ -95,7 +96,9 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
 
   const nodes = visibleAgents.map((agent) => {
     const telemetry = input.telemetry[agent.session_id];
-    const status = agent.is_off ? "Off" : telemetry?.current_status ?? "Idle";
+    const status = agent.is_off || input.offAgentIds?.has(agent.session_id)
+      ? "Off"
+      : telemetry?.current_status ?? "Idle";
     const recent = isRecent(input.interactions[agent.session_id]);
     const position = positions.get(agent.session_id) ?? { x: 0, y: 0 };
 
@@ -263,6 +266,7 @@ function isRecent(iso: string | undefined) {
 
 function statusToColor(status: string) {
   const normalized = status.toLowerCase();
+  if (normalized.includes("off")) return "var(--color-wardian-off)";
   if (normalized.includes("action")) return "var(--color-wardian-warning)";
   if (normalized.includes("error") || normalized.includes("fail")) return "var(--color-wardian-error)";
   if (normalized.includes("process") || normalized.includes("headless")) return "var(--color-wardian-processing)";

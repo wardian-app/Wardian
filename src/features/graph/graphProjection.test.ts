@@ -64,6 +64,24 @@ describe("buildAgentGraph", () => {
     });
   });
 
+  it("uses live off-agent state before stale telemetry or saved config state", () => {
+    const graph = buildAgentGraph({
+      agents: [agent({ session_id: "a", session_name: "Alpha", is_off: false })],
+      telemetry: { a: metric("a", "Processing...") },
+      teams: [],
+      activeList: null,
+      interactions: {},
+      selectedAgentIds: new Set(),
+      enabledReasons: allReasons(),
+      offAgentIds: new Set(["a"]),
+    });
+
+    expect(graph.nodes[0]).toMatchObject({
+      status: "Off",
+      color: "var(--color-wardian-off)",
+    });
+  });
+
   it("uses active watchlist scope without creating watchlist edges", () => {
     const agents = [
       agent({ session_id: "a", folder: "C:/one" }),

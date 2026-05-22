@@ -357,11 +357,12 @@ pub(crate) fn macos_extended_path() -> String {
         "{home}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:{home}/.npm-global/bin:{home}/.volta/bin",
         home = home
     );
-    if existing.is_empty() {
+    let extended = if existing.is_empty() {
         format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", extra)
     } else {
         format!("{}:{}", extra, existing)
-    }
+    };
+    crate::utils::cli_install::child_path_with_cli_bin(Some(&extended)).unwrap_or(extended)
 }
 
 pub(crate) fn state_configs_snapshot(

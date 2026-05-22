@@ -69,6 +69,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     interactions: props.interactions,
     selectedAgentIds: props.selectedAgentIds,
     enabledReasons,
+    offAgentIds: props.offAgentIds,
   }), [
     props.allAgents,
     props.telemetry,
@@ -76,6 +77,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     props.activeList,
     props.interactions,
     props.selectedAgentIds,
+    props.offAgentIds,
     enabledReasons,
   ]);
   const projectionNodeIds = useMemo(
@@ -138,7 +140,10 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
         event.stopPropagation();
         if (!isInsideContextMenu(event.target)) setContextMenu(null);
       }}
-      onContextMenu={(event) => event.stopPropagation()}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
     >
       <div className="graph-toolbar graph-toolbar--stable-centered">
         <div className="graph-scope">

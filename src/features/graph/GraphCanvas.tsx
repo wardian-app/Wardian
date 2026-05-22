@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
 import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProjection";
@@ -51,6 +51,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const rendererRef = useRef<Sigma | null>(null);
   const projectionRef = useRef(projection);
   const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu });
+  const renderSignature = useMemo(() => graphRenderSignature(projection), [projection]);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; title: string; detail?: string } | null>(null);
 
   useEffect(() => {
@@ -123,11 +124,12 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     const renderer = rendererRef.current;
     const container = containerRef.current;
     if (!graph || !renderer || !container) return;
+    const currentProjection = projectionRef.current;
 
     graph.clear();
-    const hasSelectedNode = projection.nodes.some((node) => node.selected);
+    const hasSelectedNode = currentProjection.nodes.some((node) => node.selected);
 
-    for (const node of projection.nodes) {
+    for (const node of currentProjection.nodes) {
       if (!node.recent) continue;
       const color = resolveGraphColor(node.color, container);
       graph.addNode(`${node.id}${RECENT_HALO_SUFFIX}`, {
@@ -142,7 +144,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       });
     }
 
-    for (const node of projection.nodes) {
+    for (const node of currentProjection.nodes) {
       graph.addNode(node.id, {
         label: node.label,
         x: node.x,
@@ -155,7 +157,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       });
     }
 
-    for (const edge of projection.edges) {
+    for (const edge of currentProjection.edges) {
       const primaryReason = edge.reasons[0] ?? "same_team";
       graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
         size: 1,
@@ -166,7 +168,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     }
 
     renderer.refresh();
-  }, [projection]);
+  }, [renderSignature]);
 
   const previousResetSignalRef = useRef(resetSignal);
   useEffect(() => {
@@ -206,6 +208,28 @@ function graphNodeToAgentId(node: string) {
   return node.endsWith(RECENT_HALO_SUFFIX)
     ? node.slice(0, -RECENT_HALO_SUFFIX.length)
     : node;
+}
+
+function graphRenderSignature(projection: AgentGraphProjection) {
+  return JSON.stringify({
+    nodes: projection.nodes.map((node) => ({
+      id: node.id,
+      label: node.label,
+      status: node.status,
+      color: node.color,
+      x: node.x,
+      y: node.y,
+      size: node.size,
+      selected: node.selected,
+      recent: node.recent,
+    })),
+    edges: projection.edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      reasons: edge.reasons,
+    })),
+  });
 }
 
 function resolveGraphColor(color: string, container: HTMLElement) {

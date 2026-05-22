@@ -322,6 +322,46 @@ describe("GraphCanvas", () => {
     expect(mocks.kill).not.toHaveBeenCalled();
   });
 
+  it("does not rebuild graphology for telemetry-only projection updates", () => {
+    const { rerender } = render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    rerender(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          nodes: [
+            {
+              ...projection.nodes[0],
+              telemetry: {
+                session_id: "a",
+                cpu_usage: 92,
+                memory_mb: 1024,
+                uptime_seconds: 10,
+                query_count: 8,
+                init_timestamp: null,
+                current_status: "Idle",
+                log_path: null,
+              },
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.graphology.clear).toHaveBeenCalledTimes(1);
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("resets the sigma camera when the reset signal changes", () => {
     const { rerender } = render(
       <GraphCanvas
