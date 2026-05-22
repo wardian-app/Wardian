@@ -18,6 +18,7 @@ function resetAppPreferences() {
     autoPatchGemini: false,
     terminalFontSize: 14,
     terminalFontFamily: '',
+    gridCardDisplayMode: 'terminal',
     app_settings_overrides: {},
     app_settings_loaded: false,
   });
@@ -134,6 +135,7 @@ describe('app settings persistence', () => {
       auto_patch_gemini: true,
       terminal_font_size: 16,
       terminal_font_family: 'JetBrains Mono, monospace',
+      grid_card_display_mode: 'chat',
     });
 
     await useSettingsStore.getState().loadAppSettings();
@@ -143,6 +145,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
     expect(useSettingsStore.getState().terminalFontSize).toBe(16);
     expect(useSettingsStore.getState().terminalFontFamily).toBe('JetBrains Mono, monospace');
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
   });
 
@@ -152,12 +155,14 @@ describe('app settings persistence', () => {
       auto_patch_gemini: true,
       terminal_font_size: 12,
       terminal_font_family: null,
+      grid_card_display_mode: 'chat',
     });
 
     useSettingsStore.getState().setTheme('light');
     useSettingsStore.getState().setAutoPatchGemini(true);
     useSettingsStore.getState().setTerminalFontSize(12);
     useSettingsStore.getState().setTerminalFontFamily('');
+    useSettingsStore.getState().setGridCardDisplayMode('chat');
 
     await useSettingsStore.getState().saveAppSettings();
 
@@ -168,11 +173,13 @@ describe('app settings persistence', () => {
           theme: 'light',
           auto_patch_gemini: true,
           terminal_font_size: 12,
+          grid_card_display_mode: 'chat',
         }),
       }),
     });
     expect(useSettingsStore.getState().theme).toBe('light');
     expect(useSettingsStore.getState().terminalFontSize).toBe(12);
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
   });
 
   it('keeps migrated local preferences when no backend app settings file exists yet', async () => {
@@ -181,6 +188,7 @@ describe('app settings persistence', () => {
       autoPatchGemini: true,
       terminalFontSize: 16,
       terminalFontFamily: 'Cascadia Mono, monospace',
+      gridCardDisplayMode: 'chat',
     });
     mockedInvoke.mockResolvedValueOnce({
       schema_version: 2,
@@ -190,6 +198,7 @@ describe('app settings persistence', () => {
         auto_patch_gemini: false,
         terminal_font_size: 14,
         terminal_font_family: null,
+        grid_card_display_mode: 'terminal',
       },
       overrides: {},
     });
@@ -200,11 +209,13 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
     expect(useSettingsStore.getState().terminalFontSize).toBe(16);
     expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().app_settings_overrides).toEqual({
       theme: 'dark',
       auto_patch_gemini: true,
       terminal_font_size: 16,
       terminal_font_family: 'Cascadia Mono, monospace',
+      grid_card_display_mode: 'chat',
     });
   });
 
@@ -214,6 +225,7 @@ describe('app settings persistence', () => {
       autoPatchGemini: true,
       terminalFontSize: 16,
       terminalFontFamily: 'Cascadia Mono, monospace',
+      gridCardDisplayMode: 'chat',
     });
     mockedInvoke.mockResolvedValueOnce({
       schema_version: 2,
@@ -223,6 +235,7 @@ describe('app settings persistence', () => {
         auto_patch_gemini: false,
         terminal_font_size: 14,
         terminal_font_family: null,
+        grid_card_display_mode: 'terminal',
       },
       overrides: {},
     });
@@ -233,6 +246,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().autoPatchGemini).toBe(false);
     expect(useSettingsStore.getState().terminalFontSize).toBe(14);
     expect(useSettingsStore.getState().terminalFontFamily).toBe('');
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('terminal');
     expect(useSettingsStore.getState().app_settings_overrides).toEqual({});
   });
 
@@ -242,6 +256,7 @@ describe('app settings persistence', () => {
       autoPatchGemini: true,
       terminalFontSize: 16,
       terminalFontFamily: 'Cascadia Mono, monospace',
+      gridCardDisplayMode: 'chat',
     });
     mockedInvoke.mockResolvedValueOnce({
       schema_version: 2,
@@ -251,6 +266,7 @@ describe('app settings persistence', () => {
         auto_patch_gemini: false,
         terminal_font_size: 14,
         terminal_font_family: null,
+        grid_card_display_mode: 'terminal',
       },
       overrides: {},
     });
@@ -262,12 +278,14 @@ describe('app settings persistence', () => {
         auto_patch_gemini: true,
         terminal_font_size: 16,
         terminal_font_family: 'Cascadia Mono, monospace',
+        grid_card_display_mode: 'chat',
       },
       overrides: {
         theme: 'dark',
         auto_patch_gemini: true,
         terminal_font_size: 16,
         terminal_font_family: 'Cascadia Mono, monospace',
+        grid_card_display_mode: 'chat',
       },
     });
 
@@ -282,6 +300,7 @@ describe('app settings persistence', () => {
           auto_patch_gemini: true,
           terminal_font_size: 16,
           terminal_font_family: 'Cascadia Mono, monospace',
+          grid_card_display_mode: 'chat',
         },
       }),
     });
@@ -293,12 +312,14 @@ describe('app settings persistence', () => {
       autoPatchGemini: true,
       terminalFontSize: 16,
       terminalFontFamily: 'Cascadia Mono, monospace',
+      gridCardDisplayMode: 'chat',
     });
     mockedInvoke.mockResolvedValueOnce({
       theme: 'system',
       auto_patch_gemini: false,
       terminal_font_size: 14,
       terminal_font_family: null,
+      grid_card_display_mode: 'terminal',
     });
 
     await useSettingsStore.getState().loadAppSettings();
@@ -307,6 +328,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
     expect(useSettingsStore.getState().terminalFontSize).toBe(16);
     expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
   });
 
   it('falls back without error when backend app settings response is empty', async () => {
