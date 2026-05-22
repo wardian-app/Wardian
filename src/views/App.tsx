@@ -164,6 +164,7 @@ function AppBody() {
   const agentsRef = React.useRef(agents);
   const agentStatusRef = React.useRef<Record<string, string>>({});
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
+  const fetchAgentsRequestRef = React.useRef(0);
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
@@ -706,14 +707,20 @@ function AppBody() {
   };
 
   const fetchAgents = async () => {
+    const requestId = ++fetchAgentsRequestRef.current;
     try {
       const list = await invoke<AgentConfig[]>("list_agents");
+      if (requestId !== fetchAgentsRequestRef.current) return;
       const normalized = normalizeAgentConfigs(list);
       setAgents(normalized);
       const newOffIds = new Set<string>();
       for (const agent of normalized) if (agent.is_off) newOffIds.add(agent.session_id);
       setOffAgentIds(newOffIds);
-    } catch (e) { console.error("Failed to fetch agents:", e); }
+    } catch (e) {
+      if (requestId === fetchAgentsRequestRef.current) {
+        console.error("Failed to fetch agents:", e);
+      }
+    }
   };
 
   const fetchAgentClasses = async () => {

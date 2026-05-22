@@ -93,6 +93,34 @@ describe("UserTerminalPanel", () => {
     );
   });
 
+  it("drains all queued PTY output when mounted", async () => {
+    const outputChunks = ["first chunk", "second chunk", null];
+    mockInvoke.mockImplementation((command) => {
+      if (command === "ensure_user_terminal") {
+        return Promise.resolve("test-user-terminal-session");
+      }
+      if (command === "read_user_terminal_pty") {
+        return Promise.resolve(outputChunks.shift() ?? null);
+      }
+      return Promise.resolve(null);
+    });
+
+    render(
+      <UserTerminalPanel
+        theme="dark"
+        height={320}
+        selectedWorkspace={null}
+        onHeightChange={vi.fn()}
+        onHide={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(writeMock).toHaveBeenCalledWith("first chunk");
+      expect(writeMock).toHaveBeenCalledWith("second chunk");
+    });
+  });
+
   it("disables workspace jump when no single workspace is selected", () => {
     render(
       <UserTerminalPanel

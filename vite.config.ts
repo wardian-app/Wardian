@@ -29,6 +29,49 @@ export default defineConfig(async () => ({
   // correctly.
   build: {
     minify: "terser",
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalized = id.replace(/\\/g, "/");
+          if (!normalized.includes("/node_modules/")) {
+            return undefined;
+          }
+          if (normalized.includes("/node_modules/@xterm/addon-webgl/")) {
+            return "vendor-terminal-webgl";
+          }
+          if (normalized.includes("/node_modules/@xterm/addon-")) {
+            return "vendor-terminal-addons";
+          }
+          if (normalized.includes("/node_modules/@xterm/headless/")) {
+            return "vendor-terminal-headless";
+          }
+          if (normalized.includes("/node_modules/@xterm/xterm/")) {
+            return "vendor-terminal-core";
+          }
+          if (
+            normalized.includes("/node_modules/@xyflow/react/") ||
+            normalized.includes("/node_modules/graphology/") ||
+            normalized.includes("/node_modules/sigma/")
+          ) {
+            return "vendor-graph";
+          }
+          if (
+            normalized.includes("/node_modules/react/") ||
+            normalized.includes("/node_modules/react-dom/") ||
+            normalized.includes("/node_modules/scheduler/")
+          ) {
+            return "vendor-react";
+          }
+          if (normalized.includes("/node_modules/lucide-react/")) {
+            return "vendor-icons";
+          }
+          if (normalized.includes("/node_modules/qrcode/")) {
+            return "vendor-qrcode";
+          }
+          return "vendor";
+        },
+      },
+    },
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

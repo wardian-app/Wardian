@@ -53,6 +53,7 @@ export function UserTerminalPanel({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const drainStateRef = useRef({ generation: 0, inFlight: false, queued: false });
   const [initError, setInitError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [exited, setExited] = useState(false);
@@ -96,13 +97,34 @@ export function UserTerminalPanel({
   }, [terminalSize]);
 
   const drainPty = useCallback(async () => {
+    const drainState = drainStateRef.current;
+    if (drainState.inFlight) {
+      drainState.queued = true;
+      return;
+    }
+
+    drainState.inFlight = true;
+    const drainGeneration = drainState.generation;
     try {
-      const output = await invoke<string | null>("read_user_terminal_pty");
-      if (output) {
-        termRef.current?.write(output);
-      }
+      do {
+        drainState.queued = false;
+        while (termRef.current && drainState.generation === drainGeneration) {
+          const output = await invoke<string | null>("read_user_terminal_pty");
+          if (!output || !termRef.current || drainState.generation !== drainGeneration) {
+            break;
+          }
+          termRef.current.write(output);
+        }
+      } while (termRef.current && drainState.generation === drainGeneration && drainState.queued);
     } catch (error) {
       setStatusMessage(String(error));
+    } finally {
+      drainState.inFlight = false;
+      if (termRef.current && drainState.generation === drainGeneration && drainState.queued) {
+        queueMicrotask(() => {
+          void drainPty();
+        });
+      }
     }
   }, []);
 
@@ -116,6 +138,9 @@ export function UserTerminalPanel({
     let resizeObserver: ResizeObserver | null = null;
     let outputUnlisten: (() => void) | null = null;
     let exitedUnlisten: (() => void) | null = null;
+    drainStateRef.current.generation += 1;
+    drainStateRef.current.inFlight = false;
+    drainStateRef.current.queued = false;
 
     const term = new Terminal({
       allowProposedApi: true,
@@ -201,6 +226,9 @@ export function UserTerminalPanel({
 
     return () => {
       mounted = false;
+      drainStateRef.current.generation += 1;
+      drainStateRef.current.inFlight = false;
+      drainStateRef.current.queued = false;
       outputUnlisten?.();
       exitedUnlisten?.();
       resizeObserver?.disconnect();

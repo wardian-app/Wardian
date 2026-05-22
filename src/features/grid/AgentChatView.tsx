@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, Copy, Loader2, SendHorizontal } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AgentChatEvent, AgentChatRole, AgentConfig, AgentTelemetry } from "../../types";
 import { submitInputToAgent } from "../../utils/terminalInput";
@@ -69,6 +69,7 @@ export function AgentChatView({
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const transcriptRequestRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +77,7 @@ export function AgentChatView({
 
     const loadTranscript = (showLoading: boolean) => {
       if (!showLoading && document.visibilityState === "hidden") return;
+      const requestId = ++transcriptRequestRef.current;
       if (showLoading) {
         setLoadState("loading");
         setError(null);
@@ -83,7 +85,7 @@ export function AgentChatView({
 
       invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
         .then((transcript) => {
-          if (cancelled) return;
+          if (cancelled || requestId !== transcriptRequestRef.current) return;
           const nextEvents = Array.isArray(transcript) ? transcript : [];
           setEvents(nextEvents);
           setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
@@ -91,7 +93,7 @@ export function AgentChatView({
           setError(null);
         })
         .catch((reason: unknown) => {
-          if (cancelled || !showLoading) return;
+          if (cancelled || requestId !== transcriptRequestRef.current || !showLoading) return;
           setEvents([]);
           setError(errorMessage(reason));
           setLoadState("error");

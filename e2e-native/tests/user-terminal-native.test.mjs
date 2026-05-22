@@ -41,8 +41,15 @@ async function configurePortableShell(driver) {
   assert.ok(selected, "No shell is available for user terminal E2E");
   await invokeTauri(driver, "save_shell_settings", {
     settings: {
-      shell_id: selected.id,
-      agent_session_persistence: "resume",
+      schema_version: 2,
+      settings: {
+        shell_id: selected.id,
+        agent_session_persistence: "resume",
+      },
+      overrides: {
+        shell_id: selected.id,
+        agent_session_persistence: "resume",
+      },
     },
   });
   return selected.id;
