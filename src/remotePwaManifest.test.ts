@@ -17,6 +17,12 @@ type RgbaPixel = {
   a: number;
 };
 
+type PngPixels = {
+  width: number;
+  height: number;
+  pixelAt: (x: number, y: number) => RgbaPixel;
+};
+
 const paethPredictor = (left: number, above: number, upperLeft: number) => {
   const estimate = left + above - upperLeft;
   const distanceLeft = Math.abs(estimate - left);
@@ -27,7 +33,7 @@ const paethPredictor = (left: number, above: number, upperLeft: number) => {
   return upperLeft;
 };
 
-const readPngPixels = (png: Buffer) => {
+const readPngPixels = (png: Buffer): PngPixels => {
   const signature = png.subarray(0, 8).toString("hex");
   expect(signature).toBe("89504e470d0a1a0a");
 
@@ -102,6 +108,34 @@ const readPngPixels = (png: Buffer) => {
   return { width, height, pixelAt };
 };
 
+const measureNonWhiteBounds = (icon: PngPixels) => {
+  let minX = icon.width;
+  let minY = icon.height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < icon.height; y += 1) {
+    for (let x = 0; x < icon.width; x += 1) {
+      const pixel = icon.pixelAt(x, y);
+      const isWhite = pixel.r === 255 && pixel.g === 255 && pixel.b === 255 && pixel.a === 255;
+      if (!isWhite) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+
+  expect(maxX).toBeGreaterThanOrEqual(0);
+  expect(maxY).toBeGreaterThanOrEqual(0);
+
+  return {
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+};
+
 describe("remote PWA manifest", () => {
   it("advertises a dedicated maskable PNG icon for Android install surfaces", () => {
     const publicDir = join(process.cwd(), "public");
@@ -131,5 +165,12 @@ describe("remote PWA manifest", () => {
     expect(icon.pixelAt(511, 0)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
     expect(icon.pixelAt(0, 511)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
     expect(icon.pixelAt(511, 511)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
+  });
+
+  it("keeps the logo inside the maskable icon safe area", () => {
+    const icon = readPngPixels(readFileSync(join(process.cwd(), "public", "icon-maskable.png")));
+    const bounds = measureNonWhiteBounds(icon);
+
+    expect(Math.max(bounds.width, bounds.height)).toBeLessThanOrEqual(384);
   });
 });
