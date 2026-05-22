@@ -3,6 +3,12 @@ import type { RemoteAgentSummary } from "../../types";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
+import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
+
+function formatProviderName(provider: string | null | undefined): string {
+  if (!provider) return "–";
+  return isUserFacingProviderName(provider) ? providerDisplayName(provider) : provider;
+}
 
 export const RemoteAgentCard: React.FC<{ agent: RemoteAgentSummary }> = ({ agent }) => {
   const openAgent = useRemoteStore((state) => state.openAgent);
@@ -19,7 +25,7 @@ export const RemoteAgentCard: React.FC<{ agent: RemoteAgentSummary }> = ({ agent
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-primary">{agent.session_name}</h2>
             <div className="mt-1 truncate text-xs text-muted-neutral">
-              {agent.provider} / {agent.agent_class}
+              {formatProviderName(agent.provider)} / {agent.agent_class}
             </div>
           </div>
           <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-neutral">

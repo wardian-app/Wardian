@@ -5,6 +5,12 @@ import { toActivityBlock } from "../grid/activityBlocks";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
+import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
+
+function formatProviderName(provider: string | null | undefined): string {
+  if (!provider) return "–";
+  return isUserFacingProviderName(provider) ? providerDisplayName(provider) : provider;
+}
 
 const roleLabel: Record<AgentChatRole, string> = {
   user: "You",
@@ -68,7 +74,7 @@ export const RemoteAgentConversationView: React.FC<{ agent: RemoteAgentSummary }
               <span className={`h-2 w-2 shrink-0 rounded-full ${remoteStatusClassFor(agent.status)}`} aria-hidden="true" />
               <span className="truncate">{agent.status}</span>
               <span aria-hidden="true">/</span>
-              <span className="truncate">{agent.provider}</span>
+              <span className="truncate">{formatProviderName(agent.provider)}</span>
             </div>
           </div>
           <button

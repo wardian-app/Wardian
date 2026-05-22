@@ -286,6 +286,8 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await screen.findByText("Coder");
+    expect(screen.getByTestId("remote-mobile-app")).toHaveClass("h-dvh", "overflow-hidden");
+    expect(screen.getByTestId("remote-scroll-region")).toHaveClass("min-h-0", "overflow-y-auto");
     expect(screen.getByTestId("remote-agent-list")).toHaveClass("grid-cols-1");
     expect(fetchMock).toHaveBeenCalledWith("/remote/api/session", expect.objectContaining({ method: "GET" }));
     await waitFor(() => {

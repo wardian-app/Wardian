@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, KeyRound, QrCode, RefreshCw, ShieldAlert, Smartphone, Trash2, X } from "lucide-react";
+import { Check, KeyRound, QrCode, RefreshCw, Save, ShieldAlert, Smartphone, Trash2, X } from "lucide-react";
 import QRCode from "qrcode";
 import type {
   PairingQrPayload,
@@ -16,12 +16,40 @@ const actionButtonClass =
 const iconButtonClass =
   "inline-flex h-8 w-8 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary disabled:cursor-not-allowed disabled:opacity-50";
 
+const inputClass =
+  "mt-1 w-full rounded-md border border-wardian-border bg-wardian-bg px-3 py-2 text-sm text-primary outline-none transition-colors focus:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-60";
+
 const pairingUrlForOffer = (pairing: PairingQrPayload): string => {
   const url = new URL("/remote", pairing.gateway_origin);
   url.searchParams.set("pairing_offer_id", pairing.pairing_offer_id);
   url.searchParams.set("nonce", pairing.nonce);
   url.searchParams.set("server_fingerprint", pairing.server_identity_fingerprint);
   return url.toString();
+};
+
+const createGatewayIdentity = (): Pick<
+  RemoteGatewayConfig,
+  "gateway_identity_public_key" | "gateway_identity_fingerprint"
+> => {
+  const bytes = new Uint8Array(32);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return {
+    gateway_identity_public_key: `wardian-local-gateway-v1:${hex}`,
+    gateway_identity_fingerprint: hex.match(/.{1,2}/g)?.join(":") ?? hex,
+  };
+};
+
+const normalizeRemoteOriginInput = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.includes("://")) return trimmed;
+  return `https://${trimmed}`;
 };
 
 const activeRemoteDevices = (records: RemoteDeviceRecord[] | null | undefined): RemoteDeviceRecord[] =>
@@ -34,7 +62,11 @@ export const RemoteAccessSettings: React.FC = () => {
   const [pendingPairings, setPendingPairings] = useState<RemotePendingPairingRequest[]>([]);
   const [pairing, setPairing] = useState<PairingQrPayload | null>(null);
   const [pairingQrDataUrl, setPairingQrDataUrl] = useState("");
+  const [remoteEnabledInput, setRemoteEnabledInput] = useState(false);
+  const [originInput, setOriginInput] = useState("");
+  const [portInput, setPortInput] = useState("41241");
   const [loading, setLoading] = useState(true);
+  const [savingConfig, setSavingConfig] = useState(false);
   const [creatingPairing, setCreatingPairing] = useState(false);
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [reviewingPairingId, setReviewingPairingId] = useState<string | null>(null);
@@ -52,6 +84,9 @@ export const RemoteAccessSettings: React.FC = () => {
       ]);
       setStatus(loadedStatus);
       setConfig(loadedConfig);
+      setRemoteEnabledInput(loadedConfig?.enabled ?? false);
+      setOriginInput(loadedConfig?.canonical_origin ?? "");
+      setPortInput(loadedConfig?.loopback_port ? String(loadedConfig.loopback_port) : "41241");
       setDevices(activeRemoteDevices(loadedDevices));
       setPendingPairings(loadedPendingPairings ?? []);
     } catch (err) {
@@ -115,6 +150,56 @@ export const RemoteAccessSettings: React.FC = () => {
       setError(`Unable to create pairing code: ${String(err)}`);
     } finally {
       setCreatingPairing(false);
+    }
+  };
+
+  const saveGatewayConfig = async () => {
+    setError("");
+    setSavingConfig(true);
+    try {
+      const trimmedOrigin = normalizeRemoteOriginInput(originInput);
+      const parsedPort = Number(portInput);
+      if (remoteEnabledInput && !trimmedOrigin) {
+        throw new Error("Enter the HTTPS Tailscale origin before enabling remote access.");
+      }
+      if (remoteEnabledInput && !trimmedOrigin.toLowerCase().startsWith("https://")) {
+        throw new Error("Remote access requires an HTTPS Tailscale origin.");
+      }
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+        throw new Error("Local gateway port must be between 1 and 65535.");
+      }
+
+      const identity =
+        config?.gateway_identity_public_key && config.gateway_identity_fingerprint
+          ? {
+              gateway_identity_public_key: config.gateway_identity_public_key,
+              gateway_identity_fingerprint: config.gateway_identity_fingerprint,
+            }
+          : createGatewayIdentity();
+      const saved = await invoke<RemoteGatewayConfig>("save_remote_gateway_config", {
+        config: {
+          schema_version: 1,
+          enabled: remoteEnabledInput,
+          canonical_origin: trimmedOrigin,
+          loopback_host: "127.0.0.1",
+          loopback_port: parsedPort,
+          ...identity,
+        },
+      });
+
+      setConfig(saved);
+      setRemoteEnabledInput(saved.enabled);
+      setOriginInput(saved.canonical_origin);
+      setPortInput(String(saved.loopback_port || parsedPort));
+      setStatus(saved.enabled ? "enabled" : "disabled");
+      if (!saved.enabled) {
+        setPairing(null);
+        setPendingPairings([]);
+      }
+    } catch (err) {
+      setError(`Unable to save remote access settings: ${String(err)}`);
+    } finally {
+      setSavingConfig(false);
     }
   };
 
@@ -222,6 +307,65 @@ export const RemoteAccessSettings: React.FC = () => {
           <dd className={statusClass}>{statusLabel}</dd>
         </div>
       </dl>
+
+      <div className="mt-4 border-t border-wardian-border pt-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold text-primary">Gateway configuration</div>
+            <div className="mt-1 text-xs leading-relaxed text-muted-neutral">
+              Tailscale Serve should forward the HTTPS origin to the local Wardian gateway.
+            </div>
+          </div>
+          <label className="flex shrink-0 items-center gap-2 text-xs font-semibold text-primary">
+            <input
+              type="checkbox"
+              checked={remoteEnabledInput}
+              onChange={(event) => setRemoteEnabledInput(event.target.checked)}
+              className="h-4 w-4 rounded border-wardian-border accent-[var(--color-wardian-accent)]"
+            />
+            Enable remote access
+          </label>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem]">
+          <label className="min-w-0 text-xs font-medium text-muted-neutral">
+            Tailscale HTTPS origin
+            <input
+              type="url"
+              value={originInput}
+              onChange={(event) => setOriginInput(event.target.value)}
+              placeholder="https://machine.tailnet.ts.net"
+              className={inputClass}
+            />
+          </label>
+          <label className="text-xs font-medium text-muted-neutral">
+            Local gateway port
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={portInput}
+              onChange={(event) => setPortInput(event.target.value)}
+              className={inputClass}
+            />
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs text-muted-neutral">
+            Wardian binds v1 remote access to <span className="font-mono text-primary">127.0.0.1</span>; expose that port through Tailscale Serve.
+          </div>
+          <button
+            type="button"
+            onClick={() => void saveGatewayConfig()}
+            disabled={savingConfig}
+            className={actionButtonClass}
+          >
+            <Save className="h-4 w-4" aria-hidden="true" />
+            {savingConfig ? "Saving..." : "Save gateway settings"}
+          </button>
+        </div>
+      </div>
 
       {pairing && (
         <div className="mt-4 border-t border-wardian-border pt-4 text-xs">

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   authSignatureMessageBytes,
   createRemoteDeviceKeyPair,
+  rawP256SignatureToDer,
   signRemoteAuthChallenge,
 } from "./remoteIdentity";
 
@@ -40,5 +41,16 @@ describe("remoteIdentity", () => {
         Buffer.from(signatureDerBase64, "base64"),
       ),
     ).toBe(true);
+  });
+
+  it("DER-encodes raw P-256 signatures that start with a sequence byte", () => {
+    const rawSignature = new Uint8Array(64);
+    rawSignature[0] = 0x30;
+    rawSignature[31] = 0x01;
+    rawSignature[63] = 0x02;
+
+    const derSignature = new Uint8Array(rawP256SignatureToDer(rawSignature.buffer));
+
+    expect(Array.from(derSignature.slice(0, 4))).toEqual([0x30, 0x25, 0x02, 0x20]);
   });
 });

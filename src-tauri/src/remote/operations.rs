@@ -1,27 +1,48 @@
 use crate::remote::models::{RemoteAgentActionRequest, RemoteAgentSummary, RemoteWorkflowSummary};
 use crate::state::AppState;
+use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 use wardian_core::models::chat::AgentChatEvent;
 
 pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
     let agents = state.agents.lock().await;
-    agents
+    let order = state.agent_order.lock().await;
+    let mut summaries_by_id = agents
         .values()
         .filter_map(|agent| {
             let config = agent.config.lock().ok()?.clone();
             let status = agent.current_status.lock().ok()?.clone();
 
-            Some(RemoteAgentSummary {
-                session_id: config.session_id,
-                session_name: config.session_name,
-                agent_class: config.agent_class,
-                provider: config.provider,
-                workspace: config.folder,
-                status,
-                latest_text: None,
-            })
+            Some((
+                config.session_id.clone(),
+                RemoteAgentSummary {
+                    session_id: config.session_id,
+                    session_name: config.session_name,
+                    agent_class: config.agent_class,
+                    provider: config.provider,
+                    workspace: config.folder,
+                    status,
+                    latest_text: None,
+                },
+            ))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+
+    let mut ordered = Vec::with_capacity(summaries_by_id.len());
+    for session_id in order.iter() {
+        if let Some(summary) = summaries_by_id.remove(session_id) {
+            ordered.push(summary);
+        }
+    }
+
+    let mut remaining = summaries_by_id.into_values().collect::<Vec<_>>();
+    remaining.sort_by(|left, right| {
+        left.session_name
+            .cmp(&right.session_name)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    ordered.extend(remaining);
+    ordered
 }
 
 pub async fn remote_agent_chat_transcript(
@@ -190,6 +211,32 @@ mod tests {
         assert_eq!(roster[0].workspace, "<absolute-workspace-path>");
         assert_eq!(roster[0].status, "Idle");
         assert_eq!(roster[0].latest_text, None);
+    }
+
+    #[tokio::test]
+    async fn remote_agent_roster_preserves_desktop_agent_order() {
+        let state = AppState::new();
+        insert_agent(&state, test_agent("agent-1", "Alpha", "Coder", "Idle")).await;
+        insert_agent(
+            &state,
+            test_agent("agent-2", "Beta", "Reviewer", "Processing"),
+        )
+        .await;
+        state
+            .agent_order
+            .lock()
+            .await
+            .extend(["agent-2".to_string(), "agent-1".to_string()]);
+
+        let roster = remote_agent_roster(&state).await;
+
+        assert_eq!(
+            roster
+                .iter()
+                .map(|agent| agent.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-2", "agent-1"]
+        );
     }
 
     #[tokio::test]

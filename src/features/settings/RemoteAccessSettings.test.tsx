@@ -104,6 +104,66 @@ describe("RemoteAccessSettings", () => {
     expect(mockInvoke).toHaveBeenCalledWith("load_remote_access_status");
   });
 
+  it("lets users configure remote access before creating a pairing code", async () => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      switch (command) {
+        case "load_remote_access_status":
+          return "disabled";
+        case "load_remote_gateway_config":
+          return null;
+        case "list_remote_devices":
+          return [];
+        case "list_pending_remote_pairing_requests":
+          return [];
+        case "save_remote_gateway_config": {
+          const saveArgs = args as { config: typeof enabledConfig };
+          expect(args).toEqual({
+            config: expect.objectContaining({
+              schema_version: 1,
+              enabled: true,
+              canonical_origin: "https://wardian.tailnet.ts.net",
+              loopback_host: "127.0.0.1",
+              loopback_port: 41241,
+              gateway_identity_public_key: expect.stringMatching(/^wardian-local-gateway-v1:/),
+              gateway_identity_fingerprint: expect.stringMatching(/^[0-9a-f]{2}(:[0-9a-f]{2})+$/),
+            }),
+          });
+          return {
+            ...enabledConfig,
+            gateway_identity_public_key: saveArgs.config.gateway_identity_public_key,
+            gateway_identity_fingerprint: saveArgs.config.gateway_identity_fingerprint,
+          };
+        }
+        case "create_remote_pairing_offer":
+          return {
+            gateway_origin: "https://wardian.tailnet.ts.net",
+            pairing_offer_id: "offer-1",
+            expires_at: "2026-05-21T00:02:00.000Z",
+            nonce: "nonce",
+            server_identity_fingerprint: "fp",
+          };
+        default:
+          return null;
+      }
+    });
+
+    render(<RemoteAccessSettings />);
+
+    expect(await screen.findByText("Disabled")).toBeVisible();
+    expect(screen.getAllByText("Not configured").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: /create pairing code/i })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /enable remote access/i }));
+    await userEvent.type(screen.getByLabelText(/tailscale https origin/i), "wardian.tailnet.ts.net");
+    await userEvent.click(screen.getByRole("button", { name: /save gateway settings/i }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_remote_gateway_config", expect.any(Object));
+    });
+    expect(screen.getByText("Enabled")).toBeVisible();
+    expect(screen.getByRole("button", { name: /create pairing code/i })).toBeEnabled();
+  });
+
   it("revokes a paired device through the remote device command", async () => {
     mockInvoke.mockImplementation(async (command) => {
       switch (command) {

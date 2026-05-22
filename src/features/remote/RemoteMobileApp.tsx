@@ -66,8 +66,8 @@ export const RemoteMobileApp: React.FC = () => {
   }
 
   return (
-    <main className="min-h-screen bg-wardian-bg text-primary" data-testid="remote-mobile-app">
-      <header className="sticky top-0 z-10 border-b border-wardian-border bg-wardian-bg/95 px-4 py-3 backdrop-blur">
+    <main className="flex h-dvh flex-col overflow-hidden bg-wardian-bg text-primary" data-testid="remote-mobile-app">
+      <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
             <Smartphone className="h-4 w-4 shrink-0 text-muted-neutral" aria-hidden="true" />
@@ -84,26 +84,28 @@ export const RemoteMobileApp: React.FC = () => {
         </div>
       </header>
 
-      <section className="p-3">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="text-xs font-semibold uppercase text-muted-neutral">Agents</h2>
-          <span className="text-[11px] text-muted-neutral">{agents.length}</span>
-        </div>
-        {agents.length === 0 ? (
-          <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
-            No remote agents available.
+      <div className="min-h-0 flex-1 overflow-y-auto pb-3" data-testid="remote-scroll-region">
+        <section className="p-3">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-xs font-semibold uppercase text-muted-neutral">Agents</h2>
+            <span className="text-[11px] text-muted-neutral">{agents.length}</span>
           </div>
-        ) : (
-          <div data-testid="remote-agent-list" className="grid grid-cols-1 gap-3">
-            {agents.map((agent) => (
-              <RemoteAgentCard key={agent.session_id} agent={agent} />
-            ))}
-          </div>
-        )}
-      </section>
+          {agents.length === 0 ? (
+            <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
+              No remote agents available.
+            </div>
+          ) : (
+            <div data-testid="remote-agent-list" className="grid grid-cols-1 gap-3">
+              {agents.map((agent) => (
+                <RemoteAgentCard key={agent.session_id} agent={agent} />
+              ))}
+            </div>
+          )}
+        </section>
 
-      <RemoteQueueView />
-      <RemoteWorkflowList workflows={workflows} />
+        <RemoteQueueView />
+        <RemoteWorkflowList workflows={workflows} />
+      </div>
       <RemoteCommandBar />
     </main>
   );

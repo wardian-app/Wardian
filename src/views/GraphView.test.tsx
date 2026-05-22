@@ -130,7 +130,7 @@ describe("GraphView", () => {
 
     expect(handlers.onSelectionChange).toHaveBeenCalledWith(new Set(["a"]));
     expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
-    expect(screen.getByText("Coder / codex")).toBeInTheDocument();
+    expect(screen.getByText("Coder / Codex")).toBeInTheDocument();
   });
 
   it("keeps the inspector aligned with external single-agent selection changes", () => {

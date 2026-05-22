@@ -112,25 +112,27 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-function rawP256SignatureToDer(signature: ArrayBuffer): ArrayBuffer {
+export function rawP256SignatureToDer(signature: ArrayBuffer): ArrayBuffer {
   const bytes = new Uint8Array(signature);
-  if (bytes[0] === 0x30) return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  if (bytes.byteLength !== 64) {
-    throw new Error("invalid_p256_signature");
+  if (bytes.byteLength === 64) {
+    const r = encodeDerInteger(bytes.slice(0, 32));
+    const s = encodeDerInteger(bytes.slice(32));
+    const sequenceLength = r.byteLength + s.byteLength;
+    const result = new Uint8Array(1 + derLengthBytes(sequenceLength).byteLength + sequenceLength);
+    let offset = 0;
+    result[offset++] = 0x30;
+    const length = derLengthBytes(sequenceLength);
+    result.set(length, offset);
+    offset += length.byteLength;
+    result.set(r, offset);
+    offset += r.byteLength;
+    result.set(s, offset);
+    return result.buffer;
   }
-  const r = encodeDerInteger(bytes.slice(0, 32));
-  const s = encodeDerInteger(bytes.slice(32));
-  const sequenceLength = r.byteLength + s.byteLength;
-  const result = new Uint8Array(1 + derLengthBytes(sequenceLength).byteLength + sequenceLength);
-  let offset = 0;
-  result[offset++] = 0x30;
-  const length = derLengthBytes(sequenceLength);
-  result.set(length, offset);
-  offset += length.byteLength;
-  result.set(r, offset);
-  offset += r.byteLength;
-  result.set(s, offset);
-  return result.buffer;
+  if (bytes[0] === 0x30) {
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  }
+  throw new Error("invalid_p256_signature");
 }
 
 function encodeDerInteger(value: Uint8Array): Uint8Array {
