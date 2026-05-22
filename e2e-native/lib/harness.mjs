@@ -11,6 +11,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
 const DEFAULT_WATCH_STEP_DELAY_MS = 750;
+const NATIVE_E2E_HOME_ENV = "WARDIAN_E2E_NATIVE_HOME";
+const DEFAULT_NATIVE_E2E_HOME = path.join(os.tmpdir(), "wardian-e2e-native-home");
 
 function existingPath(candidates) {
   for (const candidate of candidates) {
@@ -194,7 +196,31 @@ function resolveTauriDriverPath() {
 }
 
 function resolveIsolatedHome() {
-  return process.env.WARDIAN_HOME || path.join(os.tmpdir(), "wardian-e2e-native-home");
+  return process.env[NATIVE_E2E_HOME_ENV] || DEFAULT_NATIVE_E2E_HOME;
+}
+
+function isPathInside(candidate, parent) {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isSafeNativeE2EHome(homePath) {
+  const resolvedHome = path.resolve(homePath || "");
+  const root = path.parse(resolvedHome).root;
+  if (!homePath || resolvedHome === root || resolvedHome === repoRoot) {
+    return false;
+  }
+
+  const tempRoot = path.resolve(os.tmpdir());
+  const repoNativeTempRoot = path.resolve(repoRoot, ".tmp", "e2e-native");
+  const basename = path.basename(resolvedHome).toLowerCase();
+  const namedNativeE2EHome =
+    basename === "wardian-e2e-native-home" || basename.startsWith("wardian-e2e-native-");
+
+  return (
+    isPathInside(resolvedHome, repoNativeTempRoot) ||
+    (isPathInside(resolvedHome, tempRoot) && namedNativeE2EHome)
+  );
 }
 
 function readBooleanEnv(name) {
@@ -203,6 +229,13 @@ function readBooleanEnv(name) {
     return false;
   }
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function nativeInfrastructureError(error) {
+  if (!readBooleanEnv("WARDIAN_E2E_ALLOW_INFRA_SKIP")) {
+    process.exitCode = 1;
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function readPositiveIntegerEnv(name, fallback) {
@@ -279,13 +312,17 @@ export function ensureNativeAppBuilt(harness) {
   );
 
   if (build.status !== 0) {
-    throw new Error(`Failed to build Wardian native app (exit ${build.status ?? 1}).`);
+    throw nativeInfrastructureError(
+      new Error(`Failed to build Wardian native app (exit ${build.status ?? 1}).`),
+    );
   }
 
   const refreshedAppPath = resolveAppPath();
   if (!refreshedAppPath) {
-    throw new Error(
-      "Wardian app binary was not found after build. Set WARDIAN_NATIVE_APP if your output path is non-standard."
+    throw nativeInfrastructureError(
+      new Error(
+        "Wardian app binary was not found after build. Set WARDIAN_NATIVE_APP if your output path is non-standard.",
+      ),
     );
   }
 
@@ -293,6 +330,14 @@ export function ensureNativeAppBuilt(harness) {
 }
 
 export function prepareIsolatedHome(harness) {
+  if (!isSafeNativeE2EHome(harness.isolatedHome)) {
+    throw new Error(
+      `Refusing to reset unsafe native E2E home: ${harness.isolatedHome}. ` +
+        `Use ${NATIVE_E2E_HOME_ENV} with a wardian-e2e-native-* path under ${os.tmpdir()} ` +
+        `or a path under ${path.join(repoRoot, ".tmp", "e2e-native")}.`,
+    );
+  }
+
   let lastError = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
@@ -367,7 +412,11 @@ function waitForPort({ port, host = "127.0.0.1", timeoutMs = 15000, processRef, 
 }
 
 export async function startNativeSession(harness) {
-  assertNativePreflight(harness);
+  try {
+    assertNativePreflight(harness);
+  } catch (error) {
+    throw nativeInfrastructureError(error);
+  }
 
   const tauriDriverArgs = [];
   if (harness.nativeDriverPath) {
@@ -394,11 +443,16 @@ export async function startNativeSession(harness) {
 
   const logs = () => ({ stdout, stderr });
 
-  await waitForPort({
-    port: 4444,
-    processRef: tauriDriver,
-    logs,
-  });
+  try {
+    await waitForPort({
+      port: 4444,
+      processRef: tauriDriver,
+      logs,
+    });
+  } catch (error) {
+    tauriDriver.kill();
+    throw nativeInfrastructureError(error);
+  }
 
   const capabilities = new Capabilities();
   capabilities.setBrowserName("wry");
@@ -442,8 +496,10 @@ export async function startNativeSession(harness) {
     };
   } catch (error) {
     tauriDriver.kill();
-    throw new Error(
-      `Failed to start native Tauri session: ${error}\n--- tauri-driver stdout ---\n${stdout}\n--- tauri-driver stderr ---\n${stderr}`
+    throw nativeInfrastructureError(
+      new Error(
+        `Failed to start native Tauri session: ${error}\n--- tauri-driver stdout ---\n${stdout}\n--- tauri-driver stderr ---\n${stderr}`,
+      ),
     );
   }
 }

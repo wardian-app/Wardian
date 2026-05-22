@@ -1207,12 +1207,12 @@ pub async fn start_workflow_triggers(
                 let wf_id_file = wf_id.clone();
                 let app_file = app_clone.clone();
                 if path.exists() {
-                    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
                     // The watcher needs to stay alive
                     let handle = tokio::spawn(async move {
-                        let mut watcher =
-                            notify::recommended_watcher(move |res: notify::Result<Event>| {
+                        let mut watcher = match notify::recommended_watcher(
+                            move |res: notify::Result<Event>| {
                                 if let Ok(Event { paths, kind, .. }) = res {
                                     if !paths.is_empty() {
                                         let path = paths[0].to_string_lossy().to_string();
@@ -1222,17 +1222,41 @@ pub async fn start_workflow_triggers(
                                             "event": event_type,
                                             "timestamp": Utc::now().to_rfc3339()
                                         });
-                                        let _ = tx.try_send(Some(payload)); // Send payload through channel
+                                        let _ = tx.send(payload);
                                     }
                                 }
-                            })
-                            .unwrap();
+                            },
+                        ) {
+                            Ok(watcher) => watcher,
+                            Err(error) => {
+                                log_debug(&format!(
+                                    "[Wardian] Failed to create file trigger watcher for {} on {:?}: {}",
+                                    wf_id_file, path_clone, error
+                                ));
+                                return;
+                            }
+                        };
 
-                        if watcher
-                            .watch(&path_clone, RecursiveMode::NonRecursive)
-                            .is_ok()
+                        if let Err(error) = watcher.watch(&path_clone, RecursiveMode::NonRecursive)
                         {
-                            while let Some(payload) = rx.recv().await {
+                            log_debug(&format!(
+                                "[Wardian] Failed to watch file trigger for {} on {:?}: {}",
+                                wf_id_file, path_clone, error
+                            ));
+                            return;
+                        }
+
+                        while let Some(mut payload) = rx.recv().await {
+                            loop {
+                                while let Ok(Some(next_payload)) = tokio::time::timeout(
+                                    std::time::Duration::from_millis(150),
+                                    rx.recv(),
+                                )
+                                .await
+                                {
+                                    payload = next_payload;
+                                }
+
                                 let state = app_file.state::<crate::state::AppState>();
                                 if state
                                     .triggers_paused
@@ -1242,17 +1266,32 @@ pub async fn start_workflow_triggers(
                                         "[Wardian] File trigger for {} skipped (Paused)",
                                         wf_id_file
                                     ));
-                                    continue;
+                                    break;
                                 }
 
                                 log_debug(&format!(
                                     "[Wardian] Triggering workflow {} via file watcher on {:?}",
                                     wf_id_file, path_clone
                                 ));
-                                let _ = run_workflow(app_file.clone(), wf_id_file.clone(), payload)
-                                    .await;
+                                let _ = run_workflow(
+                                    app_file.clone(),
+                                    wf_id_file.clone(),
+                                    Some(payload.clone()),
+                                )
+                                .await;
                                 // Debounce: wait a bit before being ready for next trigger
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                                match rx.try_recv() {
+                                    Ok(next_payload) => {
+                                        payload = next_payload;
+                                        continue;
+                                    }
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     });
@@ -1813,7 +1852,10 @@ pub async fn run_workflow(
     let run_instance_id_for_cleanup = run_instance_id.clone();
     let run_instance_id_for_handle = run_instance_id.clone();
     let scheduled_run_id_for_completion = scheduled_run_id.clone();
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tauri::async_runtime::spawn(async move {
+        let _ = registered_rx.await;
+
         let mut trace = Vec::new();
         let mut pulsed_ports: HashMap<(String, String), u32> = HashMap::new(); // (node_id, port_id) -> count
         let mut consumed_pulses: HashMap<String, HashMap<(String, String), u32>> = HashMap::new(); // node_id -> dependency -> count
@@ -2893,6 +2935,7 @@ pub async fn run_workflow(
         let handles = runs.entry(run_instance_id_for_handle).or_default();
         handles.push(handle);
     }
+    let _ = registered_tx.send(());
 
     Ok(())
 }

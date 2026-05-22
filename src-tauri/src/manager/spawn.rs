@@ -3,6 +3,7 @@ use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::transcript::extract_transcript_message;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
+use crate::utils::append_bounded_pty_output;
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 use crate::utils::PtyUtf8Decoder;
@@ -456,7 +457,7 @@ pub async fn spawn_agent(
                             "Check ~/.wardian/wardian_debug.log for the exact command and config used.\r\n",
                         );
                         if let Ok(mut h) = output_buffer_clone.lock() {
-                            h.push_str(msg);
+                            append_bounded_pty_output(&mut h, msg);
                         }
                         let _ = pty_emit_app.emit(
                             "agent-pty-output-ready",
@@ -612,7 +613,7 @@ pub async fn spawn_agent(
                         }
                     }
                     let output_ready_action = if let Ok(mut h) = output_buffer_clone.lock() {
-                        h.push_str(&text);
+                        append_bounded_pty_output(&mut h, &text);
                         output_ready_emit_gate
                             .lock()
                             .map(|mut gate| gate.after_buffer_append(std::time::Instant::now()))

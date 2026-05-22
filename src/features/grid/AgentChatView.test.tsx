@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentChatEvent } from "../../types";
 import { AgentChatView } from "./AgentChatView";
@@ -11,6 +11,16 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
 
 const invokeMock = vi.mocked(invoke);
 const writeTextMock = vi.mocked(writeText);
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
 
 const event = (overrides: Partial<AgentChatEvent>): AgentChatEvent => ({
   id: "event-1",
@@ -748,5 +758,55 @@ describe("AgentChatView", () => {
 
     expect(await screen.findByText("Initial transcript")).toBeInTheDocument();
     expect(await screen.findByText("Updated transcript")).toBeInTheDocument();
+  });
+
+  it("ignores stale transcript responses that resolve after a newer refresh", async () => {
+    vi.useFakeTimers();
+    const firstLoad = deferred<AgentChatEvent[]>();
+    const secondLoad = deferred<AgentChatEvent[]>();
+    invokeMock
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockReturnValueOnce(secondLoad.promise);
+
+    try {
+      render(<AgentChatView sessionId="agent-1" refreshIntervalMs={10} />);
+
+      await act(async () => {});
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        secondLoad.resolve([
+          event({
+            id: "newer-message",
+            kind: "message",
+            role: "assistant",
+            text: "Newer transcript",
+            sequence: 2,
+          }),
+        ]);
+      });
+      expect(screen.getByText("Newer transcript")).toBeInTheDocument();
+
+      await act(async () => {
+        firstLoad.resolve([
+          event({
+            id: "older-message",
+            kind: "message",
+            role: "assistant",
+            text: "Older transcript",
+            sequence: 1,
+          }),
+        ]);
+      });
+
+      expect(screen.getByText("Newer transcript")).toBeInTheDocument();
+      expect(screen.queryByText("Older transcript")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -12,8 +12,8 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
       contentType: "application/json",
       body: JSON.stringify({
         csrf_nonce: "csrf-e2e",
-        expires_at: "2026-05-21T08:05:00.000Z",
-        absolute_expires_at: "2026-05-21T20:00:00.000Z",
+        expires_at: "2099-05-21T08:05:00.000Z",
+        absolute_expires_at: "2099-05-21T20:00:00.000Z",
       }),
     });
   });
@@ -38,6 +38,9 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await page.route("**/remote/api/workflows", async (route) => {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ workflows: [] }) });
   });
+  await page.route("**/remote/api/agents/agent-1/chat", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ events: [] }) });
+  });
   await page.route("**/remote/api/agents/action", async (route) => {
     actionRequests.push({
       headers: route.request().headers(),
@@ -51,10 +54,10 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await expect(page.getByText("Remote Coder")).toBeVisible();
   await expect(page.locator('[data-testid="remote-agent-list"]')).toHaveClass(/grid-cols-1/);
 
-  await page.getByLabel("Prompt").fill("status please");
-  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
-  await page.getByRole("button", { name: /Remote Coder/ }).click();
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Open Remote Coder conversation" }).click();
+  await expect(page.locator('[data-testid="remote-agent-conversation"]')).toBeVisible();
+  await page.getByLabel("Message Remote Coder").fill("status please");
+  await page.getByRole("button", { name: "Send message" }).click();
 
   await expect.poll(() => actionRequests.length).toBe(1);
   expect(actionRequests[0]).toMatchObject({

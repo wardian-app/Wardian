@@ -1,5 +1,6 @@
 use crate::manager;
 use crate::state::{AppState, UserTerminalSession};
+use crate::utils::append_bounded_pty_output;
 use crate::utils::terminal_input::submit_prompt_via_sender;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -401,7 +402,7 @@ fn spawn_user_terminal_session(
                     let text = pty_decoder.decode_chunk(&buf[..n]);
                     let should_emit = if let Ok(mut output) = output_buffer_for_reader.lock() {
                         let was_empty = output.is_empty();
-                        output.push_str(&text);
+                        append_bounded_pty_output(&mut output, &text);
                         was_empty
                     } else {
                         false

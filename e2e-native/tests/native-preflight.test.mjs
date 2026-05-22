@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -9,6 +10,8 @@ import {
   createNativeHarness,
   formatAppShellTimeoutMessage,
   nativeAppBuildArgs,
+  prepareIsolatedHome,
+  startNativeSession,
 } from "../lib/harness.mjs";
 
 test("native preflight reports missing tauri-driver clearly", () => {
@@ -70,6 +73,106 @@ test("native harness reads watch mode settings from the environment", async () =
     } else {
       process.env.WARDIAN_E2E_STEP_DELAY_MS = previousDelay;
     }
+  }
+});
+
+test("native harness ignores ambient production WARDIAN_HOME", async () => {
+  const previousHome = process.env.WARDIAN_HOME;
+  const previousNativeHome = process.env.WARDIAN_E2E_NATIVE_HOME;
+  process.env.WARDIAN_HOME = path.join(os.tmpdir(), `wardian-production-home-${process.pid}`);
+  delete process.env.WARDIAN_E2E_NATIVE_HOME;
+
+  try {
+    const harness = await createNativeHarness();
+
+    assert.notEqual(harness.isolatedHome, process.env.WARDIAN_HOME);
+    assert.match(path.basename(harness.isolatedHome), /^wardian-e2e-native/);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.WARDIAN_HOME;
+    } else {
+      process.env.WARDIAN_HOME = previousHome;
+    }
+    if (previousNativeHome === undefined) {
+      delete process.env.WARDIAN_E2E_NATIVE_HOME;
+    } else {
+      process.env.WARDIAN_E2E_NATIVE_HOME = previousNativeHome;
+    }
+  }
+});
+
+test("native harness refuses to delete an unsafe isolated home path", () => {
+  const unsafeHome = path.join(process.cwd(), ".tmp", `unsafe-native-home-${process.pid}`);
+  const sentinel = path.join(unsafeHome, "sentinel.txt");
+  fs.mkdirSync(unsafeHome, { recursive: true });
+  fs.writeFileSync(sentinel, "do not delete", "utf8");
+
+  try {
+    assert.throws(
+      () => prepareIsolatedHome({ isolatedHome: unsafeHome }),
+      /Refusing to reset unsafe native E2E home/,
+    );
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "do not delete");
+  } finally {
+    fs.rmSync(unsafeHome, { recursive: true, force: true });
+  }
+});
+
+test("native session infrastructure failures make the test process fail by default", async () => {
+  const previousAllowSkip = process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP;
+  const previousExitCode = process.exitCode;
+  delete process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP;
+  process.exitCode = undefined;
+
+  try {
+    await assert.rejects(
+      () =>
+        startNativeSession({
+          repoRoot: process.cwd(),
+          appPath: "D:/Development/Wardian/target/debug/Wardian.exe",
+          platform: "win32",
+          tauriDriverPath: null,
+          nativeDriverPath: "C:/WebDriver/msedgedriver.exe",
+        }),
+      /tauri-driver was not found on PATH/,
+    );
+    assert.equal(process.exitCode, 1);
+  } finally {
+    if (previousAllowSkip === undefined) {
+      delete process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP;
+    } else {
+      process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP = previousAllowSkip;
+    }
+    process.exitCode = previousExitCode;
+  }
+});
+
+test("native session infrastructure failures can be explicitly skipped for local runs", async () => {
+  const previousAllowSkip = process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP;
+  const previousExitCode = process.exitCode;
+  process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP = "1";
+  process.exitCode = undefined;
+
+  try {
+    await assert.rejects(
+      () =>
+        startNativeSession({
+          repoRoot: process.cwd(),
+          appPath: "D:/Development/Wardian/target/debug/Wardian.exe",
+          platform: "win32",
+          tauriDriverPath: null,
+          nativeDriverPath: "C:/WebDriver/msedgedriver.exe",
+        }),
+      /tauri-driver was not found on PATH/,
+    );
+    assert.equal(process.exitCode, undefined);
+  } finally {
+    if (previousAllowSkip === undefined) {
+      delete process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP;
+    } else {
+      process.env.WARDIAN_E2E_ALLOW_INFRA_SKIP = previousAllowSkip;
+    }
+    process.exitCode = previousExitCode;
   }
 });
 

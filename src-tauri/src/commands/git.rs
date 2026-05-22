@@ -488,6 +488,43 @@ fn escape_toml_basic_string(value: &str) -> String {
         .replace('\t', "\\t")
 }
 
+struct GitWatchPaths {
+    index_path: PathBuf,
+    head_path: PathBuf,
+}
+
+fn resolve_git_watch_paths(cwd: &Path) -> Result<GitWatchPaths, String> {
+    let dot_git = cwd.join(".git");
+    let git_dir = if dot_git.is_file() {
+        resolve_gitdir_file(cwd, &dot_git)?
+    } else {
+        dot_git
+    };
+
+    Ok(GitWatchPaths {
+        index_path: git_dir.join("index"),
+        head_path: git_dir.join("HEAD"),
+    })
+}
+
+fn resolve_gitdir_file(cwd: &Path, dot_git: &Path) -> Result<PathBuf, String> {
+    let content = std::fs::read_to_string(dot_git)
+        .map_err(|e| format!("Failed to read {}: {}", dot_git.display(), e))?;
+    let gitdir = content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Invalid gitdir file: {}", dot_git.display()))?;
+
+    let path = PathBuf::from(gitdir);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(cwd.join(path))
+    }
+}
+
 /// Start watching a git repo's index and HEAD for changes.
 /// Emits `git-changed` (payload: cwd string) to the frontend on any change,
 /// debounced to 150 ms so rapid multi-file operations fire a single event.
@@ -498,9 +535,10 @@ pub async fn git_watch(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let git_dir = std::path::Path::new(&cwd).join(".git");
-    let index_path = git_dir.join("index");
-    let head_path = git_dir.join("HEAD");
+    let GitWatchPaths {
+        index_path,
+        head_path,
+    } = resolve_git_watch_paths(std::path::Path::new(&cwd))?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
@@ -667,6 +705,49 @@ mod tests {
             "wardian/repo-agent"
         );
         assert!(worktree.join(".cargo").join("config.toml").exists());
+    }
+
+    #[test]
+    fn resolve_git_watch_paths_uses_git_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+
+        let paths = resolve_git_watch_paths(&repo).unwrap();
+
+        assert_eq!(paths.index_path, git_dir.join("index"));
+        assert_eq!(paths.head_path, git_dir.join("HEAD"));
+    }
+
+    #[test]
+    fn resolve_git_watch_paths_uses_linked_worktree_gitdir_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let git_dir = temp
+            .path()
+            .join("main")
+            .join(".git")
+            .join("worktrees")
+            .join("agent");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: ../main/.git/worktrees/agent\n",
+        )
+        .unwrap();
+
+        let paths = resolve_git_watch_paths(&worktree).unwrap();
+
+        assert_eq!(
+            paths.index_path,
+            worktree.join("../main/.git/worktrees/agent/index")
+        );
+        assert_eq!(
+            paths.head_path,
+            worktree.join("../main/.git/worktrees/agent/HEAD")
+        );
     }
 
     #[test]
