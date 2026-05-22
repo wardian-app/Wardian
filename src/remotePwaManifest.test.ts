@@ -171,6 +171,6 @@ describe("remote PWA manifest", () => {
     const icon = readPngPixels(readFileSync(join(process.cwd(), "public", "icon-maskable.png")));
     const bounds = measureNonWhiteBounds(icon);
 
-    expect(Math.max(bounds.width, bounds.height)).toBeLessThanOrEqual(384);
+    expect(Math.max(bounds.width, bounds.height)).toBeLessThanOrEqual(336);
   });
 });

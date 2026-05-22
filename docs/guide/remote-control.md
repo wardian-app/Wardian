@@ -15,15 +15,22 @@ workflows, filesystem access, provider CLIs, PTYs, and telemetry.
 
 1. Open Settings.
 2. Open Remote Access.
-3. Confirm the canonical Tailscale HTTPS origin.
-4. Start Tailscale Serve for the Wardian loopback gateway.
-5. Create a pairing code.
-6. Scan the code from the phone and approve the device on the desktop.
-7. Open the remote URL from the phone while connected to the same tailnet.
+3. Enter the canonical Tailscale HTTPS origin and local gateway address.
+4. Save the remote access configuration.
+5. Start Tailscale Serve for the Wardian loopback gateway.
+6. Create a pairing code.
+7. Scan the code from the phone and approve the device on the desktop.
+8. Open the remote URL from the phone while connected to the same tailnet.
 
 The pairing code is short-lived and single use. The phone generates its own
 device key during pairing, then waits for explicit desktop approval before it
 can create a remote session.
+
+When the origin field contains a bare hostname, Wardian saves it as HTTPS. For
+example, `<machine>.<tailnet>.ts.net` becomes
+`https://<machine>.<tailnet>.ts.net`. Enter the scheme explicitly only when you
+need to correct or replace it. The saved origin must still be HTTPS and must
+match the gateway origin used by the phone.
 
 ## Security Model
 

@@ -4,6 +4,12 @@ import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { GraphCanvas } from "../features/graph/GraphCanvas";
+import { isUserFacingProviderName, providerDisplayName } from "../features/agents/providerOptions";
+
+function formatProviderName(provider: string | null | undefined): string {
+  if (!provider) return "unknown";
+  return isUserFacingProviderName(provider) ? providerDisplayName(provider) : provider;
+}
 import {
   buildAgentGraph,
   type AgentGraphEdge,
@@ -225,7 +231,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                   </button>
                 </div>
               <h2>{inspectedAgent.label}</h2>
-              <p>{inspectedAgent.agent.agent_class} / {inspectedAgent.agent.provider ?? "unknown"}</p>
+              <p>{inspectedAgent.agent.agent_class} / {formatProviderName(inspectedAgent.agent.provider)}</p>
               <p>
                 {props.deriveCurrentThought(
                   props.terminalTitles[inspectedAgent.id] ?? "",
