@@ -150,6 +150,8 @@ pub fn run() {
         }
     }
 
+    crate::utils::fs::ensure_process_wardian_home_env();
+
     crate::utils::migration::migrate_home_layout();
 
     let db_init_result = crate::utils::fs::get_wardian_home()
