@@ -21,6 +21,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "stage-cli": "node scripts/stage-cli.mjs",
+    "stage-cli:dev": "node scripts/stage-cli.mjs --profile dev",
     "release:package-manifests": "node scripts/package-managers/generate-manifests.mjs",
     "lint": "tsc --noEmit",
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
@@ -56,8 +57,10 @@
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
     "@xyflow/react": "^12.10.1",
+    "graphology": "^0.26.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "sigma": "^3.0.3",
     "zustand": "^5.0.11"
   },
   "devDependencies": {

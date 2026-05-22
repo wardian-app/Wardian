@@ -34,6 +34,7 @@ import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { SettingsModal } from "../features/settings/SettingsModal";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
+import { GraphView } from "./GraphView";
 import { PlaceholderView } from "./PlaceholderView";
 import { QueueView } from "./QueueView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
@@ -1121,11 +1122,61 @@ function AppBody() {
               </div>
             )}
 
-            {["graph", "garden"].map(mode => viewMode === mode && (
-              <div key={mode} className="flex-1 flex flex-col min-h-0">
-                <PlaceholderView viewMode={mode as any} />
+            {viewMode === "graph" && (
+              <div className="flex-1 flex flex-col min-h-0">
+                <GraphView
+                  filteredAgents={filteredAgents}
+                  allAgents={agents}
+                  telemetry={telemetry}
+                  terminalTitles={terminalTitles}
+                  currentThoughts={currentThoughts}
+                  selectedAgentIds={selectedAgentIds}
+                  offAgentIds={offAgentIds}
+                  watchlists={watchlists}
+                  activeList={activeList}
+                  teams={teams}
+                  interactions={agentInteractions}
+                  onSelectionChange={setSelectedAgentIds}
+                  onOpenAgentInGrid={(id) => {
+                    setViewMode("grid");
+                    setSelectedAgentIds(new Set([id]));
+                    lastSelectedIdRef.current = id;
+                    window.setTimeout(() => scrollToAgent(id), 0);
+                  }}
+                  onInitiateRename={(id) => {
+                    const agent = agents.find((candidate) => candidate.session_id === id);
+                    setViewMode("grid");
+                    setSelectedAgentIds(new Set([id]));
+                    lastSelectedIdRef.current = id;
+                    setEditingAgentId(id);
+                    setTempName(agent?.session_name ?? "");
+                  }}
+                  onQuery={(id) => {
+                    setViewMode("grid");
+                    setSelectedAgentIds(new Set([id]));
+                    lastSelectedIdRef.current = id;
+                    window.setTimeout(() => scrollToAgent(id), 0);
+                  }}
+                  onPause={onPause}
+                  onRestart={onRestart}
+                  onClear={onClear}
+                  onClone={onClone}
+                  onAddToList={handleAddToList}
+                  onRemoveFromList={handleRemoveFromList}
+                  onAddAgentsToList={handleAddAgentsToList}
+                  onRemoveAgentsFromList={handleRemoveAgentsFromList}
+                  onDelete={onDelete}
+                  onDeleteAgents={onDeleteAgents}
+                  deriveCurrentThought={deriveCurrentThought}
+                />
               </div>
-            ))}
+            )}
+
+            {viewMode === "garden" && (
+              <div className="flex-1 flex flex-col min-h-0">
+                <PlaceholderView viewMode="garden" />
+              </div>
+            )}
 
             {viewMode === "grid" && (
               <GridView 

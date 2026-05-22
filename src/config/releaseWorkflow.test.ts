@@ -132,7 +132,14 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("target/*/release/bundle/**/*.dmg");
     expect(tauriConfig).toContain('"beforeBuildCommand": "npm run build && npm run stage-cli"');
     expect(tauriConfig).toContain('"resources/bin/*"');
-    expect(stageCliScript).toContain("const buildArgs = ['build', '--release', '-p', 'wardian-cli'];");
+    expect(stageCliScript).toContain("const buildArgs = ['build', '-p', 'wardian-cli'];");
+    expect(stageCliScript).toContain("buildArgs.push('--release');");
     expect(stageCliScript).toContain("const target = process.env.WARDIAN_CLI_TARGET?.trim();");
+  });
+
+  it("stages a current worktree CLI before dev startup", () => {
+    expect(tauriConfig).toContain('"beforeDevCommand": "npm run stage-cli:dev && npm run vite"');
+    expect(stageCliScript).toContain("profile !== 'dev'");
+    expect(stageCliScript).toContain("profile === 'release'");
   });
 });
