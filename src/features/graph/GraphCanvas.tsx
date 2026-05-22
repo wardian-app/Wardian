@@ -121,7 +121,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     for (const edge of projection.edges) {
       const primaryReason = edge.reasons[0] ?? "same_team";
       graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
-        size: edge.reasons.length > 1 ? Math.max(3.25, edge.weight + 1.25) : Math.max(1.75, edge.weight),
+        size: 1,
         color: resolveGraphColor(EDGE_REASON_COLORS[primaryReason], container),
         label: edge.reasons.join(", "),
         type: "line",

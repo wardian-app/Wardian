@@ -718,7 +718,7 @@ select option {
   background: var(--color-wardian-card);
 }
 
-.graph-toolbar--canvas-centered {
+.graph-toolbar--stable-centered {
   position: relative;
 }
 
@@ -745,18 +745,13 @@ select option {
   display: flex;
   position: absolute;
   top: 50%;
-  left: 0;
-  right: 0;
-  transform: translateY(-50%);
+  left: 50%;
+  transform: translate(-50%, -50%);
   align-items: center;
   justify-content: center;
   gap: 6px;
   flex-wrap: wrap;
   pointer-events: none;
-}
-
-.graph-view--inspector-open .graph-toolbar--canvas-centered .graph-lenses {
-  right: var(--graph-inspector-width);
 }
 
 .graph-toolbar-action {

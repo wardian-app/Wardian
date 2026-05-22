@@ -109,16 +109,16 @@ describe("GraphView", () => {
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
   });
 
-  it("centers relationship lenses against the graph canvas area", () => {
+  it("centers relationship lenses in the stable toolbar center", () => {
     const { container } = render(<GraphView {...defaultProps} />);
 
     expect(container.querySelector(".graph-view")).toHaveClass("graph-view--inspector-open");
-    expect(container.querySelector(".graph-toolbar")).toHaveClass("graph-toolbar--canvas-centered");
+    expect(container.querySelector(".graph-toolbar")).toHaveClass("graph-toolbar--stable-centered");
 
     const appCss = readFileSync(resolve(process.cwd(), "src/styles/App.css"), "utf8");
-    expect(appCss).toMatch(/\.graph-toolbar--canvas-centered\s*\{[^}]*position:\s*relative;/s);
-    expect(appCss).toMatch(/\.graph-view--inspector-open\s+\.graph-toolbar--canvas-centered\s+\.graph-lenses\s*\{[^}]*right:\s*var\(--graph-inspector-width\);/s);
-    expect(appCss).toMatch(/\.graph-lenses\s*\{[^}]*position:\s*absolute;[^}]*left:\s*0;[^}]*right:\s*0;/s);
+    expect(appCss).toMatch(/\.graph-toolbar--stable-centered\s*\{[^}]*position:\s*relative;/s);
+    expect(appCss).not.toMatch(/\.graph-view--inspector-open\s+\.graph-toolbar--stable-centered\s+\.graph-lenses/s);
+    expect(appCss).toMatch(/\.graph-lenses\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translate\(-50%,\s*-50%\);/s);
   });
 
   it("opens inspector when a node is selected", () => {

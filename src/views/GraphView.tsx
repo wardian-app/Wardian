@@ -120,7 +120,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
       }}
       onContextMenu={(event) => event.stopPropagation()}
     >
-      <div className="graph-toolbar graph-toolbar--canvas-centered">
+      <div className="graph-toolbar graph-toolbar--stable-centered">
         <div className="graph-scope">
           <div className="label-small">Scope</div>
           <div className="graph-scope-label">{projection.scopeLabel}</div>

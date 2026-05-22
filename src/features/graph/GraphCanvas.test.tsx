@@ -101,7 +101,7 @@ describe("GraphCanvas", () => {
     }));
   });
 
-  it("styles edge relationships by reason and makes multi-reason edges thicker", () => {
+  it("styles edge relationships by reason without changing edge thickness", () => {
     render(
       <GraphCanvas
         projection={{
@@ -145,23 +145,23 @@ describe("GraphCanvas", () => {
 
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("team", "a", "b", expect.objectContaining({
       color: "var(--color-wardian-accent)",
-      size: 1.75,
+      size: 1,
       type: "line",
     }));
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("workspace", "a", "c", expect.objectContaining({
       color: "var(--color-wardian-processing)",
-      size: 1.75,
+      size: 1,
       type: "line",
     }));
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("worktree", "a", "d", expect.objectContaining({
       color: "var(--color-wardian-warning)",
-      size: 1.75,
+      size: 1,
       type: "line",
     }));
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("multi", "a", "e", expect.objectContaining({
       color: "var(--color-wardian-processing)",
       label: "shared_workspace, same_worktree",
-      size: 3.25,
+      size: 1,
       type: "line",
     }));
   });
