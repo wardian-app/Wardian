@@ -60,6 +60,8 @@ Run the desktop app in development mode:
 npm run dev
 ```
 
+Debug desktop builds do not use the production Wardian home by default. If `WARDIAN_HOME` is unset, or if a managed agent shell inherited the default production home, the dev app rewrites its process environment to `target/debug/.wardian` before opening the database, control endpoint, remote gateway, or restored agents.
+
 When testing the CLI against a dev app, set the same explicit `WARDIAN_HOME` in both terminals:
 
 macOS/Linux shell:
@@ -131,6 +133,7 @@ Official release builds opt into signed updater artifacts with the release-only 
 | Variable | Purpose | Default |
 |---|---|---|
 | `WARDIAN_HOME` | Redirect all state to an isolated directory | `~/.wardian` |
+| `WARDIAN_DEBUG_ALLOW_PRODUCTION_HOME` | Allow a debug desktop build to use the default production home when set to `1` | unset |
 | `WARDIAN_MOCK_SCENARIO` | Mock provider scenario for native E2E tests | `basic` |
 | `WARDIAN_MOCK_DELAY_MS` | Delay between mock provider events (ms) | `100` |
 | `WARDIAN_E2E_REAL_ANTIGRAVITY` | Enable real Antigravity provider in native E2E | unset |

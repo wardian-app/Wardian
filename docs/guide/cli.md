@@ -34,7 +34,7 @@ Wardian also attempts to add that `bin` directory to the user PATH. On Windows, 
 
 Set `WARDIAN_HOME` to redirect state, the CLI install location, and the live app control endpoint for tests or isolated runs.
 
-For development, set the same `WARDIAN_HOME` before starting the desktop app and before running CLI commands. Otherwise the app debug home and the CLI default production home may differ.
+For development, `npm run dev` uses the app debug home by default and ignores an inherited default production home from a managed agent shell. Set the same non-production `WARDIAN_HOME` before starting the dev desktop app and before running CLI commands when you want the CLI to inspect that dev app's live state.
 
 When the desktop app is running for the same `WARDIAN_HOME`, the CLI asks the app for live agent snapshots before falling back to `state.db`. Request `status_source` when you need to know which path answered:
 

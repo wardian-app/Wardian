@@ -20,9 +20,67 @@ use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
 const STRUCTURED_ASK_REQUESTS_DIR: &str = "requests";
 
-pub fn spawn_control_server(app: AppHandle) {
+#[cfg(windows)]
+pub(crate) type ControlEndpointClaim = tokio::net::windows::named_pipe::NamedPipeServer;
+
+#[cfg(unix)]
+pub(crate) struct ControlEndpointClaim {
+    listener: Option<tokio::net::UnixListener>,
+    socket_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for ControlEndpointClaim {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let pipe_name = wardian_core::control::pipe_name()
+        .ok_or_else(|| std::io::Error::other("could not resolve Wardian control pipe"))?;
+    ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe_name)
+}
+
+#[cfg(unix)]
+pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> {
+    use std::os::unix::net::UnixStream;
+    use tokio::net::UnixListener;
+
+    let socket_path = wardian_core::control::socket_path()
+        .ok_or_else(|| std::io::Error::other("could not resolve Wardian control socket"))?;
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    match UnixListener::bind(&socket_path) {
+        Ok(listener) => Ok(ControlEndpointClaim {
+            listener: Some(listener),
+            socket_path,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if UnixStream::connect(&socket_path).is_ok() {
+                Err(error)
+            } else {
+                let _ = std::fs::remove_file(&socket_path);
+                UnixListener::bind(&socket_path).map(|listener| ControlEndpointClaim {
+                    listener: Some(listener),
+                    socket_path,
+                })
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn spawn_control_server(app: AppHandle, claim: ControlEndpointClaim) {
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = run_control_server(app).await {
+        if let Err(error) = run_control_server(app, claim).await {
             crate::utils::logging::log_debug(&format!(
                 "[Wardian] control server unavailable: {error}"
             ));
@@ -31,18 +89,21 @@ pub fn spawn_control_server(app: AppHandle) {
 }
 
 #[cfg(windows)]
-async fn run_control_server(app: AppHandle) -> std::io::Result<()> {
+async fn run_control_server(
+    app: AppHandle,
+    first_server: ControlEndpointClaim,
+) -> std::io::Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let pipe_name = wardian_core::control::pipe_name()
         .ok_or_else(|| std::io::Error::other("could not resolve Wardian control pipe"))?;
 
-    let mut first_instance = true;
+    let mut next_server = Some(first_server);
     loop {
-        let server = ServerOptions::new()
-            .first_pipe_instance(first_instance)
-            .create(&pipe_name)?;
-        first_instance = false;
+        let server = match next_server.take() {
+            Some(server) => server,
+            None => ServerOptions::new().create(&pipe_name)?,
+        };
         server.connect().await?;
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -56,17 +117,14 @@ async fn run_control_server(app: AppHandle) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-async fn run_control_server(app: AppHandle) -> std::io::Result<()> {
-    use tokio::net::UnixListener;
-
-    let socket_path = wardian_core::control::socket_path()
-        .ok_or_else(|| std::io::Error::other("could not resolve Wardian control socket"))?;
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(socket_path)?;
-
+async fn run_control_server(
+    app: AppHandle,
+    mut claim: ControlEndpointClaim,
+) -> std::io::Result<()> {
+    let listener = claim
+        .listener
+        .take()
+        .ok_or_else(|| std::io::Error::other("Wardian control endpoint was already claimed"))?;
     loop {
         let (stream, _) = listener.accept().await?;
         let app_handle = app.clone();
@@ -2508,6 +2566,29 @@ mod tests {
     use crate::state::ActiveAgent;
     use std::sync::{Arc, Mutex};
     use wardian_core::models::{AgentConfig, WorkflowDefinition, WorkflowNode, WorkflowSettings};
+
+    #[tokio::test]
+    async fn control_endpoint_claim_is_exclusive_for_current_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
+        let first = claim_control_endpoint().expect("first endpoint claim");
+        let second = claim_control_endpoint().expect_err("second claim should fail");
+
+        assert!(
+            matches!(
+                second.kind(),
+                std::io::ErrorKind::AlreadyExists
+                    | std::io::ErrorKind::AddrInUse
+                    | std::io::ErrorKind::PermissionDenied
+            ),
+            "unexpected endpoint claim error: {second}"
+        );
+
+        drop(first);
+        std::env::remove_var("WARDIAN_HOME");
+    }
 
     fn test_agent(session_id: &str, session_name: &str, agent_class: &str) -> ActiveAgent {
         ActiveAgent {
