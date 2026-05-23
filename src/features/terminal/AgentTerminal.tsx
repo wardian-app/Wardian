@@ -35,6 +35,13 @@ const TERMINAL_SCROLLBACK_LINES = 1_000;
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 8;
 const RESIZE_FIT_DEBOUNCE_MS = 250;
+// Grace period before a renderer's WebGL context is torn down after the React
+// component unmounts. Transient unmounts (grid maximize/minimize, tab switches,
+// re-layouts) remount almost immediately and reuse the live renderer, so we
+// avoid the WebGL context-creation burst that otherwise trips Chrome's context
+// cap and flashes the lost-context placeholder. Terminals left unmounted past
+// this window still get their context reclaimed, preserving the leak fix.
+const RENDERER_DISPOSE_GRACE_MS = 30_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type TitleHandlerRef = {
@@ -65,6 +72,7 @@ type TerminalSessionEntry = {
   provider?: string;
   currentTheme: typeof DARK_TERM_THEME;
   renderer: TerminalRendererEntry | null;
+  rendererDisposeTimer: ReturnType<typeof setTimeout> | null;
   parser: HeadlessTerminal;
   parserSerializeAddon: SerializeAddon;
   latestTitle: string | null;
@@ -323,8 +331,9 @@ function disposeTerminalSession(sessionId: string) {
   entry.disposed = true;
   entry.outputReadyUnlisten?.();
   entry.terminalClearedUnlisten?.();
+  cancelRendererDisposal(entry);
   if (entry.renderer) {
-    disposeRenderer(entry.renderer);
+    disposeRenderer(entry.renderer, sessionId);
     entry.renderer = null;
   }
   entry.parserSerializeAddon.dispose();
@@ -332,12 +341,117 @@ function disposeTerminalSession(sessionId: string) {
   terminalSessionMap.delete(sessionId);
 }
 
-function disposeRenderer(renderer: TerminalRendererEntry) {
+function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
   clearRendererTimers(renderer);
+  webglPool.delete(sessionId);
   renderer.serializeAddon.dispose();
   renderer.webglAddon?.dispose();
   renderer.webglAddon = null;
   renderer.term.dispose();
+}
+
+// Chrome caps active WebGL contexts (~16); exceeding it force-evicts the oldest
+// and flashes the lost-context placeholder. We bound our own live WebGL
+// renderers below that and let the rest fall back to xterm's DOM renderer.
+// `webglPool` is insertion-ordered (Set), so the first entry is the LRU.
+const MAX_WEBGL_CONTEXTS = 12;
+const webglPool = new Set<string>();
+
+function touchWebglPool(sessionId: string) {
+  if (webglPool.delete(sessionId)) {
+    webglPool.add(sessionId);
+  }
+}
+
+function demoteSessionToDom(sessionId: string) {
+  webglPool.delete(sessionId);
+  const renderer = terminalSessionMap.get(sessionId)?.renderer;
+  if (renderer?.webglAddon) {
+    renderer.webglAddon.dispose();
+    renderer.webglAddon = null;
+    renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+  }
+}
+
+function evictLruWebglIfNeeded(exceptSessionId: string) {
+  while (webglPool.size >= MAX_WEBGL_CONTEXTS) {
+    let victim: string | undefined;
+    for (const id of webglPool) {
+      if (id !== exceptSessionId) {
+        victim = id;
+        break;
+      }
+    }
+    if (!victim) {
+      break;
+    }
+    demoteSessionToDom(victim);
+  }
+}
+
+function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string) {
+  if (!renderer.term.element || renderer.webglAddon) {
+    return;
+  }
+  evictLruWebglIfNeeded(sessionId);
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      webglAddon.dispose();
+      webglPool.delete(sessionId);
+      if (renderer.webglAddon === webglAddon) {
+        renderer.webglAddon = null;
+      }
+      renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+    });
+    renderer.term.loadAddon(webglAddon);
+    renderer.webglAddon = webglAddon;
+    webglPool.add(sessionId);
+    renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+  } catch (error) {
+    renderer.webglAddon = null;
+    console.warn("WebGL terminal renderer unavailable; using DOM renderer.", error);
+  }
+}
+
+// Pull a terminal back onto the GPU when the user focuses or maximizes it,
+// evicting the least-recently-active WebGL terminal if the pool is full.
+function promoteSessionToWebgl(sessionId: string) {
+  const renderer = terminalSessionMap.get(sessionId)?.renderer;
+  if (!renderer || !renderer.term.element) {
+    return;
+  }
+  if (renderer.webglAddon) {
+    touchWebglPool(sessionId);
+    return;
+  }
+  loadWebglForRenderer(renderer, sessionId);
+}
+
+function cancelRendererDisposal(entry: TerminalSessionEntry) {
+  if (entry.rendererDisposeTimer) {
+    clearTimeout(entry.rendererDisposeTimer);
+    entry.rendererDisposeTimer = null;
+  }
+}
+
+// Defer renderer teardown so a quick remount (maximize/minimize, tab switch)
+// reuses the live WebGL context instead of recreating it. Reclaims the context
+// only if the session stays unmounted past the grace window.
+function scheduleRendererDisposal(sessionId: string) {
+  const entry = terminalSessionMap.get(sessionId);
+  if (!entry || entry.disposed || !entry.renderer || entry.rendererDisposeTimer) {
+    return;
+  }
+  entry.rendererDisposeTimer = setTimeout(() => {
+    const current = terminalSessionMap.get(sessionId);
+    if (!current || current.disposed || !current.renderer) {
+      return;
+    }
+    current.rendererDisposeTimer = null;
+    disposeRenderer(current.renderer, sessionId);
+    current.renderer = null;
+  }, RENDERER_DISPOSE_GRACE_MS);
 }
 function clearTerminalSession(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
@@ -585,6 +699,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     provider,
     currentTheme: DARK_TERM_THEME,
     renderer: null,
+    rendererDisposeTimer: null,
     parser,
     parserSerializeAddon,
     latestTitle: null,
@@ -755,28 +870,16 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   return renderer;
 }
 
-function activateWebglRenderer(renderer: TerminalRendererEntry) {
+// First-mount entry point: give a terminal a WebGL context once, if the pool has
+// room (evicting the LRU terminal otherwise). The `webglAttempted` latch keeps a
+// terminal demoted to DOM from auto-reclaiming a context on every re-attach —
+// re-promotion only happens via promoteSessionToWebgl on focus/maximize.
+function activateWebglRenderer(renderer: TerminalRendererEntry, sessionId: string) {
   if (renderer.webglAttempted || !renderer.term.element) {
     return;
   }
-
   renderer.webglAttempted = true;
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      webglAddon.dispose();
-      if (renderer.webglAddon === webglAddon) {
-        renderer.webglAddon = null;
-      }
-      renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-    });
-    renderer.term.loadAddon(webglAddon);
-    renderer.webglAddon = webglAddon;
-    renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-  } catch (error) {
-    renderer.webglAddon = null;
-    console.warn("WebGL terminal renderer unavailable; using DOM renderer.", error);
-  }
+  loadWebglForRenderer(renderer, sessionId);
 }
 
 function attachRendererHost(
@@ -802,6 +905,7 @@ function mountRenderer(
   session: TerminalSessionEntry,
   container: HTMLDivElement,
 ) {
+  cancelRendererDisposal(session);
   const renderer = session.renderer ?? createRenderer(sessionId, session);
   session.renderer = renderer;
 
@@ -820,7 +924,7 @@ function mountRenderer(
     renderer.term.open(renderer.host);
   }
   attachRendererHost(session, container);
-  activateWebglRenderer(renderer);
+  activateWebglRenderer(renderer, sessionId);
 
   return renderer;
 }
@@ -885,6 +989,14 @@ export const AgentTerminal = memo(function AgentTerminal({
   const focusTerminal = useCallback(() => {
     xtermRef.current?.focus();
   }, []);
+
+  const handleFocusCapture = useCallback(() => {
+    // Focusing a terminal pulls it onto the GPU (evicting the LRU WebGL
+    // terminal if the pool is full), so the one you're working in is always
+    // hardware-accelerated even when the grid holds more than the cap.
+    promoteSessionToWebgl(sessionId);
+    onTerminalFocus?.();
+  }, [sessionId, onTerminalFocus]);
 
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
@@ -966,8 +1078,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       isMounted = false;
       resizeObserver?.disconnect();
       if (entry && !entry.disposed && entry.renderer) {
-        disposeRenderer(entry.renderer);
-        entry.renderer = null;
+        scheduleRendererDisposal(sessionId);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
@@ -1017,6 +1128,14 @@ export const AgentTerminal = memo(function AgentTerminal({
   }, [sessionId, isMaximized, performFit]);
 
   useEffect(() => {
+    // A maximized terminal is the one the user is looking at; guarantee it a
+    // WebGL context regardless of pool recency.
+    if (isMaximized) {
+      promoteSessionToWebgl(sessionId);
+    }
+  }, [sessionId, isMaximized]);
+
+  useEffect(() => {
     const term = xtermRef.current;
     if (!term) {
       return;
@@ -1039,7 +1158,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         ref={terminalRef}
         data-testid="agent-terminal-host"
         tabIndex={-1}
-        onFocusCapture={onTerminalFocus}
+        onFocusCapture={handleFocusCapture}
         onClick={focusTerminal}
         className={`w-full h-full overflow-hidden ${
           provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""

@@ -1,4 +1,4 @@
-import { render, waitFor, cleanup, act, screen } from "@testing-library/react";
+import { render, waitFor, cleanup, act, screen, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -150,7 +150,10 @@ describe("AgentTerminal scrollback", () => {
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
   });
 
-  it("recreates the xterm on remount and seeds it from the persisted parser state", async () => {
+  it("reuses the live renderer on a quick remount without recreating the WebGL context", async () => {
+    // A quick unmount/remount (grid maximize then minimize, tab switch) must not
+    // tear down and recreate the renderer — recreating WebGL contexts in a burst
+    // trips Chrome's context cap and flashes the lost-context placeholder.
     const firstRender = render(
       <AgentTerminal sessionId="codex-1" theme="dark" />,
     );
@@ -162,17 +165,89 @@ describe("AgentTerminal scrollback", () => {
 
     const firstInstance = getLatestTerminalInstance();
     firstRender.unmount();
-    expect(firstInstance.dispose).toHaveBeenCalled();
+    // Within the grace window the renderer is kept alive.
+    expect(firstInstance.dispose).not.toHaveBeenCalled();
+    expect(window.__wardianTerminalDebug?.snapshot("codex-1")?.renderer).toBeTruthy();
 
     render(<AgentTerminal sessionId="codex-1" theme="dark" />);
 
     await waitFor(() => {
-      expect(mockTerminal).toHaveBeenCalledTimes(2);
+      expect(window.__wardianTerminalDebug?.snapshot("codex-1")?.renderer).toBeTruthy();
     });
 
-    const secondInstance = getLatestTerminalInstance();
-    expect(secondInstance).not.toBe(firstInstance);
-    expect(secondInstance.open).toHaveBeenCalled();
+    // No second xterm was constructed; the original instance was reused.
+    expect(mockTerminal).toHaveBeenCalledTimes(1);
+    expect(firstInstance.dispose).not.toHaveBeenCalled();
+  });
+
+  it("disposes the renderer once a session stays unmounted past the grace window", async () => {
+    const firstRender = render(
+      <AgentTerminal sessionId="codex-grace" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeTruthy();
+    });
+
+    const instance = getLatestTerminalInstance();
+
+    // Switch to fake timers only for the unmount + grace-window advance, so the
+    // async mount above stays on real timers (avoids RTL/fake-timer deadlocks).
+    vi.useFakeTimers();
+    try {
+      firstRender.unmount();
+      expect(instance.dispose).not.toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeTruthy();
+
+      vi.advanceTimersByTime(30_000);
+
+      expect(instance.dispose).toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps live WebGL renderers and promotes the focused terminal onto the GPU", async () => {
+    // Render more terminals than the WebGL pool cap (12). The pool must stay at
+    // 12 live contexts; the rest fall back to the DOM renderer. Newly mounted
+    // terminals evict the least-recently-used, so older sessions left over from
+    // earlier tests are squeezed out first — these ids end up holding the pool.
+    const ids = Array.from({ length: 14 }, (_, index) => `pool-${index}`);
+    const view = render(
+      <>
+        {ids.map((id) => (
+          <AgentTerminal key={id} sessionId={id} theme="dark" />
+        ))}
+      </>,
+    );
+
+    const webglActiveCount = () =>
+      ids.filter((id) => window.__wardianTerminalDebug?.snapshot(id)?.renderer?.webglActive).length;
+
+    await waitFor(() => {
+      expect(ids.every((id) => window.__wardianTerminalDebug?.snapshot(id)?.renderer)).toBe(true);
+    });
+
+    // Exactly the cap is GPU-accelerated; the remainder render on DOM (no context).
+    expect(webglActiveCount()).toBe(12);
+
+    const domId = ids.find(
+      (id) => !window.__wardianTerminalDebug?.snapshot(id)?.renderer?.webglActive,
+    );
+    expect(domId).toBeDefined();
+
+    const hosts = view.container.querySelectorAll<HTMLElement>('[data-testid="agent-terminal-host"]');
+    const domHost = hosts[ids.indexOf(domId!)];
+    act(() => {
+      fireEvent.focusIn(domHost);
+    });
+
+    // Focusing the DOM terminal promotes it (evicting the LRU) without exceeding the cap.
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot(domId!)?.renderer?.webglActive).toBe(true);
+    });
+    expect(webglActiveCount()).toBe(12);
   });
 
   it("captures readable terminal output for queue summaries", async () => {
