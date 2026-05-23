@@ -17,6 +17,8 @@ pub struct AppSettings {
     pub terminal_font_family: Option<String>,
     #[serde(default = "default_grid_card_display_mode")]
     pub grid_card_display_mode: String,
+    #[serde(default = "default_watchlist_new_agent_position")]
+    pub watchlist_new_agent_position: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +33,8 @@ pub struct AppSettingsOverrides {
     pub terminal_font_family: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid_card_display_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchlist_new_agent_position: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +61,7 @@ impl Default for AppSettings {
             terminal_font_size: default_terminal_font_size(),
             terminal_font_family: None,
             grid_card_display_mode: default_grid_card_display_mode(),
+            watchlist_new_agent_position: default_watchlist_new_agent_position(),
         }
     }
 }
@@ -71,6 +76,10 @@ fn default_terminal_font_size() -> u8 {
 
 fn default_grid_card_display_mode() -> String {
     "terminal".to_string()
+}
+
+fn default_watchlist_new_agent_position() -> String {
+    "top".to_string()
 }
 
 pub fn load_app_settings() -> Result<AppSettings, String> {
@@ -184,7 +193,10 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     settings.terminal_font_family = settings
         .terminal_font_family
         .and_then(|value| trim_to_option(&value));
-    settings.grid_card_display_mode = normalize_grid_card_display_mode(&settings.grid_card_display_mode);
+    settings.grid_card_display_mode =
+        normalize_grid_card_display_mode(&settings.grid_card_display_mode);
+    settings.watchlist_new_agent_position =
+        normalize_watchlist_new_agent_position(&settings.watchlist_new_agent_position);
     settings
 }
 
@@ -219,6 +231,10 @@ fn app_settings_from_overrides(overrides: &AppSettingsOverrides) -> AppSettings 
             .grid_card_display_mode
             .clone()
             .unwrap_or(defaults.grid_card_display_mode),
+        watchlist_new_agent_position: overrides
+            .watchlist_new_agent_position
+            .clone()
+            .unwrap_or(defaults.watchlist_new_agent_position),
     })
 }
 
@@ -233,6 +249,9 @@ fn normalize_app_overrides(mut overrides: AppSettingsOverrides) -> AppSettingsOv
     overrides.grid_card_display_mode = overrides
         .grid_card_display_mode
         .map(|mode| normalize_grid_card_display_mode(&mode));
+    overrides.watchlist_new_agent_position = overrides
+        .watchlist_new_agent_position
+        .map(|position| normalize_watchlist_new_agent_position(&position));
     overrides
 }
 
@@ -248,8 +267,12 @@ fn app_overrides_from_settings(
             .then_some(settings.terminal_font_size),
         terminal_font_family: (settings.terminal_font_family != defaults.terminal_font_family)
             .then(|| settings.terminal_font_family.clone()),
-        grid_card_display_mode: (settings.grid_card_display_mode != defaults.grid_card_display_mode)
+        grid_card_display_mode: (settings.grid_card_display_mode
+            != defaults.grid_card_display_mode)
             .then(|| settings.grid_card_display_mode.clone()),
+        watchlist_new_agent_position: (settings.watchlist_new_agent_position
+            != defaults.watchlist_new_agent_position)
+            .then(|| settings.watchlist_new_agent_position.clone()),
     }
 }
 
@@ -265,6 +288,13 @@ fn normalize_grid_card_display_mode(value: &str) -> String {
     match value.trim() {
         "chat" => "chat".to_string(),
         _ => "terminal".to_string(),
+    }
+}
+
+fn normalize_watchlist_new_agent_position(value: &str) -> String {
+    match value.trim() {
+        "bottom" => "bottom".to_string(),
+        _ => "top".to_string(),
     }
 }
 
@@ -297,6 +327,7 @@ mod tests {
         assert_eq!(settings.terminal_font_size, 14);
         assert_eq!(settings.terminal_font_family, None);
         assert_eq!(settings.grid_card_display_mode, "terminal");
+        assert_eq!(settings.watchlist_new_agent_position, "top");
     }
 
     #[test]
@@ -309,6 +340,7 @@ mod tests {
             terminal_font_size: 16,
             terminal_font_family: Some("JetBrains Mono, monospace".to_string()),
             grid_card_display_mode: "chat".to_string(),
+            watchlist_new_agent_position: "top".to_string(),
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -330,6 +362,7 @@ mod tests {
             terminal_font_size: default_terminal_font_size(),
             terminal_font_family: None,
             grid_card_display_mode: "terminal".to_string(),
+            watchlist_new_agent_position: "top".to_string(),
         };
 
         save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -353,7 +386,8 @@ mod tests {
             r#"{
               "schema_version": 2,
               "overrides": {
-                "terminal_font_family": "JetBrains Mono, monospace"
+                "terminal_font_family": "JetBrains Mono, monospace",
+                "watchlist_new_agent_position": "bottom"
               }
             }"#,
         )
@@ -369,6 +403,7 @@ mod tests {
             Some("JetBrains Mono, monospace".to_string())
         );
         assert_eq!(loaded.grid_card_display_mode, "terminal");
+        assert_eq!(loaded.watchlist_new_agent_position, "bottom");
     }
 
     #[test]
@@ -383,7 +418,8 @@ mod tests {
               "auto_patch_gemini": true,
               "terminal_font_size": 4,
               "terminal_font_family": "   ",
-              "grid_card_display_mode": "cards"
+              "grid_card_display_mode": "cards",
+              "watchlist_new_agent_position": "middle"
             }"#,
         )
         .expect("write settings");
@@ -395,5 +431,6 @@ mod tests {
         assert_eq!(loaded.terminal_font_size, 10);
         assert_eq!(loaded.terminal_font_family, None);
         assert_eq!(loaded.grid_card_display_mode, "terminal");
+        assert_eq!(loaded.watchlist_new_agent_position, "top");
     }
 }

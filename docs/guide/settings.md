@@ -1,7 +1,8 @@
 # Settings
 
 Settings controls Wardian's global app preferences, display behavior, terminal
-defaults, provider defaults, and provider maintenance utilities.
+defaults, watchlist behavior, provider defaults, and provider maintenance
+utilities.
 
 Open Settings from the gear icon on the left icon rail. It opens as a
 near-full-screen app modal and does not change the currently selected sidebar
@@ -17,7 +18,8 @@ entire resolved settings object. Missing fields inherit Wardian's current
 computed defaults for the app and operating system.
 
 - `settings/app.json`: app preferences such as theme, Grid card display,
-  terminal font size, terminal font family, and Gemini auto-patch.
+  Watchlist new agent position, terminal font size, terminal font family, and
+  Gemini auto-patch.
 - `settings/shell.json`: runtime preferences such as shell selection, default
   provider, regular agent session policy, and Codex runtime defaults.
 
@@ -34,6 +36,7 @@ Categories:
 - **General**: app version and update status.
 - **Appearance**: app theme.
 - **Grid**: display mode for agent cards in the main Grid view.
+- **Watchlist**: roster behavior for newly spawned agents.
 - **Terminal**: terminal font and shell defaults.
 - **Agent Runtime**: default provider, regular agent session behavior, and
   provider-specific runtime defaults such as the Codex subsection.
@@ -94,6 +97,20 @@ main Grid view:
 Use Terminal mode when you need raw TUI controls, provider-specific keybindings,
 or detailed terminal behavior.
 
+## Watchlist
+
+The **New agent position** control sets where newly spawned visible agents land
+in the right-side roster:
+
+- **Top** preserves the existing behavior and puts the newly spawned agent at
+  the front of the global roster order.
+- **Bottom** appends the newly spawned agent to the end of the global roster
+  order.
+
+This setting applies to new visible agents spawned from the Agent Config pane.
+It does not re-sort existing agents on startup, reinterpret manual drag order,
+or override clone/team placement behavior.
+
 ## Terminal
 
 Terminal settings control the embedded terminal display and the shell used for
@@ -150,6 +167,8 @@ OpenCode behavior.
   [Provider Readiness](./provider-readiness.md).
 - If Grid chat mode is empty, switch to Terminal mode to inspect the raw
   provider session and confirm the agent has emitted transcript data.
+- If newly spawned agents are not where you expect, check **Watchlist > New
+  agent position** and any active manual roster order.
 - If resume behavior is not what you expect, verify both the global runtime
   policy and any per-agent override.
 - If Gemini skills are missing, run the patch manually and restart the app
@@ -158,6 +177,9 @@ OpenCode behavior.
 ## Important Limits
 
 - Settings are global only in the current implementation.
+- Watchlist new agent position affects explicit new spawns only; existing agent
+  order, clones, teams, and custom watchlist entries keep their own ordering
+  rules.
 - Shell and runtime policy changes affect future launches and resumes; they do
   not reconfigure an already-running provider process.
 - Grid chat mode handles standard text prompts and recognized approval choices.

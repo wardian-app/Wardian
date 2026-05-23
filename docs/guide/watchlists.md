@@ -52,6 +52,12 @@ Click any column header to sort by that column. Clicking again cycles through as
 ### Persistence
 Column visibility and sort state are saved to `<wardian-home>/watchlists/prefs.json` and restored on next launch.
 
+New visible agents normally appear at the top of the roster. Change
+**Settings > Watchlist > New agent position** to place newly spawned agents at
+the bottom instead. This setting affects explicit new spawns only; existing
+roster order, manual drag order, clone placement, teams, and custom watchlist
+entries keep their own ordering rules.
+
 The CLI can inspect persisted watchlist and team state without starting the desktop app:
 
 ```bash

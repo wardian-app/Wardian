@@ -14,6 +14,7 @@ import type {
   ShellOption,
   ShellSettings,
   ShellSettingsOverrides,
+  WatchlistNewAgentPosition,
 } from '../types/settings';
 import type { GridCardDisplayMode } from '../types';
 
@@ -72,6 +73,7 @@ const CODEX_SANDBOX_MODES: CodexSandboxMode[] = ['read-only', 'workspace-write',
 const CODEX_APPROVAL_POLICIES: CodexApprovalPolicy[] = ['untrusted', 'on-failure', 'on-request', 'never'];
 const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', 'codex', 'gemini', 'antigravity', 'opencode'];
 const GRID_CARD_DISPLAY_MODES: GridCardDisplayMode[] = ['terminal', 'chat'];
+const WATCHLIST_NEW_AGENT_POSITIONS: WatchlistNewAgentPosition[] = ['top', 'bottom'];
 
 export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
   sandbox_mode: 'workspace-write',
@@ -113,12 +115,21 @@ export function normalizeGridCardDisplayMode(
     : 'terminal';
 }
 
+export function normalizeWatchlistNewAgentPosition(
+  value: string | null | undefined,
+): WatchlistNewAgentPosition {
+  return WATCHLIST_NEW_AGENT_POSITIONS.includes(value as WatchlistNewAgentPosition)
+    ? value as WatchlistNewAgentPosition
+    : 'top';
+}
+
 interface SettingsState {
   theme: AppThemeSetting;
   autoPatchGemini: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
   gridCardDisplayMode: GridCardDisplayMode;
+  watchlistNewAgentPosition: WatchlistNewAgentPosition;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -136,6 +147,7 @@ interface SettingsState {
   setTerminalFontSize: (value: number) => void;
   setTerminalFontFamily: (value: string) => void;
   setGridCardDisplayMode: (value: GridCardDisplayMode) => void;
+  setWatchlistNewAgentPosition: (value: WatchlistNewAgentPosition) => void;
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
@@ -154,7 +166,12 @@ interface SettingsState {
 
 type PersistedSettingsState = Pick<
   SettingsState,
-  'theme' | 'autoPatchGemini' | 'terminalFontSize' | 'terminalFontFamily' | 'gridCardDisplayMode'
+  | 'theme'
+  | 'autoPatchGemini'
+  | 'terminalFontSize'
+  | 'terminalFontFamily'
+  | 'gridCardDisplayMode'
+  | 'watchlistNewAgentPosition'
 >;
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -172,6 +189,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   terminal_font_size: defaultTerminalFontSize(),
   terminal_font_family: null,
   grid_card_display_mode: 'terminal',
+  watchlist_new_agent_position: 'top',
 };
 
 const EMPTY_APP_SETTINGS_OVERRIDES: AppSettingsOverrides = {};
@@ -237,6 +255,9 @@ function appOverridesFromSettings(settings: AppSettings): AppSettingsOverrides {
     ...(normalizeGridCardDisplayMode(settings.grid_card_display_mode) !== DEFAULT_APP_SETTINGS.grid_card_display_mode
       ? { grid_card_display_mode: normalizeGridCardDisplayMode(settings.grid_card_display_mode) }
       : {}),
+    ...(normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position
+      ? { watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) }
+      : {}),
   };
 }
 
@@ -247,6 +268,7 @@ function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
     terminal_font_size: state.terminalFontSize,
     terminal_font_family: state.terminalFontFamily.trim() || null,
     grid_card_display_mode: state.gridCardDisplayMode,
+    watchlist_new_agent_position: state.watchlistNewAgentPosition,
   });
 }
 
@@ -295,6 +317,9 @@ function normalizeAppOverrides(overrides: AppSettingsOverrides | undefined): App
     ...(overrides?.grid_card_display_mode
       ? { grid_card_display_mode: normalizeGridCardDisplayMode(overrides.grid_card_display_mode) }
       : {}),
+    ...(overrides?.watchlist_new_agent_position
+      ? { watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(overrides.watchlist_new_agent_position) }
+      : {}),
   };
 }
 
@@ -323,7 +348,8 @@ function appSettingsAreDefaults(settings: AppSettings) {
     settings.auto_patch_gemini === DEFAULT_APP_SETTINGS.auto_patch_gemini &&
     normalizeTerminalFontSize(settings.terminal_font_size) === DEFAULT_APP_SETTINGS.terminal_font_size &&
     (settings.terminal_font_family?.trim() ?? '') === '' &&
-    normalizeGridCardDisplayMode(settings.grid_card_display_mode) === DEFAULT_APP_SETTINGS.grid_card_display_mode
+    normalizeGridCardDisplayMode(settings.grid_card_display_mode) === DEFAULT_APP_SETTINGS.grid_card_display_mode &&
+    normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) === DEFAULT_APP_SETTINGS.watchlist_new_agent_position
   );
 }
 
@@ -333,7 +359,8 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
     state.autoPatchGemini !== DEFAULT_APP_SETTINGS.auto_patch_gemini ||
     normalizeTerminalFontSize(state.terminalFontSize) !== DEFAULT_APP_SETTINGS.terminal_font_size ||
     state.terminalFontFamily.trim() !== '' ||
-    state.gridCardDisplayMode !== DEFAULT_APP_SETTINGS.grid_card_display_mode
+    state.gridCardDisplayMode !== DEFAULT_APP_SETTINGS.grid_card_display_mode ||
+    state.watchlistNewAgentPosition !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position
   );
 }
 
@@ -345,6 +372,7 @@ export const useSettingsStore = create<SettingsState>()(
       terminalFontSize: defaultTerminalFontSize(),
       terminalFontFamily: '',
       gridCardDisplayMode: 'terminal',
+      watchlistNewAgentPosition: 'top',
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -385,6 +413,13 @@ export const useSettingsStore = create<SettingsState>()(
         return {
           gridCardDisplayMode: normalized,
           app_settings_overrides: { ...state.app_settings_overrides, grid_card_display_mode: normalized },
+        };
+      }),
+      setWatchlistNewAgentPosition: (watchlistNewAgentPosition) => set((state) => {
+        const normalized = normalizeWatchlistNewAgentPosition(watchlistNewAgentPosition);
+        return {
+          watchlistNewAgentPosition: normalized,
+          app_settings_overrides: { ...state.app_settings_overrides, watchlist_new_agent_position: normalized },
         };
       }),
       setShellId: (shell_id) => set((state) => ({
@@ -469,6 +504,7 @@ export const useSettingsStore = create<SettingsState>()(
             terminalFontSize: normalizeTerminalFontSize(settings.terminal_font_size),
             terminalFontFamily: settings.terminal_font_family?.trim() ?? '',
             gridCardDisplayMode: normalizeGridCardDisplayMode(settings.grid_card_display_mode),
+            watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position),
             app_settings_overrides: normalizeAppOverrides(overrides),
             app_settings_loaded: true,
           });
@@ -484,6 +520,7 @@ export const useSettingsStore = create<SettingsState>()(
           terminal_font_size: normalizeTerminalFontSize(get().terminalFontSize),
           terminal_font_family: get().terminalFontFamily.trim() || null,
           grid_card_display_mode: normalizeGridCardDisplayMode(get().gridCardDisplayMode),
+          watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(get().watchlistNewAgentPosition),
         };
         const settings: SettingsDocument<AppSettings, AppSettingsOverrides> = {
           schema_version: 2,
@@ -499,6 +536,7 @@ export const useSettingsStore = create<SettingsState>()(
           terminalFontSize: normalizeTerminalFontSize(saved.terminal_font_size),
           terminalFontFamily: saved.terminal_font_family?.trim() ?? '',
           gridCardDisplayMode: normalizeGridCardDisplayMode(saved.grid_card_display_mode),
+          watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(saved.watchlist_new_agent_position),
           app_settings_overrides: normalizeAppOverrides(overrides),
           app_settings_loaded: true,
         });
@@ -593,6 +631,7 @@ export const useSettingsStore = create<SettingsState>()(
           terminalFontSize: normalizeTerminalFontSize(state.terminalFontSize ?? defaultTerminalFontSize()),
           terminalFontFamily: state.terminalFontFamily?.trim() ?? '',
           gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode ?? state.grid_card_display_mode),
+          watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
         };
       },
       partialize: (state) => ({
@@ -601,6 +640,7 @@ export const useSettingsStore = create<SettingsState>()(
         terminalFontSize: normalizeTerminalFontSize(state.terminalFontSize),
         terminalFontFamily: state.terminalFontFamily.trim(),
         gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode),
+        watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
       }),
     }
   )

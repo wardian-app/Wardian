@@ -47,6 +47,7 @@ describe("SettingsModal", () => {
       terminalFontSize: 14,
       terminalFontFamily: "",
       gridCardDisplayMode: "terminal",
+      watchlistNewAgentPosition: "top",
       shell_id: "auto",
       custom_executable: "",
       custom_args: "",
@@ -247,6 +248,30 @@ describe("SettingsModal", () => {
       });
     });
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe("terminal");
+  });
+
+  it("loads and saves the Watchlist new agent position preference", async () => {
+    useSettingsStore.setState({ watchlistNewAgentPosition: "top" });
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Watchlist" }));
+
+    const select = screen.getByLabelText("New agent position");
+    expect(select).toHaveValue("top");
+
+    fireEvent.change(select, { target: { value: "bottom" } });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            watchlist_new_agent_position: "bottom",
+          }),
+        }),
+      });
+    });
+    expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe("bottom");
   });
 
   it("names the resolved default terminal choices", () => {
