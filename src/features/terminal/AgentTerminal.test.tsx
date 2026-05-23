@@ -150,7 +150,10 @@ describe("AgentTerminal scrollback", () => {
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
   });
 
-  it("recreates the xterm on remount and seeds it from the persisted parser state", async () => {
+  it("reuses the live renderer on a quick remount without recreating the WebGL context", async () => {
+    // A quick unmount/remount (grid maximize then minimize, tab switch) must not
+    // tear down and recreate the renderer — recreating WebGL contexts in a burst
+    // trips Chrome's context cap and flashes the lost-context placeholder.
     const firstRender = render(
       <AgentTerminal sessionId="codex-1" theme="dark" />,
     );
@@ -162,17 +165,47 @@ describe("AgentTerminal scrollback", () => {
 
     const firstInstance = getLatestTerminalInstance();
     firstRender.unmount();
-    expect(firstInstance.dispose).toHaveBeenCalled();
+    // Within the grace window the renderer is kept alive.
+    expect(firstInstance.dispose).not.toHaveBeenCalled();
+    expect(window.__wardianTerminalDebug?.snapshot("codex-1")?.renderer).toBeTruthy();
 
     render(<AgentTerminal sessionId="codex-1" theme="dark" />);
 
     await waitFor(() => {
-      expect(mockTerminal).toHaveBeenCalledTimes(2);
+      expect(window.__wardianTerminalDebug?.snapshot("codex-1")?.renderer).toBeTruthy();
     });
 
-    const secondInstance = getLatestTerminalInstance();
-    expect(secondInstance).not.toBe(firstInstance);
-    expect(secondInstance.open).toHaveBeenCalled();
+    // No second xterm was constructed; the original instance was reused.
+    expect(mockTerminal).toHaveBeenCalledTimes(1);
+    expect(firstInstance.dispose).not.toHaveBeenCalled();
+  });
+
+  it("disposes the renderer once a session stays unmounted past the grace window", async () => {
+    const firstRender = render(
+      <AgentTerminal sessionId="codex-grace" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeTruthy();
+    });
+
+    const instance = getLatestTerminalInstance();
+
+    // Switch to fake timers only for the unmount + grace-window advance, so the
+    // async mount above stays on real timers (avoids RTL/fake-timer deadlocks).
+    vi.useFakeTimers();
+    try {
+      firstRender.unmount();
+      expect(instance.dispose).not.toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeTruthy();
+
+      vi.advanceTimersByTime(30_000);
+
+      expect(instance.dispose).toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("captures readable terminal output for queue summaries", async () => {

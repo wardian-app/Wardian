@@ -35,6 +35,13 @@ const TERMINAL_SCROLLBACK_LINES = 1_000;
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 8;
 const RESIZE_FIT_DEBOUNCE_MS = 250;
+// Grace period before a renderer's WebGL context is torn down after the React
+// component unmounts. Transient unmounts (grid maximize/minimize, tab switches,
+// re-layouts) remount almost immediately and reuse the live renderer, so we
+// avoid the WebGL context-creation burst that otherwise trips Chrome's context
+// cap and flashes the lost-context placeholder. Terminals left unmounted past
+// this window still get their context reclaimed, preserving the leak fix.
+const RENDERER_DISPOSE_GRACE_MS = 30_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type TitleHandlerRef = {
@@ -65,6 +72,7 @@ type TerminalSessionEntry = {
   provider?: string;
   currentTheme: typeof DARK_TERM_THEME;
   renderer: TerminalRendererEntry | null;
+  rendererDisposeTimer: ReturnType<typeof setTimeout> | null;
   parser: HeadlessTerminal;
   parserSerializeAddon: SerializeAddon;
   latestTitle: string | null;
@@ -323,6 +331,7 @@ function disposeTerminalSession(sessionId: string) {
   entry.disposed = true;
   entry.outputReadyUnlisten?.();
   entry.terminalClearedUnlisten?.();
+  cancelRendererDisposal(entry);
   if (entry.renderer) {
     disposeRenderer(entry.renderer);
     entry.renderer = null;
@@ -338,6 +347,32 @@ function disposeRenderer(renderer: TerminalRendererEntry) {
   renderer.webglAddon?.dispose();
   renderer.webglAddon = null;
   renderer.term.dispose();
+}
+
+function cancelRendererDisposal(entry: TerminalSessionEntry) {
+  if (entry.rendererDisposeTimer) {
+    clearTimeout(entry.rendererDisposeTimer);
+    entry.rendererDisposeTimer = null;
+  }
+}
+
+// Defer renderer teardown so a quick remount (maximize/minimize, tab switch)
+// reuses the live WebGL context instead of recreating it. Reclaims the context
+// only if the session stays unmounted past the grace window.
+function scheduleRendererDisposal(sessionId: string) {
+  const entry = terminalSessionMap.get(sessionId);
+  if (!entry || entry.disposed || !entry.renderer || entry.rendererDisposeTimer) {
+    return;
+  }
+  entry.rendererDisposeTimer = setTimeout(() => {
+    const current = terminalSessionMap.get(sessionId);
+    if (!current || current.disposed || !current.renderer) {
+      return;
+    }
+    current.rendererDisposeTimer = null;
+    disposeRenderer(current.renderer);
+    current.renderer = null;
+  }, RENDERER_DISPOSE_GRACE_MS);
 }
 function clearTerminalSession(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
@@ -585,6 +620,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     provider,
     currentTheme: DARK_TERM_THEME,
     renderer: null,
+    rendererDisposeTimer: null,
     parser,
     parserSerializeAddon,
     latestTitle: null,
@@ -802,6 +838,7 @@ function mountRenderer(
   session: TerminalSessionEntry,
   container: HTMLDivElement,
 ) {
+  cancelRendererDisposal(session);
   const renderer = session.renderer ?? createRenderer(sessionId, session);
   session.renderer = renderer;
 
@@ -966,8 +1003,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       isMounted = false;
       resizeObserver?.disconnect();
       if (entry && !entry.disposed && entry.renderer) {
-        disposeRenderer(entry.renderer);
-        entry.renderer = null;
+        scheduleRendererDisposal(sessionId);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
