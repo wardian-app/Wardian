@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../../types";
 import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId, AgentTeam, WatchlistDisplayItem, WatchlistEntry } from "./types";
 import { DEFAULT_WATCHLIST_PREFS } from "./types";
@@ -624,6 +625,14 @@ export default function AgentWatchlist({
     if (onPrefsChange) onPrefsChange({ ...prefs, sort: cycleSort(prefs.sort, columnId) });
   }
 
+  const handleToggleTeamCollapsed = (teamId: string) => {
+    if (!onPrefsChange) return;
+    const collapsed = new Set(prefs.collapsed_team_ids ?? []);
+    if (collapsed.has(teamId)) collapsed.delete(teamId);
+    else collapsed.add(teamId);
+    onPrefsChange({ ...prefs, collapsed_team_ids: Array.from(collapsed) });
+  };
+
   // ── Dynamic grid template: dot | name | [visible columns]
   const visibleCols = prefs.columns.filter(c => c.visible);
   const colFragment = visibleCols.map(c => COLUMN_WIDTHS[c.id]).join(' ');
@@ -892,6 +901,7 @@ export default function AgentWatchlist({
             ? displayedAgents.map((agent) => renderAgentRow(agent))
             : sortedDisplayItems.map((item) => {
                 if (item.type === "agent") return renderAgentRow(item.agent);
+                const isCollapsed = (prefs.collapsed_team_ids ?? []).includes(item.team.id);
                 return (
                   <div
                     key={item.team.id}
@@ -933,36 +943,55 @@ export default function AgentWatchlist({
                       }}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        {editingTeamId === item.team.id ? (
-                          <input
-                            className="text-xs font-bold text-primary bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none min-w-0 flex-1"
-                            autoFocus
-                            value={editingTeamName}
-                            onChange={(e) => setEditingTeamName(e.target.value)}
-                            onBlur={() => handleRenameTeamCommit(item.team.id)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                handleRenameTeamCommit(item.team.id);
-                              }
-                              if (e.key === 'Escape') {
-                                e.preventDefault();
-                                setEditingTeamId(null);
-                              }
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                          <button
+                            type="button"
+                            aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${item.team.name}`}
+                            aria-expanded={!isCollapsed}
+                            className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-muted hover:text-primary focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
+                            onMouseDown={(e) => {
                               e.stopPropagation();
                             }}
-                            onClick={(e) => e.stopPropagation()}
-                            onMouseDown={(e) => e.stopPropagation()}
-                          />
-                        ) : (
-                          <span className="text-xs font-bold text-primary truncate">{item.team.name}</span>
-                        )}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleToggleTeamCollapsed(item.team.id);
+                            }}
+                          >
+                            {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                          </button>
+                          {editingTeamId === item.team.id ? (
+                            <input
+                              className="text-xs font-bold text-primary bg-transparent border-b border-[var(--color-wardian-accent)] focus:outline-none min-w-0 flex-1"
+                              autoFocus
+                              value={editingTeamName}
+                              onChange={(e) => setEditingTeamName(e.target.value)}
+                              onBlur={() => handleRenameTeamCommit(item.team.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleRenameTeamCommit(item.team.id);
+                                }
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  setEditingTeamId(null);
+                                }
+                                e.stopPropagation();
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
+                            />
+                          ) : (
+                            <span className="text-xs font-bold text-primary truncate">{item.team.name}</span>
+                          )}
+                        </div>
                         <span className="label-small !tracking-normal">{item.agents.length} agents</span>
                       </div>
                     </div>
-                    <div className="py-1">
-                      {item.agents.map((agent) => renderAgentRow(agent, { nested: true }))}
-                    </div>
+                    {!isCollapsed && (
+                      <div className="py-1">
+                        {item.agents.map((agent) => renderAgentRow(agent, { nested: true }))}
+                      </div>
+                    )}
                     <div
                       data-testid={`team-drop-after-${item.team.id}`}
                       className="team-edge-drop-zone"

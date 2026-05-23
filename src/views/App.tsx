@@ -390,6 +390,7 @@ function AppBody() {
             ...DEFAULT_WATCHLIST_PREFS,
             ...prefs,
             columns: DEFAULT_WATCHLIST_PREFS.columns.map(def => savedMap.get(def.id) ?? def),
+            collapsed_team_ids: Array.isArray(prefs.collapsed_team_ids) ? prefs.collapsed_team_ids : [],
           });
         }
       } catch { /* first run */ }
