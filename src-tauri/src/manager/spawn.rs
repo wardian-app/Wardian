@@ -175,6 +175,20 @@ fn should_cleanup_stale_session_processes_before_spawn(is_restored: bool) -> boo
     !is_restored
 }
 
+fn filter_ignored_conversation_id(
+    detected: Option<String>,
+    ignored: Option<&str>,
+) -> Option<String> {
+    if let Some(ref detected_id) = detected {
+        if let Some(ignored_id) = ignored {
+            if detected_id == ignored_id {
+                return None;
+            }
+        }
+    }
+    detected
+}
+
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
@@ -237,6 +251,24 @@ pub async fn spawn_agent(
     }
 
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
+
+    let initial_ignored_conversation_id = if config.provider == "antigravity" && !is_restored {
+        let home = AntigravityProvider::antigravity_home();
+        home.as_ref()
+            .and_then(|home| {
+                AntigravityProvider::conversation_for_workspace(
+                    home,
+                    &cwd,
+                )
+            })
+            .or_else(|| {
+                home.as_ref().and_then(|home| {
+                    AntigravityProvider::latest_conversation_id(home)
+                })
+            })
+    } else {
+        None
+    };
 
     #[cfg(windows)]
     if should_cleanup_stale_session_processes_before_spawn(is_restored) {
@@ -1187,24 +1219,7 @@ pub async fn spawn_agent(
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let watcher_workspace = cwd.clone();
-
-        let initial_ignored_conversation_id = if !watcher_skip_existing_log {
-            let home = AntigravityProvider::antigravity_home();
-            home.as_ref()
-                .and_then(|home| {
-                    AntigravityProvider::conversation_for_workspace(
-                        home,
-                        &watcher_workspace,
-                    )
-                })
-                .or_else(|| {
-                    home.as_ref().and_then(|home| {
-                        AntigravityProvider::latest_conversation_id(home)
-                    })
-                })
-        } else {
-            None
-        };
+        let initial_ignored = initial_ignored_conversation_id.clone();
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
@@ -1221,12 +1236,13 @@ pub async fn spawn_agent(
 
                 let home = AntigravityProvider::antigravity_home();
                 let conversation_id = {
-                    let configured = watcher_config.lock().ok().and_then(|cfg| {
+                    let configured = {
+                        let cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
                         cfg.resume_session
                             .as_ref()
                             .map(|value| value.trim().to_string())
                             .filter(|value| !value.is_empty())
-                    });
+                    };
                     configured.or_else(|| {
                         let detected = home.as_ref()
                             .and_then(|home| {
@@ -1240,14 +1256,7 @@ pub async fn spawn_agent(
                                     AntigravityProvider::latest_conversation_id(home)
                                 })
                             });
-                        if let Some(ref detected_id) = detected {
-                            if let Some(ref ignored_id) = initial_ignored_conversation_id {
-                                if detected_id == ignored_id {
-                                    return None;
-                                }
-                            }
-                        }
-                        detected
+                        filter_ignored_conversation_id(detected, initial_ignored.as_deref())
                     })
                 };
 
@@ -1479,5 +1488,25 @@ mod tests {
             OutputReadyEmitAction::Suppress
         );
         assert!(gate.finish_delayed_emit(true, start + OUTPUT_READY_EMIT_MIN_INTERVAL));
+    }
+
+    #[test]
+    fn test_filter_ignored_conversation_id() {
+        assert_eq!(
+            filter_ignored_conversation_id(Some("conv_abc".to_string()), Some("conv_abc")),
+            None
+        );
+        assert_eq!(
+            filter_ignored_conversation_id(Some("conv_xyz".to_string()), Some("conv_abc")),
+            Some("conv_xyz".to_string())
+        );
+        assert_eq!(
+            filter_ignored_conversation_id(Some("conv_abc".to_string()), None),
+            Some("conv_abc".to_string())
+        );
+        assert_eq!(
+            filter_ignored_conversation_id(None, Some("conv_abc")),
+            None
+        );
     }
 }
