@@ -101,6 +101,7 @@ describe('AgentWatchlist', () => {
     ],
     sort: null,
     preserve_team_grouping_when_sorted: false,
+    collapsed_team_ids: [],
   };
   const defaultInteractions: AgentInteractions = {};
   const mockOnPrefsChange = vi.fn();
@@ -386,6 +387,59 @@ describe('AgentWatchlist', () => {
     expect(defaultProps.onAddToList).not.toHaveBeenCalled();
   });
 
+  it('renders team blocks expanded when no team is collapsed', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={{ ...defaultPrefs, collapsed_team_ids: [] }}
+        onPrefsChange={mockOnPrefsChange}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('team-block-team-1')).getByText('Alpha')).toBeInTheDocument();
+    expect(within(screen.getByTestId('team-block-team-1')).getByText('Beta')).toBeInTheDocument();
+  });
+
+  it('toggles a team collapsed from the chevron without selecting the team', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={{ ...defaultPrefs, collapsed_team_ids: [] }}
+        onPrefsChange={mockOnPrefsChange}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' }));
+
+    expect(mockOnSelectionChange).not.toHaveBeenCalled();
+    expect(mockOnPrefsChange).toHaveBeenCalledWith({
+      ...defaultPrefs,
+      collapsed_team_ids: ['team-1'],
+    });
+  });
+
+  it('hides team members when a team is collapsed but keeps team actions available', async () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={{ ...defaultPrefs, collapsed_team_ids: ['team-1'] }}
+        onPrefsChange={mockOnPrefsChange}
+      />
+    );
+
+    const teamBlock = screen.getByTestId('team-block-team-1');
+    expect(screen.getByRole('button', { name: 'Expand Core Dev Swarm' })).toBeInTheDocument();
+    expect(within(teamBlock).queryByText('Alpha')).not.toBeInTheDocument();
+    expect(within(teamBlock).queryByText('Beta')).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(screen.getByTestId('team-header-team-1'));
+    expect(await screen.findByRole('button', { name: 'Query Team' })).toBeInTheDocument();
+  });
+
   it('batches list additions and removals from a multi-selection context menu', async () => {
     render(
       <AgentWatchlist
@@ -442,6 +496,22 @@ describe('AgentWatchlist', () => {
     expect(rowText[0]).toContain('Beta');
     expect(rowText[1]).toContain('Gamma');
     expect(rowText[2]).toContain('Alpha');
+  });
+
+  it('keeps sorted flattened teams without collapse controls', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        prefs={{ ...defaultPrefs, sort: { column_id: 'agent_name', direction: 'asc' }, collapsed_team_ids: ['team-1'] }}
+        onPrefsChange={mockOnPrefsChange}
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+      />
+    );
+
+    expect(screen.queryByTestId('team-block-team-1')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Expand Core Dev Swarm' })).not.toBeInTheDocument();
+    expect(screen.getByText('Alpha')).toBeInTheDocument();
+    expect(screen.getByText('Beta')).toBeInTheDocument();
   });
 
   it('renders team blocks when a sort is active and preserving sorted team grouping', async () => {

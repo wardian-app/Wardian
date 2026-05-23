@@ -77,6 +77,11 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 - **Bulk Selection**: Use `Ctrl+Click` to select multiple agents within a watchlist for broadcast commands.
 - **Bulk Context Menu**: If you right-click inside the current multi-selection, the menu applies to the whole selection. Bulk delete shows one confirmation dialog for the full selected set instead of prompting once per agent.
 
+### Collapsing Teams
+Click the chevron in a team header to hide or reveal that team's members. The team header stays visible with its member count, and context-menu actions still apply to the full team. Collapsed teams are saved with the rest of the watchlist display preferences and restored on next launch.
+
+![Wardian watchlist showing one collapsed team and one expanded team](../assets/screenshots/watchlists/team-collapse.png)
+
 ## Remote Management
 Hover over any agent in the Roster to access instant control icons:
 - **Pause/Resume**: Suspend the PTY process to save CPU.

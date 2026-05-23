@@ -65,6 +65,7 @@ export interface WatchlistPrefs {
   columns: WatchlistColumnConfig[];
   sort: { column_id: SortableColumnId; direction: 'asc' | 'desc' } | null;
   preserve_team_grouping_when_sorted: boolean;
+  collapsed_team_ids: string[];
 }
 
 // agentId → ISO 8601 timestamp of last query sent to that agent
@@ -80,4 +81,5 @@ export const DEFAULT_WATCHLIST_PREFS: WatchlistPrefs = {
   ],
   sort: null,
   preserve_team_grouping_when_sorted: false,
+  collapsed_team_ids: [],
 };
