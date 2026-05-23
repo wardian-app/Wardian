@@ -130,6 +130,7 @@ fn parse_porcelain_path(raw_path: &str) -> String {
 /// Parse `git status --porcelain=v1 -b` output into a GitStatusResult.
 fn parse_porcelain_status(raw: &str) -> GitStatusResult {
     let mut branch = String::new();
+    let mut upstream = None;
     let mut ahead: u32 = 0;
     let mut behind: u32 = 0;
     let mut files = Vec::new();
@@ -142,6 +143,14 @@ fn parse_porcelain_status(raw: &str) -> GitStatusResult {
                 None => (rest, ""),
             };
             branch = branch_part.to_string();
+
+            let tracking_branch = tracking
+                .split_once('[')
+                .map_or(tracking, |(candidate, _)| candidate)
+                .trim();
+            if !tracking_branch.is_empty() {
+                upstream = Some(tracking_branch.to_string());
+            }
 
             if let Some(bracket_start) = tracking.find('[') {
                 if let Some(bracket_end) = tracking.find(']') {
@@ -193,6 +202,7 @@ fn parse_porcelain_status(raw: &str) -> GitStatusResult {
 
     GitStatusResult {
         branch,
+        upstream,
         files,
         ahead,
         behind,
@@ -222,25 +232,56 @@ pub async fn git_log(cwd: String, count: u32) -> Result<Vec<GitLogEntry>, String
         &[
             "log",
             &count_str,
-            "--pretty=format:%H%n%s%n%an%n%ai",
+            "--date=iso-strict",
+            "--decorate=full",
+            "--pretty=format:%x1e%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%ae%x1f%aI",
             "--no-color",
         ],
     )?;
 
-    let mut entries = Vec::new();
-    let lines: Vec<&str> = raw.lines().collect();
-    // Each entry is 4 lines: hash, message, author, date
-    for chunk in lines.chunks(4) {
-        if chunk.len() == 4 {
-            entries.push(GitLogEntry {
-                hash: chunk[0].to_string(),
-                message: chunk[1].to_string(),
-                author: chunk[2].to_string(),
-                date: chunk[3].to_string(),
-            });
-        }
-    }
-    Ok(entries)
+    Ok(parse_git_log(&raw))
+}
+
+fn parse_git_log(raw: &str) -> Vec<GitLogEntry> {
+    raw.split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim_matches('\n');
+            if record.trim().is_empty() {
+                return None;
+            }
+
+            let mut fields = record.split('\x1f');
+            let hash = fields.next()?.trim().to_string();
+            let parents = fields
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let refs = fields
+                .next()
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect();
+            let message = fields.next().unwrap_or_default().to_string();
+            let author = fields.next().unwrap_or_default().to_string();
+            let author_email = fields.next().unwrap_or_default().to_string();
+            let date = fields.next().unwrap_or_default().trim().to_string();
+
+            Some(GitLogEntry {
+                hash,
+                parents,
+                refs,
+                message,
+                author,
+                author_email,
+                date,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -331,7 +372,53 @@ pub async fn git_pull(cwd: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn git_push(cwd: String) -> Result<String, String> {
-    run_git(&cwd, &["push"])
+    if branch_has_upstream(&cwd) {
+        return run_git(&cwd, &["push"]);
+    }
+
+    let branch = current_branch_for_push(&cwd)?;
+    let remote = default_push_remote(&cwd)?;
+    run_git(&cwd, &["push", "--set-upstream", &remote, &branch])
+}
+
+fn branch_has_upstream(cwd: &str) -> bool {
+    run_git(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .is_ok()
+}
+
+fn current_branch_for_push(cwd: &str) -> Result<String, String> {
+    let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err("Cannot publish a detached HEAD.".to_string());
+    }
+    Ok(branch.to_string())
+}
+
+fn default_push_remote(cwd: &str) -> Result<String, String> {
+    let remotes = run_git(cwd, &["remote"])?;
+    let remotes: Vec<&str> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .collect();
+
+    if remotes.contains(&"origin") {
+        return Ok("origin".to_string());
+    }
+
+    remotes
+        .first()
+        .map(|remote| (*remote).to_string())
+        .ok_or_else(|| "No git remotes are configured for this branch.".to_string())
 }
 
 #[tauri::command]
@@ -612,12 +699,79 @@ mod tests {
         let raw = "## feature-branch\nMM both.rs\n";
         let result = parse_porcelain_status(raw);
         assert_eq!(result.branch, "feature-branch");
+        assert_eq!(result.upstream, None);
         assert_eq!(result.ahead, 0);
         assert_eq!(result.behind, 0);
         // MM = staged M + unstaged M
         assert_eq!(result.files.len(), 2);
         assert!(result.files[0].is_staged);
         assert!(!result.files[1].is_staged);
+    }
+
+    #[test]
+    fn parse_status_records_tracking_branch() {
+        let raw = "## feature-branch...origin/feature-branch [ahead 2, behind 1]\n";
+        let result = parse_porcelain_status(raw);
+
+        assert_eq!(result.branch, "feature-branch");
+        assert_eq!(result.upstream.as_deref(), Some("origin/feature-branch"));
+        assert_eq!(result.ahead, 2);
+        assert_eq!(result.behind, 1);
+    }
+
+    #[tokio::test]
+    async fn git_push_publishes_branch_when_no_upstream_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote.git");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_git(remote.to_str().unwrap(), &["init", "--bare"]).unwrap();
+        run_git(repo.to_str().unwrap(), &["init"]).unwrap();
+        run_git(
+            repo.to_str().unwrap(),
+            &["config", "user.email", "test@example.com"],
+        )
+        .unwrap();
+        run_git(
+            repo.to_str().unwrap(),
+            &["config", "user.name", "Wardian Test"],
+        )
+        .unwrap();
+        run_git(
+            repo.to_str().unwrap(),
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        run_git(repo.to_str().unwrap(), &["add", "README.md"]).unwrap();
+        run_git(repo.to_str().unwrap(), &["commit", "-m", "initial"]).unwrap();
+        run_git(repo.to_str().unwrap(), &["checkout", "-b", "feature/graph"]).unwrap();
+
+        git_push(repo.to_string_lossy().to_string()).await.unwrap();
+
+        let upstream = run_git(
+            repo.to_str().unwrap(),
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
+        )
+        .unwrap();
+        assert_eq!(upstream.trim(), "origin/feature/graph");
+        assert_eq!(
+            run_git(
+                remote.to_str().unwrap(),
+                &["rev-parse", "refs/heads/feature/graph"]
+            )
+            .unwrap()
+            .trim()
+            .len(),
+            40
+        );
     }
 
     #[test]

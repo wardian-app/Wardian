@@ -11,6 +11,7 @@ pub struct GitFileEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitStatusResult {
     pub branch: String,
+    pub upstream: Option<String>,
     pub files: Vec<GitFileEntry>,
     pub ahead: u32,
     pub behind: u32,
@@ -19,7 +20,10 @@ pub struct GitStatusResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLogEntry {
     pub hash: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
     pub message: String,
     pub author: String,
+    pub author_email: String,
     pub date: String,
 }
