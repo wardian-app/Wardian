@@ -169,7 +169,6 @@ describe("terminal capability broker", () => {
   it("preserves partial Codex numbered redraw chunks after a complete audit response is stable", () => {
     const state: TerminalOutputState = {
       lastHomeRedrawLines: null,
-      lastStableHomeRedrawOutput: "ROW_001\r\nROW_050",
     };
     const partialResizeChunk = Array.from({ length: 48 }, (_, index) =>
       `ROW_${String(index + 1).padStart(3, "0")}`,
@@ -271,7 +270,7 @@ describe("terminal capability broker", () => {
   it("preserves Claude resize repaint frames without synthetic scrollback repair", () => {
     const state: TerminalOutputState = {
       lastHomeRedrawLines: null,
-      existingScrollbackLines: new Set([
+      existingKnownLines: new Set([
         " ▐▛███▜▌   Claude Code v2.1.140",
         "❯ CCopy the exact 50-line block below and output nothing else:",
         "important earlier conversation line",
@@ -289,7 +288,6 @@ describe("terminal capability broker", () => {
   it("preserves legitimate lower-numbered Codex output after a previous numbered response", () => {
     const state: TerminalOutputState = {
       lastHomeRedrawLines: null,
-      lastStableHomeRedrawOutput: "Step 1\r\nStep 10",
     };
     const nextResponse =
       "\u001b[?25l\u001b[HStep 1\u001b[K\r\nStep 2\u001b[K\r\nStep 3\u001b[K";
@@ -438,11 +436,27 @@ describe("terminal capability broker", () => {
   it("preserves Codex redraw lines that already exist in scrollback", () => {
     const state: TerminalOutputState = {
       lastHomeRedrawLines: ["already in scrollback", "visible next", "visible tail"],
-      existingScrollbackLines: new Set(["already in scrollback"]),
+      existingKnownLines: new Set(["already in scrollback"]),
     };
     const nextFrame = "\u001b[?25l\u001b[Hvisible next\u001b[K\r\nvisible tail\u001b[K\r\nfresh\u001b[K";
 
     expect(normalizeOpenCodeOutput(nextFrame, "codex", state)).toBe(nextFrame);
+  });
+
+  it("does not push a Codex line into scrollback if it is still in the viewport after a shuffle", () => {
+    // Codex sometimes repaints with a reordered frame where no line actually
+    // scrolled off the top. The findDroppedHomeRedrawLines suffix-match misses
+    // and the fallback flags lines as "dropped" purely because they moved.
+    // existingKnownLines covers the parser's viewport, so dedupe should skip
+    // the false positive and leave the frame untouched.
+    const shuffleState: TerminalOutputState = {
+      lastHomeRedrawLines: ["foo", "bar", "baz", "qux"],
+      existingKnownLines: new Set(["foo", "bar", "baz", "qux"]),
+    };
+    const shuffleFrame =
+      "[?25l[Hqux[K\r\nfoo[K\r\nbar[K\r\nbaz[K";
+
+    expect(normalizeOpenCodeOutput(shuffleFrame, "codex", shuffleState)).toBe(shuffleFrame);
   });
 
   it("journals non-overlapping Codex home-redraw frames without repeating seen lines", () => {

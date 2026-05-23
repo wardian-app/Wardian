@@ -9,7 +9,7 @@ use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_tr
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::models::{AgentConfig, AgentEvent, ProviderConfig};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
@@ -245,10 +245,19 @@ pub async fn spawn_agent(
 
     let pty_system = NativePtySystem::default();
 
+    let (initial_cols, initial_rows) = {
+        let app_state = app.state::<AppState>();
+        let sizes = app_state.pty_sizes.read().ok();
+        sizes
+            .as_ref()
+            .and_then(|sizes| sizes.get(&config.session_id).copied())
+            .unwrap_or((80, 24))
+    };
+
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: initial_rows,
+            cols: initial_cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -1385,6 +1394,10 @@ pub async fn resize_pty(
     .await
     .map_err(|e| format!("Failed to join PTY resize task: {}", e))?
     .map_err(|e| format!("Failed to resize PTY: {}", e))?;
+
+    if let Ok(mut sizes) = state.pty_sizes.write() {
+        sizes.insert(session_id, (cols, rows));
+    }
     Ok(())
 }
 

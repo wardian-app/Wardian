@@ -146,6 +146,8 @@ export function UserTerminalPanel({
       allowProposedApi: true,
       convertEol: false,
       cursorBlink: true,
+      cursorStyle: "bar",
+      cursorInactiveStyle: "bar",
       fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
       fontSize: terminalFontSize,
       scrollback: 2_000,
