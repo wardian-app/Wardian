@@ -179,6 +179,13 @@ pub fn run() {
     builder
         .manage(AppState::new())
         .setup(|app| {
+            let control_endpoint_claim = control::claim_control_endpoint().map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("Wardian control endpoint is already owned for this WARDIAN_HOME: {error}"),
+                )
+            })?;
+
             if let Ok(resource_dir) = app.path().resource_dir() {
                 if let Some(app_home) = crate::utils::fs::get_wardian_home() {
                     if let Err(err) = crate::utils::cli_install::install_cli_from_resources_to_home(
@@ -193,7 +200,7 @@ pub fn run() {
             }
 
             let app_handle = app.handle().clone();
-            control::spawn_control_server(app_handle.clone());
+            control::spawn_control_server(app_handle.clone(), control_endpoint_claim);
             remote::gateway::spawn_remote_gateway(app_handle.clone());
             manager::init_agent_classes(&app_handle);
 

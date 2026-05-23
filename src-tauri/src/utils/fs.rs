@@ -17,12 +17,7 @@ pub fn get_wardian_home() -> Option<std::path::PathBuf> {
 
 pub fn ensure_process_wardian_home_env() -> Option<std::path::PathBuf> {
     let home = get_wardian_home()?;
-    if std::env::var("WARDIAN_HOME")
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
-    {
-        unsafe { std::env::set_var("WARDIAN_HOME", &home) };
-    }
+    unsafe { std::env::set_var("WARDIAN_HOME", &home) };
     Some(home)
 }
 
@@ -32,10 +27,30 @@ mod process_home_env_contract_tests {
     fn ensure_process_wardian_home_env_sets_missing_env_to_resolved_app_home() {
         let _guard = crate::utils::wardian_test_env_lock();
         unsafe { std::env::remove_var("WARDIAN_HOME") };
+        unsafe { std::env::remove_var("WARDIAN_DEBUG_ALLOW_PRODUCTION_HOME") };
 
         let resolved = super::ensure_process_wardian_home_env().expect("resolved home");
         let env_home = std::env::var("WARDIAN_HOME").expect("WARDIAN_HOME env");
 
+        assert_eq!(std::path::PathBuf::from(env_home), resolved);
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn ensure_process_wardian_home_env_replaces_inherited_production_home_with_debug_home() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let production_home = dirs::home_dir().unwrap().join(".wardian");
+        unsafe {
+            std::env::set_var("WARDIAN_HOME", &production_home);
+            std::env::remove_var("WARDIAN_DEBUG_ALLOW_PRODUCTION_HOME");
+        }
+
+        let resolved = super::ensure_process_wardian_home_env().expect("resolved home");
+        let env_home = std::env::var("WARDIAN_HOME").expect("WARDIAN_HOME env");
+
+        assert_ne!(resolved, production_home);
         assert_eq!(std::path::PathBuf::from(env_home), resolved);
 
         unsafe { std::env::remove_var("WARDIAN_HOME") };
