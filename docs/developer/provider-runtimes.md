@@ -13,6 +13,9 @@ This document captures the practical runtime differences between Wardian's suppo
 - Workflow-spawned fresh runs skip interactive startup prompts. The workflow node prompt is the first provider input.
 - Regular visible agents use the global `Regular agent sessions` setting unless the agent config sets `session_persistence` to `fresh` or `resume`. The agent-level `default` value inherits the global setting.
 - The regular-agent context menu `Clear` action forces a fresh provider launch for that one action and clears both the backend PTY output buffer and frontend terminal scrollback cache.
+- Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
+- Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
+- Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
 
 ## Quick Comparison
 

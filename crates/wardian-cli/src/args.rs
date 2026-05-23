@@ -96,6 +96,14 @@ pub struct SendArgs {
     #[arg(long = "as-command")]
     pub as_command: bool,
 
+    /// Queue policy to use when the target is not safe for live delivery
+    #[arg(long = "queue-policy", value_enum, default_value = "queue-if-busy")]
+    pub queue_policy: QueuePolicyArg,
+
+    /// Send an explicit approval action instead of a normal message
+    #[arg(long, value_enum, conflicts_with = "as_command")]
+    pub approval: Option<ApprovalArg>,
+
     /// Wait until the target reaches this status after sending
     #[arg(long = "wait-until")]
     pub wait_until: Option<String>,
@@ -103,6 +111,19 @@ pub struct SendArgs {
     /// Maximum time to wait, e.g. 30s, 10m, or 1000ms
     #[arg(long, default_value = "10m")]
     pub timeout: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum QueuePolicyArg {
+    QueueIfBusy,
+    LiveOnly,
+    MailboxOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ApprovalArg {
+    Accept,
+    Reject,
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +333,55 @@ mod tests {
         assert!(args.as_command);
         assert_eq!(args.to, "Wardian-Codex");
         assert_eq!(args.message.as_deref(), Some("/goal test"));
+    }
+
+    #[test]
+    fn parses_send_queue_policy() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "send",
+            "hello",
+            "--to",
+            "agent-1",
+            "--queue-policy",
+            "live-only",
+        ])
+        .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+
+        assert_eq!(args.queue_policy, QueuePolicyArg::LiveOnly);
+    }
+
+    #[test]
+    fn parses_send_approval_action() {
+        let cli =
+            Cli::try_parse_from(["wardian", "send", "--approval", "accept", "--to", "agent-1"])
+                .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+
+        assert_eq!(args.approval, Some(ApprovalArg::Accept));
+        assert_eq!(args.message, None);
+    }
+
+    #[test]
+    fn send_approval_conflicts_with_as_command() {
+        let err = Cli::try_parse_from([
+            "wardian",
+            "send",
+            "--approval",
+            "accept",
+            "--to",
+            "agent-1",
+            "--as-command",
+            "/status",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

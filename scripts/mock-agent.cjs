@@ -13,6 +13,8 @@
  *   basic         — init → user → generating → model_response → turn_completed
  *   resume        — init(session_id) → generating → model_response → turn_completed
  *   action_needed — init → user → action_required (waits for stdin) → turn_completed
+ *   delayed_ready — init → user → generating → MOCK_INPUT_READY → model_response → turn_completed
+ *   action_required_stale — init → action_required(APPROVAL_PROMPT_A) → action_required(APPROVAL_PROMPT_B)
  *   failure       — init → user → generating → exit(1)
  *   long_output   — init → user → 200 lines of text → model_response → turn_completed
  *   headless      — single JSON response object, then exit
@@ -47,8 +49,9 @@ function waitForStdin() {
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
-      if (data.includes("\n")) {
-        resolve(data.trim());
+      if (/[\r\n]/.test(data)) {
+        const [line] = data.replace(/\r\n/g, "\n").split(/[\r\n]/);
+        resolve(line.trim());
       }
     });
     process.stdin.resume();
@@ -116,6 +119,31 @@ async function runActionNeeded() {
   }
   await sleep(delay);
   emit(events.turnCompleted());
+}
+
+async function runDelayedReady() {
+  emit(events.init());
+  await sleep(delay);
+  emit(events.user());
+  await sleep(delay);
+  emit(events.generating());
+  await sleep(delay * 20);
+  process.stdout.write("MOCK_INPUT_READY\n");
+  await sleep(delay);
+  emit(events.modelResponse("Mock delayed-ready response completed."));
+  await sleep(delay);
+  emit(events.turnCompleted());
+}
+
+async function runActionRequiredStale() {
+  emit(events.init());
+  await sleep(delay);
+  emit(events.actionRequired("APPROVAL_PROMPT_A"));
+  process.stdout.write("APPROVAL_PROMPT_A\n");
+  await sleep(delay * 20);
+  emit(events.actionRequired("APPROVAL_PROMPT_B"));
+  process.stdout.write("APPROVAL_PROMPT_B\n");
+  await new Promise(() => {});
 }
 
 async function runFailure() {
@@ -202,10 +230,11 @@ async function runInteractiveEchoThenResponse() {
 
   emit(events.actionRequired("Interactive echo test: waiting for input"));
   const input = await waitForStdin();
+  const marker = input.match(/[A-Z0-9_]{4,}/)?.[0] || input;
   await sleep(delay);
   emit(events.modelResponse(input));
   await sleep(delay);
-  emit(events.modelResponse(`Actual response after echo: ${input}`));
+  emit(events.modelResponse(`Actual response after echo: ${marker}`));
   await sleep(delay);
   emit(events.turnCompleted());
 }
@@ -233,6 +262,8 @@ async function main() {
     basic: runBasic,
     resume: runResume,
     action_needed: runActionNeeded,
+    delayed_ready: runDelayedReady,
+    action_required_stale: runActionRequiredStale,
     failure: runFailure,
     long_output: runLongOutput,
     headless: runHeadless,

@@ -7,14 +7,14 @@ mod output;
 use std::{io::Read as _, time::Duration};
 
 use args::{
-    AgentArgs, AgentCommand, AgentWorktreeCommand, AskArgs, Cli, Command, ReplyArgs,
-    ReplyStatusArg, SendArgs, TeamArgs, TeamCommand, WatchlistArgs, WatchlistCommand, WorkflowArgs,
-    WorkflowCommand,
+    AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, Cli, Command,
+    QueuePolicyArg, ReplyArgs, ReplyStatusArg, SendArgs, TeamArgs, TeamCommand, WatchlistArgs,
+    WatchlistCommand, WorkflowArgs, WorkflowCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
-use wardian_core::control::MessageInputMode;
+use wardian_core::control::{ApprovalAction, MessageInputMode, QueuePolicy};
 use wardian_core::identity::{self, ListFilters, Scope};
 
 fn main() {
@@ -296,10 +296,7 @@ fn handle_agent_wait(
     render_show(&agent, &render_options(args))
 }
 
-fn handle_agent_watch(
-    target: &str,
-    options: AgentWatchCliOptions<'_>,
-) -> Result<String, CliError> {
+fn handle_agent_watch(target: &str, options: AgentWatchCliOptions<'_>) -> Result<String, CliError> {
     if options.follow {
         return Err(CliError::backend(
             ExitCode::Generic,
@@ -392,8 +389,17 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
 // ---------------------------------------------------------------------------
 
 fn handle_send(args: SendArgs) -> Result<String, CliError> {
-    let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
-    let input_mode = if args.as_command {
+    let approval_action = args.approval.map(approval_arg_to_control);
+    let message = read_send_message_input(
+        args.message.as_deref(),
+        args.stdin,
+        args.file.as_deref(),
+        args.approval,
+    )?;
+    let queue_policy = queue_policy_arg_to_control(args.queue_policy);
+    let input_mode = if approval_action.is_some() {
+        MessageInputMode::ApprovalAction
+    } else if args.as_command {
         validate_single_agent_target(&args.to, "send --as-command")?;
         validate_send_command_thread(args.thread.as_deref())?;
         MessageInputMode::Command
@@ -407,10 +413,14 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
         let response = live::send_message_and_watch(
             &args.to,
             &message,
-            args.thread.as_deref(),
-            input_mode,
-            until,
-            timeout,
+            live::SendMessageAndWatchOptions {
+                thread: args.thread.as_deref(),
+                input_mode,
+                queue_policy,
+                approval_action,
+                until,
+                timeout,
+            },
         )
         .map_err(control_error)?;
         let watch = response.watch;
@@ -424,14 +434,19 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
             "cursor": watch.cursor,
         })
     } else {
-        let sent = if input_mode == MessageInputMode::Message {
+        let sent = if input_mode == MessageInputMode::Message
+            && queue_policy == QueuePolicy::QueueIfBusy
+            && approval_action.is_none()
+        {
             live::send_message(&args.to, &message, args.thread.as_deref())
         } else {
-            live::send_message_with_input_mode(
+            live::send_message_with_delivery_options(
                 &args.to,
                 &message,
                 args.thread.as_deref(),
                 input_mode,
+                queue_policy,
+                approval_action,
             )
         }
         .map_err(control_error)?;
@@ -491,6 +506,43 @@ fn reply_status_arg_to_control(status: ReplyStatusArg) -> wardian_core::control:
         ReplyStatusArg::Done => wardian_core::control::ReplyStatus::Done,
         ReplyStatusArg::Blocked => wardian_core::control::ReplyStatus::Blocked,
         ReplyStatusArg::Failed => wardian_core::control::ReplyStatus::Failed,
+    }
+}
+
+fn queue_policy_arg_to_control(policy: QueuePolicyArg) -> QueuePolicy {
+    match policy {
+        QueuePolicyArg::QueueIfBusy => QueuePolicy::QueueIfBusy,
+        QueuePolicyArg::LiveOnly => QueuePolicy::LiveOnly,
+        QueuePolicyArg::MailboxOnly => QueuePolicy::MailboxOnly,
+    }
+}
+
+fn approval_arg_to_control(approval: ApprovalArg) -> ApprovalAction {
+    match approval {
+        ApprovalArg::Accept => ApprovalAction::Accept,
+        ApprovalArg::Reject => ApprovalAction::Reject,
+    }
+}
+
+fn approval_arg_default_message(approval: ApprovalArg) -> &'static str {
+    match approval {
+        ApprovalArg::Accept => "accept",
+        ApprovalArg::Reject => "reject",
+    }
+}
+
+fn read_send_message_input(
+    message: Option<&str>,
+    stdin: bool,
+    file: Option<&str>,
+    approval: Option<ApprovalArg>,
+) -> Result<String, CliError> {
+    match read_message_input(message, stdin, file) {
+        Ok(message) => Ok(message),
+        Err(_) if approval.is_some() && message.is_none() && !stdin && file.is_none() => {
+            Ok(approval_arg_default_message(approval.unwrap()).to_string())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -579,6 +631,7 @@ fn render_ask_response(
         "condition": condition,
         "request_id": ask.request_id,
         "reply": ask.reply,
+        "watch_error": ask.watch_error,
         "agent": watch.agent,
         "cursor": watch.cursor,
         "delivery": ask.delivery,
@@ -951,8 +1004,15 @@ mod tests {
                 runtime_state: "live_pty_available".to_string(),
                 delivery_state: "submitted".to_string(),
                 input_mode: MessageInputMode::Message,
+                queue_policy: wardian_core::control::QueuePolicy::QueueIfBusy,
+                message_id: None,
+                delivery_phase: None,
+                observed_state: None,
+                reason: None,
+                profile: None,
                 error: None,
             }],
+            watch_error: None,
             watch: wardian_core::control::AgentWatchResponse {
                 schema: 1,
                 agent: wardian_core::control::WatchAgentSnapshot {
@@ -997,6 +1057,7 @@ mod tests {
                 replied_at: "2026-05-13T00:00:00.000Z".to_string(),
             }),
             delivery: Vec::new(),
+            watch_error: None,
             watch: wardian_core::control::AgentWatchResponse {
                 schema: 1,
                 agent: wardian_core::control::WatchAgentSnapshot {
@@ -1030,11 +1091,56 @@ mod tests {
     }
 
     #[test]
+    fn render_ask_response_includes_watch_error_when_present() {
+        let ask = live::AskAgentResponse {
+            request_id: None,
+            reply: None,
+            delivery: Vec::new(),
+            watch_error: Some(wardian_core::control::WatchEvidenceError {
+                code: "gap_detected".to_string(),
+                message: "watch cursor expired while waiting".to_string(),
+            }),
+            watch: wardian_core::control::AgentWatchResponse {
+                schema: 1,
+                agent: wardian_core::control::WatchAgentSnapshot {
+                    uuid: "agent-1".to_string(),
+                    name: "reviewer-a1".to_string(),
+                    provider: "mock".to_string(),
+                    status: "idle".to_string(),
+                    last_status_at: None,
+                },
+                cursor: "agent-1:2".to_string(),
+                events: Vec::new(),
+                output: wardian_core::control::WatchOutput {
+                    cursor: "agent-1:2".to_string(),
+                    text: String::new(),
+                    truncated: false,
+                    omitted_bytes: 0,
+                },
+                transcript: None,
+                raw_output: None,
+                delivery: wardian_core::control::WatchDeliverySnapshot {
+                    delivery: Vec::new(),
+                },
+            },
+        };
+
+        let rendered = render_ask_response("reviewer-a1", "reply", ask).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["watch_error"]["code"], "gap_detected");
+        assert_eq!(
+            json["watch_error"]["message"],
+            "watch cursor expired while waiting"
+        );
+    }
+
+    #[test]
     fn render_ask_response_includes_transcript_when_watch_has_it() {
         let ask = live::AskAgentResponse {
             request_id: None,
             reply: None,
             delivery: Vec::new(),
+            watch_error: None,
             watch: wardian_core::control::AgentWatchResponse {
                 schema: 1,
                 agent: wardian_core::control::WatchAgentSnapshot {

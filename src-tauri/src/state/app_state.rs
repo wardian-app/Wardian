@@ -1,4 +1,5 @@
 use crate::state::active_agent::ActiveAgent;
+use crate::state::mailbox::MailboxState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -19,6 +20,8 @@ pub struct AppState {
     pub agent_order: Mutex<Vec<String>>,
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub mailbox: Mutex<MailboxState>,
     // Separate, lightweight map for stdin senders — completely independent from the
     // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
     pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
@@ -52,6 +55,22 @@ impl AppState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub async fn delivery_lock_for(&self, target_session_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.delivery_locks.lock().await;
+        locks
+            .entry(target_session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    pub async fn remove_agent_delivery_state(&self, target_session_id: &str) {
+        self.delivery_locks.lock().await.remove(target_session_id);
+        self.mailbox
+            .lock()
+            .await
+            .remove_for_target(target_session_id);
+    }
 }
 
 impl Default for AppState {
@@ -64,6 +83,8 @@ impl Default for AppState {
             agent_order: Mutex::new(Vec::new()),
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
+            delivery_locks: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(MailboxState::default()),
             input_senders: RwLock::new(HashMap::new()),
             workflow_triggers: Mutex::new(HashMap::new()),
             workflow_runs: Mutex::new(HashMap::new()),
@@ -81,11 +102,37 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::mailbox::MailboxMessageDraft;
+    use wardian_core::control::{MessageInputMode, QueuePolicy};
 
     #[test]
     fn app_state_constructs_without_panic() {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
         drop(state);
+    }
+
+    #[tokio::test]
+    async fn removing_agent_delivery_state_prunes_lock_and_mailbox_records() {
+        let state = AppState::new();
+        let _lock = state.delivery_lock_for("agent-1").await;
+        state.mailbox.lock().await.enqueue(MailboxMessageDraft {
+            target_session_id: "agent-1".to_string(),
+            body: "queued".to_string(),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            approval_action: None,
+            origin: None,
+        });
+
+        state.remove_agent_delivery_state("agent-1").await;
+
+        assert!(!state.delivery_locks.lock().await.contains_key("agent-1"));
+        assert!(state
+            .mailbox
+            .lock()
+            .await
+            .list_for_target("agent-1")
+            .is_empty());
     }
 }
