@@ -1188,6 +1188,24 @@ pub async fn spawn_agent(
         let watcher_skip_existing_log = is_restored;
         let watcher_workspace = cwd.clone();
 
+        let initial_ignored_conversation_id = if !watcher_skip_existing_log {
+            let home = AntigravityProvider::antigravity_home();
+            home.as_ref()
+                .and_then(|home| {
+                    AntigravityProvider::conversation_for_workspace(
+                        home,
+                        &watcher_workspace,
+                    )
+                })
+                .or_else(|| {
+                    home.as_ref().and_then(|home| {
+                        AntigravityProvider::latest_conversation_id(home)
+                    })
+                })
+        } else {
+            None
+        };
+
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
             let mut positioned_initial_log = !watcher_skip_existing_log;
@@ -1210,7 +1228,7 @@ pub async fn spawn_agent(
                             .filter(|value| !value.is_empty())
                     });
                     configured.or_else(|| {
-                        home.as_ref()
+                        let detected = home.as_ref()
                             .and_then(|home| {
                                 AntigravityProvider::conversation_for_workspace(
                                     home,
@@ -1221,7 +1239,15 @@ pub async fn spawn_agent(
                                 home.as_ref().and_then(|home| {
                                     AntigravityProvider::latest_conversation_id(home)
                                 })
-                            })
+                            });
+                        if let Some(ref detected_id) = detected {
+                            if let Some(ref ignored_id) = initial_ignored_conversation_id {
+                                if detected_id == ignored_id {
+                                    return None;
+                                }
+                            }
+                        }
+                        detected
                     })
                 };
 
