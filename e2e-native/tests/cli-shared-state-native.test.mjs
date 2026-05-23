@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 
 import {
   createNativeHarness,
@@ -24,6 +24,8 @@ const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
 const ASK_SESSION_NAME = `E2E-CLI-ASK-${RUN_ID}`;
 const ASK_ECHO_SESSION_NAME = `E2E-CLI-ASK-ECHO-${RUN_ID}`;
 const WATCH_READABLE_SESSION_NAME = `E2E-CLI-WATCH-READABLE-${RUN_ID}`;
+const ROUTE_QUEUE_SESSION_NAME = `E2E-CLI-ROUTE-QUEUE-${RUN_ID}`;
+const ROUTE_LIVE_ONLY_SESSION_NAME = `E2E-CLI-ROUTE-LIVE-${RUN_ID}`;
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
@@ -46,7 +48,29 @@ function buildCli(harness) {
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 
-  return path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
+  const localCandidate = path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
+  if (existsSync(localCandidate)) {
+    return localCandidate;
+  }
+
+  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+    cwd: harness.repoRoot,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+  });
+  assert.equal(
+    metadata.status,
+    0,
+    `cargo metadata failed\nstdout:\n${metadata.stdout}\nstderr:\n${metadata.stderr}`,
+  );
+  const targetDirectory = JSON.parse(metadata.stdout).target_directory;
+  const metadataCandidate = path.join(targetDirectory, "debug", commandName("wardian-cli"));
+  assert.equal(
+    existsSync(metadataCandidate),
+    true,
+    `wardian-cli binary was not found at ${metadataCandidate}`,
+  );
+  return metadataCandidate;
 }
 
 function runCli(cliPath, harness, args) {
@@ -66,11 +90,40 @@ function runCli(cliPath, harness, args) {
   };
 }
 
-async function withMockScenario(scenario, fn) {
+function runCliAsync(cliPath, harness, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cliPath, args, {
+      cwd: harness.repoRoot,
+      env: {
+        ...process.env,
+        WARDIAN_HOME: harness.isolatedHome,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (status) => {
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withMockScenario(scenario, fn, delayMs = "50") {
   const previousScenario = process.env.WARDIAN_MOCK_SCENARIO;
   const previousDelay = process.env.WARDIAN_MOCK_DELAY_MS;
   process.env.WARDIAN_MOCK_SCENARIO = scenario;
-  process.env.WARDIAN_MOCK_DELAY_MS = "50";
+  process.env.WARDIAN_MOCK_DELAY_MS = delayMs;
   try {
     return await fn();
   } finally {
@@ -97,6 +150,57 @@ function runCliOk(cliPath, harness, args) {
   return result;
 }
 
+function deliveryDetailFromWatch(watchJson, state, messageId = null) {
+  const snapshotDetails = watchJson.delivery?.delivery ?? [];
+  const eventDetails = (watchJson.events ?? [])
+    .filter((event) => event.kind === "delivery")
+    .map((event) => event.payload);
+  return [...snapshotDetails, ...eventDetails].find((detail) => {
+    if (detail.delivery_state !== state) {
+      return false;
+    }
+    return messageId === null || detail.message_id === messageId;
+  });
+}
+
+async function waitForDeliveryState(cliPath, harness, target, state, messageId, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  let since = null;
+  let lastResult = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const args = [
+      "agent",
+      "watch",
+      target,
+      "--until",
+      `delivery:${state}`,
+      "--include",
+      "delivery,events",
+      "--timeout",
+      "5s",
+    ];
+    if (since) {
+      args.push("--since", since);
+    }
+
+    lastResult = runCli(cliPath, harness, args);
+    if (lastResult.status === 0) {
+      const json = JSON.parse(lastResult.stdout);
+      const detail = deliveryDetailFromWatch(json, state, messageId);
+      if (detail) {
+        return { json, detail };
+      }
+      since = json.cursor;
+    }
+    await delay(250);
+  }
+
+  assert.fail(
+    `Timed out waiting for delivery ${state} message ${messageId}; last result: ${JSON.stringify(lastResult)}`,
+  );
+}
+
 function cliField(cliPath, harness, target, field) {
   return runCli(cliPath, harness, ["agent", target, "--field", field]);
 }
@@ -118,8 +222,20 @@ async function waitForCliField(cliPath, harness, target, field, expected, timeou
   );
 }
 
-async function createMockAgent(driver, workspacePath, { sessionId, sessionName, isOff }) {
-  const result = await driver.executeAsyncScript((sessionId, sessionName, folder, isOff, done) => {
+async function createMockAgent(
+  driver,
+  workspacePath,
+  { sessionId, sessionName, isOff, mockScenario = null, mockDelayMs = null },
+) {
+  const result = await driver.executeAsyncScript((sessionId, sessionName, folder, isOff, mockScenario, mockDelayMs, done) => {
+    const providerConfig =
+      mockScenario || mockDelayMs
+        ? {
+            type: "mock",
+            scenario: mockScenario,
+            delay_ms: mockDelayMs,
+          }
+        : undefined;
     window.__TAURI_INTERNALS__.invoke("spawn_agent", {
       req: {
         sessionName,
@@ -127,16 +243,48 @@ async function createMockAgent(driver, workspacePath, { sessionId, sessionName, 
         folder,
         resumeSession: sessionId,
         isOff,
-        configOverride: { provider: "mock" },
+        configOverride: providerConfig
+          ? { provider: "mock", provider_config: providerConfig }
+          : { provider: "mock" },
       },
     }).then(
       (agent) => done({ ok: true, agent }),
       (error) => done({ ok: false, error: String(error) }),
     );
-  }, sessionId, sessionName, workspacePath, isOff);
+  }, sessionId, sessionName, workspacePath, isOff, mockScenario, mockDelayMs);
 
   assert.equal(result.ok, true, `spawn_agent failed: ${result.error}`);
   return result.agent;
+}
+
+async function setAgentStatus(driver, sessionId, status) {
+  const result = await driver.executeAsyncScript((sessionId, status, done) => {
+    window.__TAURI_INTERNALS__.invoke("debug_set_agent_status", {
+      sessionId,
+      status,
+    }).then(
+      () => done({ ok: true }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, sessionId, status);
+
+  assert.equal(result.ok, true, `debug_set_agent_status failed: ${result.error}`);
+}
+
+async function pushAgentOutput(driver, sessionId, output, transcriptText = null) {
+  const result = await driver.executeAsyncScript((sessionId, output, transcriptText, done) => {
+    window.__TAURI_INTERNALS__.invoke("debug_push_agent_watch_output", {
+      sessionId,
+      output,
+      transcriptText,
+      provider: "mock",
+    }).then(
+      () => done({ ok: true }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, sessionId, output, transcriptText);
+
+  assert.equal(result.ok, true, `debug_push_agent_watch_output failed: ${result.error}`);
 }
 
 test("native app-created agent is readable through the CLI", { timeout: 180000 }, async (t) => {
@@ -322,6 +470,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
     assert.equal(source.name, CONTROL_SESSION_NAME);
     assert.equal(source.class, "Reviewer");
     assert.equal(source.provider, "mock");
+    await setAgentStatus(session.driver, source.uuid, "action_required");
     await watchStep(harness, `Spawned ${CONTROL_SESSION_NAME} with mock action_required state through the CLI`);
     await waitForCliField(
       cliPath,
@@ -354,36 +503,17 @@ test("native CLI control commands operate through the running app", { timeout: 1
     ]);
     assert.equal(waitResult.stdout, "action_required\n");
 
-    await watchStep(harness, `Sending approval to ${CONTROL_SESSION_NAME} through the CLI`);
+    await watchStep(harness, `Queueing approval-like input to ${CONTROL_SESSION_NAME} through the CLI`);
     const sendResult = runCliOk(cliPath, harness, [
       "send",
       "y",
       "--to",
       CONTROL_SESSION_NAME,
-      "--wait-until",
-      "idle",
-      "--timeout",
-      "30s",
     ]);
-    assert.equal(JSON.parse(sendResult.stdout).status, "idle");
-
-    const watchResult = runCliOk(cliPath, harness, [
-      "agent",
-      "watch",
-      CONTROL_SESSION_NAME,
-      "--until",
-      "output:Action approved",
-      "--include",
-      "status,events,output,delivery",
-      "--timeout",
-      "30s",
-    ]);
-    const watched = JSON.parse(watchResult.stdout);
-    assert.match(watched.output.text, /Action approved/);
-    const idleStatusEvents = watched.events.filter(
-      (event) => event.kind === "status" && event.payload?.status === "idle",
-    );
-    assert.equal(idleStatusEvents.length, 1, JSON.stringify(watched.events));
+    const queued = JSON.parse(sendResult.stdout).delivery[0];
+    assert.equal(queued.delivery_state, "queued");
+    assert.equal(queued.runtime_state, "target_action_required");
+    assert.match(queued.message_id, /^msg_/);
 
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
     const cloneResult = runCliOk(cliPath, harness, [
@@ -396,6 +526,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
     const cloneAgent = JSON.parse(cloneResult.stdout).agent;
     assert.equal(cloneAgent.name, CONTROL_CLONE_NAME);
     assert.notEqual(cloneAgent.uuid, source.uuid);
+    await setAgentStatus(session.driver, cloneAgent.uuid, "action_required");
     const teamResult = runCliOk(cliPath, harness, ["team", "show", "team-control"]);
     assert.deepEqual(JSON.parse(teamResult.stdout).team.agent_ids, [
       source.uuid,
@@ -410,6 +541,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
 
     await watchStep(harness, `Resuming ${CONTROL_CLONE_NAME} through the CLI`);
     runCliOk(cliPath, harness, ["agent", "resume", CONTROL_CLONE_NAME]);
+    await setAgentStatus(session.driver, cloneAgent.uuid, "action_required");
     await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "action_required");
 
     await watchStep(harness, `Killing ${CONTROL_CLONE_NAME} through the CLI`);
@@ -425,6 +557,8 @@ test("native CLI control commands operate through the running app", { timeout: 1
       );
     }, source.uuid);
     assert.equal(removed.ok, true, `debug_remove_agent_input_sender failed: ${removed.error}`);
+    await setAgentStatus(session.driver, source.uuid, "idle");
+    await waitForCliField(cliPath, harness, CONTROL_SESSION_NAME, "status", "idle");
 
     const missingSender = runCli(cliPath, harness, [
       "send",
@@ -448,102 +582,225 @@ test("native CLI control commands operate through the running app", { timeout: 1
 });
 
 test("native CLI ask returns only output after its pre-send cursor", { timeout: 180000 }, async (t) => {
-  await withMockScenario("interactive_multi_turn", async () => {
-    const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
+  await withMockScenario("interactive_echo_then_response", async () => {
+  const harness = await createNativeHarness();
+  assert.ok(harness.appPath);
 
-    try {
-      if (!skipNativeBuild) {
-        ensureNativeAppBuilt(harness);
-      }
-    } catch (error) {
-      t.skip(String(error));
-      return;
+  try {
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
     }
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
 
-    prepareIsolatedHome(harness);
+  prepareIsolatedHome(harness);
 
-    const cliPath = buildCli(harness);
-    const workspacePath = path.join(harness.repoRoot, "e2e-native");
+  const cliPath = buildCli(harness);
+  const workspacePath = path.join(harness.repoRoot, "e2e-native");
 
-    let session;
-    try {
-      session = await startNativeSession(harness);
-    } catch (error) {
-      t.skip(String(error));
-      return;
-    }
+  let session;
+  try {
+    session = await startNativeSession(harness);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
 
-    t.after(async () => {
-      await session.close();
-    });
+  t.after(async () => {
+    await session.close();
+  });
 
-    await waitForAppShell(session.driver, 20000);
-    await watchStep(harness, "Wardian app shell is ready for ask smoke");
+  await waitForAppShell(session.driver, 20000);
+  await watchStep(harness, "Wardian app shell is ready for ask smoke");
 
-    runCliOk(cliPath, harness, [
-      "agent",
-      "spawn",
-      "--provider",
-      "mock",
-      "--class",
-      "Reviewer",
-      "--name",
-      ASK_SESSION_NAME,
-      "--workspace",
-      workspacePath,
-    ]);
-    await waitForCliField(cliPath, harness, ASK_SESSION_NAME, "status", "action_required");
+  const agent = await createMockAgent(session.driver, workspacePath, {
+    sessionId: `e2e-cli-ask-${RUN_ID}`,
+    sessionName: ASK_SESSION_NAME,
+    isOff: false,
+    mockScenario: "interactive_echo_then_response",
+    mockDelayMs: 50,
+  });
+  await setAgentStatus(session.driver, agent.session_id, "action_required");
+  await pushAgentOutput(session.driver, agent.session_id, "STALE_BEFORE_ASK\r\n");
 
-    runCliOk(cliPath, harness, [
-      "send",
-      "STALE_BEFORE_ASK",
-      "--to",
-      ASK_SESSION_NAME,
-      "--wait-until",
-      "action_required",
-      "--timeout",
-      "30s",
-    ]);
+  const askPromise = runCliAsync(cliPath, harness, [
+    "ask",
+    ASK_SESSION_NAME,
+    "Say ASK_AFTER_CURSOR when ready",
+    "--until",
+    "output:ASK_AFTER_CURSOR",
+    "--timeout",
+    "30s",
+    "--tail",
+    "65536",
+  ]);
 
-    const staleWatch = runCliOk(cliPath, harness, [
-      "agent",
-      "watch",
-      ASK_SESSION_NAME,
-      "--until",
-      "output:STALE_BEFORE_ASK",
-      "--include",
-      "status,output,delivery",
-      "--timeout",
-      "30s",
-    ]);
-    assert.match(JSON.parse(staleWatch.stdout).output.text, /STALE_BEFORE_ASK/);
+  const queued = await waitForDeliveryState(
+    cliPath,
+    harness,
+    ASK_SESSION_NAME,
+    "queued",
+    null,
+  );
+  const queuedMessageId = queued.detail.message_id;
+  assert.ok(queuedMessageId);
+  assert.equal(queued.detail.runtime_state, "target_action_required");
 
-    const askOutput = runCliOk(cliPath, harness, [
-      "ask",
-      ASK_SESSION_NAME,
-      "ASK_AFTER_CURSOR",
-      "--until",
-      "output:ASK_AFTER_CURSOR",
-      "--timeout",
-      "30s",
-      "--tail",
-      "65536",
-    ]);
+  await pushAgentOutput(session.driver, agent.session_id, "PRE_DRAIN_ASK_AFTER_CURSOR\r\n");
+  const earlyResult = await Promise.race([
+    askPromise.then(() => "completed"),
+    delay(750).then(() => "pending"),
+  ]);
+  assert.equal(earlyResult, "pending", "pre-drain output must not satisfy queued ask");
 
-    const askJson = JSON.parse(askOutput.stdout);
-    assert.equal(askJson.ok, true);
-    assert.equal(askJson.target, ASK_SESSION_NAME);
-    assert.equal(askJson.condition, "output:ASK_AFTER_CURSOR");
-    assert.match(askJson.output.text, /ASK_AFTER_CURSOR/);
-    assert.doesNotMatch(askJson.output.text, /STALE_BEFORE_ASK/);
-    assert.ok(Array.isArray(askJson.delivery));
-    assert.equal(askJson.delivery[0].delivery_state, "submitted");
+  await setAgentStatus(session.driver, agent.session_id, "idle");
+  const drained = await waitForDeliveryState(
+    cliPath,
+    harness,
+    ASK_SESSION_NAME,
+    "submit_sent_unverified",
+    queuedMessageId,
+  );
+  assert.equal(drained.detail.runtime_state, "mailbox_drain");
+
+  const askOutput = await askPromise;
+  assert.equal(
+    askOutput.status,
+    0,
+    `wardian ask failed\nstdout:\n${askOutput.stdout}\nstderr:\n${askOutput.stderr}`,
+  );
+
+  const askJson = JSON.parse(askOutput.stdout);
+  assert.equal(askJson.ok, true);
+  assert.equal(askJson.target, ASK_SESSION_NAME);
+  assert.equal(askJson.condition, "output:ASK_AFTER_CURSOR");
+  assert.match(askJson.output.text, /ASK_AFTER_CURSOR/);
+  assert.doesNotMatch(askJson.output.text, /PRE_DRAIN_ASK_AFTER_CURSOR/);
+  assert.match(askJson.output.text, /Actual response after echo: ASK_AFTER_CURSOR/);
+  assert.doesNotMatch(askJson.output.text, /STALE_BEFORE_ASK/);
+  assert.ok(Array.isArray(askJson.delivery));
+  assert.equal(askJson.delivery[0].delivery_state, "queued");
+  assert.equal(askJson.delivery[0].runtime_state, "target_action_required");
   });
 });
 
 test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 180000 }, async (t) => {
   await withMockScenario("interactive_echo_then_response", async () => {
+  const harness = await createNativeHarness();
+  assert.ok(harness.appPath);
+
+  try {
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
+    }
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  prepareIsolatedHome(harness);
+
+  const cliPath = buildCli(harness);
+  const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+  let session;
+  try {
+    session = await startNativeSession(harness);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  t.after(async () => {
+    await session.close();
+  });
+
+  await waitForAppShell(session.driver, 20000);
+  await watchStep(harness, "Wardian app shell is ready for ask echo guard");
+
+  const agent = await createMockAgent(session.driver, workspacePath, {
+    sessionId: `e2e-cli-ask-echo-${RUN_ID}`,
+    sessionName: ASK_ECHO_SESSION_NAME,
+    isOff: false,
+    mockScenario: "interactive_echo_then_response",
+    mockDelayMs: 700,
+  });
+  await setAgentStatus(session.driver, agent.session_id, "action_required");
+
+  const askPromise = runCliAsync(cliPath, harness, [
+    "ask",
+    ASK_ECHO_SESSION_NAME,
+    "Say AUTO_TEST_2_DONE when finished",
+    "--until",
+    "output:AUTO_TEST_2_DONE",
+    "--timeout",
+    "30s",
+    "--tail",
+    "65536",
+  ]);
+
+  const queued = await waitForDeliveryState(
+    cliPath,
+    harness,
+    ASK_ECHO_SESSION_NAME,
+    "queued",
+    null,
+  );
+  const queuedMessageId = queued.detail.message_id;
+  assert.ok(queuedMessageId);
+  assert.equal(queued.detail.runtime_state, "target_action_required");
+
+  await pushAgentOutput(session.driver, agent.session_id, "Say AUTO_TEST_2_DONE when finished\r\n");
+  const earlyResult = await Promise.race([
+    askPromise.then(() => "completed"),
+    delay(750).then(() => "pending"),
+  ]);
+  assert.equal(earlyResult, "pending", "pre-drain prompt echo should not satisfy the output wait");
+
+  await setAgentStatus(session.driver, agent.session_id, "idle");
+  const drained = await waitForDeliveryState(
+    cliPath,
+    harness,
+    ASK_ECHO_SESSION_NAME,
+    "submit_sent_unverified",
+    queuedMessageId,
+  );
+  assert.equal(drained.detail.runtime_state, "mailbox_drain");
+
+  const echoAfterDrainResult = await Promise.race([
+    askPromise.then(() => "completed"),
+    delay(1000).then(() => "pending"),
+  ]);
+  assert.equal(
+    echoAfterDrainResult,
+    "pending",
+    "submitted prompt echo should not satisfy the output wait",
+  );
+
+  const askOutput = await askPromise;
+  assert.equal(
+    askOutput.status,
+    0,
+    `wardian ask failed\nstdout:\n${askOutput.stdout}\nstderr:\n${askOutput.stderr}`,
+  );
+
+  const askJson = JSON.parse(askOutput.stdout);
+  assert.equal(askJson.ok, true);
+  assert.equal(askJson.target, ASK_ECHO_SESSION_NAME);
+  assert.equal(askJson.condition, "output:AUTO_TEST_2_DONE");
+  assert.match(
+    askJson.output.text,
+    /Actual response after echo: AUTO_TEST_2_DONE/,
+  );
+  assert.ok(Array.isArray(askJson.delivery));
+  assert.equal(askJson.delivery[0].delivery_state, "queued");
+  assert.equal(askJson.delivery[0].runtime_state, "target_action_required");
+  }, "700");
+});
+
+test("native CLI send routes processing mock by queue policy", { timeout: 180000 }, async (t) => {
     const harness = await createNativeHarness();
     assert.ok(harness.appPath);
 
@@ -574,42 +831,49 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
     });
 
     await waitForAppShell(session.driver, 20000);
-    await watchStep(harness, "Wardian app shell is ready for ask echo guard");
+    await watchStep(harness, "Wardian app shell is ready for delivery route smoke");
 
-    runCliOk(cliPath, harness, [
-      "agent",
-      "spawn",
-      "--provider",
-      "mock",
-      "--class",
-      "Reviewer",
-      "--name",
-      ASK_ECHO_SESSION_NAME,
-      "--workspace",
-      workspacePath,
+    const queueAgent = await createMockAgent(session.driver, workspacePath, {
+      sessionId: `e2e-cli-route-queue-${RUN_ID}`,
+      sessionName: ROUTE_QUEUE_SESSION_NAME,
+      isOff: false,
+    });
+    await setAgentStatus(session.driver, queueAgent.session_id, "processing");
+    await waitForCliField(cliPath, harness, ROUTE_QUEUE_SESSION_NAME, "status", "processing");
+
+    const queuedResult = runCliOk(cliPath, harness, [
+      "send",
+      "QUEUE_WHILE_PROCESSING",
+      "--to",
+      ROUTE_QUEUE_SESSION_NAME,
+      "--queue-policy",
+      "queue-if-busy",
     ]);
-    await waitForCliField(cliPath, harness, ASK_ECHO_SESSION_NAME, "status", "action_required");
+    const queuedDelivery = JSON.parse(queuedResult.stdout).delivery[0];
+    assert.equal(queuedDelivery.delivery_state, "queued");
+    assert.equal(queuedDelivery.runtime_state, "target_processing");
+    assert.match(queuedDelivery.message_id, /^msg_/);
 
-    const askOutput = runCliOk(cliPath, harness, [
-      "ask",
-      ASK_ECHO_SESSION_NAME,
-      "AUTO_TEST_2_DONE",
-      "--until",
-      "output:AUTO_TEST_2_DONE",
-      "--timeout",
-      "30s",
-      "--tail",
-      "65536",
+    const liveOnlyAgent = await createMockAgent(session.driver, workspacePath, {
+      sessionId: `e2e-cli-route-live-${RUN_ID}`,
+      sessionName: ROUTE_LIVE_ONLY_SESSION_NAME,
+      isOff: false,
+    });
+    await setAgentStatus(session.driver, liveOnlyAgent.session_id, "processing");
+    await waitForCliField(cliPath, harness, ROUTE_LIVE_ONLY_SESSION_NAME, "status", "processing");
+
+    const liveOnlyResult = runCli(cliPath, harness, [
+      "send",
+      "LIVE_ONLY_WHILE_PROCESSING",
+      "--to",
+      ROUTE_LIVE_ONLY_SESSION_NAME,
+      "--queue-policy",
+      "live-only",
     ]);
-
-    const askJson = JSON.parse(askOutput.stdout);
-    assert.equal(askJson.ok, true);
-    assert.equal(askJson.target, ASK_ECHO_SESSION_NAME);
-    assert.equal(askJson.condition, "output:AUTO_TEST_2_DONE");
-    assert.match(askJson.output.text, /Actual response after echo: .*AUTO_TEST_2_DONE/);
-    assert.ok(Array.isArray(askJson.delivery));
-    assert.equal(askJson.delivery[0].delivery_state, "submitted");
-  });
+    assert.notEqual(liveOnlyResult.status, 0);
+    const liveOnlyError = JSON.parse(liveOnlyResult.stderr);
+    const liveOnlyDelivery = liveOnlyError.error.details.delivery[0];
+    assert.equal(liveOnlyDelivery.delivery_state, "not_input_ready");
 });
 
 test("native CLI watch returns readable output by default and raw output on opt-in", { timeout: 180000 }, async (t) => {

@@ -24,6 +24,46 @@ Wardian does not install provider accounts, complete browser sign-in, create pro
 
 You can choose a preferred launch provider in [Settings](./settings.md). `Auto` keeps the Claude-first default when Claude is installed, then falls back to the first installed supported provider.
 
+## Opt-In Delivery Validation
+
+Maintainers can run the real-provider delivery matrix after all provider CLIs are installed, authenticated, and trusted for the target workspace. This validation is opt-in because it can send prompts to live provider accounts.
+
+The full delivery matrix includes Codex, Claude, Gemini, OpenCode, and Antigravity:
+
+```bash
+WARDIAN_E2E_REAL_DELIVERY=1 WARDIAN_E2E_DELIVERY_PROVIDERS=codex,claude,gemini,opencode,antigravity npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_DELIVERY = "1"
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = "codex,claude,gemini,opencode,antigravity"
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+```
+
+To limit a local run while debugging one provider, set `WARDIAN_E2E_DELIVERY_PROVIDERS` and explicitly allow a partial matrix:
+
+```bash
+WARDIAN_E2E_REAL_DELIVERY=1 WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 WARDIAN_E2E_DELIVERY_PROVIDERS=codex,claude npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_DELIVERY = "1"
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = "1"
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = "codex,claude"
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+```
+
+When `WARDIAN_E2E_REAL_DELIVERY=1` is set, unknown provider names fail the test. Antigravity is required in the matrix unless `WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1` is also set.
+
 ## Shared Checks
 
 Most supported providers are distributed through Node.js packages. Check Node and npm first:

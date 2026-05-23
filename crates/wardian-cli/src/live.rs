@@ -6,9 +6,10 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
-    AgentWorktreeMutationResponse, AgentWorktreeSummary, AskResponse, ControlRequest,
-    DeliveryDetail, MessageInputMode, MessageOrigin, ReplyResponse, ReplyStatus,
-    SendMessageResponse, StructuredReply, WorkflowListResponse, WorkflowResponse, WorkflowSummary,
+    AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
+    ControlRequest, DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse,
+    ReplyStatus, SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError,
+    WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
@@ -32,10 +33,31 @@ struct SendAndWatchRequest<'a> {
     message: &'a str,
     thread: Option<&'a str>,
     input_mode: MessageInputMode,
+    queue_policy: QueuePolicy,
+    approval_action: Option<ApprovalAction>,
     condition: &'a str,
     tail_bytes: Option<usize>,
     timeout: Duration,
     output_echo_guard: Option<&'a str>,
+}
+
+pub struct SendMessageAndWatchOptions<'a> {
+    pub thread: Option<&'a str>,
+    pub input_mode: MessageInputMode,
+    pub queue_policy: QueuePolicy,
+    pub approval_action: Option<ApprovalAction>,
+    pub until: &'a str,
+    pub timeout: Duration,
+}
+
+pub struct SendMessageAndWatchConditionOptions<'a> {
+    pub thread: Option<&'a str>,
+    pub input_mode: MessageInputMode,
+    pub queue_policy: QueuePolicy,
+    pub approval_action: Option<ApprovalAction>,
+    pub condition: &'a str,
+    pub tail_bytes: Option<usize>,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +217,7 @@ pub struct AskAgentResponse {
     pub request_id: Option<String>,
     pub reply: Option<StructuredReply>,
     pub delivery: Vec<DeliveryDetail>,
+    pub watch_error: Option<WatchEvidenceError>,
     pub watch: AgentWatchResponse,
 }
 
@@ -405,6 +428,24 @@ pub fn send_message_with_input_mode(
     thread: Option<&str>,
     input_mode: MessageInputMode,
 ) -> io::Result<SendMessageResponse> {
+    send_message_with_delivery_options(
+        target,
+        message,
+        thread,
+        input_mode,
+        QueuePolicy::QueueIfBusy,
+        None,
+    )
+}
+
+pub fn send_message_with_delivery_options(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    input_mode: MessageInputMode,
+    queue_policy: QueuePolicy,
+    approval_action: Option<ApprovalAction>,
+) -> io::Result<SendMessageResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
@@ -414,6 +455,8 @@ pub fn send_message_with_input_mode(
             message: message.to_string(),
             thread: thread.map(str::to_string),
             input_mode,
+            queue_policy,
+            approval_action,
             origin: current_message_origin(),
         }),
     )?;
@@ -517,19 +560,20 @@ pub fn wait_agent_until_next(
 pub fn send_message_and_watch(
     target: &str,
     message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-    until: &str,
-    timeout: Duration,
+    options: SendMessageAndWatchOptions<'_>,
 ) -> io::Result<AskAgentResponse> {
     send_message_and_watch_condition(
         target,
         message,
-        thread,
-        input_mode,
-        &format!("status:{until}"),
-        Some(4096),
-        timeout,
+        SendMessageAndWatchConditionOptions {
+            thread: options.thread,
+            input_mode: options.input_mode,
+            queue_policy: options.queue_policy,
+            approval_action: options.approval_action,
+            condition: &format!("status:{}", options.until),
+            tail_bytes: Some(4096),
+            timeout: options.timeout,
+        },
     )
 }
 
@@ -549,6 +593,8 @@ pub fn ask_agent(
         message,
         thread,
         input_mode: MessageInputMode::Message,
+        queue_policy: QueuePolicy::QueueIfBusy,
+        approval_action: None,
         condition,
         tail_bytes,
         timeout,
@@ -585,27 +631,26 @@ fn ask_agent_structured(
         request_id: Some(response.request_id),
         reply: Some(response.reply),
         delivery: response.delivery,
+        watch_error: response.watch_error,
         watch: response.watch,
     })
 }
 
-pub fn send_message_and_watch_condition(
+fn send_message_and_watch_condition(
     target: &str,
     message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-    condition: &str,
-    tail_bytes: Option<usize>,
-    timeout: Duration,
+    options: SendMessageAndWatchConditionOptions<'_>,
 ) -> io::Result<AskAgentResponse> {
     send_message_and_watch_condition_with_output_echo_guard(SendAndWatchRequest {
         target,
         message,
-        thread,
-        input_mode,
-        condition,
-        tail_bytes,
-        timeout,
+        thread: options.thread,
+        input_mode: options.input_mode,
+        queue_policy: options.queue_policy,
+        approval_action: options.approval_action,
+        condition: options.condition,
+        tail_bytes: options.tail_bytes,
+        timeout: options.timeout,
         output_echo_guard: None,
     })
 }
@@ -627,15 +672,37 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         false,
         Duration::from_secs(5),
     )?;
-    let sent = send_message_with_input_mode(
+    let sent = send_message_with_delivery_options(
         request.target,
         request.message,
         request.thread,
         request.input_mode,
+        request.queue_policy,
+        request.approval_action,
     )?;
+    let started_at = Instant::now();
+    let queued_message_ids = queued_delivery_message_ids(&sent.delivery);
+    let condition_since = if !queued_message_ids.is_empty()
+        && condition_requires_queued_delivery_submission(request.condition)
+    {
+        wait_for_queued_delivery_submission(
+            request.target,
+            &initial.cursor,
+            &queued_message_ids,
+            request.tail_bytes,
+            remaining_watch_timeout(
+                request.timeout,
+                started_at,
+                request.target,
+                request.condition,
+            )?,
+        )?
+    } else {
+        initial.cursor.clone()
+    };
     let watch = agent_watch_with_output_echo_guard(AgentWatchRequest {
         target: request.target,
-        since: Some(&initial.cursor),
+        since: Some(&condition_since),
         until: Some(request.condition),
         include: vec![
             "status".to_string(),
@@ -645,13 +712,19 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         ],
         tail_bytes: request.tail_bytes,
         follow: false,
-        timeout: request.timeout,
+        timeout: remaining_watch_timeout(
+            request.timeout,
+            started_at,
+            request.target,
+            request.condition,
+        )?,
         output_echo_guard: request.output_echo_guard,
     })?;
     Ok(AskAgentResponse {
         request_id: None,
         reply: None,
         delivery: sent.delivery,
+        watch_error: None,
         watch,
     })
 }
@@ -731,6 +804,100 @@ fn current_message_origin() -> Option<MessageOrigin> {
 fn ask_prompt_echo_guard<'a>(condition: &str, message: &'a str) -> Option<&'a str> {
     let token = condition.strip_prefix("output:")?;
     (!token.is_empty() && message.contains(token)).then_some(message)
+}
+
+fn queued_delivery_message_ids(delivery: &[DeliveryDetail]) -> Vec<String> {
+    delivery
+        .iter()
+        .filter(|detail| detail.delivery_state == "queued")
+        .filter_map(|detail| detail.message_id.clone())
+        .collect()
+}
+
+fn condition_requires_queued_delivery_submission(condition: &str) -> bool {
+    condition.starts_with("output:") || condition.starts_with("status:")
+}
+
+fn wait_for_queued_delivery_submission(
+    target: &str,
+    since: &str,
+    message_ids: &[String],
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+) -> io::Result<String> {
+    let started_at = Instant::now();
+    let mut since_cursor = since.to_string();
+
+    loop {
+        let watch = agent_watch_with_output_echo_guard(AgentWatchRequest {
+            target,
+            since: Some(&since_cursor),
+            until: Some("delivery:submit_started"),
+            include: vec![
+                "status".to_string(),
+                "transcript".to_string(),
+                "output".to_string(),
+                "delivery".to_string(),
+                "events".to_string(),
+            ],
+            tail_bytes,
+            follow: false,
+            timeout: remaining_watch_timeout(
+                timeout,
+                started_at,
+                target,
+                "delivery:submit_started",
+            )?,
+            output_echo_guard: None,
+        })?;
+
+        if let Some(cursor) = matching_delivery_event_cursor(&watch.events, message_ids) {
+            return Ok(cursor);
+        }
+        if watch
+            .delivery
+            .delivery
+            .iter()
+            .any(|detail| delivery_matches_submit(detail, message_ids))
+        {
+            return Ok(watch.cursor);
+        }
+        since_cursor = watch.cursor;
+    }
+}
+
+fn matching_delivery_event_cursor(events: &[WatchEvent], message_ids: &[String]) -> Option<String> {
+    events.iter().find_map(|event| {
+        if event.kind != "delivery" {
+            return None;
+        }
+        let detail = serde_json::from_value::<DeliveryDetail>(event.payload.clone()).ok()?;
+        delivery_matches_submit(&detail, message_ids).then(|| event.cursor.clone())
+    })
+}
+
+fn delivery_matches_submit(detail: &DeliveryDetail, message_ids: &[String]) -> bool {
+    detail.delivery_state == "submit_started"
+        && detail
+            .message_id
+            .as_ref()
+            .is_some_and(|id| message_ids.iter().any(|queued_id| queued_id == id))
+}
+
+fn remaining_watch_timeout(
+    timeout: Duration,
+    started_at: Instant,
+    target: &str,
+    condition: &str,
+) -> io::Result<Duration> {
+    let elapsed = started_at.elapsed();
+    if elapsed >= timeout {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            WatchTimeoutError::new(target, condition, "unknown"),
+        ));
+    }
+    Ok(timeout - elapsed)
 }
 
 fn wait_agent_until_after_snapshot(
@@ -992,6 +1159,71 @@ mod tests {
             Some("Say AUTO_TEST_2_DONE")
         );
         assert_eq!(ask_prompt_echo_guard("status:idle", "Say DONE"), None);
+    }
+
+    fn delivery_detail(state: &str, message_id: Option<&str>) -> DeliveryDetail {
+        DeliveryDetail {
+            uuid: "agent-1".to_string(),
+            name: "reviewer-a1".to_string(),
+            provider: "mock".to_string(),
+            runtime_state: "target_action_required".to_string(),
+            delivery_state: state.to_string(),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            message_id: message_id.map(str::to_string),
+            delivery_phase: None,
+            observed_state: None,
+            reason: None,
+            profile: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn queued_delivery_message_ids_only_returns_queued_ids_with_ids() {
+        let delivery = vec![
+            delivery_detail("queued", Some("msg_1")),
+            delivery_detail("submit_started", Some("msg_2")),
+            delivery_detail("queued", None),
+        ];
+
+        assert_eq!(queued_delivery_message_ids(&delivery), vec!["msg_1"]);
+    }
+
+    #[test]
+    fn matching_delivery_event_cursor_uses_same_message_id_and_state() {
+        let events = vec![
+            wardian_core::control::WatchEvent {
+                cursor: "agent-1:1".to_string(),
+                kind: "delivery".to_string(),
+                payload: serde_json::json!(delivery_detail("submit_started", Some("msg_other"))),
+            },
+            wardian_core::control::WatchEvent {
+                cursor: "agent-1:2".to_string(),
+                kind: "delivery".to_string(),
+                payload: serde_json::json!(delivery_detail("submit_started", Some("msg_1"))),
+            },
+        ];
+
+        assert_eq!(
+            matching_delivery_event_cursor(&events, &["msg_1".to_string()]).as_deref(),
+            Some("agent-1:2")
+        );
+    }
+
+    #[test]
+    fn queued_submission_prewait_applies_only_to_output_and_status_conditions() {
+        assert!(condition_requires_queued_delivery_submission("output:DONE"));
+        assert!(condition_requires_queued_delivery_submission("status:idle"));
+        assert!(!condition_requires_queued_delivery_submission(
+            "delivery:submit_sent_unverified"
+        ));
+        assert!(!condition_requires_queued_delivery_submission(
+            "delivery:queued"
+        ));
+        assert!(!condition_requires_queued_delivery_submission(
+            "event:custom"
+        ));
     }
 
     #[test]

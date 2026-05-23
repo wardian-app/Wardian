@@ -1979,6 +1979,9 @@ pub async fn kill_agent(
     if let Some(snapshot) = state_snapshot {
         manager::save_state_snapshot(&app, &snapshot);
     }
+    if agent.is_some() {
+        state.remove_agent_delivery_state(&session_id).await;
+    }
 
     #[allow(unused_mut)]
     if let Some(mut agent) = agent {

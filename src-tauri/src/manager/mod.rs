@@ -187,6 +187,8 @@ pub(crate) fn set_agent_status(
                     "current_status": next_status,
                 }),
             );
+
+            crate::control::spawn_mailbox_drain_if_idle(app, session_id, next_status);
         }
     }
 }

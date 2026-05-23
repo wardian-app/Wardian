@@ -360,6 +360,7 @@ pub fn run() {
             commands::chat::load_agent_chat_transcript,
             commands::debug::debug_remove_agent_input_sender,
             commands::debug::debug_push_agent_watch_output,
+            commands::debug::debug_set_agent_status,
             commands::terminal::send_input_to_agent,
             commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,

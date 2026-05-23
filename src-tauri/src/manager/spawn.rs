@@ -320,6 +320,33 @@ pub async fn spawn_agent(
         for (key, value) in opencode_interactive_env(&provider_cwd, &config)? {
             cmd.env(key, value);
         }
+    } else if config.provider == "mock" {
+        let mut has_config_scenario = false;
+        let mut has_config_delay = false;
+        if let ProviderConfig::Mock(mock) = &config.provider_config {
+            if let Some(scenario) = mock.scenario.as_deref().filter(|value| !value.is_empty()) {
+                cmd.env("WARDIAN_MOCK_SCENARIO", scenario);
+                has_config_scenario = true;
+            }
+            if let Some(delay_ms) = mock.delay_ms {
+                cmd.env("WARDIAN_MOCK_DELAY_MS", delay_ms.to_string());
+                has_config_delay = true;
+            }
+        }
+        for key in [
+            "WARDIAN_MOCK_SCENARIO",
+            "WARDIAN_MOCK_DELAY_MS",
+            "WARDIAN_MOCK_SCRIPT",
+        ] {
+            if (key == "WARDIAN_MOCK_SCENARIO" && has_config_scenario)
+                || (key == "WARDIAN_MOCK_DELAY_MS" && has_config_delay)
+            {
+                continue;
+            }
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
     }
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());

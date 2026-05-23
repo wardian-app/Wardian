@@ -56,6 +56,10 @@ pub enum ControlRequest {
         thread: Option<String>,
         #[serde(default, skip_serializing_if = "MessageInputMode::is_message")]
         input_mode: MessageInputMode,
+        #[serde(default, skip_serializing_if = "QueuePolicy::is_queue_if_busy")]
+        queue_policy: QueuePolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_action: Option<ApprovalAction>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<MessageOrigin>,
     },
@@ -100,12 +104,37 @@ pub enum MessageInputMode {
     #[default]
     Message,
     Command,
+    ApprovalAction,
 }
 
 impl MessageInputMode {
     pub fn is_message(&self) -> bool {
         matches!(self, Self::Message)
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePolicy {
+    #[default]
+    QueueIfBusy,
+    LiveOnly,
+    MailboxOnly,
+}
+
+impl QueuePolicy {
+    pub fn is_queue_if_busy(&self) -> bool {
+        matches!(self, Self::QueueIfBusy)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ApprovalAction {
+    Accept,
+    Reject,
+    Select { option: String },
+    FreeText { text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,6 +188,18 @@ pub struct DeliveryDetail {
     pub delivery_state: String,
     #[serde(default)]
     pub input_mode: MessageInputMode,
+    #[serde(default, skip_serializing_if = "QueuePolicy::is_queue_if_busy")]
+    pub queue_policy: QueuePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DeliveryErrorDetail>,
 }
@@ -198,6 +239,14 @@ pub struct AskResponse {
     pub delivery: Vec<DeliveryDetail>,
     pub reply: StructuredReply,
     pub watch: AgentWatchResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch_error: Option<WatchEvidenceError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchEvidenceError {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -444,6 +493,8 @@ mod tests {
             message: "hello".to_string(),
             thread: None,
             input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            approval_action: None,
             origin: None,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -459,6 +510,8 @@ mod tests {
             message: "hello".to_string(),
             thread: None,
             input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            approval_action: None,
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
@@ -478,6 +531,8 @@ mod tests {
             message: "/goal test".to_string(),
             thread: None,
             input_mode: MessageInputMode::Command,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            approval_action: None,
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
@@ -486,6 +541,30 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
 
         assert!(json.contains(r#""input_mode":"command""#));
+    }
+
+    #[test]
+    fn send_message_request_serializes_queue_policy_and_approval_action() {
+        let req = ControlRequest::SendMessage {
+            target: "CoderOne".to_string(),
+            message: "approve".to_string(),
+            thread: None,
+            input_mode: MessageInputMode::ApprovalAction,
+            queue_policy: QueuePolicy::LiveOnly,
+            approval_action: Some(ApprovalAction::Select {
+                option: "allow_once".to_string(),
+            }),
+            origin: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""input_mode":"approval_action""#));
+        assert!(json.contains(r#""queue_policy":"live_only""#));
+        assert!(json.contains(r#""action":"select""#));
+        assert!(json.contains(r#""option":"allow_once""#));
+        assert_eq!(roundtrip, req);
     }
 
     #[test]
@@ -500,6 +579,8 @@ mod tests {
                 message: "hello".to_string(),
                 thread: None,
                 input_mode: MessageInputMode::Message,
+                queue_policy: QueuePolicy::QueueIfBusy,
+                approval_action: None,
                 origin: None,
             }
         );
@@ -653,6 +734,65 @@ mod tests {
     }
 
     #[test]
+    fn ask_response_serializes_additive_watch_error() {
+        let response = AskResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            request_id: "ask_0123456789abcdef".to_string(),
+            target: "reviewer-a1".to_string(),
+            delivery: Vec::new(),
+            reply: StructuredReply {
+                request_id: "ask_0123456789abcdef".to_string(),
+                status: ReplyStatus::Done,
+                body: "finished".to_string(),
+                target_session_id: "agent-1".to_string(),
+                source_session_id: Some("agent-1".to_string()),
+                replied_at: "2026-05-22T00:00:00.000Z".to_string(),
+            },
+            watch: AgentWatchResponse {
+                schema: CONTROL_SCHEMA,
+                agent: WatchAgentSnapshot {
+                    uuid: "agent-1".to_string(),
+                    name: "reviewer-a1".to_string(),
+                    provider: "codex".to_string(),
+                    status: "idle".to_string(),
+                    last_status_at: None,
+                },
+                cursor: "agent-1:0000000000000001".to_string(),
+                events: Vec::new(),
+                output: WatchOutput {
+                    cursor: "agent-1:0000000000000001".to_string(),
+                    text: String::new(),
+                    truncated: false,
+                    omitted_bytes: 0,
+                },
+                transcript: None,
+                raw_output: None,
+                delivery: WatchDeliverySnapshot {
+                    delivery: Vec::new(),
+                },
+            },
+            watch_error: Some(WatchEvidenceError {
+                code: "cursor_expired".to_string(),
+                message: "watch state error".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let roundtrip: AskResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""watch_error""#));
+        assert_eq!(
+            roundtrip
+                .watch_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("cursor_expired")
+        );
+        assert_eq!(roundtrip.reply.body, "finished");
+    }
+
+    #[test]
     fn submit_reply_request_serializes_status_and_body() {
         let req = ControlRequest::SubmitReply {
             request_id: "ask_0123456789abcdef".to_string(),
@@ -753,6 +893,12 @@ mod tests {
             runtime_state: "live_pty_available".to_string(),
             delivery_state: "submitted".to_string(),
             input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            message_id: None,
+            delivery_phase: None,
+            observed_state: None,
+            reason: None,
+            profile: None,
             error: None,
         };
 
@@ -760,6 +906,34 @@ mod tests {
 
         assert!(json.contains(r#""runtime_state":"live_pty_available""#));
         assert!(json.contains(r#""delivery_state":"submitted""#));
+    }
+
+    #[test]
+    fn delivery_detail_serializes_rich_delivery_fields() {
+        let detail = DeliveryDetail {
+            uuid: "agent-1".to_string(),
+            name: "CoderOne".to_string(),
+            provider: "codex".to_string(),
+            runtime_state: "live_pty_available".to_string(),
+            delivery_state: "submitted".to_string(),
+            input_mode: MessageInputMode::ApprovalAction,
+            queue_policy: QueuePolicy::MailboxOnly,
+            message_id: Some("msg_1".to_string()),
+            delivery_phase: Some("submit".to_string()),
+            observed_state: Some("submitted_observed".to_string()),
+            reason: Some("target_processing".to_string()),
+            profile: Some("codex".to_string()),
+            error: None,
+        };
+
+        let json = serde_json::to_string(&detail).unwrap();
+
+        assert!(json.contains(r#""queue_policy":"mailbox_only""#));
+        assert!(json.contains(r#""message_id":"msg_1""#));
+        assert!(json.contains(r#""delivery_phase":"submit""#));
+        assert!(json.contains(r#""observed_state":"submitted_observed""#));
+        assert!(json.contains(r#""reason":"target_processing""#));
+        assert!(json.contains(r#""profile":"codex""#));
     }
 
     #[test]
@@ -774,6 +948,12 @@ mod tests {
                 runtime_state: "live_pty_available".to_string(),
                 delivery_state: "submitted".to_string(),
                 input_mode: MessageInputMode::Command,
+                queue_policy: QueuePolicy::QueueIfBusy,
+                message_id: None,
+                delivery_phase: None,
+                observed_state: None,
+                reason: None,
+                profile: None,
                 error: None,
             }],
         };

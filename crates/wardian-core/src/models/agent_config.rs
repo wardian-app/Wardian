@@ -149,7 +149,12 @@ pub struct OpenCodeProviderConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct MockProviderConfig {}
+pub struct MockProviderConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+}
 
 impl ProviderConfig {
     pub fn type_name(&self) -> &str {
@@ -215,8 +220,9 @@ impl ProviderConfig {
             "claude" => serde_json::from_value::<ClaudeProviderConfig>(value).map(Self::Claude),
             "gemini" => serde_json::from_value::<GeminiProviderConfig>(value).map(Self::Gemini),
             "codex" => serde_json::from_value::<CodexProviderConfig>(value).map(Self::Codex),
-            "antigravity" => serde_json::from_value::<AntigravityProviderConfig>(value)
-                .map(Self::Antigravity),
+            "antigravity" => {
+                serde_json::from_value::<AntigravityProviderConfig>(value).map(Self::Antigravity)
+            }
             "opencode" => {
                 serde_json::from_value::<OpenCodeProviderConfig>(value).map(Self::OpenCode)
             }
@@ -1169,17 +1175,23 @@ mod tests {
     fn mock_provider_config_roundtrips() {
         let config = AgentConfig {
             provider: "mock".into(),
-            provider_config: ProviderConfig::Mock(MockProviderConfig::default()),
+            provider_config: ProviderConfig::Mock(MockProviderConfig {
+                scenario: Some("interactive_echo_then_response".to_string()),
+                delay_ms: Some(700),
+            }),
             ..Default::default()
         };
 
         let serialized = serde_json::to_string(&config).unwrap();
         let deserialized: AgentConfig = serde_json::from_str(&serialized).unwrap();
 
-        assert!(matches!(
+        assert_eq!(
             deserialized.provider_config,
-            ProviderConfig::Mock(_)
-        ));
+            ProviderConfig::Mock(MockProviderConfig {
+                scenario: Some("interactive_echo_then_response".to_string()),
+                delay_ms: Some(700),
+            })
+        );
     }
 
     #[test]
@@ -1198,7 +1210,10 @@ mod tests {
 
         assert_eq!(value["provider_config"]["type"], "antigravity");
         assert_eq!(value["provider_config"]["sandbox"], true);
-        assert_eq!(value["provider_config"]["dangerously_skip_permissions"], true);
+        assert_eq!(
+            value["provider_config"]["dangerously_skip_permissions"],
+            true
+        );
         assert_eq!(value["provider_config"]["print_timeout"], "2m");
 
         let deserialized: AgentConfig = serde_json::from_value(value).unwrap();
