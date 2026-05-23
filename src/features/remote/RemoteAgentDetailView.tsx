@@ -8,7 +8,7 @@ import { useRemoteStore } from "./useRemoteStore";
 import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
 
 function formatProviderName(provider: string | null | undefined): string {
-  if (!provider) return "–";
+  if (!provider) return "-";
   return isUserFacingProviderName(provider) ? providerDisplayName(provider) : provider;
 }
 
@@ -29,16 +29,25 @@ const messageClass: Record<AgentChatRole, string> = {
 const iconButtonClass =
   "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary disabled:cursor-not-allowed disabled:opacity-50";
 
-export const RemoteAgentConversationView: React.FC<{ agent: RemoteAgentSummary }> = ({ agent }) => {
+const modeButtonClass =
+  "min-h-9 flex-1 rounded-md px-3 text-xs font-semibold transition-colors";
+
+export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({ agent }) => {
+  const activeAgentViewMode = useRemoteStore((state) => state.activeAgentViewMode);
+  const terminalSnapshot = useRemoteStore((state) => state.terminalSnapshot);
+  const terminalLoading = useRemoteStore((state) => state.terminalLoading);
+  const terminalError = useRemoteStore((state) => state.terminalError);
   const chatEvents = useRemoteStore((state) => state.chatEvents);
   const chatLoading = useRemoteStore((state) => state.chatLoading);
   const chatError = useRemoteStore((state) => state.chatError);
   const sending = useRemoteStore((state) => state.sending);
   const closeAgent = useRemoteStore((state) => state.closeAgent);
+  const setActiveAgentViewMode = useRemoteStore((state) => state.setActiveAgentViewMode);
+  const refreshActiveAgentTerminal = useRemoteStore((state) => state.refreshActiveAgentTerminal);
   const refreshActiveAgentChat = useRemoteStore((state) => state.refreshActiveAgentChat);
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
   const [prompt, setPrompt] = useState("");
-  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const contentEndRef = useRef<HTMLDivElement | null>(null);
 
   const visibleEvents = useMemo(
     () =>
@@ -50,8 +59,8 @@ export const RemoteAgentConversationView: React.FC<{ agent: RemoteAgentSummary }
   );
 
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ block: "end" });
-  }, [visibleEvents]);
+    contentEndRef.current?.scrollIntoView({ block: "end" });
+  }, [activeAgentViewMode, terminalSnapshot?.text, visibleEvents]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -61,8 +70,16 @@ export const RemoteAgentConversationView: React.FC<{ agent: RemoteAgentSummary }
     setPrompt("");
   };
 
+  const refresh = () => {
+    if (activeAgentViewMode === "chat") {
+      void refreshActiveAgentChat();
+    } else {
+      void refreshActiveAgentTerminal();
+    }
+  };
+
   return (
-    <main className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary" data-testid="remote-agent-conversation">
+    <main className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary" data-testid="remote-agent-detail">
       <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-3 py-3 backdrop-blur">
         <div className="flex items-center gap-2">
           <button type="button" aria-label="Back to remote agents" onClick={closeAgent} className={iconButtonClass}>
@@ -79,52 +96,65 @@ export const RemoteAgentConversationView: React.FC<{ agent: RemoteAgentSummary }
           </div>
           <button
             type="button"
-            aria-label="Refresh conversation"
-            onClick={() => void refreshActiveAgentChat()}
-            disabled={chatLoading}
+            aria-label={`Refresh ${activeAgentViewMode}`}
+            onClick={refresh}
+            disabled={terminalLoading || chatLoading}
             className={iconButtonClass}
           >
-            <RefreshCw className={`h-4 w-4 ${chatLoading ? "animate-spin" : ""}`} aria-hidden="true" />
+            <RefreshCw className={`h-4 w-4 ${terminalLoading || chatLoading ? "animate-spin" : ""}`} aria-hidden="true" />
           </button>
         </div>
         <RemoteAgentActions agent={agent} compact />
+        <div className="mt-3 flex rounded-md border border-wardian-border bg-wardian-card p-1" aria-label="Agent view mode">
+          <button
+            type="button"
+            aria-pressed={activeAgentViewMode === "terminal"}
+            onClick={() => void setActiveAgentViewMode("terminal")}
+            className={`${modeButtonClass} ${
+              activeAgentViewMode === "terminal"
+                ? "bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]"
+                : "text-muted-neutral"
+            }`}
+          >
+            Terminal
+          </button>
+          <button
+            type="button"
+            aria-pressed={activeAgentViewMode === "chat"}
+            onClick={() => void setActiveAgentViewMode("chat")}
+            className={`${modeButtonClass} ${
+              activeAgentViewMode === "chat"
+                ? "bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]"
+                : "text-muted-neutral"
+            }`}
+          >
+            Chat
+          </button>
+        </div>
       </header>
 
-      <section className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} conversation`}>
-        {chatError && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{chatError}</div>}
-        {chatLoading && visibleEvents.length === 0 && (
-          <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
-            <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
-            Loading conversation...
-          </div>
-        )}
-        {!chatLoading && visibleEvents.length === 0 && (
-          <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
-            No chat transcript yet.
-          </div>
-        )}
-        {visibleEvents.map((event) =>
-          event.kind === "message" ? <MessageBubble key={event.id} event={event} /> : <ActivityRow key={event.id} event={event} />,
-        )}
-        <div ref={transcriptEndRef} aria-hidden="true" />
-      </section>
+      {activeAgentViewMode === "chat" ? (
+        <ChatPane agent={agent} visibleEvents={visibleEvents} loading={chatLoading} error={chatError} endRef={contentEndRef} />
+      ) : (
+        <TerminalPane agent={agent} text={terminalSnapshot?.text ?? ""} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
+      )}
 
       <form onSubmit={(event) => void submit(event)} className="shrink-0 border-t border-wardian-border bg-wardian-bg/95 p-3 backdrop-blur">
         <div className="flex items-end gap-2">
           <textarea
-            aria-label={`Message ${agent.session_name}`}
+            aria-label={`Prompt ${agent.session_name}`}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             rows={2}
             className="min-h-14 flex-1 resize-none rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-sm text-primary outline-none transition-colors placeholder:text-muted-neutral focus:border-[var(--color-wardian-accent)]"
-            placeholder="Message agent"
+            placeholder="Prompt agent"
           />
           <button
             type="submit"
             disabled={sending || !prompt.trim()}
             className="inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span className="sr-only">Send message</span>
+            <span className="sr-only">Send prompt</span>
             <Send className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
@@ -132,6 +162,78 @@ export const RemoteAgentConversationView: React.FC<{ agent: RemoteAgentSummary }
     </main>
   );
 };
+
+function TerminalPane({
+  agent,
+  text,
+  loading,
+  error,
+  endRef,
+}: {
+  agent: RemoteAgentSummary;
+  text: string;
+  loading: boolean;
+  error: string;
+  endRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <section className="min-h-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} terminal`}>
+      {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
+      {loading && !text && (
+        <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
+          <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Loading terminal...
+        </div>
+      )}
+      {!loading && !text && (
+        <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
+          No terminal output yet.
+        </div>
+      )}
+      {text && (
+        <pre className="min-h-full whitespace-pre-wrap break-words rounded-md border border-wardian-border bg-wardian-card px-3 py-3 font-mono text-[11px] leading-relaxed text-primary">
+          {text}
+        </pre>
+      )}
+      <div ref={endRef} aria-hidden="true" />
+    </section>
+  );
+}
+
+function ChatPane({
+  agent,
+  visibleEvents,
+  loading,
+  error,
+  endRef,
+}: {
+  agent: RemoteAgentSummary;
+  visibleEvents: AgentChatEvent[];
+  loading: boolean;
+  error: string;
+  endRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <section className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
+      {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
+      {loading && visibleEvents.length === 0 && (
+        <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
+          <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Loading chat...
+        </div>
+      )}
+      {!loading && visibleEvents.length === 0 && (
+        <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
+          No chat transcript yet.
+        </div>
+      )}
+      {visibleEvents.map((event) =>
+        event.kind === "message" ? <MessageBubble key={event.id} event={event} /> : <ActivityRow key={event.id} event={event} />,
+      )}
+      <div ref={endRef} aria-hidden="true" />
+    </section>
+  );
+}
 
 function MessageBubble({ event }: { event: AgentChatEvent }) {
   const role = event.role ?? "assistant";

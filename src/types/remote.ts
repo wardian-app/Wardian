@@ -56,6 +56,13 @@ export interface RemoteAgentSummary {
   latest_text: string | null;
 }
 
+export interface RemoteTerminalSnapshot {
+  cursor: string;
+  text: string;
+  truncated: boolean;
+  omitted_bytes: number;
+}
+
 export interface RemoteAgentActionRequest {
   action: string;
   target: string;

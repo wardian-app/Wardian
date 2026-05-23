@@ -2,7 +2,7 @@ import React, { useEffect } from "react";
 import "../../styles/App.css";
 import { RefreshCw, Smartphone } from "lucide-react";
 import { RemoteAgentCard } from "./RemoteAgentCard";
-import { RemoteAgentConversationView } from "./RemoteAgentConversationView";
+import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { RemoteCommandBar } from "./RemoteCommandBar";
 import { RemotePairingView } from "./RemotePairingView";
 import { RemoteQueueView } from "./RemoteQueueView";
@@ -62,7 +62,7 @@ export const RemoteMobileApp: React.FC = () => {
 
   const activeAgent = agents.find((agent) => agent.session_id === activeAgentId);
   if (activeAgent) {
-    return <RemoteAgentConversationView agent={activeAgent} />;
+    return <RemoteAgentDetailView agent={activeAgent} />;
   }
 
   return (
