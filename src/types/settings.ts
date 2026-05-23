@@ -9,6 +9,7 @@ export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-ac
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
 export type DefaultProviderSetting = 'auto' | 'claude' | 'codex' | 'gemini' | 'antigravity' | 'opencode';
 export type AppThemeSetting = 'dark' | 'light' | 'system';
+export type WatchlistNewAgentPosition = 'top' | 'bottom';
 
 export interface CodexRuntimePolicy {
   sandbox_mode: CodexSandboxMode;
@@ -46,6 +47,7 @@ export interface AppSettings {
   terminal_font_size: number;
   terminal_font_family: string | null;
   grid_card_display_mode: 'terminal' | 'chat';
+  watchlist_new_agent_position: WatchlistNewAgentPosition;
 }
 
 export interface AppSettingsOverrides {
@@ -54,6 +56,7 @@ export interface AppSettingsOverrides {
   terminal_font_size?: number;
   terminal_font_family?: string | null;
   grid_card_display_mode?: 'terminal' | 'chat';
+  watchlist_new_agent_position?: WatchlistNewAgentPosition;
 }
 
 export interface SettingsDocument<TSettings, TOverrides> {

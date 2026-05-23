@@ -11,7 +11,7 @@ import {
 } from "../../store/useSettingsStore";
 import { useAppUpdate } from "./useAppUpdate";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
-import type { AppThemeSetting } from "../../types/settings";
+import type { AppThemeSetting, WatchlistNewAgentPosition } from "../../types/settings";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -22,6 +22,7 @@ type SettingsCategory =
   | "General"
   | "Appearance"
   | "Grid"
+  | "Watchlist"
   | "Terminal"
   | "Agent Runtime"
   | "Provider Utilities"
@@ -41,6 +42,7 @@ const categories: SettingsCategory[] = [
   "General",
   "Appearance",
   "Grid",
+  "Watchlist",
   "Terminal",
   "Agent Runtime",
   "Provider Utilities",
@@ -83,6 +85,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "Grid card display",
     detail: "Applies to every card in the main Grid view.",
     keywords: ["grid", "card", "display", "terminal", "chat", "transcript"],
+  },
+  {
+    id: "watchlist-new-agent-position",
+    category: "Watchlist",
+    label: "New agent position",
+    detail: "Controls where newly spawned visible agents land in the roster.",
+    keywords: ["watchlist", "roster", "spawn", "new agent", "position", "top", "bottom"],
   },
   {
     id: "shell",
@@ -266,6 +275,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setTerminalFontFamily,
     gridCardDisplayMode,
     setGridCardDisplayMode,
+    watchlistNewAgentPosition,
+    setWatchlistNewAgentPosition,
     shell_id,
     agent_session_persistence,
     default_provider,
@@ -397,6 +408,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
   const handleGridCardDisplayChange = async (value: typeof gridCardDisplayMode) => {
     setGridCardDisplayMode(value);
+    await useSettingsStore.getState().saveAppSettings();
+  };
+
+  const handleWatchlistNewAgentPositionChange = async (value: WatchlistNewAgentPosition) => {
+    setWatchlistNewAgentPosition(value);
     await useSettingsStore.getState().saveAppSettings();
   };
 
@@ -585,6 +601,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             >
               <option value="terminal">Terminal</option>
               <option value="chat">Chat</option>
+            </select>
+          </SettingRow>
+        );
+      case "watchlist-new-agent-position":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <select
+              aria-label="New agent position"
+              value={watchlistNewAgentPosition}
+              onChange={(event) => void handleWatchlistNewAgentPositionChange(event.target.value as WatchlistNewAgentPosition)}
+              className={optionClass}
+            >
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
             </select>
           </SettingRow>
         );

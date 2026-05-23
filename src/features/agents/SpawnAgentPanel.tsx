@@ -14,7 +14,7 @@ const FIRST_AGENT_ONBOARDING_HINT_ID = "spawn-agent-first-run:v1";
 
 interface Props {
   agentClasses: AgentClassDefinition[];
-  onSpawned: () => void;
+  onSpawned: (agent: AgentConfig) => void;
 }
 
 export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) => {
@@ -123,7 +123,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
     }
     setIsSpawning(true);
     try {
-      await invoke<AgentConfig>("spawn_agent", {
+      const spawnedAgent = await invoke<AgentConfig>("spawn_agent", {
         req: {
           sessionName: newSessionName,
           agentClass: newAgentClass,
@@ -145,7 +145,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
       setSpawnAdvancedConfig(resolved
         ? { provider: resolved, provider_config: defaultProviderConfig(resolved) }
         : initialProviderConfig);
-      onSpawned();
+      onSpawned(spawnedAgent);
     } catch (error) {
       console.error("Failed to spawn agent:", error);
       alert(`Failed to spawn agent: ${error}`);

@@ -189,6 +189,26 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
       }
       case "list_provider_readiness":
         return allProvidersReady;
+      case "spawn_agent": {
+        const agent: AgentConfig = {
+          session_id: "spawned-agent",
+          session_name: args?.req?.sessionName || "Spawned",
+          agent_class: args?.req?.agentClass || "Generalist",
+          folder: args?.req?.folder || "",
+          is_off: false,
+          provider: args?.req?.configOverride?.provider ?? "claude",
+        };
+        currentAgents = [agent, ...currentAgents];
+        return agent;
+      }
+      case "reorder_agents": {
+        const order = Array.isArray(args?.sessionIds) ? args.sessionIds : [];
+        const byId = new Map(currentAgents.map((agent) => [agent.session_id, agent]));
+        currentAgents = order
+          .map((id: string) => byId.get(id))
+          .filter((agent: AgentConfig | undefined): agent is AgentConfig => Boolean(agent));
+        return null;
+      }
       case "get_agent_metrics":
         return [];
       case "attach_agent_pty":
@@ -211,6 +231,8 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
           auto_patch_gemini: false,
           terminal_font_size: 14,
           terminal_font_family: null,
+          grid_card_display_mode: "terminal",
+          watchlist_new_agent_position: "top",
         };
       case "load_shell_settings":
         return {
@@ -718,6 +740,44 @@ describe("Agent Watchlist Sidebar", () => {
       const alphaElements = screen.getAllByText("Alpha");
       expect(alphaElements.length).toBeGreaterThanOrEqual(2);
     }, { timeout: 3000 });
+  });
+
+  it("moves a newly spawned agent to the bottom of the watchlist when configured", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
+      if (cmd === "load_app_settings") {
+        return {
+          schema_version: 2,
+          persisted: true,
+          settings: {
+            theme: "system",
+            auto_patch_gemini: false,
+            terminal_font_size: 14,
+            terminal_font_family: null,
+            grid_card_display_mode: "terminal",
+            watchlist_new_agent_position: "bottom",
+          },
+          overrides: {
+            watchlist_new_agent_position: "bottom",
+          },
+        };
+      }
+      return defaultInvoke?.(cmd, args) ?? null;
+    });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getAllByText("Alpha").length).toBeGreaterThanOrEqual(2);
+    });
+
+    fireEvent.click(screen.getByTestId("spawn-submit"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("reorder_agents", {
+        sessionIds: ["agent-1", "agent-2", "agent-3", "spawned-agent"],
+      });
+    });
   });
 
   it("does not overwrite persisted last queried timestamps from first metrics after relaunch", async () => {

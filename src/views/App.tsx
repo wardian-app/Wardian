@@ -707,16 +707,38 @@ function AppBody() {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  const fetchAgents = async () => {
+  const fetchAgents = async (spawnedAgent?: AgentConfig) => {
     const requestId = ++fetchAgentsRequestRef.current;
     try {
       const list = await invoke<AgentConfig[]>("list_agents");
       if (requestId !== fetchAgentsRequestRef.current) return;
       const normalized = normalizeAgentConfigs(list);
-      setAgents(normalized);
+      const spawnedAgentId = spawnedAgent?.session_id;
+      const newAgentPosition = useSettingsStore.getState().watchlistNewAgentPosition;
+      const shouldPlaceNewAgent = Boolean(spawnedAgentId);
+      const nextAgents = shouldPlaceNewAgent
+        ? newAgentPosition === "bottom"
+          ? [
+              ...normalized.filter((agent) => agent.session_id !== spawnedAgentId),
+              ...normalized.filter((agent) => agent.session_id === spawnedAgentId),
+            ]
+          : [
+              ...normalized.filter((agent) => agent.session_id === spawnedAgentId),
+              ...normalized.filter((agent) => agent.session_id !== spawnedAgentId),
+            ]
+        : normalized;
+      setAgents(nextAgents);
       const newOffIds = new Set<string>();
-      for (const agent of normalized) if (agent.is_off) newOffIds.add(agent.session_id);
+      for (const agent of nextAgents) if (agent.is_off) newOffIds.add(agent.session_id);
       setOffAgentIds(newOffIds);
+      const orderChanged = nextAgents.some((agent, index) => agent.session_id !== normalized[index]?.session_id);
+      if (shouldPlaceNewAgent && orderChanged && nextAgents.some((agent) => agent.session_id === spawnedAgentId)) {
+        try {
+          await invoke("reorder_agents", { sessionIds: nextAgents.map((agent) => agent.session_id) });
+        } catch (error) {
+          console.error("Failed to place spawned agent in configured watchlist position:", error);
+        }
+      }
     } catch (e) {
       if (requestId === fetchAgentsRequestRef.current) {
         console.error("Failed to fetch agents:", e);

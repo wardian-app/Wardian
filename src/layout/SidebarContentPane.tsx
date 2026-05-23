@@ -21,7 +21,7 @@ interface SidebarContentPaneProps {
   agents: AgentConfig[];
   agentClasses: AgentClassDefinition[];
   telemetry: Record<string, AgentTelemetry>;
-  onAgentsUpdated: () => void;
+  onAgentsUpdated: (agent?: AgentConfig) => void;
   onClassesUpdated: () => void;
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;

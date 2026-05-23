@@ -162,7 +162,7 @@ describe("SpawnAgentPanel", () => {
         agentClass: "Generalist",
       }),
     });
-    expect(onSpawned).toHaveBeenCalled();
+    expect(onSpawned).toHaveBeenCalledWith(spawnResponse);
   });
 
   it("initializes the config override with a matching provider config", async () => {
