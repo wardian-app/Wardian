@@ -1,4 +1,4 @@
-import { render, waitFor, cleanup, act, screen } from "@testing-library/react";
+import { render, waitFor, cleanup, act, screen, fireEvent } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -206,6 +206,48 @@ describe("AgentTerminal scrollback", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("caps live WebGL renderers and promotes the focused terminal onto the GPU", async () => {
+    // Render more terminals than the WebGL pool cap (12). The pool must stay at
+    // 12 live contexts; the rest fall back to the DOM renderer. Newly mounted
+    // terminals evict the least-recently-used, so older sessions left over from
+    // earlier tests are squeezed out first — these ids end up holding the pool.
+    const ids = Array.from({ length: 14 }, (_, index) => `pool-${index}`);
+    const view = render(
+      <>
+        {ids.map((id) => (
+          <AgentTerminal key={id} sessionId={id} theme="dark" />
+        ))}
+      </>,
+    );
+
+    const webglActiveCount = () =>
+      ids.filter((id) => window.__wardianTerminalDebug?.snapshot(id)?.renderer?.webglActive).length;
+
+    await waitFor(() => {
+      expect(ids.every((id) => window.__wardianTerminalDebug?.snapshot(id)?.renderer)).toBe(true);
+    });
+
+    // Exactly the cap is GPU-accelerated; the remainder render on DOM (no context).
+    expect(webglActiveCount()).toBe(12);
+
+    const domId = ids.find(
+      (id) => !window.__wardianTerminalDebug?.snapshot(id)?.renderer?.webglActive,
+    );
+    expect(domId).toBeDefined();
+
+    const hosts = view.container.querySelectorAll<HTMLElement>('[data-testid="agent-terminal-host"]');
+    const domHost = hosts[ids.indexOf(domId!)];
+    act(() => {
+      fireEvent.focusIn(domHost);
+    });
+
+    // Focusing the DOM terminal promotes it (evicting the LRU) without exceeding the cap.
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot(domId!)?.renderer?.webglActive).toBe(true);
+    });
+    expect(webglActiveCount()).toBe(12);
   });
 
   it("captures readable terminal output for queue summaries", async () => {
