@@ -78,7 +78,7 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
     }
 }
 
-pub fn spawn_control_server(app: AppHandle, claim: ControlEndpointClaim) {
+pub(crate) fn spawn_control_server(app: AppHandle, claim: ControlEndpointClaim) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = run_control_server(app, claim).await {
             crate::utils::logging::log_debug(&format!(
@@ -2574,7 +2574,10 @@ mod tests {
         std::env::set_var("WARDIAN_HOME", temp.path());
 
         let first = claim_control_endpoint().expect("first endpoint claim");
-        let second = claim_control_endpoint().expect_err("second claim should fail");
+        let second = match claim_control_endpoint() {
+            Ok(_) => panic!("second claim should fail"),
+            Err(error) => error,
+        };
 
         assert!(
             matches!(
