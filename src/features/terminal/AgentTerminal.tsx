@@ -73,6 +73,7 @@ type TerminalSessionEntry = {
   drainQueued: boolean;
   generation: number;
   disposed: boolean;
+  pendingForceResize: boolean;
 } & TerminalOutputState;
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
@@ -131,7 +132,6 @@ declare global {
         allLines: string[];
         recentWritePreviews: string[];
         recentNormalizedWritePreviews: string[];
-        lastStableHomeRedrawPreview: string | null;
       } | null;
     };
   }
@@ -236,13 +236,6 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
           allLines,
         recentWritePreviews: [...entry.recentWritePreviews],
         recentNormalizedWritePreviews: [...entry.recentNormalizedWritePreviews],
-        lastStableHomeRedrawPreview: entry.lastStableHomeRedrawOutput
-          ? entry.lastStableHomeRedrawOutput
-              .replace(/\u001b/g, "\\x1b")
-              .replace(/\r/g, "\\r")
-              .replace(/\n/g, "\\n")
-              .slice(0, 300)
-          : null,
       };
       },
     }),
@@ -270,11 +263,16 @@ function terminalCursorPositionReply(entry: TerminalSessionEntry) {
   return { row, col };
 }
 
-function readParserScrollbackLineSet(entry: TerminalSessionEntry) {
+function readParserKnownLineSet(entry: TerminalSessionEntry) {
+  // Include both scrollback (0..baseY-1) and the viewport (baseY..length-1).
+  // Codex home-redraw reconstruction uses this set to decide whether a "dropped"
+  // line is already represented somewhere in the parser buffer. Without viewport
+  // coverage, a content shuffle that the drop heuristic misidentifies can push a
+  // still-visible line into scrollback, duplicating it.
   const buffer = entry.parser.buffer.active;
-  const scrollbackLineCount = Math.max(0, buffer.baseY ?? 0);
+  const lineCount = Math.max(0, buffer.length ?? 0);
   return new Set(
-    Array.from({ length: scrollbackLineCount }, (_, index) =>
+    Array.from({ length: lineCount }, (_, index) =>
       buffer.getLine(index)?.translateToString(true).replace(/\s+/g, " ").trim() || "",
     ).filter(Boolean),
   );
@@ -325,19 +323,21 @@ function disposeTerminalSession(sessionId: string) {
   entry.disposed = true;
   entry.outputReadyUnlisten?.();
   entry.terminalClearedUnlisten?.();
-  const renderer = entry.renderer;
-  if (renderer?.resizeTimeout) {
-    clearTimeout(renderer.resizeTimeout);
+  if (entry.renderer) {
+    disposeRenderer(entry.renderer);
+    entry.renderer = null;
   }
-  if (renderer?.fitTimeout) {
-    clearTimeout(renderer.fitTimeout);
-  }
-  renderer?.serializeAddon.dispose();
-  renderer?.webglAddon?.dispose();
-  renderer?.term.dispose();
   entry.parserSerializeAddon.dispose();
   entry.parser.dispose();
   terminalSessionMap.delete(sessionId);
+}
+
+function disposeRenderer(renderer: TerminalRendererEntry) {
+  clearRendererTimers(renderer);
+  renderer.serializeAddon.dispose();
+  renderer.webglAddon?.dispose();
+  renderer.webglAddon = null;
+  renderer.term.dispose();
 }
 function clearTerminalSession(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
@@ -356,8 +356,7 @@ function clearTerminalSession(sessionId: string) {
   entry.lastHomeRedrawLines = null;
   entry.homeRedrawScrollbackSeen?.clear();
   entry.transientHomeRedrawActive = false;
-  entry.existingScrollbackLines = undefined;
-  entry.lastStableHomeRedrawOutput = undefined;
+  entry.existingKnownLines = undefined;
 
   const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
   if (typeof parserWithReset.reset === "function") {
@@ -371,9 +370,13 @@ function clearTerminalSession(sessionId: string) {
     entry.renderer.term.reset();
     entry.renderer.term.scrollToBottom();
     entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
-    void reportTerminalSize(sessionId, entry, entry.renderer.term.cols, entry.renderer.term.rows);
   }
-  
+
+  // The backend emits agent-terminal-cleared before the new PTY is spawned,
+  // so we can't usefully resize here. Flag a force-resize that drainPty will
+  // run on the next agent-pty-output-ready, by which point the new PTY exists.
+  entry.pendingForceResize = true;
+
   entry.titleHandlerRef.current?.("");
 }
 
@@ -393,8 +396,13 @@ async function reportTerminalSize(
     return;
   }
 
-  entry.lastReportedSize = { cols, rows };
-  await invoke("resize_agent_terminal", { sessionId, cols, rows }).catch(() => {});
+  try {
+    await invoke("resize_agent_terminal", { sessionId, cols, rows });
+    entry.lastReportedSize = { cols, rows };
+  } catch {
+    // Leave lastReportedSize untouched so the next fit can retry. Poisoning the
+    // cache here would block resizes for PTYs that come back up (e.g. after clear).
+  }
 }
 
 async function fitTerminalToContainer(
@@ -461,6 +469,16 @@ async function drainPty(sessionId: string) {
 
   entry.drainInFlight = true;
   try {
+    if (entry.pendingForceResize && entry.renderer) {
+      entry.pendingForceResize = false;
+      await reportTerminalSize(
+        sessionId,
+        entry,
+        entry.renderer.term.cols,
+        entry.renderer.term.rows,
+        { force: true },
+      );
+    }
     do {
       entry.drainQueued = false;
       const drainGeneration = entry.generation;
@@ -490,7 +508,7 @@ async function drainPty(sessionId: string) {
       }
 
       if (rawChunks.length > 0) {
-        entry.existingScrollbackLines = readParserScrollbackLineSet(entry);
+        entry.existingKnownLines = readParserKnownLineSet(entry);
         const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
         const rendererWasAtBottom = entry.renderer
           ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
@@ -506,7 +524,7 @@ async function drainPty(sessionId: string) {
           entry.recentNormalizedWritePreviews.splice(0, entry.recentNormalizedWritePreviews.length - 12);
         }
         useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
-        entry.existingScrollbackLines = undefined;
+        entry.existingKnownLines = undefined;
         entry.parser.write(batchedWrite);
         if (entry.renderer) {
           entry.renderer.term.write(batchedWrite, () => {
@@ -575,6 +593,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     drainQueued: false,
     generation: 0,
     disposed: false,
+    pendingForceResize: false,
     lastHomeRedrawLines: null,
     homeRedrawScrollbackSeen: new Set(),
     transientHomeRedrawActive: false,
@@ -651,6 +670,8 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     fontSize: terminalFontSize,
     customGlyphs: true,
     cursorBlink: true,
+    cursorStyle: "bar",
+    cursorInactiveStyle: "bar",
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
     convertEol: false,
@@ -797,7 +818,6 @@ function mountRenderer(
     }
 
     renderer.term.open(renderer.host);
-    activateWebglRenderer(renderer);
   }
   attachRendererHost(session, container);
   activateWebglRenderer(renderer);
@@ -945,8 +965,9 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => {
       isMounted = false;
       resizeObserver?.disconnect();
-      if (entry?.renderer) {
-        clearRendererTimers(entry.renderer);
+      if (entry && !entry.disposed && entry.renderer) {
+        disposeRenderer(entry.renderer);
+        entry.renderer = null;
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;

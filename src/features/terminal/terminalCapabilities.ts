@@ -38,9 +38,11 @@ export type TerminalCapabilityPlan = {
 export type TerminalOutputState = {
   lastHomeRedrawLines: string[] | null;
   homeRedrawScrollbackSeen?: Set<string>;
-  existingScrollbackLines?: Set<string>;
+  // Lines already represented in the parser buffer (scrollback + viewport).
+  // Used by home-redraw reconstruction to avoid pushing duplicates when the
+  // drop heuristic misfires on content shuffles.
+  existingKnownLines?: Set<string>;
   transientHomeRedrawActive?: boolean;
-  lastStableHomeRedrawOutput?: string;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -260,9 +262,8 @@ function reconstructHomeRedrawScrollback(
     const normalizedLine = normalizePlainLine(line);
     if (
       seen.has(normalizedLine) ||
-      state.existingScrollbackLines?.has(normalizedLine) ||
-      state.existingScrollbackLines?.has(line) ||
-      (normalizedLine && state.existingScrollbackLines?.has(normalizedLine))
+      state.existingKnownLines?.has(normalizedLine) ||
+      state.existingKnownLines?.has(line)
     ) {
       return false;
     }

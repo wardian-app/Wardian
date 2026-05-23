@@ -150,7 +150,7 @@ describe("AgentTerminal scrollback", () => {
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
   });
 
-  it("reuses the live xterm instance on remount while preserving prior session state", async () => {
+  it("recreates the xterm on remount and seeds it from the persisted parser state", async () => {
     const firstRender = render(
       <AgentTerminal sessionId="codex-1" theme="dark" />,
     );
@@ -160,19 +160,19 @@ describe("AgentTerminal scrollback", () => {
       expect(firstInstance.write).toHaveBeenCalledWith("hello from codex\n", expect.any(Function));
     });
 
+    const firstInstance = getLatestTerminalInstance();
     firstRender.unmount();
+    expect(firstInstance.dispose).toHaveBeenCalled();
 
     render(<AgentTerminal sessionId="codex-1" theme="dark" />);
 
     await waitFor(() => {
-      expect(mockTerminal).toHaveBeenCalledTimes(1);
+      expect(mockTerminal).toHaveBeenCalledTimes(2);
     });
 
-    await waitFor(() => {
-      const secondInstance = getLatestTerminalInstance();
-      expect(secondInstance.write).toHaveBeenCalledWith("hello from codex\n", expect.any(Function));
-    });
-
+    const secondInstance = getLatestTerminalInstance();
+    expect(secondInstance).not.toBe(firstInstance);
+    expect(secondInstance.open).toHaveBeenCalled();
   });
 
   it("captures readable terminal output for queue summaries", async () => {
@@ -656,7 +656,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("re-reports the current PTY size after a backend terminal clear even when the card size did not change", async () => {
+  it("force-resizes the new PTY on its first output after a backend terminal clear", async () => {
     const listeners = new Map<string, (event: { payload: { session_id: string } }) => void>();
 
     mockListen.mockImplementation(async (eventName, handler) => {
@@ -672,10 +672,21 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       expect(listeners.has("agent-terminal-cleared")).toBe(true);
     });
-    mockInvoke.mockClear();
 
+    mockInvoke.mockClear();
     act(() => {
       listeners.get("agent-terminal-cleared")?.({ payload: { session_id: "gemini-clear-size" } });
+    });
+
+    // Clear must not resize against the dead PTY — backend hasn't spawned the
+    // replacement yet, so any invoke here would silently fail and poison state.
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "resize_agent_terminal",
+      expect.objectContaining({ sessionId: "gemini-clear-size" }),
+    );
+
+    act(() => {
+      listeners.get("agent-pty-output-ready")?.({ payload: { session_id: "gemini-clear-size" } });
     });
 
     await waitFor(() => {

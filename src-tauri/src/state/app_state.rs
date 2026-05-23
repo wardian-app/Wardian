@@ -38,6 +38,10 @@ pub struct AppState {
     pub ask_requests: Mutex<HashMap<String, AskRequestRecord>>,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
+    // Last frontend-reported PTY size per session. Used to open a freshly-spawned
+    // PTY at the user's actual terminal dimensions instead of the 80x24 default,
+    // which otherwise causes deformed/duplicated TUI output across clear/resume.
+    pub pty_sizes: RwLock<HashMap<String, (u16, u16)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +78,7 @@ impl Default for AppState {
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
+            pty_sizes: RwLock::new(HashMap::new()),
         }
     }
 }
