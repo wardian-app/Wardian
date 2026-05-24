@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { useQueueStore } from "./useQueueStore";
+import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -9,8 +10,75 @@ function resetStore() {
     items: [],
     _agentBuffers: {},
     _workflowLastOutput: {},
+    preferences: normalizeQueuePreferences({}),
   });
 }
+
+describe("useQueueStore - preferences", () => {
+  beforeEach(() => {
+    resetStore();
+    mockInvoke.mockResolvedValue([]);
+  });
+
+  it("defaults queue filters to all event types and alerts only to action needed", () => {
+    const { preferences } = useQueueStore.getState();
+
+    expect(preferences.visible_event_types).toEqual({
+      action_needed: true,
+      agent_completed: true,
+      workflow_completed: true,
+      workflow_failed: true,
+    });
+    expect(preferences.desktop_notifications).toEqual({
+      action_needed: true,
+      agent_completed: false,
+      workflow_completed: false,
+      workflow_failed: false,
+    });
+    expect(preferences.sound_notifications).toEqual({
+      action_needed: true,
+      agent_completed: false,
+      workflow_completed: false,
+      workflow_failed: false,
+    });
+  });
+
+  it("loads persisted queue preferences and merges missing event keys with defaults", async () => {
+    mockInvoke.mockImplementation((cmd) => {
+      if (cmd === "load_queue_preferences") {
+        return Promise.resolve({
+          visible_event_types: { agent_completed: false },
+          desktop_notifications: { workflow_failed: true },
+          sound_notifications: { action_needed: false },
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    await useQueueStore.getState().loadPreferences();
+
+    expect(useQueueStore.getState().preferences.visible_event_types).toEqual({
+      action_needed: true,
+      agent_completed: false,
+      workflow_completed: true,
+      workflow_failed: true,
+    });
+    expect(useQueueStore.getState().preferences.desktop_notifications.workflow_failed).toBe(true);
+    expect(useQueueStore.getState().preferences.sound_notifications.action_needed).toBe(false);
+  });
+
+  it("persists filter and alert preference changes", () => {
+    useQueueStore.getState().setEventVisible("workflow_completed", false);
+    useQueueStore.getState().setDesktopNotification("workflow_failed", true);
+    useQueueStore.getState().setSoundNotification("action_needed", false);
+
+    const { preferences } = useQueueStore.getState();
+    expect(preferences.visible_event_types.workflow_completed).toBe(false);
+    expect(preferences.desktop_notifications.workflow_failed).toBe(true);
+    expect(preferences.sound_notifications.action_needed).toBe(false);
+    expect(mockInvoke).toHaveBeenCalledWith("save_queue_preferences", { preferences });
+  });
+});
 
 describe("useQueueStore - agent completion", () => {
   beforeEach(() => {
@@ -177,6 +245,53 @@ describe("useQueueStore - agent completion", () => {
   it("calls save_queue_items after flushAgentCompletion", () => {
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
     expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({ items: expect.any(Array) }));
+  });
+});
+
+describe("useQueueStore - action needed", () => {
+  beforeEach(() => {
+    resetStore();
+    mockInvoke.mockResolvedValue([]);
+  });
+
+  it("addActionNeeded creates an unread action-needed item for an agent", () => {
+    useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Approve file write?");
+
+    const { items } = useQueueStore.getState();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "action_needed",
+      read: false,
+      agent_session_id: "agent-1",
+      agent_name: "My Coder",
+      summary: "Approve file write?",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({ items: expect.any(Array) }));
+  });
+
+  it("uses buffered approval text for generic action-needed cards and clears the buffer", () => {
+    useQueueStore.setState({
+      _agentBuffers: {
+        "agent-1": "Do you want to proceed?\n1. Yes\n2. No",
+      },
+    });
+
+    useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Action needed");
+
+    const { items, _agentBuffers } = useQueueStore.getState();
+    expect(items[0].summary).toBe("Do you want to proceed?\n1. Yes\n2. No");
+    expect(_agentBuffers["agent-1"]).toBe("");
+  });
+
+  it("deduplicates repeated action-needed items for the same agent in the short status window", () => {
+    useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Approve file write?");
+    useQueueStore.setState((s) => ({
+      items: s.items.map((i) => ({ ...i, timestamp: Date.now() - 500 })),
+    }));
+
+    useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Approve file write?");
+
+    expect(useQueueStore.getState().items).toHaveLength(1);
   });
 });
 

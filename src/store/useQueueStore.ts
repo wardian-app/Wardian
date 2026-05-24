@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { QueueItem } from "../types";
+import { QueueEventType, QueueItem, QueuePreferences } from "../types";
 import { extractQueueContent, extractTerminalQueueContent } from "../utils/statusUtils";
 import { WorkflowTelemetryEvent } from "../types/workflow";
+import { DEFAULT_QUEUE_PREFERENCES, normalizeQueuePreferences } from "../features/queue/queueFilters";
+import { dispatchQueueNotification } from "../features/queue/queueNotifications";
 
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
 const SUMMARY_MAX_CHARS = 500;
@@ -11,14 +13,17 @@ let persistQueue: Promise<void> = Promise.resolve();
 
 interface QueueState {
   items: QueueItem[];
+  preferences: QueuePreferences;
   _agentBuffers: Record<string, string>;
   _workflowLastOutput: Record<string, string>;
 
   loadItems: () => Promise<void>;
+  loadPreferences: () => Promise<void>;
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
   appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (sessionId: string, agentName: string, summaryOverride?: string | null) => void;
+  addActionNeeded: (sessionId: string, agentName: string, summary?: string | null) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
   addWorkflowCompletion: (
     payload: { workflow_id: string; run_instance_id?: string; status: "completed" | "failed"; error?: string },
@@ -28,12 +33,23 @@ interface QueueState {
   markRead: (id: string) => void;
   markAllRead: () => void;
   clearRead: () => void;
+  setEventVisible: (eventType: QueueEventType, visible: boolean) => void;
+  setDesktopNotification: (eventType: QueueEventType, enabled: boolean) => void;
+  setSoundNotification: (eventType: QueueEventType, enabled: boolean) => void;
 }
 
-function persist(items: QueueItem[]) {
+function persistItems(items: QueueItem[]) {
   persistQueue = persistQueue
     .catch(() => undefined)
     .then(() => invoke("save_queue_items", { items }).then(() => undefined, () => undefined));
+}
+
+function persistPreferences(preferences: QueuePreferences) {
+  void invoke("save_queue_preferences", { preferences }).then(() => undefined, () => undefined);
+}
+
+function notifyForItem(item: QueueItem, preferences: QueuePreferences) {
+  void dispatchQueueNotification(item, preferences);
 }
 
 function boundSummary(text: string): string {
@@ -47,6 +63,7 @@ function boundSummary(text: string): string {
 
 export const useQueueStore = create<QueueState>((set, get) => ({
   items: [],
+  preferences: DEFAULT_QUEUE_PREFERENCES,
   _agentBuffers: {},
   _workflowLastOutput: {},
 
@@ -58,6 +75,15 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       set({ items });
     } catch {
       // First run or unavailable: leave items empty.
+    }
+  },
+
+  async loadPreferences() {
+    try {
+      const raw = await invoke<QueuePreferences>("load_queue_preferences");
+      set({ preferences: normalizeQueuePreferences(raw) });
+    } catch {
+      set({ preferences: DEFAULT_QUEUE_PREFERENCES });
     }
   },
 
@@ -103,7 +129,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       item.summary === boundedText &&
       now - item.timestamp < DEDUP_WINDOW_MS
     )) {
-      persist(nextItems);
+      persistItems(nextItems);
     }
   },
 
@@ -133,7 +159,37 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     set((s) => {
       const next = [item, ...s.items];
-      persist(next);
+      persistItems(next);
+      notifyForItem(item, s.preferences);
+      return { items: next, _agentBuffers: { ...s._agentBuffers, [sessionId]: "" } };
+    });
+  },
+
+  addActionNeeded(sessionId, agentName, summary) {
+    const { items, _agentBuffers } = get();
+    const recent = items.find(
+      (i) => i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS,
+    );
+    if (recent) return;
+
+    const explicitSummary = summary?.trim();
+    const bufferedSummary = (_agentBuffers[sessionId] ?? "").trim();
+    const isGenericSummary = !explicitSummary || /^action needed$/i.test(explicitSummary);
+    const itemSummary = isGenericSummary ? (bufferedSummary || explicitSummary || "Action needed") : explicitSummary;
+    const item: QueueItem = {
+      id: crypto.randomUUID(),
+      type: "action_needed",
+      timestamp: Date.now(),
+      read: false,
+      agent_session_id: sessionId,
+      agent_name: agentName,
+      summary: boundSummary(itemSummary),
+    };
+
+    set((s) => {
+      const next = [item, ...s.items];
+      persistItems(next);
+      notifyForItem(item, s.preferences);
       return { items: next, _agentBuffers: { ...s._agentBuffers, [sessionId]: "" } };
     });
   },
@@ -166,7 +222,8 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     set((s) => {
       const next = [item, ...s.items];
-      persist(next);
+      persistItems(next);
+      notifyForItem(item, s.preferences);
       return {
         items: next,
         _workflowLastOutput: { ...s._workflowLastOutput, [workflow_id]: "" },
@@ -177,7 +234,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   dismissItem(id) {
     set((s) => {
       const next = s.items.filter((i) => i.id !== id);
-      persist(next);
+      persistItems(next);
       return { items: next };
     });
   },
@@ -185,7 +242,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   markRead(id) {
     set((s) => {
       const next = s.items.map((i) => (i.id === id ? { ...i, read: true } : i));
-      persist(next);
+      persistItems(next);
       return { items: next };
     });
   },
@@ -193,7 +250,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   markAllRead() {
     set((s) => {
       const next = s.items.map((i) => ({ ...i, read: true }));
-      persist(next);
+      persistItems(next);
       return { items: next };
     });
   },
@@ -201,8 +258,41 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   clearRead() {
     set((s) => {
       const next = s.items.filter((i) => !i.read);
-      persist(next);
+      persistItems(next);
       return { items: next };
+    });
+  },
+
+  setEventVisible(eventType, visible) {
+    set((s) => {
+      const preferences = {
+        ...s.preferences,
+        visible_event_types: { ...s.preferences.visible_event_types, [eventType]: visible },
+      };
+      persistPreferences(preferences);
+      return { preferences };
+    });
+  },
+
+  setDesktopNotification(eventType, enabled) {
+    set((s) => {
+      const preferences = {
+        ...s.preferences,
+        desktop_notifications: { ...s.preferences.desktop_notifications, [eventType]: enabled },
+      };
+      persistPreferences(preferences);
+      return { preferences };
+    });
+  },
+
+  setSoundNotification(eventType, enabled) {
+    set((s) => {
+      const preferences = {
+        ...s.preferences,
+        sound_notifications: { ...s.preferences.sound_notifications, [eventType]: enabled },
+      };
+      persistPreferences(preferences);
+      return { preferences };
     });
   },
 }));

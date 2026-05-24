@@ -220,9 +220,17 @@ export interface AgentStatusUpdate {
     current_status: string;
 }
 
+export type QueueEventType = "action_needed" | "agent_completed" | "workflow_completed" | "workflow_failed";
+
+export interface QueuePreferences {
+    visible_event_types: Record<QueueEventType, boolean>;
+    desktop_notifications: Record<QueueEventType, boolean>;
+    sound_notifications: Record<QueueEventType, boolean>;
+}
+
 export interface QueueItem {
     id: string;
-    type: "agent_completed" | "workflow_completed";
+    type: "action_needed" | "agent_completed" | "workflow_completed";
     timestamp: number;
     read: boolean;
     // agent fields
