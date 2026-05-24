@@ -172,7 +172,7 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
     <div data-testid="workflow-sidebar" className="flex flex-col h-full select-none">
       <div className="flex flex-col gap-2 mb-1">
         <div className="flex justify-between items-center">
-          <h2 className="text-xl font-bold text-primary tracking-tight truncate">
+          <h2 className="text-sm font-bold text-primary tracking-tight truncate">
             Workflows
           </h2>
         </div>

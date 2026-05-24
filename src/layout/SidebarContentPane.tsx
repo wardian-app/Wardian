@@ -65,7 +65,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
         {activeTab === "agent-config" && (
           <>
             <div className="flex items-center gap-4">
-              <h2 className="text-xl font-bold text-primary tracking-tight">Agent Config</h2>
+              <h2 className="text-sm font-bold text-primary tracking-tight">Agent Config</h2>
             </div>
 
             {selectedAgentIds.size === 1 ? (

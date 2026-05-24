@@ -88,6 +88,7 @@ describe('WorkflowSidebar', () => {
     renderWithProvider(<WorkflowSidebar />);
 
     expect(screen.getByText('Workflows')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Workflows', level: 2 })).toHaveClass('text-sm');
     expect(screen.queryByRole('link', { name: /workflow guide/i })).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText('Search workflows...')).toBeInTheDocument();
     expect(screen.getByTitle('Stop All (Panic)')).toBeInTheDocument();

@@ -102,6 +102,14 @@ describe("CommandPanel", () => {
     expect(screen.queryByText("Draft")).not.toBeInTheDocument();
   });
 
+  it("uses compact sidebar typography for title and section labels", () => {
+    renderCommandPanel();
+
+    expect(screen.getByRole("heading", { name: "Command", level: 2 })).toHaveClass("text-sm");
+    expect(screen.getByRole("heading", { name: "Quick Prompts", level: 3 })).toHaveClass("text-xs");
+    expect(screen.getByRole("heading", { name: "Broadcast", level: 3 })).toHaveClass("text-xs");
+  });
+
   it("flattens and injects a quick prompt into selected agents", async () => {
     const user = userEvent.setup();
 

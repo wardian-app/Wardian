@@ -93,7 +93,7 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   return (
     <div data-testid="command-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-xl font-bold text-primary tracking-tight">Command</h2>
+        <h2 className="text-sm font-bold text-primary tracking-tight">Command</h2>
       </div>
 
       <div className="mb-8 flex-1 overflow-y-auto pr-2 no-scrollbar">

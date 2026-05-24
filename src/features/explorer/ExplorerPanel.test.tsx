@@ -14,6 +14,13 @@ describe('ExplorerPanel', () => {
     vi.clearAllMocks();
   });
 
+  it('uses compact sidebar title typography', () => {
+    vi.mocked(invoke).mockImplementation(() => new Promise(() => {}));
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    expect(screen.getByRole('heading', { name: 'Explorer', level: 2 })).toHaveClass('text-sm');
+  });
+
   it('opens the current explorer root in the local file system', async () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === 'get_explorer_root') return 'C:\\Users\\test\\.wardian';
