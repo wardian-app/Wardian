@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { GridView } from './GridView';
 import type { AgentConfig, AgentTelemetry } from '../types';
 import { useLayoutStore } from '../store/useLayoutStore';
@@ -269,6 +269,32 @@ describe('GridView stacked mode', () => {
 
     const grid = container.firstElementChild as HTMLElement;
     expect(grid.style.minWidth).toBe('360px');
+  });
+
+  it('keeps the deliberate two-column preview inside a small viewport', () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+      useLayoutStore.getState().setGridStacked(true);
+    });
+
+    try {
+      const { container } = renderGrid(null, agents);
+      const grid = container.firstElementChild as HTMLElement;
+
+      act(() => {
+        fireEvent.mouseDown(container.querySelector('[data-resize-handle="stack-exit"]') as HTMLElement);
+      });
+
+      expect(grid.style.gridTemplateColumns).toBe('minmax(0, 0.5fr) minmax(0, 0.5fr)');
+      expect(grid.style.minWidth).toBe('100%');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+    }
   });
 
   it('renders per-cell stack-exit handles when gridStacked is true', () => {
