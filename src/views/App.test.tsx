@@ -364,6 +364,48 @@ afterEach(() => {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
 });
 
+describe("Titlebar settings", () => {
+  it("hides titlebar telemetry until app settings finish loading", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    let resolveAppSettings: ((value: unknown) => void) | undefined;
+    mockInvoke.mockImplementation((cmd, args) => {
+      if (cmd === "load_app_settings") {
+        return new Promise((resolve) => {
+          resolveAppSettings = resolve;
+        });
+      }
+      return defaultInvoke?.(cmd, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    expect(screen.queryByText("CPU 0.0%")).not.toBeInTheDocument();
+    expect(screen.queryByText("MEM 0MB")).not.toBeInTheDocument();
+
+    act(() => {
+      resolveAppSettings?.({
+        schema_version: 2,
+        persisted: false,
+        settings: {
+          theme: "system",
+          auto_patch_gemini: false,
+          terminal_font_size: 14,
+          terminal_font_family: null,
+          grid_card_display_mode: "terminal",
+          watchlist_new_agent_position: "top",
+          titlebar_telemetry_visible: false,
+        },
+        overrides: {},
+      });
+    });
+
+    await waitFor(() => expect(useSettingsStore.getState().app_settings_loaded).toBe(true));
+    expect(screen.queryByText("CPU 0.0%")).not.toBeInTheDocument();
+    expect(screen.queryByText("MEM 0MB")).not.toBeInTheDocument();
+  });
+});
+
 describe("Native window layout bridge", () => {
   it("publishes Tauri resize dimensions to the app shell and terminal layout listeners", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);

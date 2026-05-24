@@ -334,6 +334,10 @@ function normalizeAppOverrides(overrides: AppSettingsOverrides | undefined): App
   };
 }
 
+function appSettingsOverridesAreEmpty(overrides: AppSettingsOverrides | undefined) {
+  return Object.keys(normalizeAppOverrides(overrides)).length === 0;
+}
+
 function normalizeShellOverrides(overrides: ShellSettingsOverrides | undefined): ShellSettingsOverrides {
   const codex = overrides?.codex_runtime_policy;
   const codexOverrides: CodexRuntimePolicyOverrides = {
@@ -351,18 +355,6 @@ function normalizeShellOverrides(overrides: ShellSettingsOverrides | undefined):
     ...(Object.keys(codexOverrides).length > 0 ? { codex_runtime_policy: codexOverrides } : {}),
     ...(overrides?.default_provider ? { default_provider: normalizeDefaultProviderSetting(overrides.default_provider) } : {}),
   };
-}
-
-function appSettingsAreDefaults(settings: AppSettings) {
-  return (
-    settings.theme === DEFAULT_APP_SETTINGS.theme &&
-    settings.auto_patch_gemini === DEFAULT_APP_SETTINGS.auto_patch_gemini &&
-    normalizeTerminalFontSize(settings.terminal_font_size) === DEFAULT_APP_SETTINGS.terminal_font_size &&
-    (settings.terminal_font_family?.trim() ?? '') === '' &&
-    normalizeGridCardDisplayMode(settings.grid_card_display_mode) === DEFAULT_APP_SETTINGS.grid_card_display_mode &&
-    normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) === DEFAULT_APP_SETTINGS.watchlist_new_agent_position &&
-    (settings.titlebar_telemetry_visible !== false) === DEFAULT_APP_SETTINGS.titlebar_telemetry_visible
-  );
 }
 
 function stateHasMigratedAppPreferences(state: SettingsState) {
@@ -509,7 +501,7 @@ export const useSettingsStore = create<SettingsState>()(
           }
           const { settings, overrides, persisted } = resolved;
           const currentState = get();
-          if (!persisted && appSettingsAreDefaults(settings) && stateHasMigratedAppPreferences(currentState)) {
+          if (!persisted && appSettingsOverridesAreEmpty(overrides) && stateHasMigratedAppPreferences(currentState)) {
             set({
               app_settings_overrides: normalizeAppOverrides(appOverridesFromState(currentState)),
               app_settings_loaded: true,
