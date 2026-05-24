@@ -1,0 +1,51 @@
+# Queue v2 Action Needed Alerts
+
+## Purpose
+
+Queue v2 turns the Queue from a passive completion inbox into a triage surface for human-in-the-loop work. This slice adds the first live HITL queue event, lets users filter visible event types, and lets users opt into desktop or sound alerts per event type.
+
+## Event Types
+
+Queue cards are grouped by these event types:
+
+- `action_needed`: an agent changed from another known status into `Action Needed`.
+- `agent_completed`: an agent changed from an active status back to `Idle`.
+- `workflow_completed`: a workflow run finished successfully.
+- `workflow_failed`: a workflow run finished with failed status.
+
+`workflow_failed` is a filter and alert key derived from a `workflow_completed` queue item whose status is `failed`. This keeps persisted queue items compatible with the existing workflow completion record while giving failures their own triage controls.
+
+## Preferences
+
+Queue preferences are stored under the active Wardian home at:
+
+```text
+<wardian-home>/queue/preferences.json
+```
+
+The document stores three boolean maps keyed by event type:
+
+- `visible_event_types`
+- `desktop_notifications`
+- `sound_notifications`
+
+All event types are visible by default. Desktop and sound alerts default to `true` only for `action_needed`; every passive completion/failure event defaults to `false` for alerts until the user opts in.
+
+## Runtime Behavior
+
+The frontend listens to the same agent status streams that already drive completion queue items. A new `action_needed` card is created only when Wardian has a previous status for the agent and then observes `Action Needed`, avoiding stale startup hydration cards.
+
+Action-needed cards use the amber warning treatment used elsewhere for action-required status. Agent cards can focus the related agent terminal from Queue, and action-needed cards also expose a compact quick-response composer for simple replies.
+
+Desktop notifications use the browser notification API available in the WebView. Sound alerts use a short Web Audio tone. If either capability is blocked by OS or browser policy, queue item creation still succeeds.
+
+## Testing
+
+Unit and component tests cover:
+
+- preference defaults, merge behavior, mutation, and persistence calls
+- action-needed queue item creation and deduplication
+- workflow failure filter classification
+- Queue rendering, filtering, alert toggles, terminal open action, and quick response
+- App status-transition integration from `Processing...` to `Action Needed`
+- notification dispatch defaults for action-needed events

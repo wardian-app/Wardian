@@ -9,6 +9,7 @@ import type { AgentConfig, AgentClassDefinition, AgentClonePreview, ProviderRead
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useQueueStore } from "../store/useQueueStore";
+import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 
@@ -78,6 +79,7 @@ let currentAgents: AgentConfig[] = [];
 let currentWatchlists: unknown = [];
 let currentInteractions: unknown = {};
 let currentQueueItems: unknown = [];
+let currentQueuePreferences: unknown = {};
 
 const allProvidersReady: ProviderReadiness[] = [
   { provider: "claude", display_name: "Claude", available: true, executable: "claude", reason: null },
@@ -115,6 +117,7 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
   currentWatchlists = [];
   currentInteractions = {};
   currentQueueItems = [];
+  currentQueuePreferences = {};
   mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
     switch (cmd) {
       case "list_agents":
@@ -135,6 +138,11 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return currentQueueItems;
       case "save_queue_items":
         currentQueueItems = args?.items;
+        return null;
+      case "load_queue_preferences":
+        return currentQueuePreferences;
+      case "save_queue_preferences":
+        currentQueuePreferences = args?.preferences;
         return null;
       case "pause_agent":
         if (args?.sessionId) {
@@ -349,7 +357,12 @@ beforeEach(() => {
     terminalFontFamily: "",
     app_settings_loaded: false,
   });
-  useQueueStore.setState({ items: [], _agentBuffers: {}, _workflowLastOutput: {} });
+  useQueueStore.setState({
+    items: [],
+    _agentBuffers: {},
+    _workflowLastOutput: {},
+    preferences: normalizeQueuePreferences({}),
+  });
   delete (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__;
   delete (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   document.documentElement.style.removeProperty("--wardian-native-window-width");
@@ -942,6 +955,39 @@ describe("Agent Watchlist Sidebar", () => {
               agent_session_id: "agent-1",
               agent_name: "Alpha",
               summary: "Finished the requested update.",
+              read: false,
+            }),
+          ],
+        }),
+      );
+    });
+  });
+
+  it("adds an action-needed queue item when an agent transitions into Action Needed", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitStatus } = captureQueueAgentListeners();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Processing..." });
+      emitStatus({ session_id: "agent-1", current_status: "Action Needed" });
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "save_queue_items",
+        expect.objectContaining({
+          items: [
+            expect.objectContaining({
+              type: "action_needed",
+              agent_session_id: "agent-1",
+              agent_name: "Alpha",
+              summary: "Action needed",
               read: false,
             }),
           ],

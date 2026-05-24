@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { Bot, ChevronDown, ChevronUp, GitBranch, Trash2 } from "lucide-react";
+import { useState, type FormEvent, type ReactNode } from "react";
+import { Bell, Bot, ChevronDown, ChevronUp, GitBranch, Send, SlidersHorizontal, Terminal, Trash2, Volume2 } from "lucide-react";
 import { useQueueStore } from "../store/useQueueStore";
-import type { QueueItem } from "../types";
+import type { QueueEventType, QueueItem } from "../types";
 import { DocsLink } from "../components/DocsLink";
+import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES, queueItemIsVisible } from "../features/queue/queueFilters";
 
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts;
@@ -16,16 +17,20 @@ function relativeTime(ts: number): string {
 }
 
 function queueItemLabel(item: QueueItem) {
+  if (item.type === "action_needed") return "Action needed";
   if (item.type === "agent_completed") return "Agent task completed";
   return item.status === "failed" ? "Workflow failed" : "Workflow completed";
 }
 
 function StatusBadge({ item }: { item: QueueItem }) {
   const isCompleted = item.type === "agent_completed" || item.status === "completed";
+  const isActionNeeded = item.type === "action_needed";
   return (
     <span
       className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-        isCompleted
+        isActionNeeded
+          ? "bg-wardian-warning/15 text-wardian-warning"
+          : isCompleted
           ? "bg-wardian-success/15 text-wardian-success"
           : "bg-wardian-error/15 text-wardian-error"
         }`}
@@ -36,6 +41,9 @@ function StatusBadge({ item }: { item: QueueItem }) {
 }
 
 function queueItemAccent(item: QueueItem) {
+  if (item.type === "action_needed") {
+    return "bg-wardian-warning";
+  }
   if (item.type === "workflow_completed" && item.status === "failed") {
     return "bg-wardian-error";
   }
@@ -43,11 +51,14 @@ function queueItemAccent(item: QueueItem) {
 }
 
 function QueueItemIcon({ item }: { item: QueueItem }) {
-  const isAgent = item.type === "agent_completed";
+  const isAgent = item.type === "agent_completed" || item.type === "action_needed";
+  const isActionNeeded = item.type === "action_needed";
   const isFailed = item.type === "workflow_completed" && item.status === "failed";
   const Icon = isAgent ? Bot : GitBranch;
   const iconClass = isFailed
     ? "bg-wardian-error/10 text-wardian-error"
+    : isActionNeeded
+      ? "bg-wardian-warning/10 text-wardian-warning"
     : isAgent
       ? "bg-wardian-processing/10 text-wardian-processing"
       : "bg-wardian-headless/10 text-wardian-headless";
@@ -62,16 +73,43 @@ function QueueItemIcon({ item }: { item: QueueItem }) {
   );
 }
 
-function QueueCard({ item }: { item: QueueItem }) {
+interface QueueCardProps {
+  item: QueueItem;
+  onOpenAgent?: (sessionId: string) => void;
+  onSendAgentPrompt?: (sessionId: string, prompt: string) => Promise<void> | void;
+}
+
+function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
   const dismissItem = useQueueStore((s) => s.dismissItem);
   const markRead = useQueueStore((s) => s.markRead);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [quickResponse, setQuickResponse] = useState("");
+  const [isSending, setIsSending] = useState(false);
 
-  const isAgent = item.type === "agent_completed";
+  const isAgent = item.type === "agent_completed" || item.type === "action_needed";
+  const isActionNeeded = item.type === "action_needed";
   const title = isAgent ? item.agent_name : item.workflow_name;
   const bodyText = item.status === "failed" && item.error ? item.error : item.summary;
   const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
   const summaryId = `queue-item-summary-${item.id}`;
+  const canOpenAgent = Boolean(item.agent_session_id && onOpenAgent);
+  const canQuickRespond = Boolean(isActionNeeded && item.agent_session_id && onSendAgentPrompt);
+
+  const handleQuickResponse = async (event: FormEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const prompt = quickResponse.trim();
+    if (!item.agent_session_id || !prompt || !onSendAgentPrompt) return;
+
+    setIsSending(true);
+    try {
+      await onSendAgentPrompt(item.agent_session_id, prompt);
+      setQuickResponse("");
+      markRead(item.id);
+    } finally {
+      setIsSending(false);
+    }
+  };
 
   return (
     <div
@@ -130,6 +168,44 @@ function QueueCard({ item }: { item: QueueItem }) {
               )}
             </div>
           )}
+          {(canOpenAgent || canQuickRespond) && (
+            <div className="mt-3 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()}>
+              {canOpenAgent && item.agent_session_id && (
+                <button
+                  type="button"
+                  aria-label="Open agent terminal"
+                  title="Open agent terminal"
+                  onClick={() => {
+                    markRead(item.id);
+                    onOpenAgent?.(item.agent_session_id!);
+                  }}
+                  className="inline-flex h-7 items-center gap-1 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-2 text-[11px] font-semibold text-muted-neutral hover:text-bright-neutral transition-colors"
+                >
+                  <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+                  Open
+                </button>
+              )}
+              {canQuickRespond && item.agent_session_id && (
+                <form className="flex min-w-[220px] flex-1 items-center gap-2" onSubmit={handleQuickResponse}>
+                  <input
+                    aria-label="Quick response"
+                    value={quickResponse}
+                    onChange={(event) => setQuickResponse(event.target.value)}
+                    className="h-7 min-w-0 flex-1 rounded-md border border-wardian-border bg-wardian-bg px-2 text-xs text-primary outline-none focus:border-[var(--color-wardian-accent)]"
+                  />
+                  <button
+                    type="submit"
+                    aria-label="Send quick response"
+                    title="Send quick response"
+                    disabled={!quickResponse.trim() || isSending}
+                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-wardian-border bg-wardian-card-bg-muted text-muted-neutral hover:text-bright-neutral disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+                  >
+                    <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </form>
+              )}
+            </div>
+          )}
         </div>
 
         <button
@@ -146,17 +222,50 @@ function QueueCard({ item }: { item: QueueItem }) {
   );
 }
 
-export function QueueView() {
-  const items = useQueueStore((s) => s.items);
-  const markAllRead = useQueueStore((s) => s.markAllRead);
-  const clearRead = useQueueStore((s) => s.clearRead);
-  const hasReadItems = items.some((item) => item.read);
+function QueuePreferenceToggle({
+  label,
+  checked,
+  onChange,
+  icon,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  icon?: ReactNode;
+}) {
+  return (
+    <label className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-2 text-[11px] font-semibold text-muted-neutral hover:text-bright-neutral transition-colors">
+      <input
+        type="checkbox"
+        aria-label={label}
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-3 w-3 accent-[var(--color-wardian-accent)]"
+      />
+      {icon}
+      <span>{label.replace(/^(Show|Desktop alert for|Sound alert for)\s+/i, "")}</span>
+    </label>
+  );
+}
+
+interface QueueControlsProps {
+  hasItems: boolean;
+  hasReadItems: boolean;
+  markAllRead: () => void;
+  clearRead: () => void;
+}
+
+function QueueControls({ hasItems, hasReadItems, markAllRead, clearRead }: QueueControlsProps) {
+  const preferences = useQueueStore((s) => s.preferences);
+  const setEventVisible = useQueueStore((s) => s.setEventVisible);
+  const setDesktopNotification = useQueueStore((s) => s.setDesktopNotification);
+  const setSoundNotification = useQueueStore((s) => s.setSoundNotification);
 
   return (
-    <div className="flex flex-col h-full min-h-0 p-4 gap-4">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-primary tracking-wide">Queue</h2>
-        {items.length > 0 && (
+        {hasItems && (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -177,6 +286,59 @@ export function QueueView() {
         )}
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <SlidersHorizontal className="h-3.5 w-3.5 text-muted-neutral" aria-hidden="true" />
+        {QUEUE_EVENT_TYPES.map((eventType) => (
+          <QueuePreferenceToggle
+            key={`show-${eventType}`}
+            label={`Show ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
+            checked={preferences.visible_event_types[eventType]}
+            onChange={(checked) => setEventVisible(eventType, checked)}
+          />
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Bell className="h-3.5 w-3.5 text-muted-neutral" aria-hidden="true" />
+        {QUEUE_EVENT_TYPES.map((eventType: QueueEventType) => (
+          <QueuePreferenceToggle
+            key={`desktop-${eventType}`}
+            label={`Desktop alert for ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
+            checked={preferences.desktop_notifications[eventType]}
+            onChange={(checked) => setDesktopNotification(eventType, checked)}
+          />
+        ))}
+        <Volume2 className="ml-1 h-3.5 w-3.5 text-muted-neutral" aria-hidden="true" />
+        {QUEUE_EVENT_TYPES.map((eventType: QueueEventType) => (
+          <QueuePreferenceToggle
+            key={`sound-${eventType}`}
+            label={`Sound alert for ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
+            checked={preferences.sound_notifications[eventType]}
+            onChange={(checked) => setSoundNotification(eventType, checked)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface QueueViewProps {
+  onOpenAgent?: (sessionId: string) => void;
+  onSendAgentPrompt?: (sessionId: string, prompt: string) => Promise<void> | void;
+}
+
+export function QueueView({ onOpenAgent, onSendAgentPrompt }: QueueViewProps) {
+  const items = useQueueStore((s) => s.items);
+  const preferences = useQueueStore((s) => s.preferences);
+  const markAllRead = useQueueStore((s) => s.markAllRead);
+  const clearRead = useQueueStore((s) => s.clearRead);
+  const hasReadItems = items.some((item) => item.read);
+  const visibleItems = items.filter((item) => queueItemIsVisible(item, preferences));
+
+  return (
+    <div className="flex flex-col h-full min-h-0 p-4 gap-4">
+      <QueueControls hasItems={items.length > 0} hasReadItems={hasReadItems} markAllRead={markAllRead} clearRead={clearRead} />
+
       {items.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
           <div className="max-w-sm text-center">
@@ -190,10 +352,19 @@ export function QueueView() {
             </div>
           </div>
         </div>
+      ) : visibleItems.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center">
+          <p className="text-sm font-semibold text-primary">No matching queue items.</p>
+        </div>
       ) : (
         <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto pr-1">
-          {items.map((item) => (
-            <QueueCard key={item.id} item={item} />
+          {visibleItems.map((item) => (
+            <QueueCard
+              key={item.id}
+              item={item}
+              onOpenAgent={onOpenAgent}
+              onSendAgentPrompt={onSendAgentPrompt}
+            />
           ))}
         </div>
       )}

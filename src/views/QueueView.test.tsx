@@ -1,13 +1,19 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { QueueView } from "./QueueView";
 import { useQueueStore } from "../store/useQueueStore";
+import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 
 vi.mocked(invoke).mockResolvedValue([]);
 
 function resetStore() {
-  useQueueStore.setState({ items: [], _agentBuffers: {}, _workflowLastOutput: {} });
+  useQueueStore.setState({
+    items: [],
+    _agentBuffers: {},
+    _workflowLastOutput: {},
+    preferences: normalizeQueuePreferences({}),
+  });
 }
 
 describe("QueueView", () => {
@@ -44,6 +50,83 @@ describe("QueueView", () => {
     expect(screen.getByText("My Coder")).toBeInTheDocument();
     expect(screen.getByText("Done writing tests.")).toBeInTheDocument();
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+  });
+
+  it("renders an action-needed item with agent actions", async () => {
+    const onOpenAgent = vi.fn();
+    const onSendAgentPrompt = vi.fn(async () => undefined);
+    useQueueStore.setState({
+      items: [{
+        id: "item-action",
+        type: "action_needed",
+        timestamp: Date.now(),
+        read: false,
+        agent_session_id: "sess-1",
+        agent_name: "My Coder",
+        summary: "Approve file write?",
+      }],
+    });
+
+    render(<QueueView onOpenAgent={onOpenAgent} onSendAgentPrompt={onSendAgentPrompt} />);
+
+    expect(screen.getByText("Action needed")).toBeInTheDocument();
+    expect(screen.getByText("Approve file write?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /open agent terminal/i }));
+    expect(onOpenAgent).toHaveBeenCalledWith("sess-1");
+
+    fireEvent.change(screen.getByLabelText("Quick response"), { target: { value: "approve" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /send quick response/i }));
+    });
+    expect(onSendAgentPrompt).toHaveBeenCalledWith("sess-1", "approve");
+  });
+
+  it("filters visible queue items by event type", () => {
+    useQueueStore.setState((state) => ({
+      preferences: {
+        ...state.preferences,
+        visible_event_types: {
+          ...state.preferences.visible_event_types,
+          agent_completed: false,
+        },
+      },
+      items: [
+        {
+          id: "hidden-agent",
+          type: "agent_completed",
+          timestamp: Date.now(),
+          read: false,
+          agent_name: "Hidden Agent",
+          summary: "Done.",
+        },
+        {
+          id: "visible-action",
+          type: "action_needed",
+          timestamp: Date.now(),
+          read: false,
+          agent_name: "Visible Agent",
+          summary: "Needs approval.",
+        },
+      ],
+    }));
+
+    render(<QueueView />);
+
+    expect(screen.queryByText("Hidden Agent")).not.toBeInTheDocument();
+    expect(screen.getByText("Visible Agent")).toBeInTheDocument();
+  });
+
+  it("updates queue filter and alert toggles", () => {
+    render(<QueueView />);
+
+    fireEvent.click(screen.getByLabelText("Show agent completions"));
+    fireEvent.click(screen.getByLabelText("Desktop alert for workflow failures"));
+    fireEvent.click(screen.getByLabelText("Sound alert for action needed"));
+
+    const { preferences } = useQueueStore.getState();
+    expect(preferences.visible_event_types.agent_completed).toBe(false);
+    expect(preferences.desktop_notifications.workflow_failed).toBe(true);
+    expect(preferences.sound_notifications.action_needed).toBe(false);
   });
 
   it("renders a failed workflow item with error text", () => {

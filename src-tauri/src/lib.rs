@@ -415,6 +415,8 @@ pub fn run() {
             commands::watchlist::save_watchlist_prefs,
             commands::watchlist::load_queue_items,
             commands::watchlist::save_queue_items,
+            commands::watchlist::load_queue_preferences,
+            commands::watchlist::save_queue_preferences,
             commands::watchlist::load_opencode_last_assistant_text,
             commands::watchlist::load_agent_interactions,
             commands::watchlist::save_agent_interactions,

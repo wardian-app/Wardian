@@ -179,9 +179,11 @@ function AppBody() {
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
+  const addActionNeeded = useQueueStore((s) => s.addActionNeeded);
   const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
   const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
+  const loadQueuePreferences = useQueueStore((s) => s.loadPreferences);
 
   useEffect(() => {
     let disposed = false;
@@ -248,6 +250,12 @@ function AppBody() {
       }
     }
   }, [flushAgentCompletion]);
+
+  const maybeAddActionNeededQueueItem = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+    if (currentStatus !== "Action Needed" || !previousStatus || previousStatus === "Action Needed") return;
+    const agent = agentsRef.current.find((a) => a.session_id === sessionId);
+    addActionNeeded(sessionId, agent?.session_name ?? sessionId, "Action needed");
+  }, [addActionNeeded]);
 
   useEffect(() => {
     const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
@@ -759,6 +767,7 @@ function AppBody() {
     fetchWorkflows();
     loadScheduledRuns();
     loadQueueItems();
+    loadQueuePreferences();
     fetchLibraryTree("prompts");
     fetchLibraryTree("skills");
     const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
@@ -778,7 +787,7 @@ function AppBody() {
       unlistenUpdate.then(fn => fn());
       unlistenWatchlists.then(fn => fn());
     };
-  }, [appendAgentEvent, fetchLibraryTree, fetchWorkflows, loadQueueItems, loadScheduledRuns, loadWatchlistState]);
+  }, [appendAgentEvent, fetchLibraryTree, fetchWorkflows, loadQueueItems, loadQueuePreferences, loadScheduledRuns, loadWatchlistState]);
 
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
@@ -788,6 +797,7 @@ function AppBody() {
         const previousStatus = agentStatusRef.current[sessionId];
         if (previousStatus !== undefined) {
           maybeFlushAgentQueueCompletion(sessionId, metric.current_status, previousStatus);
+          maybeAddActionNeededQueueItem(sessionId, metric.current_status, previousStatus);
         }
         agentStatusRef.current[sessionId] = metric.current_status;
       }
@@ -830,6 +840,7 @@ function AppBody() {
       }
       const previousStatus = agentStatusRef.current[session_id];
       maybeFlushAgentQueueCompletion(session_id, current_status, previousStatus);
+      maybeAddActionNeededQueueItem(session_id, current_status, previousStatus);
       agentStatusRef.current[session_id] = current_status;
       setTelemetry(prev => {
         return {
@@ -852,7 +863,7 @@ function AppBody() {
       unlistenAppMetrics.then(fn => fn());
       unlistenStatus.then(fn => fn());
     };
-  }, [maybeFlushAgentQueueCompletion]);
+  }, [maybeAddActionNeededQueueItem, maybeFlushAgentQueueCompletion]);
 
   async function sendCommand(sessionId: string, cmd: string) {
     try {
@@ -1077,6 +1088,13 @@ function AppBody() {
     ? agents.find((agent) => agent.session_id === Array.from(selectedAgentIds)[0])?.folder?.trim() || null
     : null;
 
+  const openAgentFromQueue = useCallback((sessionId: string) => {
+    setViewMode("grid");
+    setSelectedAgentIds(new Set([sessionId]));
+    lastSelectedIdRef.current = sessionId;
+    window.setTimeout(() => scrollToAgent(sessionId), 0);
+  }, [scrollToAgent]);
+
   return (
     <div
       data-testid="app-shell"
@@ -1148,7 +1166,7 @@ function AppBody() {
 
             {viewMode === "queue" && (
               <div className="flex-1 flex flex-col min-h-0">
-                <QueueView />
+                <QueueView onOpenAgent={openAgentFromQueue} onSendAgentPrompt={sendCommand} />
               </div>
             )}
 
