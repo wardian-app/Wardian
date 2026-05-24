@@ -42,9 +42,23 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
 
     let pipe_name = wardian_core::control::pipe_name()
         .ok_or_else(|| std::io::Error::other("could not resolve Wardian control pipe"))?;
-    ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_name)
+
+    // `ServerOptions::create` registers the pipe handle with Tokio's IOCP reactor and
+    // panics if invoked outside a Tokio runtime context. The Tauri `setup` hook runs
+    // on the main thread before the async runtime is entered, so when no runtime is
+    // ambient we enter the Tauri-managed one. When a runtime is already current
+    // (e.g. inside a `#[tokio::test]` or any `tauri::async_runtime::spawn` task) we
+    // call `create` directly to avoid nesting `block_on`, which Tokio rejects.
+    let create_pipe = || {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        create_pipe()
+    } else {
+        tauri::async_runtime::block_on(async { create_pipe() })
+    }
 }
 
 #[cfg(unix)]
@@ -2566,6 +2580,30 @@ mod tests {
     use crate::state::ActiveAgent;
     use std::sync::{Arc, Mutex};
     use wardian_core::models::{AgentConfig, WorkflowDefinition, WorkflowNode, WorkflowSettings};
+
+    /// Regression test for the silent release-build crash where `claim_control_endpoint`
+    /// was called from Tauri's `setup` hook (no Tokio runtime context), causing
+    /// `tokio::net::windows::named_pipe::ServerOptions::create` to panic with
+    /// "there is no reactor running". This test runs as a plain `#[test]` — *not*
+    /// `#[tokio::test]` — so the absence of an ambient runtime mirrors the real
+    /// setup-hook environment. The claim must succeed without panicking.
+    #[test]
+    fn control_endpoint_claim_succeeds_without_ambient_tokio_runtime() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "test precondition: no Tokio runtime must be ambient on this thread, \
+             otherwise we are not exercising the setup-hook code path"
+        );
+
+        let claim = claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
+        drop(claim);
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
 
     #[tokio::test]
     async fn control_endpoint_claim_is_exclusive_for_current_home() {
