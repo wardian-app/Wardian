@@ -1,4 +1,6 @@
-use crate::remote::models::{RemoteAgentActionRequest, RemoteAgentSummary, RemoteWorkflowSummary};
+use crate::remote::models::{
+    RemoteAgentActionRequest, RemoteAgentSummary, RemoteTerminalSnapshot, RemoteWorkflowSummary,
+};
 use crate::state::AppState;
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
@@ -50,6 +52,33 @@ pub async fn remote_agent_chat_transcript(
     session_id: &str,
 ) -> Result<Vec<AgentChatEvent>, String> {
     crate::commands::chat::load_agent_chat_transcript_for_state(state, session_id.to_string()).await
+}
+
+pub async fn remote_agent_terminal_snapshot(
+    state: &AppState,
+    session_id: &str,
+    since: Option<&str>,
+    tail_bytes: Option<usize>,
+) -> Result<RemoteTerminalSnapshot, String> {
+    let watch_state = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(session_id)
+            .map(|agent| agent.watch_state.clone())
+            .ok_or_else(|| "agent_not_found".to_string())?
+    };
+    let snapshot = watch_state
+        .lock()
+        .map_err(|_| "watch_state_unavailable".to_string())?
+        .snapshot_since(since, tail_bytes)
+        .map_err(|error| error.code().to_string())?;
+
+    Ok(RemoteTerminalSnapshot {
+        cursor: snapshot.output.cursor,
+        text: snapshot.output.text,
+        truncated: snapshot.output.truncated,
+        omitted_bytes: snapshot.output.omitted_bytes,
+    })
 }
 
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
@@ -279,6 +308,61 @@ mod tests {
                 && event.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
                 && event.text.as_deref() == Some("Use the shared chat transcript model.")
         }));
+    }
+
+    #[tokio::test]
+    async fn remote_agent_terminal_snapshot_returns_sanitized_output_without_draining() {
+        let state = AppState::new();
+        let agent = test_agent("agent-1", "CoderOne", "Coder", "Processing");
+        {
+            let mut watch = agent.watch_state.lock().expect("watch state");
+            watch.push_output(b"\x1b[31mred terminal\x1b[0m\nsecond line");
+        }
+        insert_agent(&state, agent).await;
+
+        let first = remote_agent_terminal_snapshot(&state, "agent-1", None, Some(4096))
+            .await
+            .expect("first terminal snapshot");
+        let second = remote_agent_terminal_snapshot(&state, "agent-1", None, Some(4096))
+            .await
+            .expect("second terminal snapshot");
+
+        assert_eq!(first.text, "red terminal\nsecond line");
+        assert_eq!(second.text, first.text);
+        assert_eq!(second.cursor, first.cursor);
+        assert!(!first.truncated);
+        assert_eq!(first.omitted_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn remote_agent_terminal_snapshot_respects_tail_bytes() {
+        let state = AppState::new();
+        let agent = test_agent("agent-1", "CoderOne", "Coder", "Processing");
+        {
+            let mut watch = agent.watch_state.lock().expect("watch state");
+            watch.push_output(b"alpha beta gamma");
+        }
+        insert_agent(&state, agent).await;
+
+        let snapshot = remote_agent_terminal_snapshot(&state, "agent-1", None, Some(5))
+            .await
+            .expect("bounded terminal snapshot");
+
+        assert_eq!(snapshot.text, "gamma");
+        assert!(snapshot.truncated);
+        assert!(snapshot.omitted_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn remote_agent_terminal_snapshot_rejects_unknown_agent() {
+        let state = AppState::new();
+
+        assert_eq!(
+            remote_agent_terminal_snapshot(&state, "missing-agent", None, Some(4096))
+                .await
+                .unwrap_err(),
+            "agent_not_found"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ export const RemoteAgentCard: React.FC<{ agent: RemoteAgentSummary }> = ({ agent
     <article aria-label={agent.session_name} className="rounded-md border border-wardian-border bg-wardian-card p-3">
       <button
         type="button"
-        aria-label={`Open ${agent.session_name} conversation`}
+        aria-label={`Open ${agent.session_name} details`}
         onClick={() => void openAgent(agent.session_id)}
         className="w-full text-left"
       >

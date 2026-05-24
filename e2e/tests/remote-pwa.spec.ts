@@ -41,6 +41,19 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await page.route("**/remote/api/agents/agent-1/chat", async (route) => {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ events: [] }) });
   });
+  await page.route("**/remote/api/agents/agent-1/terminal", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        snapshot: {
+          cursor: "agent-1:0000000000000001",
+          text: "terminal ready from e2e",
+          truncated: false,
+          omitted_bytes: 0,
+        },
+      }),
+    });
+  });
   await page.route("**/remote/api/agents/action", async (route) => {
     actionRequests.push({
       headers: route.request().headers(),
@@ -54,10 +67,12 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await expect(page.getByText("Remote Coder")).toBeVisible();
   await expect(page.locator('[data-testid="remote-agent-list"]')).toHaveClass(/grid-cols-1/);
 
-  await page.getByRole("button", { name: "Open Remote Coder conversation" }).click();
-  await expect(page.locator('[data-testid="remote-agent-conversation"]')).toBeVisible();
-  await page.getByLabel("Message Remote Coder").fill("status please");
-  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByRole("button", { name: "Open Remote Coder details" }).click();
+  await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("terminal ready from e2e")).toBeVisible();
+  await page.getByLabel("Prompt Remote Coder").fill("status please");
+  await page.getByRole("button", { name: "Send prompt" }).click();
 
   await expect.poll(() => actionRequests.length).toBe(1);
   expect(actionRequests[0]).toMatchObject({

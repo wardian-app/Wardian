@@ -57,9 +57,16 @@ screens. It is focused on:
 
 - Viewing active agent status.
 - Selecting one or more agents.
+- Opening an agent into a terminal-first detail view with chat one tap away.
 - Sending prompts to selected agents.
 - Running basic lifecycle actions such as pause, resume, clear, and kill.
 - Launching saved workflows from the mobile workflow list.
+
+When you tap an agent, Wardian opens a read-only terminal transcript by
+default. This transcript is a sanitized snapshot from the desktop-owned agent
+watch state; it does not drain the desktop PTY renderer. Use the Terminal and
+Chat buttons in the agent detail view to switch between the terminal transcript
+and the normalized chat transcript.
 
 The service worker caches only the remote app shell and static assets. It does
 not queue agent, workflow, PTY, or revocation actions while offline. If the
@@ -68,5 +75,6 @@ desktop is unreachable, reconnect before sending commands.
 ## Boundaries
 
 Public relay access is not part of v1. Device scopes are not part of v1. Raw PTY
-streaming is not part of v1 by default; remote views should use sanitized status
-or transcript summaries unless a later design explicitly expands that surface.
+streaming is not part of v1 by default; remote views use sanitized status,
+terminal snapshots, or transcript summaries unless a later design explicitly
+expands that surface.

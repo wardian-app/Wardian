@@ -9,7 +9,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Json, Path as AxumPath, State,
+        DefaultBodyLimit, Json, Path as AxumPath, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -26,6 +26,8 @@ const REMOTE_SESSION_COOKIE_NAME: &str = "__Host-wardian_remote_session";
 const REMOTE_CSRF_HEADER_NAME: &str = "x-wardian-csrf";
 const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
 const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
+const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
 
 pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), String> {
     crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
@@ -97,6 +99,10 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
             "/remote/api/agents/{session_id}/chat",
             get(load_remote_agent_chat),
         )
+        .route(
+            "/remote/api/agents/{session_id}/terminal",
+            get(load_remote_agent_terminal),
+        )
         .route("/remote/api/agents/action", post(run_agent_action))
         .route("/remote/api/workflows", get(list_remote_workflows))
         .route("/remote/api/workflows/run", post(run_workflow))
@@ -111,6 +117,12 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
 struct RemoteGatewayContext {
     app: AppHandle,
     config: RemoteGatewayConfig,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteTerminalQuery {
+    since: Option<String>,
+    tail_bytes: Option<usize>,
 }
 
 async fn remote_health() -> axum::Json<serde_json::Value> {
@@ -593,6 +605,48 @@ async fn load_remote_agent_chat(
         GatewayAuditEvent::accepted("chat_read", "load_agent_chat").target("agent", &session_id),
     );
     Ok(Json(serde_json::json!({ "events": events })))
+}
+
+async fn load_remote_agent_terminal(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<RemoteTerminalQuery>,
+) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
+    let origin =
+        require_audited_request_boundary(&ctx.config, &headers, false, "load_agent_terminal")?;
+    let session = require_audited_remote_session(
+        &ctx,
+        &headers,
+        &origin,
+        "terminal_read",
+        "load_agent_terminal",
+    )
+    .await?;
+    let state = ctx.app.state::<crate::state::AppState>();
+    let tail_bytes = query
+        .tail_bytes
+        .unwrap_or(REMOTE_TERMINAL_DEFAULT_TAIL_BYTES)
+        .min(REMOTE_TERMINAL_MAX_TAIL_BYTES);
+    let since = query
+        .since
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let snapshot = crate::remote::operations::remote_agent_terminal_snapshot(
+        &state,
+        &session_id,
+        since,
+        Some(tail_bytes),
+    )
+    .await
+    .map_err(|_| RemoteGatewayError::bad_request("agent_terminal_failed"))?;
+    audit_gateway_event(
+        &session,
+        &origin,
+        GatewayAuditEvent::accepted("terminal_read", "load_agent_terminal")
+            .target("agent", &session_id),
+    );
+    Ok(Json(serde_json::json!({ "snapshot": snapshot })))
 }
 
 async fn run_agent_action(

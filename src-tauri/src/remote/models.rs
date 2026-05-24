@@ -218,6 +218,14 @@ pub struct RemoteAgentSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteTerminalSnapshot {
+    pub cursor: String,
+    pub text: String,
+    pub truncated: bool,
+    pub omitted_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteAgentActionRequest {
     pub action: String,
     pub target: String,

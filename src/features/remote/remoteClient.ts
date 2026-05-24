@@ -5,6 +5,7 @@ import type {
   PairingSubmitResponse,
   RemoteAgentActionRequest,
   RemoteAgentSummary,
+  RemoteTerminalSnapshot,
   RemoteWebSocketTicketResponse,
   RemoteWorkflowRunRequest,
   RemoteWorkflowStopRequest,
@@ -113,6 +114,12 @@ export const remoteClient = {
       `/remote/api/agents/${encodeURIComponent(sessionId)}/chat`,
     );
     return result.events;
+  },
+  async loadAgentTerminal(sessionId: string) {
+    const result = await remoteJson<{ snapshot: RemoteTerminalSnapshot }>(
+      `/remote/api/agents/${encodeURIComponent(sessionId)}/terminal`,
+    );
+    return result.snapshot;
   },
   async sendPrompt(target: string, prompt: string) {
     const request: RemoteAgentActionRequest = { action: "send_prompt", target, prompt };
