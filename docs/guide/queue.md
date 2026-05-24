@@ -4,7 +4,7 @@ The Queue is Wardian's app-level triage surface for completed work. It is separa
 
 Use it when you need to review finished work, catch failed workflow runs, respond to agents that need input, or return to unread outcomes after switching away from the originating agent.
 
-![Wardian Queue view showing action-needed filtering, alert controls, and queue cards](../assets/screenshots/queue/queue-v2-action-needed.png)
+![Wardian Queue view showing an action-needed card with header filtering and clickable response choices](../assets/screenshots/queue/queue-v2-action-needed.png)
 
 ## When to Use It
 
@@ -35,7 +35,7 @@ Each item shows:
 
 Long summaries are collapsed by default. Use **Show details** to expand them, or **Hide details** to collapse them again.
 
-Use the Queue controls to choose which event types are visible:
+Use the **Filter** dropdown in the Queue header to choose which event types are visible:
 
 - Action needed
 - Agent completions
@@ -48,7 +48,8 @@ These preferences persist under the active Wardian home.
 
 - Click an item to mark it read.
 - Use **Open** on an agent card to focus the related agent terminal when the session still exists.
-- Use the quick-response field on an Action needed card for simple replies. Open the terminal for longer or more complex responses.
+- Use the response buttons on an **Action needed** card when Wardian recognizes provider choices such as `1. Yes` or `2. No`.
+- Use **Open** when the action request needs context, editing, or a response format Wardian cannot infer safely.
 - Use **Mark all read** when the full queue has been reviewed.
 - Use **Clear read** to remove reviewed items.
 - Use the trash icon on an individual item to dismiss it immediately.
@@ -57,7 +58,7 @@ Queue items are persisted under the active Wardian home, so unread work survives
 
 ## Alerts
 
-Queue alert preferences are per event type:
+Queue alert preferences live in **Settings > Queue** and are per event type:
 
 - Desktop alert
 - Sound alert
@@ -71,7 +72,7 @@ Desktop alerts use the operating system notification surface when the WebView ha
 1. Let agents or workflows run from the Grid, Command Panel, CLI, or Workflow view.
 2. Watch the Queue badge for new completions.
 3. Open Queue, review summaries, and expand details when the summary was truncated.
-4. Open the source agent terminal or send a short quick response when an Action needed card appears.
+4. Open the source agent terminal or choose a visible response button when an Action needed card appears.
 5. Mark reviewed items read and clear them when they are no longer needed.
 
 ## Important Limits

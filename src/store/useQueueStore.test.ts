@@ -269,6 +269,20 @@ describe("useQueueStore - action needed", () => {
     expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({ items: expect.any(Array) }));
   });
 
+  it("uses buffered approval text for generic action-needed cards and clears the buffer", () => {
+    useQueueStore.setState({
+      _agentBuffers: {
+        "agent-1": "Do you want to proceed?\n1. Yes\n2. No",
+      },
+    });
+
+    useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Action needed");
+
+    const { items, _agentBuffers } = useQueueStore.getState();
+    expect(items[0].summary).toBe("Do you want to proceed?\n1. Yes\n2. No");
+    expect(_agentBuffers["agent-1"]).toBe("");
+  });
+
   it("deduplicates repeated action-needed items for the same agent in the short status window", () => {
     useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Approve file write?");
     useQueueStore.setState((s) => ({

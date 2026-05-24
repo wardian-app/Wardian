@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsModal } from "./SettingsModal";
 import { useAppUpdate } from "./useAppUpdate";
 import { useSettingsStore } from "../../store/useSettingsStore";
+import { normalizeQueuePreferences } from "../queue/queueFilters";
+import { useQueueStore } from "../../store/useQueueStore";
 import type { AppUpdateState } from "./useAppUpdate";
 
 vi.mock("./useAppUpdate", () => ({
@@ -62,6 +64,12 @@ describe("SettingsModal", () => {
       app_settings_loaded: true,
       shell_settings_loaded: true,
       shells_loaded: true,
+    });
+    useQueueStore.setState({
+      items: [],
+      _agentBuffers: {},
+      _workflowLastOutput: {},
+      preferences: normalizeQueuePreferences({}),
     });
 
     mockInvoke.mockImplementation(async (command, args) => {
@@ -123,6 +131,18 @@ describe("SettingsModal", () => {
 
     expect(await screen.findByText("https://wardian.tailnet.ts.net")).toBeInTheDocument();
     expect(screen.getByText(/full remote control/i)).toBeInTheDocument();
+  });
+
+  it("exposes queue notification rules from the settings navigation", () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    fireEvent.click(screen.getByLabelText("Desktop alert for workflow failures"));
+    fireEvent.click(screen.getByLabelText("Sound alert for action needed"));
+
+    const { preferences } = useQueueStore.getState();
+    expect(preferences.desktop_notifications.workflow_failed).toBe(true);
+    expect(preferences.sound_notifications.action_needed).toBe(false);
   });
 
   it("filters settings by search text across labels and details", () => {

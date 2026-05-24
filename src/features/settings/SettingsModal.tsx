@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Check, Monitor, Search, X } from "lucide-react";
+import { Bell, Check, Monitor, Search, Volume2, X } from "lucide-react";
 import {
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
@@ -11,6 +11,8 @@ import {
 } from "../../store/useSettingsStore";
 import { useAppUpdate } from "./useAppUpdate";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
+import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES } from "../queue/queueFilters";
+import { useQueueStore } from "../../store/useQueueStore";
 import type { AppThemeSetting, WatchlistNewAgentPosition } from "../../types/settings";
 
 interface SettingsModalProps {
@@ -22,6 +24,7 @@ type SettingsCategory =
   | "General"
   | "Appearance"
   | "Grid"
+  | "Queue"
   | "Watchlist"
   | "Terminal"
   | "Agent Runtime"
@@ -42,6 +45,7 @@ const categories: SettingsCategory[] = [
   "General",
   "Appearance",
   "Grid",
+  "Queue",
   "Watchlist",
   "Terminal",
   "Agent Runtime",
@@ -85,6 +89,20 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "Grid card display",
     detail: "Applies to every card in the main Grid view.",
     keywords: ["grid", "card", "display", "terminal", "chat", "transcript"],
+  },
+  {
+    id: "queue-desktop-notifications",
+    category: "Queue",
+    label: "Desktop alerts",
+    detail: "Choose which queue events can trigger operating system notifications.",
+    keywords: ["queue", "notifications", "desktop", "alerts", "action needed"],
+  },
+  {
+    id: "queue-sound-notifications",
+    category: "Queue",
+    label: "Sound alerts",
+    detail: "Choose which queue events play Wardian's local notification tone.",
+    keywords: ["queue", "notifications", "sound", "tone", "action needed"],
   },
   {
     id: "watchlist-new-agent-position",
@@ -223,6 +241,38 @@ const SettingRow: React.FC<{
   </div>
 );
 
+function QueueNotificationToggles({
+  mode,
+  values,
+  onChange,
+}: {
+  mode: "desktop" | "sound";
+  values: Record<(typeof QUEUE_EVENT_TYPES)[number], boolean>;
+  onChange: (eventType: (typeof QUEUE_EVENT_TYPES)[number], enabled: boolean) => void;
+}) {
+  const prefix = mode === "desktop" ? "Desktop alert for" : "Sound alert for";
+
+  return (
+    <div className="flex flex-wrap justify-end gap-2">
+      {QUEUE_EVENT_TYPES.map((eventType) => (
+        <label
+          key={`${mode}-${eventType}`}
+          className="inline-flex h-8 items-center gap-2 rounded-md border border-wardian-border bg-wardian-bg px-2 text-[12px] font-semibold text-muted-neutral transition-colors hover:text-primary"
+        >
+          <input
+            type="checkbox"
+            aria-label={`${prefix} ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
+            checked={values[eventType]}
+            onChange={(event) => onChange(eventType, event.target.checked)}
+            className="h-3 w-3 accent-[var(--color-wardian-accent)]"
+          />
+          {QUEUE_EVENT_LABELS[eventType]}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 const renderRowsWithSubgroups = (
   rows: SettingsRowDefinition[],
   renderRow: (row: SettingsRowDefinition) => React.ReactNode,
@@ -298,6 +348,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     loadAvailableShells,
     saveShellSettings,
   } = useSettingsStore();
+  const queuePreferences = useQueueStore((state) => state.preferences);
+  const setDesktopNotification = useQueueStore((state) => state.setDesktopNotification);
+  const setSoundNotification = useQueueStore((state) => state.setSoundNotification);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -616,6 +669,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               <option value="top">Top</option>
               <option value="bottom">Bottom</option>
             </select>
+          </SettingRow>
+        );
+      case "queue-desktop-notifications":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <div className="flex items-start gap-2">
+              <Bell className="mt-2 h-4 w-4 shrink-0 text-muted-neutral" aria-hidden="true" />
+              <QueueNotificationToggles
+                mode="desktop"
+                values={queuePreferences.desktop_notifications}
+                onChange={setDesktopNotification}
+              />
+            </div>
+          </SettingRow>
+        );
+      case "queue-sound-notifications":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <div className="flex items-start gap-2">
+              <Volume2 className="mt-2 h-4 w-4 shrink-0 text-muted-neutral" aria-hidden="true" />
+              <QueueNotificationToggles
+                mode="sound"
+                values={queuePreferences.sound_notifications}
+                onChange={setSoundNotification}
+              />
+            </div>
           </SettingRow>
         );
       case "shell":

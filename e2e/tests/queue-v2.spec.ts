@@ -24,7 +24,7 @@ async function installQueueV2IpcMock(page: Page) {
         read: false,
         agent_session_id: "mock-session-e2e-001",
         agent_name: "E2E Coder",
-        summary: "Approve the generated patch before continuing.",
+        summary: "Approve the generated patch before continuing.\n1. Yes\n2. No",
       },
       {
         id: "agent-complete-1",
@@ -126,7 +126,7 @@ async function installQueueV2IpcMock(page: Page) {
 }
 
 test.describe("Queue v2", () => {
-  test("shows action-needed cards, filters, alerts, and quick response", async ({ page }) => {
+  test("shows action-needed cards, header filtering, and clickable action choices", async ({ page }) => {
     await installQueueV2IpcMock(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
@@ -135,21 +135,24 @@ test.describe("Queue v2", () => {
 
     await expect(page.getByText("Action needed", { exact: true })).toBeVisible();
     await expect(page.getByText("Approve the generated patch before continuing.")).toBeVisible();
-    await expect(page.getByLabel("Show agent completions")).toBeChecked();
-    await expect(page.getByLabel("Desktop alert for action needed")).toBeChecked();
-    await expect(page.getByLabel("Sound alert for action needed")).toBeChecked();
+    await expect(page.getByRole("button", { name: "Filter queue events" })).toContainText("Filter: All events");
+    await expect(page.getByLabel("Desktop alert for action needed")).toBeHidden();
+    await expect(page.getByLabel("Sound alert for action needed")).toBeHidden();
+    await expect(page.getByRole("button", { name: "Send action response 1: Yes" })).toBeVisible();
 
     if (process.env.WARDIAN_QUEUE_V2_SCREENSHOT) {
       await page.screenshot({ path: process.env.WARDIAN_QUEUE_V2_SCREENSHOT, fullPage: false });
     }
 
+    await page.getByRole("button", { name: "Filter queue events" }).click();
+    await expect(page.getByLabel("Show agent completions")).toBeChecked();
     await page.getByLabel("Show agent completions").uncheck();
     await expect(page.getByText("Finished the test summary.")).toBeHidden();
 
-    await page.getByRole("textbox", { name: "Quick response" }).fill("Approved.");
-    await page.getByRole("button", { name: "Send quick response" }).click();
+    await expect(page.getByRole("textbox", { name: "Quick response" })).toBeHidden();
+    await page.getByRole("button", { name: "Send action response 1: Yes" }).click();
     await expect.poll(async () =>
       page.evaluate(() => window.__WARDIAN_E2E_SUBMITTED_PROMPTS__?.[0]?.prompt ?? ""),
-    ).toBe("Approved.");
+    ).toBe("1");
   });
 });

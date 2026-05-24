@@ -1,9 +1,10 @@
-import { useState, type FormEvent, type ReactNode } from "react";
-import { Bell, Bot, ChevronDown, ChevronUp, GitBranch, Send, SlidersHorizontal, Terminal, Trash2, Volume2 } from "lucide-react";
+import { useState } from "react";
+import { Bot, ChevronDown, ChevronUp, GitBranch, ListFilter, Terminal, Trash2 } from "lucide-react";
 import { useQueueStore } from "../store/useQueueStore";
-import type { QueueEventType, QueueItem } from "../types";
+import type { QueueItem } from "../types";
 import { DocsLink } from "../components/DocsLink";
 import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES, queueItemIsVisible } from "../features/queue/queueFilters";
+import { parseQueueActionChoices, type QueueActionChoice } from "../features/queue/actionChoices";
 
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts;
@@ -83,7 +84,6 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
   const dismissItem = useQueueStore((s) => s.dismissItem);
   const markRead = useQueueStore((s) => s.markRead);
   const [isExpanded, setIsExpanded] = useState(false);
-  const [quickResponse, setQuickResponse] = useState("");
   const [isSending, setIsSending] = useState(false);
 
   const isAgent = item.type === "agent_completed" || item.type === "action_needed";
@@ -93,18 +93,15 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
   const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
   const summaryId = `queue-item-summary-${item.id}`;
   const canOpenAgent = Boolean(item.agent_session_id && onOpenAgent);
-  const canQuickRespond = Boolean(isActionNeeded && item.agent_session_id && onSendAgentPrompt);
+  const actionChoices = isActionNeeded ? parseQueueActionChoices(bodyText) : [];
+  const canUseActionChoices = Boolean(item.agent_session_id && onSendAgentPrompt && actionChoices.length > 0);
 
-  const handleQuickResponse = async (event: FormEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const prompt = quickResponse.trim();
-    if (!item.agent_session_id || !prompt || !onSendAgentPrompt) return;
+  const handleActionChoice = async (choice: QueueActionChoice) => {
+    if (!item.agent_session_id || !onSendAgentPrompt) return;
 
     setIsSending(true);
     try {
-      await onSendAgentPrompt(item.agent_session_id, prompt);
-      setQuickResponse("");
+      await onSendAgentPrompt(item.agent_session_id, choice.value);
       markRead(item.id);
     } finally {
       setIsSending(false);
@@ -121,7 +118,12 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
       onClick={() => markRead(item.id)}
     >
       <div className={`absolute left-0 top-0 h-full w-1 ${queueItemAccent(item)}`} />
-      {!item.read && <span className="absolute left-3 top-4 h-2 w-2 rounded-full bg-[var(--color-wardian-accent)]" />}
+      {!item.read && (
+        <span
+          data-testid="queue-unread-dot"
+          className="absolute left-2 top-2 z-10 h-2 w-2 rounded-full bg-[var(--color-wardian-accent)] shadow-[0_0_0_2px_var(--color-wardian-bg)]"
+        />
+      )}
 
       <div className="flex items-start gap-3 py-3 pl-5 pr-3">
         <QueueItemIcon item={item} />
@@ -168,7 +170,7 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
               )}
             </div>
           )}
-          {(canOpenAgent || canQuickRespond) && (
+          {(canOpenAgent || canUseActionChoices) && (
             <div className="mt-3 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()}>
               {canOpenAgent && item.agent_session_id && (
                 <button
@@ -185,24 +187,23 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
                   Open
                 </button>
               )}
-              {canQuickRespond && item.agent_session_id && (
-                <form className="flex min-w-[220px] flex-1 items-center gap-2" onSubmit={handleQuickResponse}>
-                  <input
-                    aria-label="Quick response"
-                    value={quickResponse}
-                    onChange={(event) => setQuickResponse(event.target.value)}
-                    className="h-7 min-w-0 flex-1 rounded-md border border-wardian-border bg-wardian-bg px-2 text-xs text-primary outline-none focus:border-[var(--color-wardian-accent)]"
-                  />
-                  <button
-                    type="submit"
-                    aria-label="Send quick response"
-                    title="Send quick response"
-                    disabled={!quickResponse.trim() || isSending}
-                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-wardian-border bg-wardian-card-bg-muted text-muted-neutral hover:text-bright-neutral disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
-                  >
-                    <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                </form>
+              {canUseActionChoices && (
+                <div className="flex min-w-0 flex-wrap items-center gap-2" aria-label="Action choices">
+                  {actionChoices.map((choice) => (
+                    <button
+                      key={`${choice.value}-${choice.label}`}
+                      type="button"
+                      aria-label={`Send action response ${choice.value}: ${choice.label}`}
+                      title={`Send ${choice.label}`}
+                      disabled={isSending}
+                      onClick={() => void handleActionChoice(choice)}
+                      className="inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-md border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_35%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] px-2 text-[11px] font-semibold text-primary transition-colors hover:bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <span className="shrink-0 font-mono text-[var(--color-wardian-warning)]">{choice.value}</span>
+                      <span className="min-w-0 truncate">{choice.label}</span>
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
           )}
@@ -222,32 +223,6 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
   );
 }
 
-function QueuePreferenceToggle({
-  label,
-  checked,
-  onChange,
-  icon,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  icon?: ReactNode;
-}) {
-  return (
-    <label className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-2 text-[11px] font-semibold text-muted-neutral hover:text-bright-neutral transition-colors">
-      <input
-        type="checkbox"
-        aria-label={label}
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-        className="h-3 w-3 accent-[var(--color-wardian-accent)]"
-      />
-      {icon}
-      <span>{label.replace(/^(Show|Desktop alert for|Sound alert for)\s+/i, "")}</span>
-    </label>
-  );
-}
-
 interface QueueControlsProps {
   hasItems: boolean;
   hasReadItems: boolean;
@@ -258,66 +233,68 @@ interface QueueControlsProps {
 function QueueControls({ hasItems, hasReadItems, markAllRead, clearRead }: QueueControlsProps) {
   const preferences = useQueueStore((s) => s.preferences);
   const setEventVisible = useQueueStore((s) => s.setEventVisible);
-  const setDesktopNotification = useQueueStore((s) => s.setDesktopNotification);
-  const setSoundNotification = useQueueStore((s) => s.setSoundNotification);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const visibleCount = QUEUE_EVENT_TYPES.filter((eventType) => preferences.visible_event_types[eventType]).length;
+  const filterLabel = visibleCount === QUEUE_EVENT_TYPES.length
+    ? "All events"
+    : visibleCount === 0
+      ? "None"
+      : `${visibleCount} shown`;
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-primary tracking-wide">Queue</h2>
-        {hasItems && (
-          <div className="flex items-center gap-2">
+    <div className="flex items-center justify-between gap-2">
+      <h2 className="text-sm font-semibold text-primary tracking-wide">Queue</h2>
+      {hasItems && (
+        <div className="flex items-center gap-2">
+          <div className="relative">
             <button
               type="button"
-              onClick={markAllRead}
-              className="rounded-md px-2 py-1 text-[11px] text-muted-neutral hover:bg-wardian-card-bg-muted hover:text-bright-neutral transition-colors"
+              aria-label="Filter queue events"
+              aria-expanded={filtersOpen}
+              onClick={() => setFiltersOpen((open) => !open)}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-2 text-[11px] font-semibold text-muted-neutral transition-colors hover:text-bright-neutral"
             >
-              Mark all read
+              <ListFilter className="h-3.5 w-3.5" aria-hidden="true" />
+              Filter: {filterLabel}
+              <ChevronDown className="h-3 w-3" aria-hidden="true" />
             </button>
-            <button
-              type="button"
-              onClick={clearRead}
-              disabled={!hasReadItems}
-              className="rounded-md px-2 py-1 text-[11px] text-muted-neutral hover:bg-wardian-card-bg-muted hover:text-bright-neutral disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
-            >
-              Clear read
-            </button>
+            {filtersOpen && (
+              <div className="absolute right-0 top-8 z-20 w-56 rounded-md border border-wardian-border bg-wardian-bg p-2 shadow-xl">
+                {QUEUE_EVENT_TYPES.map((eventType) => (
+                  <label
+                    key={`show-${eventType}`}
+                    className="flex items-center gap-2 rounded px-2 py-1.5 text-[12px] font-medium text-muted-neutral transition-colors hover:bg-wardian-card-bg-muted hover:text-primary"
+                  >
+                    <input
+                      type="checkbox"
+                      aria-label={`Show ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
+                      checked={preferences.visible_event_types[eventType]}
+                      onChange={(event) => setEventVisible(eventType, event.target.checked)}
+                      className="h-3 w-3 accent-[var(--color-wardian-accent)]"
+                    />
+                    {QUEUE_EVENT_LABELS[eventType]}
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <SlidersHorizontal className="h-3.5 w-3.5 text-muted-neutral" aria-hidden="true" />
-        {QUEUE_EVENT_TYPES.map((eventType) => (
-          <QueuePreferenceToggle
-            key={`show-${eventType}`}
-            label={`Show ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
-            checked={preferences.visible_event_types[eventType]}
-            onChange={(checked) => setEventVisible(eventType, checked)}
-          />
-        ))}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Bell className="h-3.5 w-3.5 text-muted-neutral" aria-hidden="true" />
-        {QUEUE_EVENT_TYPES.map((eventType: QueueEventType) => (
-          <QueuePreferenceToggle
-            key={`desktop-${eventType}`}
-            label={`Desktop alert for ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
-            checked={preferences.desktop_notifications[eventType]}
-            onChange={(checked) => setDesktopNotification(eventType, checked)}
-          />
-        ))}
-        <Volume2 className="ml-1 h-3.5 w-3.5 text-muted-neutral" aria-hidden="true" />
-        {QUEUE_EVENT_TYPES.map((eventType: QueueEventType) => (
-          <QueuePreferenceToggle
-            key={`sound-${eventType}`}
-            label={`Sound alert for ${QUEUE_EVENT_LABELS[eventType].toLowerCase()}`}
-            checked={preferences.sound_notifications[eventType]}
-            onChange={(checked) => setSoundNotification(eventType, checked)}
-          />
-        ))}
-      </div>
+          <button
+            type="button"
+            onClick={markAllRead}
+            className="rounded-md px-2 py-1 text-[11px] text-muted-neutral hover:bg-wardian-card-bg-muted hover:text-bright-neutral transition-colors"
+          >
+            Mark all read
+          </button>
+          <button
+            type="button"
+            onClick={clearRead}
+            disabled={!hasReadItems}
+            className="rounded-md px-2 py-1 text-[11px] text-muted-neutral hover:bg-wardian-card-bg-muted hover:text-bright-neutral disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+          >
+            Clear read
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -166,12 +166,16 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   },
 
   addActionNeeded(sessionId, agentName, summary) {
-    const { items } = get();
+    const { items, _agentBuffers } = get();
     const recent = items.find(
       (i) => i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS,
     );
     if (recent) return;
 
+    const explicitSummary = summary?.trim();
+    const bufferedSummary = (_agentBuffers[sessionId] ?? "").trim();
+    const isGenericSummary = !explicitSummary || /^action needed$/i.test(explicitSummary);
+    const itemSummary = isGenericSummary ? (bufferedSummary || explicitSummary || "Action needed") : explicitSummary;
     const item: QueueItem = {
       id: crypto.randomUUID(),
       type: "action_needed",
@@ -179,14 +183,14 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       read: false,
       agent_session_id: sessionId,
       agent_name: agentName,
-      summary: summary?.trim() || "Action needed",
+      summary: boundSummary(itemSummary),
     };
 
     set((s) => {
       const next = [item, ...s.items];
       persistItems(next);
       notifyForItem(item, s.preferences);
-      return { items: next };
+      return { items: next, _agentBuffers: { ...s._agentBuffers, [sessionId]: "" } };
     });
   },
 

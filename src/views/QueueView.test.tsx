@@ -52,7 +52,7 @@ describe("QueueView", () => {
     expect(screen.queryByText("Completed")).not.toBeInTheDocument();
   });
 
-  it("renders an action-needed item with agent actions", async () => {
+  it("renders an action-needed item with inferred action choices", async () => {
     const onOpenAgent = vi.fn();
     const onSendAgentPrompt = vi.fn(async () => undefined);
     useQueueStore.setState({
@@ -63,22 +63,22 @@ describe("QueueView", () => {
         read: false,
         agent_session_id: "sess-1",
         agent_name: "My Coder",
-        summary: "Approve file write?",
+        summary: "Do you want to proceed?\n1. Yes\n2. No",
       }],
     });
 
     render(<QueueView onOpenAgent={onOpenAgent} onSendAgentPrompt={onSendAgentPrompt} />);
 
     expect(screen.getByText("Action needed")).toBeInTheDocument();
-    expect(screen.getByText("Approve file write?")).toBeInTheDocument();
+    expect(screen.getByTestId("queue-item-summary-item-action")).toHaveTextContent("Do you want to proceed? 1. Yes 2. No");
     fireEvent.click(screen.getByRole("button", { name: /open agent terminal/i }));
     expect(onOpenAgent).toHaveBeenCalledWith("sess-1");
 
-    fireEvent.change(screen.getByLabelText("Quick response"), { target: { value: "approve" } });
+    expect(screen.queryByLabelText("Quick response")).not.toBeInTheDocument();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /send quick response/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Send action response 1: Yes" }));
     });
-    expect(onSendAgentPrompt).toHaveBeenCalledWith("sess-1", "approve");
+    expect(onSendAgentPrompt).toHaveBeenCalledWith("sess-1", "1");
   });
 
   it("filters visible queue items by event type", () => {
@@ -116,17 +116,58 @@ describe("QueueView", () => {
     expect(screen.getByText("Visible Agent")).toBeInTheDocument();
   });
 
-  it("updates queue filter and alert toggles", () => {
+  it("filters from a compact header dropdown without showing alert rules", () => {
+    useQueueStore.setState({
+      items: [
+        {
+          id: "hidden-agent",
+          type: "agent_completed",
+          timestamp: Date.now(),
+          read: false,
+          agent_name: "Hidden Agent",
+          summary: "Done.",
+        },
+        {
+          id: "visible-action",
+          type: "action_needed",
+          timestamp: Date.now(),
+          read: false,
+          agent_name: "Visible Agent",
+          summary: "Needs approval.",
+        },
+      ],
+    });
+
     render(<QueueView />);
 
+    expect(screen.getByRole("button", { name: /filter queue events/i })).toHaveTextContent("Filter: All events");
+    expect(screen.queryByLabelText("Desktop alert for workflow failures")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Sound alert for action needed")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /filter queue events/i }));
     fireEvent.click(screen.getByLabelText("Show agent completions"));
-    fireEvent.click(screen.getByLabelText("Desktop alert for workflow failures"));
-    fireEvent.click(screen.getByLabelText("Sound alert for action needed"));
 
     const { preferences } = useQueueStore.getState();
     expect(preferences.visible_event_types.agent_completed).toBe(false);
-    expect(preferences.desktop_notifications.workflow_failed).toBe(true);
-    expect(preferences.sound_notifications.action_needed).toBe(false);
+    expect(screen.queryByText("Hidden Agent")).not.toBeInTheDocument();
+    expect(screen.getByText("Visible Agent")).toBeInTheDocument();
+  });
+
+  it("places the unread indicator near the card top-left", () => {
+    useQueueStore.setState({
+      items: [{
+        id: "item-1",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_name: "My Coder",
+        summary: "Done.",
+      }],
+    });
+
+    render(<QueueView />);
+
+    expect(screen.getByTestId("queue-unread-dot")).toHaveClass("left-2", "top-2");
   });
 
   it("renders a failed workflow item with error text", () => {
