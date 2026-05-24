@@ -36,15 +36,36 @@ impl Drop for ControlEndpointClaim {
     }
 }
 
+/// Run a synchronous closure inside a Tokio runtime context.
+///
+/// The Tauri `setup` hook runs on the main thread before any async runtime is
+/// entered, but several Tokio I/O constructors (e.g. `NamedPipeServer::create`
+/// on Windows, `UnixListener::bind` on Unix) register their handles with the
+/// reactor and panic when called outside a runtime. When a runtime is already
+/// current (e.g. inside a `#[tokio::test]` or a `tauri::async_runtime::spawn`
+/// task), invoke `f` directly to avoid nesting `block_on`, which Tokio rejects.
+/// Otherwise enter the Tauri-managed runtime via `block_on`. `f` is non-async,
+/// so `block_on` returns synchronously.
+fn run_in_tokio_runtime<R>(f: impl FnOnce() -> R) -> R {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        f()
+    } else {
+        tauri::async_runtime::block_on(async { f() })
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let pipe_name = wardian_core::control::pipe_name()
         .ok_or_else(|| std::io::Error::other("could not resolve Wardian control pipe"))?;
-    ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_name)
+
+    run_in_tokio_runtime(|| {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)
+    })
 }
 
 #[cfg(unix)]
@@ -58,10 +79,10 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
         std::fs::create_dir_all(parent)?;
     }
 
-    match UnixListener::bind(&socket_path) {
+    run_in_tokio_runtime(|| match UnixListener::bind(&socket_path) {
         Ok(listener) => Ok(ControlEndpointClaim {
             listener: Some(listener),
-            socket_path,
+            socket_path: socket_path.clone(),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             if UnixStream::connect(&socket_path).is_ok() {
@@ -70,12 +91,12 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
                 let _ = std::fs::remove_file(&socket_path);
                 UnixListener::bind(&socket_path).map(|listener| ControlEndpointClaim {
                     listener: Some(listener),
-                    socket_path,
+                    socket_path: socket_path.clone(),
                 })
             }
         }
         Err(error) => Err(error),
-    }
+    })
 }
 
 pub(crate) fn spawn_control_server(app: AppHandle, claim: ControlEndpointClaim) {
@@ -2566,6 +2587,30 @@ mod tests {
     use crate::state::ActiveAgent;
     use std::sync::{Arc, Mutex};
     use wardian_core::models::{AgentConfig, WorkflowDefinition, WorkflowNode, WorkflowSettings};
+
+    /// Regression test for the silent release-build crash where `claim_control_endpoint`
+    /// was called from Tauri's `setup` hook (no Tokio runtime context), causing
+    /// `tokio::net::windows::named_pipe::ServerOptions::create` to panic with
+    /// "there is no reactor running". This test runs as a plain `#[test]` — *not*
+    /// `#[tokio::test]` — so the absence of an ambient runtime mirrors the real
+    /// setup-hook environment. The claim must succeed without panicking.
+    #[test]
+    fn control_endpoint_claim_succeeds_without_ambient_tokio_runtime() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "test precondition: no Tokio runtime must be ambient on this thread, \
+             otherwise we are not exercising the setup-hook code path"
+        );
+
+        let claim = claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
+        drop(claim);
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
 
     #[tokio::test]
     async fn control_endpoint_claim_is_exclusive_for_current_home() {
