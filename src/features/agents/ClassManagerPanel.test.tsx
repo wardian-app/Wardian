@@ -36,6 +36,14 @@ describe('ClassManagerPanel', () => {
     expect(screen.getByRole('button', { name: 'Reset all default prompts' })).toBeInTheDocument();
   });
 
+  it('uses compact sidebar typography for title and section labels', () => {
+    render(<ClassManagerPanel agentClasses={mockClasses} onClassesUpdated={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: 'Classes', level: 2 })).toHaveClass('text-sm');
+    expect(screen.getByRole('heading', { name: 'Create Class', level: 3 })).toHaveClass('text-xs');
+    expect(screen.getByRole('heading', { name: 'Available Classes', level: 3 })).toHaveClass('text-xs');
+  });
+
   it('renders the Default badge only for default classes', () => {
     render(<ClassManagerPanel agentClasses={mockClasses} onClassesUpdated={vi.fn()} />);
     

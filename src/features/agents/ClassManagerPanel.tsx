@@ -65,7 +65,7 @@ export const ClassManagerPanel: React.FC<ClassManagerPanelProps> = ({
   return (
     <div data-testid="class-manager-panel" className="flex flex-col h-full">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-xl font-bold text-primary tracking-tight">Classes</h2>
+        <h2 className="text-sm font-bold text-primary tracking-tight">Classes</h2>
       </div>
 
       <div className="mb-6">

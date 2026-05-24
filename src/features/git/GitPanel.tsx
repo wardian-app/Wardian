@@ -437,7 +437,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   if (!selectedAgentId) {
     return (
       <div className="flex flex-col h-full w-full">
-        <h2 className="text-xl font-bold text-primary tracking-tight mb-4">Source Control</h2>
+        <h2 className="text-sm font-bold text-primary tracking-tight mb-4">Source Control</h2>
         <div className="flex flex-col items-center justify-center flex-1 text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="w-16 h-16 mb-4 text-gray-700/40">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -455,7 +455,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   if (error !== null) {
     return (
       <div className="flex flex-col h-full w-full">
-        <h2 className="text-xl font-bold text-primary tracking-tight mb-4">Source Control</h2>
+        <h2 className="text-sm font-bold text-primary tracking-tight mb-4">Source Control</h2>
         <div className="flex flex-col items-center justify-center flex-1 text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="w-16 h-16 mb-4 text-gray-700/40">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -480,7 +480,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   if (!status) {
     return (
       <div className="flex flex-col h-full w-full">
-        <h2 className="text-xl font-bold text-primary tracking-tight mb-4">Source Control</h2>
+        <h2 className="text-sm font-bold text-primary tracking-tight mb-4">Source Control</h2>
         <div className="text-sm text-[var(--color-wardian-text-muted)] animate-pulse px-1">Loading git status...</div>
       </div>
     );
@@ -493,7 +493,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   return (
     <div className="flex flex-col h-full w-full relative">
-      <h2 className="text-xl font-bold text-primary tracking-tight mb-2">Source Control</h2>
+      <h2 className="text-sm font-bold text-primary tracking-tight mb-2">Source Control</h2>
 
       {/* Branch bar */}
       <div className="flex items-center gap-2 py-1.5 mb-3 border-b border-wardian-border/30">
