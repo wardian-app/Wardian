@@ -66,6 +66,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     keywords: ["appearance", "color", "dark", "light"],
   },
   {
+    id: "titlebar-telemetry",
+    category: "Appearance",
+    label: "Top bar telemetry",
+    detail: "Shows CPU, memory, and active-agent counts in the top bar.",
+    keywords: ["appearance", "titlebar", "top bar", "telemetry", "cpu", "memory", "active"],
+  },
+  {
     id: "terminal-font-size",
     category: "Terminal",
     label: "Terminal font size",
@@ -273,6 +280,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setTerminalFontSize,
     terminalFontFamily,
     setTerminalFontFamily,
+    titlebarTelemetryVisible,
+    setTitlebarTelemetryVisible,
     gridCardDisplayMode,
     setGridCardDisplayMode,
     watchlistNewAgentPosition,
@@ -403,6 +412,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
   const handleTerminalFontFamilyChange = async (value: string) => {
     setTerminalFontFamily(value);
+    await useSettingsStore.getState().saveAppSettings();
+  };
+
+  const handleTitlebarTelemetryChange = async (value: string) => {
+    setTitlebarTelemetryVisible(value === "show");
     await useSettingsStore.getState().saveAppSettings();
   };
 
@@ -550,6 +564,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               <option value="system">System</option>
               <option value="dark">Dark</option>
               <option value="light">Light</option>
+            </select>
+          </SettingRow>
+        );
+      case "titlebar-telemetry":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <select
+              aria-label="Top bar telemetry"
+              value={titlebarTelemetryVisible ? "show" : "hide"}
+              onChange={(event) => void handleTitlebarTelemetryChange(event.target.value)}
+              className={optionClass}
+            >
+              <option value="show">Show</option>
+              <option value="hide">Hide</option>
             </select>
           </SettingRow>
         );

@@ -130,6 +130,7 @@ interface SettingsState {
   terminalFontFamily: string;
   gridCardDisplayMode: GridCardDisplayMode;
   watchlistNewAgentPosition: WatchlistNewAgentPosition;
+  titlebarTelemetryVisible: boolean;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -148,6 +149,7 @@ interface SettingsState {
   setTerminalFontFamily: (value: string) => void;
   setGridCardDisplayMode: (value: GridCardDisplayMode) => void;
   setWatchlistNewAgentPosition: (value: WatchlistNewAgentPosition) => void;
+  setTitlebarTelemetryVisible: (value: boolean) => void;
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
@@ -172,6 +174,7 @@ type PersistedSettingsState = Pick<
   | 'terminalFontFamily'
   | 'gridCardDisplayMode'
   | 'watchlistNewAgentPosition'
+  | 'titlebarTelemetryVisible'
 >;
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -190,6 +193,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   terminal_font_family: null,
   grid_card_display_mode: 'terminal',
   watchlist_new_agent_position: 'top',
+  titlebar_telemetry_visible: true,
 };
 
 const EMPTY_APP_SETTINGS_OVERRIDES: AppSettingsOverrides = {};
@@ -258,6 +262,9 @@ function appOverridesFromSettings(settings: AppSettings): AppSettingsOverrides {
     ...(normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position
       ? { watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) }
       : {}),
+    ...((settings.titlebar_telemetry_visible !== false) !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible
+      ? { titlebar_telemetry_visible: settings.titlebar_telemetry_visible !== false }
+      : {}),
   };
 }
 
@@ -269,6 +276,7 @@ function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
     terminal_font_family: state.terminalFontFamily.trim() || null,
     grid_card_display_mode: state.gridCardDisplayMode,
     watchlist_new_agent_position: state.watchlistNewAgentPosition,
+    titlebar_telemetry_visible: state.titlebarTelemetryVisible,
   });
 }
 
@@ -320,6 +328,9 @@ function normalizeAppOverrides(overrides: AppSettingsOverrides | undefined): App
     ...(overrides?.watchlist_new_agent_position
       ? { watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(overrides.watchlist_new_agent_position) }
       : {}),
+    ...(typeof overrides?.titlebar_telemetry_visible === 'boolean'
+      ? { titlebar_telemetry_visible: overrides.titlebar_telemetry_visible }
+      : {}),
   };
 }
 
@@ -349,7 +360,8 @@ function appSettingsAreDefaults(settings: AppSettings) {
     normalizeTerminalFontSize(settings.terminal_font_size) === DEFAULT_APP_SETTINGS.terminal_font_size &&
     (settings.terminal_font_family?.trim() ?? '') === '' &&
     normalizeGridCardDisplayMode(settings.grid_card_display_mode) === DEFAULT_APP_SETTINGS.grid_card_display_mode &&
-    normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) === DEFAULT_APP_SETTINGS.watchlist_new_agent_position
+    normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position) === DEFAULT_APP_SETTINGS.watchlist_new_agent_position &&
+    (settings.titlebar_telemetry_visible !== false) === DEFAULT_APP_SETTINGS.titlebar_telemetry_visible
   );
 }
 
@@ -360,7 +372,8 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
     normalizeTerminalFontSize(state.terminalFontSize) !== DEFAULT_APP_SETTINGS.terminal_font_size ||
     state.terminalFontFamily.trim() !== '' ||
     state.gridCardDisplayMode !== DEFAULT_APP_SETTINGS.grid_card_display_mode ||
-    state.watchlistNewAgentPosition !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position
+    state.watchlistNewAgentPosition !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position ||
+    state.titlebarTelemetryVisible !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible
   );
 }
 
@@ -373,6 +386,7 @@ export const useSettingsStore = create<SettingsState>()(
       terminalFontFamily: '',
       gridCardDisplayMode: 'terminal',
       watchlistNewAgentPosition: 'top',
+      titlebarTelemetryVisible: true,
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -422,6 +436,10 @@ export const useSettingsStore = create<SettingsState>()(
           app_settings_overrides: { ...state.app_settings_overrides, watchlist_new_agent_position: normalized },
         };
       }),
+      setTitlebarTelemetryVisible: (titlebarTelemetryVisible) => set((state) => ({
+        titlebarTelemetryVisible,
+        app_settings_overrides: { ...state.app_settings_overrides, titlebar_telemetry_visible: titlebarTelemetryVisible },
+      })),
       setShellId: (shell_id) => set((state) => ({
         shell_id,
         shell_settings_overrides: { ...state.shell_settings_overrides, shell_id },
@@ -505,6 +523,7 @@ export const useSettingsStore = create<SettingsState>()(
             terminalFontFamily: settings.terminal_font_family?.trim() ?? '',
             gridCardDisplayMode: normalizeGridCardDisplayMode(settings.grid_card_display_mode),
             watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position),
+            titlebarTelemetryVisible: settings.titlebar_telemetry_visible !== false,
             app_settings_overrides: normalizeAppOverrides(overrides),
             app_settings_loaded: true,
           });
@@ -521,6 +540,7 @@ export const useSettingsStore = create<SettingsState>()(
           terminal_font_family: get().terminalFontFamily.trim() || null,
           grid_card_display_mode: normalizeGridCardDisplayMode(get().gridCardDisplayMode),
           watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(get().watchlistNewAgentPosition),
+          titlebar_telemetry_visible: get().titlebarTelemetryVisible,
         };
         const settings: SettingsDocument<AppSettings, AppSettingsOverrides> = {
           schema_version: 2,
@@ -537,6 +557,7 @@ export const useSettingsStore = create<SettingsState>()(
           terminalFontFamily: saved.terminal_font_family?.trim() ?? '',
           gridCardDisplayMode: normalizeGridCardDisplayMode(saved.grid_card_display_mode),
           watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(saved.watchlist_new_agent_position),
+          titlebarTelemetryVisible: saved.titlebar_telemetry_visible !== false,
           app_settings_overrides: normalizeAppOverrides(overrides),
           app_settings_loaded: true,
         });
@@ -632,6 +653,7 @@ export const useSettingsStore = create<SettingsState>()(
           terminalFontFamily: state.terminalFontFamily?.trim() ?? '',
           gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode ?? state.grid_card_display_mode),
           watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
+          titlebarTelemetryVisible: typeof state.titlebarTelemetryVisible === 'boolean' ? state.titlebarTelemetryVisible : true,
         };
       },
       partialize: (state) => ({
@@ -641,6 +663,7 @@ export const useSettingsStore = create<SettingsState>()(
         terminalFontFamily: state.terminalFontFamily.trim(),
         gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode),
         watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
+        titlebarTelemetryVisible: state.titlebarTelemetryVisible,
       }),
     }
   )

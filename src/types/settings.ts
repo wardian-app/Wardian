@@ -48,6 +48,7 @@ export interface AppSettings {
   terminal_font_family: string | null;
   grid_card_display_mode: 'terminal' | 'chat';
   watchlist_new_agent_position: WatchlistNewAgentPosition;
+  titlebar_telemetry_visible: boolean;
 }
 
 export interface AppSettingsOverrides {
@@ -57,6 +58,7 @@ export interface AppSettingsOverrides {
   terminal_font_family?: string | null;
   grid_card_display_mode?: 'terminal' | 'chat';
   watchlist_new_agent_position?: WatchlistNewAgentPosition;
+  titlebar_telemetry_visible?: boolean;
 }
 
 export interface SettingsDocument<TSettings, TOverrides> {

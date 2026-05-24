@@ -19,6 +19,8 @@ pub struct AppSettings {
     pub grid_card_display_mode: String,
     #[serde(default = "default_watchlist_new_agent_position")]
     pub watchlist_new_agent_position: String,
+    #[serde(default = "default_titlebar_telemetry_visible")]
+    pub titlebar_telemetry_visible: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +37,8 @@ pub struct AppSettingsOverrides {
     pub grid_card_display_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchlist_new_agent_position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub titlebar_telemetry_visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +66,7 @@ impl Default for AppSettings {
             terminal_font_family: None,
             grid_card_display_mode: default_grid_card_display_mode(),
             watchlist_new_agent_position: default_watchlist_new_agent_position(),
+            titlebar_telemetry_visible: default_titlebar_telemetry_visible(),
         }
     }
 }
@@ -80,6 +85,25 @@ fn default_grid_card_display_mode() -> String {
 
 fn default_watchlist_new_agent_position() -> String {
     "top".to_string()
+}
+
+fn default_titlebar_telemetry_visible() -> bool {
+    titlebar_telemetry_visible_default_for_build(
+        cfg!(debug_assertions),
+        option_env!("WARDIAN_UPDATE_CHANNEL"),
+    )
+}
+
+fn titlebar_telemetry_visible_default_for_build(
+    debug_build: bool,
+    update_channel: Option<&str>,
+) -> bool {
+    let official_stable_release = !debug_build
+        && update_channel
+            .map(str::trim)
+            .filter(|channel| !channel.is_empty())
+            == Some("stable");
+    !official_stable_release
 }
 
 pub fn load_app_settings() -> Result<AppSettings, String> {
@@ -214,6 +238,18 @@ fn app_settings_document_from_overrides(
 }
 
 fn app_settings_from_overrides(overrides: &AppSettingsOverrides) -> AppSettings {
+    app_settings_from_overrides_for_build(
+        overrides,
+        cfg!(debug_assertions),
+        option_env!("WARDIAN_UPDATE_CHANNEL"),
+    )
+}
+
+fn app_settings_from_overrides_for_build(
+    overrides: &AppSettingsOverrides,
+    debug_build: bool,
+    update_channel: Option<&str>,
+) -> AppSettings {
     let defaults = AppSettings::default();
     normalize_app_settings(AppSettings {
         theme: overrides.theme.clone().unwrap_or(defaults.theme),
@@ -235,6 +271,9 @@ fn app_settings_from_overrides(overrides: &AppSettingsOverrides) -> AppSettings 
             .watchlist_new_agent_position
             .clone()
             .unwrap_or(defaults.watchlist_new_agent_position),
+        titlebar_telemetry_visible: overrides.titlebar_telemetry_visible.unwrap_or_else(|| {
+            titlebar_telemetry_visible_default_for_build(debug_build, update_channel)
+        }),
     })
 }
 
@@ -273,6 +312,9 @@ fn app_overrides_from_settings(
         watchlist_new_agent_position: (settings.watchlist_new_agent_position
             != defaults.watchlist_new_agent_position)
             .then(|| settings.watchlist_new_agent_position.clone()),
+        titlebar_telemetry_visible: (settings.titlebar_telemetry_visible
+            != defaults.titlebar_telemetry_visible)
+            .then_some(settings.titlebar_telemetry_visible),
     }
 }
 
@@ -328,6 +370,54 @@ mod tests {
         assert_eq!(settings.terminal_font_family, None);
         assert_eq!(settings.grid_card_display_mode, "terminal");
         assert_eq!(settings.watchlist_new_agent_position, "top");
+        assert!(settings.titlebar_telemetry_visible);
+    }
+
+    #[test]
+    fn app_settings_defaults_titlebar_telemetry_visible_for_non_stable_build() {
+        let debug_settings = app_settings_from_overrides_for_build(
+            &AppSettingsOverrides::default(),
+            true,
+            Some("stable"),
+        );
+        let unmarked_release_settings =
+            app_settings_from_overrides_for_build(&AppSettingsOverrides::default(), false, None);
+
+        assert!(debug_settings.titlebar_telemetry_visible);
+        assert!(unmarked_release_settings.titlebar_telemetry_visible);
+    }
+
+    #[test]
+    fn app_settings_defaults_titlebar_telemetry_hidden_for_stable_release_context() {
+        let settings = app_settings_from_overrides_for_build(
+            &AppSettingsOverrides::default(),
+            false,
+            Some("stable"),
+        );
+
+        assert!(!settings.titlebar_telemetry_visible);
+    }
+
+    #[test]
+    fn app_settings_persists_titlebar_telemetry_override() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("settings/app.json");
+        let document = AppSettingsDocument {
+            schema_version: 2,
+            settings: AppSettings::default(),
+            overrides: AppSettingsOverrides {
+                titlebar_telemetry_visible: Some(false),
+                ..AppSettingsOverrides::default()
+            },
+            persisted: false,
+        };
+
+        let saved = save_app_settings_document_to_path(&path, &document).expect("save settings");
+        let loaded = load_app_settings_document_from_path(&path).expect("load settings");
+
+        assert!(!saved.settings.titlebar_telemetry_visible);
+        assert_eq!(loaded.overrides.titlebar_telemetry_visible, Some(false));
+        assert!(!loaded.settings.titlebar_telemetry_visible);
     }
 
     #[test]
@@ -341,6 +431,7 @@ mod tests {
             terminal_font_family: Some("JetBrains Mono, monospace".to_string()),
             grid_card_display_mode: "chat".to_string(),
             watchlist_new_agent_position: "top".to_string(),
+            titlebar_telemetry_visible: true,
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -363,6 +454,7 @@ mod tests {
             terminal_font_family: None,
             grid_card_display_mode: "terminal".to_string(),
             watchlist_new_agent_position: "top".to_string(),
+            titlebar_telemetry_visible: true,
         };
 
         save_app_settings_to_path(&path, &settings).expect("save settings");

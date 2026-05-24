@@ -17,9 +17,9 @@ Settings in this screen are global. Wardian stores durable settings under
 entire resolved settings object. Missing fields inherit Wardian's current
 computed defaults for the app and operating system.
 
-- `settings/app.json`: app preferences such as theme, Grid card display,
-  Watchlist new agent position, terminal font size, terminal font family, and
-  Gemini auto-patch.
+- `settings/app.json`: app preferences such as theme, top bar telemetry
+  visibility, Grid card display, Watchlist new agent position, terminal font
+  size, terminal font family, and Gemini auto-patch.
 - `settings/shell.json`: runtime preferences such as shell selection, default
   provider, regular agent session policy, and Codex runtime defaults.
 
@@ -34,7 +34,7 @@ setting labels, short descriptions, and related keywords.
 Categories:
 
 - **General**: app version and update status.
-- **Appearance**: app theme.
+- **Appearance**: app theme and top bar telemetry visibility.
 - **Grid**: display mode for agent cards in the main Grid view.
 - **Watchlist**: roster behavior for newly spawned agents.
 - **Terminal**: terminal font and shell defaults.
@@ -82,6 +82,16 @@ Theme options:
 
 Wardian applies the selected mode to the app UI and syncs the OpenCode theme
 preference through backend settings.
+
+The **Top bar telemetry** control shows or hides the CPU, memory, and active
+agent count cluster beside the left sidebar toggle. It does not disable telemetry
+collection or remove telemetry from Dashboard, Grid, Graph, or Watchlist views.
+
+![Settings Appearance section showing the Top bar telemetry visibility control](../assets/screenshots/settings/titlebar-telemetry-setting.png)
+
+Official installed stable release builds hide top bar telemetry by default.
+Development builds, prerelease builds, and unmarked local source-built release
+binaries show it by default.
 
 ## Grid
 
