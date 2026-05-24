@@ -1,11 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, RefreshCw, Send } from "lucide-react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import type { AgentChatEvent, AgentChatRole, RemoteAgentSummary } from "../../types";
 import { toActivityBlock } from "../grid/activityBlocks";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
 import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
+import { remoteClient } from "./remoteClient";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -32,9 +36,15 @@ const iconButtonClass =
 const modeButtonClass =
   "min-h-9 flex-1 rounded-md px-3 text-xs font-semibold transition-colors";
 
+const REMOTE_TERMINAL_THEME = {
+  background: "#020402",
+  foreground: "#EEF2EE",
+  cursor: "#F1D382",
+  selectionBackground: "#1E261E",
+};
+
 export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({ agent }) => {
   const activeAgentViewMode = useRemoteStore((state) => state.activeAgentViewMode);
-  const terminalSnapshot = useRemoteStore((state) => state.terminalSnapshot);
   const terminalLoading = useRemoteStore((state) => state.terminalLoading);
   const terminalError = useRemoteStore((state) => state.terminalError);
   const chatEvents = useRemoteStore((state) => state.chatEvents);
@@ -60,7 +70,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
   useEffect(() => {
     contentEndRef.current?.scrollIntoView({ block: "end" });
-  }, [activeAgentViewMode, terminalSnapshot?.text, visibleEvents]);
+  }, [activeAgentViewMode, visibleEvents]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -136,7 +146,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
       {activeAgentViewMode === "chat" ? (
         <ChatPane agent={agent} visibleEvents={visibleEvents} loading={chatLoading} error={chatError} endRef={contentEndRef} />
       ) : (
-        <TerminalPane agent={agent} text={terminalSnapshot?.text ?? ""} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
+        <TerminalPane agent={agent} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
       )}
 
       <form onSubmit={(event) => void submit(event)} className="shrink-0 border-t border-wardian-border bg-wardian-bg/95 p-3 backdrop-blur">
@@ -165,39 +175,129 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
 function TerminalPane({
   agent,
-  text,
   loading,
   error,
   endRef,
 }: {
   agent: RemoteAgentSummary;
-  text: string;
   loading: boolean;
   error: string;
   endRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const [streamError, setStreamError] = useState("");
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host) return;
+    host.replaceChildren();
+    setConnected(false);
+    setStreamError("");
+
+    const terminal = new Terminal({
+      allowProposedApi: false,
+      cols: 80,
+      convertEol: false,
+      cursorBlink: true,
+      disableStdin: false,
+      fontSize: 11,
+      rows: 24,
+      scrollback: 1_000,
+      theme: REMOTE_TERMINAL_THEME,
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon?.(fitAddon);
+    terminal.open?.(host);
+    fitAddon.fit?.();
+    terminalRef.current = terminal;
+
+    terminal.onData?.((data) => {
+      socketRef.current?.send(JSON.stringify({ type: "input", data }));
+    });
+    terminal.onBinary?.((data) => {
+      socketRef.current?.send(JSON.stringify({ type: "binary", data_base64: binaryStringToBase64(data) }));
+    });
+
+    let disposed = false;
+    void remoteClient
+      .openTerminalStream(agent.session_id, terminal.cols || 80, terminal.rows || 24, {
+        onMessage: (message) => {
+          if (disposed) return;
+          setConnected(true);
+          if (message.type === "snapshot") {
+            terminal.reset?.();
+            terminal.resize?.(message.cols, message.rows);
+            terminal.write?.(base64ToTerminalString(message.state_base64));
+            return;
+          }
+          if (message.type === "update") {
+            terminal.write?.(base64ToTerminalString(message.state_base64));
+            return;
+          }
+          if (message.type === "ownership") {
+            terminal.resize?.(message.cols, message.rows);
+          }
+        },
+        onSessionExpired: () => setStreamError("Remote session expired."),
+        onError: (message) => setStreamError(message),
+        onClose: () => {
+          if (!disposed) setConnected(false);
+        },
+      })
+      .then((socket) => {
+        if (disposed) {
+          socket.close();
+          return;
+        }
+        socketRef.current = socket;
+      })
+      .catch((nextError: unknown) => {
+        if (!disposed) setStreamError(nextError instanceof Error ? nextError.message : String(nextError));
+      });
+
+    return () => {
+      disposed = true;
+      socketRef.current?.send(JSON.stringify({ type: "detach" }));
+      socketRef.current?.close();
+      socketRef.current = null;
+      terminalRef.current = null;
+      terminal.dispose?.();
+      host.replaceChildren();
+    };
+  }, [agent.session_id]);
+
   return (
-    <section className="min-h-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} terminal`}>
-      {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
-      {loading && !text && (
+    <section className="min-h-0 flex-1 overflow-hidden px-3 py-3" aria-label={`${agent.session_name} terminal`}>
+      {(error || streamError) && <div className="mb-2 rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error || streamError}</div>}
+      {(loading || !connected) && !streamError && (
         <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
           <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
-          Loading terminal...
+          Attaching terminal...
         </div>
       )}
-      {!loading && !text && (
-        <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
-          No terminal output yet.
-        </div>
-      )}
-      {text && (
-        <pre className="min-h-full whitespace-pre-wrap break-words rounded-md border border-wardian-border bg-wardian-card px-3 py-3 font-mono text-[11px] leading-relaxed text-primary">
-          {text}
-        </pre>
-      )}
+      <div className="mt-2 h-full min-h-0 overflow-hidden rounded-md border border-wardian-border bg-wardian-card">
+        <div ref={terminalHostRef} data-testid="remote-terminal-attach" className="h-full min-h-[280px] w-full overflow-hidden" />
+      </div>
       <div ref={endRef} aria-hidden="true" />
     </section>
   );
+}
+
+function base64ToTerminalString(value: string) {
+  const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function binaryStringToBase64(value: string) {
+  const bytes = Uint8Array.from(value, (char) => char.charCodeAt(0));
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
 }
 
 function ChatPane({

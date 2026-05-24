@@ -364,7 +364,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
   });
 
-  it("opens a selected agent detail view with terminal selected by default, keeps chat one tap away, and sends prompts", async () => {
+  it("opens a selected agent detail view with terminal attach selected by default, keeps chat one tap away, and sends prompts", async () => {
     let chatCalls = 0;
     let terminalCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -467,9 +467,25 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
 
-    expect(await screen.findByText("terminal says ready")).toBeVisible();
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    expect(MockWebSocket.instances[1]?.url).toContain("/remote/api/agents/agent-1/terminal-stream");
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+    });
+    expect(JSON.parse(MockWebSocket.instances[1]?.sent[0] ?? "{}")).toEqual({
+      ticket: "ws-ticket-1",
+      cols: 80,
+      rows: 24,
+    });
+    const terminalTicketCall = fetchMock.mock.calls
+      .filter(([url]) => url === "/remote/api/ws-ticket")
+      .map(([, init]) => JSON.parse(init?.body as string))
+      .find((body) => body.stream === "terminal_attach");
+    expect(terminalTicketCall).toEqual({ stream: "terminal_attach" });
+    expect(terminalCalls).toBe(0);
+    expect(screen.getByTestId("remote-terminal-attach")).toBeVisible();
     expect(screen.getByTestId("remote-agent-detail")).toHaveClass("h-dvh", "overflow-hidden");
-    expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("min-h-0", "overflow-y-auto");
+    expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("min-h-0", "overflow-hidden");
     expect(screen.getByRole("button", { name: "Terminal" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "false");
     expect(chatCalls).toBe(0);
@@ -498,7 +514,7 @@ describe("RemoteMobileApp", () => {
     });
   });
 
-  it("refreshes the selected terminal when the status stream updates that agent", async () => {
+  it("does not poll terminal snapshots when the status stream updates the attached terminal", async () => {
     let terminalCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
@@ -565,7 +581,8 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    expect(await screen.findByText("First terminal chunk.")).toBeVisible();
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    expect(terminalCalls).toBe(0);
 
     act(() => {
       MockWebSocket.instances[0]?.emit("message", {
@@ -586,11 +603,11 @@ describe("RemoteMobileApp", () => {
       });
     });
 
-    expect(await screen.findByText("Second terminal chunk.")).toBeVisible();
-    expect(terminalCalls).toBeGreaterThanOrEqual(2);
+    await waitFor(() => expect(screen.getByText("Processing...")).toBeVisible());
+    expect(terminalCalls).toBe(0);
   });
 
-  it("coalesces bursty status updates into one selected terminal refresh", async () => {
+  it("ignores bursty status updates for terminal snapshot polling while attached", async () => {
     let terminalCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
@@ -657,7 +674,7 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    expect(await screen.findByText("Stable terminal.")).toBeVisible();
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
     const scrollCallsAfterOpen = scrollIntoViewMock.mock.calls.length;
 
     act(() => {
@@ -681,11 +698,12 @@ describe("RemoteMobileApp", () => {
       }
     });
 
-    await waitFor(() => expect(terminalCalls).toBe(2));
+    await waitFor(() => expect(screen.getByText("Idle")).toBeVisible());
+    expect(terminalCalls).toBe(0);
     expect(scrollIntoViewMock).toHaveBeenCalledTimes(scrollCallsAfterOpen);
   });
 
-  it("refreshes the selected terminal for unchanged active-agent status frames", async () => {
+  it("does not refresh terminal snapshots for unchanged active-agent status frames", async () => {
     let terminalCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
@@ -752,7 +770,7 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    expect(await screen.findByText("Stable terminal.")).toBeVisible();
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
 
     act(() => {
       MockWebSocket.instances[0]?.emit("message", {
@@ -773,14 +791,12 @@ describe("RemoteMobileApp", () => {
       });
     });
 
-    expect(await screen.findByText("Updated terminal.")).toBeVisible();
-    expect(terminalCalls).toBeGreaterThanOrEqual(2);
+    await waitFor(() => expect(screen.getByText("Idle")).toBeVisible());
+    expect(terminalCalls).toBe(0);
   });
 
-  it("keeps the newest terminal snapshot when refresh responses arrive out of order", async () => {
+  it("keeps terminal rendering on the terminal stream instead of snapshot refresh ordering", async () => {
     let terminalCalls = 0;
-    let resolveFirst: ((response: Response) => void) | null = null;
-    let resolveSecond: ((response: Response) => void) | null = null;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -816,14 +832,7 @@ describe("RemoteMobileApp", () => {
       }
       if (url === "/remote/api/agents/agent-1/terminal") {
         terminalCalls += 1;
-        if (terminalCalls === 1) {
-          return new Promise<Response>((resolve) => {
-            resolveFirst = resolve;
-          });
-        }
-        return new Promise<Response>((resolve) => {
-          resolveSecond = resolve;
-        });
+        return Promise.resolve(new Response("{}", { status: 500 }));
       }
       if (url === "/remote/api/workflows") {
         return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
@@ -841,52 +850,33 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    await waitFor(() => expect(terminalCalls).toBe(1));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+    });
+    act(() => {
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("new terminal"),
+        }),
+      });
+    });
+
     await act(async () => {
       void useRemoteStore.getState().refreshActiveAgentTerminal();
     });
-    await waitFor(() => expect(terminalCalls).toBe(2));
 
-    act(() => {
-      resolveSecond?.(
-        new Response(
-          JSON.stringify({
-            snapshot: {
-              cursor: "agent-1:0000000000000002",
-              text: "new terminal",
-              truncated: false,
-              omitted_bytes: 0,
-            },
-          }),
-          { status: 200 },
-        ),
-      );
-    });
-    expect(await screen.findByText("new terminal")).toBeVisible();
-
-    await act(async () => {
-      resolveFirst?.(
-        new Response(
-          JSON.stringify({
-            snapshot: {
-              cursor: "agent-1:0000000000000001",
-              text: "old terminal",
-              truncated: false,
-              omitted_bytes: 0,
-            },
-          }),
-          { status: 200 },
-        ),
-      );
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(screen.getByText("new terminal")).toBeVisible();
-    expect(screen.queryByText("old terminal")).not.toBeInTheDocument();
+    expect(terminalCalls).toBe(0);
+    expect(MockWebSocket.instances[1]?.sent[0]).toContain("ws-ticket-1");
   });
 
-  it("keeps terminal read failures local to the active agent detail view", async () => {
+  it("keeps terminal attach failures local to the active agent detail view", async () => {
+    let wsTicketCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -927,6 +917,10 @@ describe("RemoteMobileApp", () => {
         return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
       }
       if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        wsTicketCalls += 1;
+        if (wsTicketCalls === 2) {
+          return Promise.resolve(new Response(JSON.stringify({ ok: false, code: "terminal_attach_failed" }), { status: 400 }));
+        }
         return Promise.resolve(
           new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
             status: 200,
@@ -942,6 +936,7 @@ describe("RemoteMobileApp", () => {
 
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
     expect(await screen.findByText("Remote request failed: 400")).toBeVisible();
+    expect(wsTicketCalls).toBe(2);
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
   });
 

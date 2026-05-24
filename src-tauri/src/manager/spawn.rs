@@ -494,6 +494,7 @@ pub async fn spawn_agent(
     let pty_provider = provider.clone();
     let sid_for_pty = sid_out.clone();
     let pty_emit_app = app.clone();
+    let terminal_attach = app.state::<AppState>().terminal_attach.clone();
     let config_lock_clone = config_lock.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
@@ -545,6 +546,7 @@ pub async fn spawn_agent(
                         opencode_chunks_logged += 1;
                     }
                     had_pty_output = true;
+                    terminal_attach.process_output(&sid_for_pty, &buf[0..n]);
                     if let Ok(mut watch_state) = watch_state_clone.lock() {
                         watch_state.push_output(&buf[0..n]);
                     }

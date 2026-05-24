@@ -6,6 +6,7 @@ import type {
   RemoteAgentActionRequest,
   RemoteAgentSummary,
   RemoteTerminalSnapshot,
+  RemoteTerminalStreamMessage,
   RemoteWebSocketTicketResponse,
   RemoteWorkflowRunRequest,
   RemoteWorkflowStopRequest,
@@ -154,9 +155,15 @@ export const remoteClient = {
     });
   },
   async createStatusStreamTicket() {
+    return this.createWebSocketTicket("agent_status");
+  },
+  async createTerminalStreamTicket() {
+    return this.createWebSocketTicket("terminal_attach");
+  },
+  async createWebSocketTicket(stream: "agent_status" | "terminal_attach") {
     return remoteJson<RemoteWebSocketTicketResponse>("/remote/api/ws-ticket", {
       method: "POST",
-      body: JSON.stringify({ stream: "agent_status" }),
+      body: JSON.stringify({ stream }),
     });
   },
   async openStatusStream(handlers: {
@@ -193,6 +200,48 @@ export const remoteClient = {
       handlers.onError?.();
     });
     socket.addEventListener("error", () => handlers.onError?.());
+    socket.addEventListener("close", () => handlers.onClose?.());
+    return socket;
+  },
+  async openTerminalStream(
+    sessionId: string,
+    cols: number,
+    rows: number,
+    handlers: {
+      onMessage: (message: RemoteTerminalStreamMessage) => void;
+      onSessionExpired?: () => void;
+      onError?: (message: string) => void;
+      onClose?: () => void;
+    },
+  ) {
+    const ticket = await this.createTerminalStreamTicket();
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(
+      `${protocol}//${window.location.host}/remote/api/agents/${encodeURIComponent(sessionId)}/terminal-stream`,
+    );
+
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({ ticket: ticket.ticket, cols, rows }));
+    });
+    socket.addEventListener("message", (event) => {
+      let data: RemoteTerminalStreamMessage;
+      try {
+        data = JSON.parse(String(event.data)) as RemoteTerminalStreamMessage;
+      } catch {
+        handlers.onError?.("invalid_terminal_stream_message");
+        return;
+      }
+      if (data.type === "error") {
+        if (data.code === "session_expired" || data.code === "invalid_websocket_ticket") {
+          handlers.onSessionExpired?.();
+          return;
+        }
+        handlers.onError?.(data.code);
+        return;
+      }
+      handlers.onMessage(data);
+    });
+    socket.addEventListener("error", () => handlers.onError?.("terminal_stream_error"));
     socket.addEventListener("close", () => handlers.onClose?.());
     return socket;
   },

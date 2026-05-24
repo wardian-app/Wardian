@@ -25,7 +25,9 @@ use tauri::{AppHandle, Manager};
 const REMOTE_SESSION_COOKIE_NAME: &str = "__Host-wardian_remote_session";
 const REMOTE_CSRF_HEADER_NAME: &str = "x-wardian-csrf";
 const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
+const REMOTE_TERMINAL_ATTACH_STREAM_NAME: &str = "terminal_attach";
 const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const TERMINAL_ATTACH_WARM_DISPOSE_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
 
@@ -102,6 +104,10 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route(
             "/remote/api/agents/{session_id}/terminal",
             get(load_remote_agent_terminal),
+        )
+        .route(
+            "/remote/api/agents/{session_id}/terminal-stream",
+            get(terminal_stream_upgrade),
         )
         .route("/remote/api/agents/action", post(run_agent_action))
         .route("/remote/api/workflows", get(list_remote_workflows))
@@ -918,6 +924,18 @@ async fn status_stream_upgrade(
     }))
 }
 
+async fn terminal_stream_upgrade(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, RemoteGatewayError> {
+    require_audited_request_boundary(&ctx.config, &headers, true, "terminal_stream_upgrade")?;
+    Ok(ws.on_upgrade(move |socket| async move {
+        handle_terminal_socket(ctx, session_id, socket).await;
+    }))
+}
+
 async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) {
     let first_message =
         match tokio::time::timeout(WEBSOCKET_FIRST_TICKET_TIMEOUT, socket.recv()).await {
@@ -1011,6 +1029,173 @@ async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) 
     crate::remote::auth::close_status_stream(&mut runtime, &ticket_record.session_id);
 }
 
+async fn handle_terminal_socket(
+    ctx: RemoteGatewayContext,
+    session_id: String,
+    mut socket: WebSocket,
+) {
+    let first_message =
+        match tokio::time::timeout(WEBSOCKET_FIRST_TICKET_TIMEOUT, socket.recv()).await {
+            Ok(Some(Ok(first_message))) => first_message,
+            Ok(Some(Err(_))) | Ok(None) => return,
+            Err(_) => {
+                send_socket_error(&mut socket, "ticket_timeout").await;
+                return;
+            }
+        };
+    let open_message = match parse_terminal_attach_open_message(first_message) {
+        Ok(open_message) => open_message,
+        Err(code) => {
+            send_socket_error(&mut socket, code).await;
+            return;
+        }
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let state = ctx.app.state::<crate::state::AppState>();
+    let ticket_record = {
+        let mut runtime = state.remote_runtime.lock().await;
+        match crate::remote::auth::consume_websocket_ticket(
+            &mut runtime,
+            &open_message.ticket,
+            now_ms,
+        ) {
+            Ok(record) => record,
+            Err(_) => {
+                drop(runtime);
+                send_socket_error(&mut socket, "invalid_websocket_ticket").await;
+                return;
+            }
+        }
+    };
+    if ticket_record.stream != REMOTE_TERMINAL_ATTACH_STREAM_NAME
+        || ticket_record.canonical_origin != ctx.config.canonical_origin
+    {
+        send_socket_error(&mut socket, "invalid_websocket_ticket").await;
+        return;
+    }
+    let session_active = {
+        let runtime = state.remote_runtime.lock().await;
+        status_stream_session_is_active(&runtime, &ticket_record.session_id, now_ms)
+    };
+    if !session_active {
+        send_socket_error(&mut socket, "session_expired").await;
+        return;
+    }
+    let agent_exists = {
+        let agents = state.agents.lock().await;
+        agents.contains_key(&session_id)
+    };
+    if !agent_exists {
+        send_socket_error(&mut socket, "agent_not_found").await;
+        return;
+    }
+
+    let attachment_id = uuid::Uuid::new_v4().to_string();
+    let mut subscription = match state.terminal_attach.attach(
+        &session_id,
+        &attachment_id,
+        &ticket_record.session_id,
+        &ticket_record.device_id,
+        open_message.cols,
+        open_message.rows,
+    ) {
+        Ok(subscription) => subscription,
+        Err(_) => {
+            send_socket_error(&mut socket, "terminal_attach_failed").await;
+            return;
+        }
+    };
+    let _ = crate::manager::resize_pty(
+        session_id.clone(),
+        subscription.snapshot.cols,
+        subscription.snapshot.rows,
+        &state,
+    )
+    .await;
+    if send_terminal_event(
+        &mut socket,
+        crate::state::terminal_attach::TerminalAttachEvent::Snapshot {
+            attachment_id: Some(subscription.attachment_id.clone()),
+            owner_attachment_id: subscription.snapshot.owner_attachment_id.clone(),
+            cols: subscription.snapshot.cols,
+            rows: subscription.snapshot.rows,
+            state_base64: subscription.snapshot.state_base64.clone(),
+        },
+    )
+    .await
+    .is_err()
+    {
+        detach_terminal_attachment(state.terminal_attach.clone(), session_id, attachment_id);
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            event = subscription.receiver.recv() => {
+                match event {
+                    Ok(event) => {
+                        if send_terminal_event(&mut socket, event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some(snapshot) = state.terminal_attach.snapshot(&session_id) {
+                            let event = crate::state::terminal_attach::TerminalAttachEvent::Snapshot {
+                                attachment_id: Some(attachment_id.clone()),
+                                owner_attachment_id: snapshot.owner_attachment_id,
+                                cols: snapshot.cols,
+                                rows: snapshot.rows,
+                                state_base64: snapshot.state_base64,
+                            };
+                            if send_terminal_event(&mut socket, event).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(message)) => {
+                        if handle_terminal_client_message(&state, &session_id, &attachment_id, message).await.is_err() {
+                            send_socket_error(&mut socket, "terminal_attach_message_failed").await;
+                            break;
+                        }
+                    }
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+
+    detach_terminal_attachment(state.terminal_attach.clone(), session_id, attachment_id);
+}
+
+fn detach_terminal_attachment(
+    terminal_attach: std::sync::Arc<crate::state::TerminalAttachState>,
+    session_id: String,
+    attachment_id: String,
+) {
+    if let Some(generation) = terminal_attach.detach(&session_id, &attachment_id) {
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(TERMINAL_ATTACH_WARM_DISPOSE_DELAY).await;
+            terminal_attach.dispose_if_idle_generation(&session_id, generation);
+        });
+    }
+}
+
+async fn send_terminal_event(
+    socket: &mut WebSocket,
+    event: crate::state::terminal_attach::TerminalAttachEvent,
+) -> Result<(), axum::Error> {
+    let payload = serde_json::to_string(&event).unwrap_or_else(|_| {
+        r#"{"type":"error","code":"terminal_event_serialize_failed"}"#.to_string()
+    });
+    socket.send(Message::Text(payload.into())).await
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum StatusStreamClientMessageAction {
     IgnoreUntilNextTick,
@@ -1041,6 +1226,107 @@ fn parse_status_socket_ticket_message(message: Message) -> Result<String, &'stat
     Ok(ticket.to_string())
 }
 
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+struct TerminalAttachOpenMessage {
+    ticket: String,
+    cols: u16,
+    rows: u16,
+}
+
+fn parse_terminal_attach_open_message(
+    message: Message,
+) -> Result<TerminalAttachOpenMessage, &'static str> {
+    let Message::Text(text) = message else {
+        return Err("invalid_terminal_attach_message");
+    };
+    let mut parsed = serde_json::from_str::<TerminalAttachOpenMessage>(text.as_str())
+        .map_err(|_| "invalid_terminal_attach_message")?;
+    parsed.ticket = parsed.ticket.trim().to_string();
+    if parsed.ticket.is_empty() || parsed.cols < 20 || parsed.rows < 8 {
+        return Err("invalid_terminal_attach_message");
+    }
+    Ok(parsed)
+}
+
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalAttachClientMessage {
+    Input { data: String },
+    Binary { data_base64: String },
+    Resize { cols: u16, rows: u16 },
+    Detach,
+}
+
+async fn handle_terminal_client_message(
+    state: &crate::state::AppState,
+    session_id: &str,
+    attachment_id: &str,
+    message: Message,
+) -> Result<(), String> {
+    let Message::Text(text) = message else {
+        return Ok(());
+    };
+    let parsed = serde_json::from_str::<TerminalAttachClientMessage>(text.as_str())
+        .map_err(|_| "invalid_terminal_attach_message".to_string())?;
+    match parsed {
+        TerminalAttachClientMessage::Input { data } => {
+            require_terminal_owner(state, session_id, attachment_id)?;
+            send_terminal_input_bytes(state, session_id, data.into_bytes())
+        }
+        TerminalAttachClientMessage::Binary { data_base64 } => {
+            require_terminal_owner(state, session_id, attachment_id)?;
+            let bytes = decode_base64_standard(&data_base64)
+                .map_err(|_| "invalid_terminal_attach_message".to_string())?;
+            send_terminal_input_bytes(state, session_id, bytes)
+        }
+        TerminalAttachClientMessage::Resize { cols, rows } => {
+            let snapshot = state
+                .terminal_attach
+                .resize_owner(session_id, attachment_id, cols, rows)?;
+            crate::manager::resize_pty(
+                session_id.to_string(),
+                snapshot.cols,
+                snapshot.rows,
+                state,
+            )
+            .await
+        }
+        TerminalAttachClientMessage::Detach => Err("terminal_attach_detached".to_string()),
+    }
+}
+
+fn require_terminal_owner(
+    state: &crate::state::AppState,
+    session_id: &str,
+    attachment_id: &str,
+) -> Result<(), String> {
+    if state.terminal_attach.is_owner(session_id, attachment_id) {
+        Ok(())
+    } else {
+        Err("terminal_attach_not_owner".to_string())
+    }
+}
+
+fn send_terminal_input_bytes(
+    state: &crate::state::AppState,
+    session_id: &str,
+    input: Vec<u8>,
+) -> Result<(), String> {
+    let tx = state
+        .input_senders
+        .try_read()
+        .map_err(|_| "input_channel_temporarily_locked".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "agent_not_found".to_string())?;
+    tx.try_send(input).map_err(|error| match error {
+        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+            "terminal_input_buffer_full".to_string()
+        }
+        tokio::sync::mpsc::error::TrySendError::Closed(_) => "terminal_input_closed".to_string(),
+    })
+}
+
 fn status_stream_session_is_active(
     runtime: &crate::remote::models::RemoteRuntimeState,
     session_id: &str,
@@ -1053,6 +1339,10 @@ fn status_stream_session_is_active(
 }
 
 async fn send_status_socket_error(socket: &mut WebSocket, code: &'static str) {
+    send_socket_error(socket, code).await;
+}
+
+async fn send_socket_error(socket: &mut WebSocket, code: &'static str) {
     let payload = serde_json::json!({
         "type": "error",
         "code": code,
@@ -1143,6 +1433,7 @@ fn require_request_boundary(
 fn validate_remote_stream(stream: &str) -> Result<&'static str, &'static str> {
     match stream.trim() {
         REMOTE_STATUS_STREAM_NAME => Ok(REMOTE_STATUS_STREAM_NAME),
+        REMOTE_TERMINAL_ATTACH_STREAM_NAME => Ok(REMOTE_TERMINAL_ATTACH_STREAM_NAME),
         _ => Err("unsupported_stream"),
     }
 }
@@ -1673,8 +1964,30 @@ mod tests {
             "agent_status"
         );
         assert_eq!(
+            validate_remote_stream("terminal_attach").expect("terminal attach stream"),
+            "terminal_attach"
+        );
+        assert_eq!(
             validate_remote_stream("terminal").expect_err("unsupported stream"),
             "unsupported_stream"
+        );
+    }
+
+    #[test]
+    fn terminal_attach_first_message_requires_ticket_and_geometry() {
+        let message = axum::extract::ws::Message::Text(
+            r#"{"ticket":"ticket-1","cols":100,"rows":30}"#.into(),
+        );
+        let parsed = parse_terminal_attach_open_message(message).expect("open message");
+        assert_eq!(parsed.ticket, "ticket-1");
+        assert_eq!(parsed.cols, 100);
+        assert_eq!(parsed.rows, 30);
+
+        let message =
+            axum::extract::ws::Message::Text(r#"{"ticket":"ticket-1","cols":2,"rows":3}"#.into());
+        assert_eq!(
+            parse_terminal_attach_open_message(message).expect_err("small geometry"),
+            "invalid_terminal_attach_message"
         );
     }
 

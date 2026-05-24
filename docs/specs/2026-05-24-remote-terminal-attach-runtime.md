@@ -135,8 +135,8 @@ Browser E2E alone is not enough for claims about PTY fidelity.
 
 ## Open Decisions
 
-- Which Rust terminal parser crate should back `TerminalScreenSnapshot` and `TerminalScreenDelta`.
-- Exact terminal update protocol shape: full grid snapshots first, then deltas later, or deltas from the first implementation.
+- Parser choice: use the Rust `vt100` crate for the first implementation because it provides a backend terminal parser, current screen state, formatted full-state output, and formatted diffs without requiring a platform-specific multiplexer process.
+- Protocol shape: the first implementation sends a full formatted terminal state on attach and after missed updates, then sends formatted ANSI diffs for live updates.
 - Ownership reclaim behavior from the desktop UI.
-- Warm parser grace duration.
+- Warm parser grace duration: keep the parser warm for 60 seconds after the last remote attachment detaches.
 - Whether remote attachments should show scrollback or only the active viewport in the first implementation.
