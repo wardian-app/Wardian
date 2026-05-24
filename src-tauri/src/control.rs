@@ -36,6 +36,24 @@ impl Drop for ControlEndpointClaim {
     }
 }
 
+/// Run a synchronous closure inside a Tokio runtime context.
+///
+/// The Tauri `setup` hook runs on the main thread before any async runtime is
+/// entered, but several Tokio I/O constructors (e.g. `NamedPipeServer::create`
+/// on Windows, `UnixListener::bind` on Unix) register their handles with the
+/// reactor and panic when called outside a runtime. When a runtime is already
+/// current (e.g. inside a `#[tokio::test]` or a `tauri::async_runtime::spawn`
+/// task), invoke `f` directly to avoid nesting `block_on`, which Tokio rejects.
+/// Otherwise enter the Tauri-managed runtime via `block_on`. `f` is non-async,
+/// so `block_on` returns synchronously.
+fn run_in_tokio_runtime<R>(f: impl FnOnce() -> R) -> R {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        f()
+    } else {
+        tauri::async_runtime::block_on(async { f() })
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -43,22 +61,11 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
     let pipe_name = wardian_core::control::pipe_name()
         .ok_or_else(|| std::io::Error::other("could not resolve Wardian control pipe"))?;
 
-    // `ServerOptions::create` registers the pipe handle with Tokio's IOCP reactor and
-    // panics if invoked outside a Tokio runtime context. The Tauri `setup` hook runs
-    // on the main thread before the async runtime is entered, so when no runtime is
-    // ambient we enter the Tauri-managed one. When a runtime is already current
-    // (e.g. inside a `#[tokio::test]` or any `tauri::async_runtime::spawn` task) we
-    // call `create` directly to avoid nesting `block_on`, which Tokio rejects.
-    let create_pipe = || {
+    run_in_tokio_runtime(|| {
         ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)
-    };
-    if tokio::runtime::Handle::try_current().is_ok() {
-        create_pipe()
-    } else {
-        tauri::async_runtime::block_on(async { create_pipe() })
-    }
+    })
 }
 
 #[cfg(unix)]
@@ -72,10 +79,10 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
         std::fs::create_dir_all(parent)?;
     }
 
-    match UnixListener::bind(&socket_path) {
+    run_in_tokio_runtime(|| match UnixListener::bind(&socket_path) {
         Ok(listener) => Ok(ControlEndpointClaim {
             listener: Some(listener),
-            socket_path,
+            socket_path: socket_path.clone(),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             if UnixStream::connect(&socket_path).is_ok() {
@@ -84,12 +91,12 @@ pub(crate) fn claim_control_endpoint() -> std::io::Result<ControlEndpointClaim> 
                 let _ = std::fs::remove_file(&socket_path);
                 UnixListener::bind(&socket_path).map(|listener| ControlEndpointClaim {
                     listener: Some(listener),
-                    socket_path,
+                    socket_path: socket_path.clone(),
                 })
             }
         }
         Err(error) => Err(error),
-    }
+    })
 }
 
 pub(crate) fn spawn_control_server(app: AppHandle, claim: ControlEndpointClaim) {
