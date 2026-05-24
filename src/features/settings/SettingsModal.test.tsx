@@ -48,6 +48,7 @@ describe("SettingsModal", () => {
       terminalFontFamily: "",
       gridCardDisplayMode: "terminal",
       watchlistNewAgentPosition: "top",
+      titlebarTelemetryVisible: true,
       shell_id: "auto",
       custom_executable: "",
       custom_args: "",
@@ -272,6 +273,30 @@ describe("SettingsModal", () => {
       });
     });
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe("bottom");
+  });
+
+  it("loads and saves the top bar telemetry preference", async () => {
+    useSettingsStore.setState({ titlebarTelemetryVisible: true });
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+
+    const select = screen.getByLabelText("Top bar telemetry");
+    expect(select).toHaveValue("show");
+
+    fireEvent.change(select, { target: { value: "hide" } });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            titlebar_telemetry_visible: false,
+          }),
+        }),
+      });
+    });
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
   });
 
   it("names the resolved default terminal choices", () => {

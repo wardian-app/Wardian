@@ -322,7 +322,8 @@ function AppBody() {
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
-  const { theme, autoPatchGemini, app_settings_loaded, loadAppSettings } = useSettingsStore();
+  const { theme, autoPatchGemini, titlebarTelemetryVisible, app_settings_loaded, loadAppSettings } = useSettingsStore();
+  const resolvedTitlebarTelemetryVisible = app_settings_loaded && titlebarTelemetryVisible;
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [teams, setTeams] = useState<AgentTeam[]>([]);
@@ -1099,6 +1100,7 @@ function AppBody() {
         appTelemetry={appTelemetry}
         agents={agents}
         offAgentIds={offAgentIds}
+        titlebarTelemetryVisible={resolvedTitlebarTelemetryVisible}
       />
 
       <div className="flex flex-1 overflow-hidden">

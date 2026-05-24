@@ -10,6 +10,7 @@ interface LeftSidebarControlsProps {
   appTelemetry: AppTelemetry;
   agents: AgentConfig[];
   offAgentIds: Set<string>;
+  titlebarTelemetryVisible: boolean;
 }
 
 export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
@@ -19,6 +20,7 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
   appTelemetry,
   agents,
   offAgentIds,
+  titlebarTelemetryVisible,
 }) => {
   const agentCpu = Object.values(telemetry).reduce((acc, t) => acc + t.cpu_usage, 0);
   const agentMemory = Object.values(telemetry).reduce((acc, t) => acc + t.memory_mb, 0);
@@ -38,7 +40,7 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
         </svg>
       </button>
 
-      {!leftCollapsed && (
+      {!leftCollapsed && titlebarTelemetryVisible && (
         <div className="titlebar-telemetry label-small !tracking-normal">
           <span>CPU {totalCpu.toFixed(1)}%</span>
           <span>MEM {totalMemory.toFixed(0)}MB</span>

@@ -25,6 +25,7 @@ interface CustomTitleBarProps {
   appTelemetry: AppTelemetry;
   agents: AgentConfig[];
   offAgentIds: Set<string>;
+  titlebarTelemetryVisible: boolean;
 }
 
 export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
@@ -54,6 +55,7 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
         appTelemetry={props.appTelemetry}
         agents={props.agents}
         offAgentIds={props.offAgentIds}
+        titlebarTelemetryVisible={props.titlebarTelemetryVisible}
       />
       <div className="titlebar-center-container">
         <WorkspaceTabs

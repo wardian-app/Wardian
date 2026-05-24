@@ -20,6 +20,7 @@ function resetAppPreferences() {
     terminalFontFamily: '',
     gridCardDisplayMode: 'terminal',
     watchlistNewAgentPosition: 'top',
+    titlebarTelemetryVisible: true,
     app_settings_overrides: {},
     app_settings_loaded: false,
   });
@@ -138,6 +139,7 @@ describe('app settings persistence', () => {
       terminal_font_family: 'JetBrains Mono, monospace',
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
+      titlebar_telemetry_visible: false,
     });
 
     await useSettingsStore.getState().loadAppSettings();
@@ -149,6 +151,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().terminalFontFamily).toBe('JetBrains Mono, monospace');
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
     expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
   });
 
@@ -160,6 +163,7 @@ describe('app settings persistence', () => {
       terminal_font_family: null,
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
+      titlebar_telemetry_visible: false,
     });
 
     useSettingsStore.getState().setTheme('light');
@@ -168,6 +172,7 @@ describe('app settings persistence', () => {
     useSettingsStore.getState().setTerminalFontFamily('');
     useSettingsStore.getState().setGridCardDisplayMode('chat');
     useSettingsStore.getState().setWatchlistNewAgentPosition('bottom');
+    useSettingsStore.getState().setTitlebarTelemetryVisible(false);
 
     await useSettingsStore.getState().saveAppSettings();
 
@@ -180,6 +185,7 @@ describe('app settings persistence', () => {
           terminal_font_size: 12,
           grid_card_display_mode: 'chat',
           watchlist_new_agent_position: 'bottom',
+          titlebar_telemetry_visible: false,
         }),
       }),
     });
@@ -187,6 +193,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().terminalFontSize).toBe(12);
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
   });
 
   it('keeps migrated local preferences when no backend app settings file exists yet', async () => {
@@ -197,6 +204,7 @@ describe('app settings persistence', () => {
       terminalFontFamily: 'Cascadia Mono, monospace',
       gridCardDisplayMode: 'chat',
       watchlistNewAgentPosition: 'bottom',
+      titlebarTelemetryVisible: false,
     });
     mockedInvoke.mockResolvedValueOnce({
       schema_version: 2,
@@ -208,6 +216,7 @@ describe('app settings persistence', () => {
         terminal_font_family: null,
         grid_card_display_mode: 'terminal',
         watchlist_new_agent_position: 'top',
+        titlebar_telemetry_visible: true,
       },
       overrides: {},
     });
@@ -220,6 +229,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
     expect(useSettingsStore.getState().app_settings_overrides).toEqual({
       theme: 'dark',
       auto_patch_gemini: true,
@@ -227,6 +237,52 @@ describe('app settings persistence', () => {
       terminal_font_family: 'Cascadia Mono, monospace',
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
+      titlebar_telemetry_visible: false,
+    });
+  });
+
+  it('keeps migrated local preferences when missing backend settings use stable titlebar defaults', async () => {
+    useSettingsStore.setState({
+      theme: 'dark',
+      autoPatchGemini: true,
+      terminalFontSize: 16,
+      terminalFontFamily: 'Cascadia Mono, monospace',
+      gridCardDisplayMode: 'chat',
+      watchlistNewAgentPosition: 'bottom',
+      titlebarTelemetryVisible: false,
+    });
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      persisted: false,
+      settings: {
+        theme: 'system',
+        auto_patch_gemini: false,
+        terminal_font_size: 14,
+        terminal_font_family: null,
+        grid_card_display_mode: 'terminal',
+        watchlist_new_agent_position: 'top',
+        titlebar_telemetry_visible: false,
+      },
+      overrides: {},
+    });
+
+    await useSettingsStore.getState().loadAppSettings();
+
+    expect(useSettingsStore.getState().theme).toBe('dark');
+    expect(useSettingsStore.getState().autoPatchGemini).toBe(true);
+    expect(useSettingsStore.getState().terminalFontSize).toBe(16);
+    expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
+    expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
+    expect(useSettingsStore.getState().app_settings_overrides).toEqual({
+      theme: 'dark',
+      auto_patch_gemini: true,
+      terminal_font_size: 16,
+      terminal_font_family: 'Cascadia Mono, monospace',
+      grid_card_display_mode: 'chat',
+      watchlist_new_agent_position: 'bottom',
+      titlebar_telemetry_visible: false,
     });
   });
 
@@ -238,6 +294,7 @@ describe('app settings persistence', () => {
       terminalFontFamily: 'Cascadia Mono, monospace',
       gridCardDisplayMode: 'chat',
       watchlistNewAgentPosition: 'bottom',
+      titlebarTelemetryVisible: false,
     });
     mockedInvoke.mockResolvedValueOnce({
       schema_version: 2,
@@ -249,6 +306,7 @@ describe('app settings persistence', () => {
         terminal_font_family: null,
         grid_card_display_mode: 'terminal',
         watchlist_new_agent_position: 'top',
+        titlebar_telemetry_visible: true,
       },
       overrides: {},
     });
@@ -261,6 +319,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().terminalFontFamily).toBe('');
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('terminal');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('top');
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(true);
     expect(useSettingsStore.getState().app_settings_overrides).toEqual({});
   });
 
@@ -272,6 +331,7 @@ describe('app settings persistence', () => {
       terminalFontFamily: 'Cascadia Mono, monospace',
       gridCardDisplayMode: 'chat',
       watchlistNewAgentPosition: 'bottom',
+      titlebarTelemetryVisible: false,
     });
     mockedInvoke.mockResolvedValueOnce({
       schema_version: 2,
@@ -283,6 +343,7 @@ describe('app settings persistence', () => {
         terminal_font_family: null,
         grid_card_display_mode: 'terminal',
         watchlist_new_agent_position: 'top',
+        titlebar_telemetry_visible: true,
       },
       overrides: {},
     });
@@ -296,6 +357,7 @@ describe('app settings persistence', () => {
         terminal_font_family: 'Cascadia Mono, monospace',
         grid_card_display_mode: 'chat',
         watchlist_new_agent_position: 'bottom',
+        titlebar_telemetry_visible: false,
       },
       overrides: {
         theme: 'dark',
@@ -304,6 +366,7 @@ describe('app settings persistence', () => {
         terminal_font_family: 'Cascadia Mono, monospace',
         grid_card_display_mode: 'chat',
         watchlist_new_agent_position: 'bottom',
+        titlebar_telemetry_visible: false,
       },
     });
 
@@ -320,6 +383,7 @@ describe('app settings persistence', () => {
           terminal_font_family: 'Cascadia Mono, monospace',
           grid_card_display_mode: 'chat',
           watchlist_new_agent_position: 'bottom',
+          titlebar_telemetry_visible: false,
         },
       }),
     });
@@ -333,6 +397,7 @@ describe('app settings persistence', () => {
       terminalFontFamily: 'Cascadia Mono, monospace',
       gridCardDisplayMode: 'chat',
       watchlistNewAgentPosition: 'bottom',
+      titlebarTelemetryVisible: false,
     });
     mockedInvoke.mockResolvedValueOnce({
       theme: 'system',
@@ -341,6 +406,7 @@ describe('app settings persistence', () => {
       terminal_font_family: null,
       grid_card_display_mode: 'terminal',
       watchlist_new_agent_position: 'top',
+      titlebar_telemetry_visible: true,
     });
 
     await useSettingsStore.getState().loadAppSettings();
@@ -351,6 +417,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().terminalFontFamily).toBe('Cascadia Mono, monospace');
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
   });
 
   it('falls back without error when backend app settings response is empty', async () => {

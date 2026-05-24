@@ -15,6 +15,7 @@ const titlebarProps = {
   appTelemetry: { cpu_usage: 0, memory_mb: 0 },
   agents: [],
   offAgentIds: new Set<string>(),
+  titlebarTelemetryVisible: true,
 };
 
 describe("CustomTitleBar density", () => {
