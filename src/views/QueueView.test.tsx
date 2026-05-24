@@ -81,6 +81,26 @@ describe("QueueView", () => {
     expect(onSendAgentPrompt).toHaveBeenCalledWith("sess-1", "1");
   });
 
+  it("does not render action buttons when the provider did not expose explicit choices", () => {
+    const onSendAgentPrompt = vi.fn(async () => undefined);
+    useQueueStore.setState({
+      items: [{
+        id: "item-action-generic",
+        type: "action_needed",
+        timestamp: Date.now(),
+        read: false,
+        agent_session_id: "sess-1",
+        agent_name: "My Coder",
+        summary: "Approve file write?",
+      }],
+    });
+
+    render(<QueueView onSendAgentPrompt={onSendAgentPrompt} />);
+
+    expect(screen.getByText("Approve file write?")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /send action response/i })).not.toBeInTheDocument();
+  });
+
   it("filters visible queue items by event type", () => {
     useQueueStore.setState((state) => ({
       preferences: {

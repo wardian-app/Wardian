@@ -37,7 +37,7 @@ Visibility filters live in the Queue header because they affect the current tria
 
 The frontend listens to the same agent status streams that already drive completion queue items. A new `action_needed` card is created only when Wardian has a previous status for the agent and then observes `Action Needed`, avoiding stale startup hydration cards.
 
-Action-needed cards use the amber warning treatment used elsewhere for action-required status. Agent cards can focus the related agent terminal from Queue. When the action-needed summary contains recognizable provider choices, such as numbered options, the card renders those choices as compact buttons and submits the provider token directly. Wardian does not keep a generic freeform Queue response box because approval intent should come from an explicit provider option or from the live terminal.
+Action-needed cards use the amber warning treatment used elsewhere for action-required status. Agent cards can focus the related agent terminal from Queue. When the action-needed summary contains recognizable provider choices, such as numbered options, the card renders those choices as compact buttons and submits the provider token directly. Wardian does not infer generic yes/no buttons from approval-looking text and does not keep a generic freeform Queue response box because approval intent should come from an explicit provider option or from the live terminal.
 
 When the app receives a generic `Action Needed` status but has buffered recent provider text for the agent, the queue card uses that buffered text as the action-needed summary and then clears the buffer. This keeps numbered approval choices visible in Queue without reusing the approval prompt later as a completion summary.
 

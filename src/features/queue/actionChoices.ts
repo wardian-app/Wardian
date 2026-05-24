@@ -10,11 +10,7 @@ export function parseQueueActionChoices(text: string | null | undefined): QueueA
   const numbered = parseNumberedChoices(source);
   if (numbered.length > 0) return numbered;
 
-  if (!looksLikeApprovalPrompt(source)) return [];
-  return [
-    { value: "y", label: "Yes" },
-    { value: "n", label: "No" },
-  ];
+  return [];
 }
 
 function parseNumberedChoices(text: string): QueueActionChoice[] {
@@ -47,8 +43,4 @@ function shouldAppendContinuation(line: string): boolean {
   if (/^(esc|ctrl|tab|enter|shift|navigate)\b/i.test(trimmed)) return false;
   if (/^(command|do you want|requesting permission|action required)\b/i.test(trimmed)) return false;
   return !/^[─-]{3,}$/.test(trimmed);
-}
-
-function looksLikeApprovalPrompt(text: string): boolean {
-  return /\b(action required|approval|required permission|requesting permission|do you want to proceed|approve|deny)\b/i.test(text);
 }

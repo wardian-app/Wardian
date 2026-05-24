@@ -79,6 +79,7 @@ Desktop alerts use the operating system notification surface when the WebView ha
 
 - Items older than seven days are ignored on load.
 - A generic "Completed" summary means Wardian did not capture a provider-specific final answer for that transition.
+- Generic approval-looking text does not create response buttons. Queue only shows buttons when it can read explicit choices from the provider text.
 - Clearing read items removes them from the visible queue for the active Wardian home.
 - Desktop and sound alerts depend on operating system and WebView permissions.
 
