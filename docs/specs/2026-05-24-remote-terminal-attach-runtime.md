@@ -51,7 +51,7 @@ The runtime is demand-driven:
 4. When the last remote terminal detaches, the parser stays warm for a short grace period.
 5. If no new remote attachment arrives before the grace period expires, Wardian disposes the parser and returns the agent to the lightweight baseline path.
 
-The first remote frame is best effort for an already-running TUI. Remote attach triggers a PTY resize, which should cause most TUIs to repaint. From that repaint onward, Wardian streams from one authoritative backend terminal state instead of replaying a raw log into an independent renderer.
+The first remote frame is best effort for an already-running TUI. On attach, Wardian may seed the lazy parser from the retained, bounded raw PTY tail and send that same bounded tail as the client's initial terminal payload. The browser terminal normalizes that one bounded tail through provider-aware TUI history rules, including splitting flattened repaint frames into scrollback-producing writes. This gives the browser terminal real emulator-owned scrollback without turning the remote UI back into a polling text snapshot. Remote attach then triggers a PTY resize, which should cause most TUIs to repaint. From that repaint onward, live remote updates must forward the original PTY bytes to the browser terminal instead of translating them through a backend terminal diff. The backend parser remains useful for warm snapshots and recovery, but the steady-state path is byte-for-byte attach rendering.
 
 ## Backend Components
 
@@ -105,6 +105,10 @@ The mobile remote terminal should use a real terminal component connected to the
 
 On open, it sends measured terminal columns and rows. On resize/orientation changes, it sends resize messages while it remains owner. Input comes from the terminal component's data and binary callbacks and is forwarded to the WebSocket.
 
+On touch devices, drag and wheel gestures inside the whole terminal pane should be mapped to the terminal emulator's scrollback API. These listeners should run in the capture phase so xterm's internal DOM cannot swallow the drag before Wardian maps it to scrollback. The pane should also opt out of browser touch panning while active so a full-page swipe over either the rendered terminal or the surrounding terminal pane scrolls xterm, not the page. This keeps scrolling tied to xterm's actual buffer instead of exposing a page-level overflow wrapper that only works when the user grabs a narrow scrollbar.
+
+Remote terminal writes should filter provider cursor-shape control sequences that conflict with Wardian's mobile cursor style. The remote client owns the visible cursor shape so the insert caret remains a line across providers.
+
 The UI should make ownership visible only when useful. The default behavior is that the open remote terminal is active and interactive.
 
 ## Performance
@@ -120,7 +124,7 @@ Performance guardrails:
 - warm parser disposal after a short grace period;
 - no unbounded raw output replay on attach.
 
-The parser may be seeded from recent bounded PTY output only as best effort, but correctness must come from live bytes after attach and PTY resize, not from raw snapshot replay.
+The parser may be seeded from recent bounded PTY output only as best effort, and the initial remote client may replay that same bounded tail once to populate xterm scrollback. Correctness must still come from raw live bytes after attach and PTY resize, not from repeated raw snapshot replay or parser-generated terminal diffs.
 
 ## Testing
 
@@ -136,7 +140,8 @@ Browser E2E alone is not enough for claims about PTY fidelity.
 ## Open Decisions
 
 - Parser choice: use the Rust `vt100` crate for the first implementation because it provides a backend terminal parser, current screen state, formatted full-state output, and formatted diffs without requiring a platform-specific multiplexer process.
-- Protocol shape: the first implementation sends a full formatted terminal state on attach and after missed updates, then sends formatted ANSI diffs for live updates.
+- Protocol shape: the first implementation sends a bounded initial terminal payload on attach and full formatted snapshots after missed updates, then sends raw PTY bytes for live updates.
 - Ownership reclaim behavior from the desktop UI.
 - Warm parser grace duration: keep the parser warm for 60 seconds after the last remote attachment detaches.
-- Whether remote attachments should show scrollback or only the active viewport in the first implementation.
+- Remote attachments should expose bounded xterm scrollback when retained raw PTY history is available. The active viewport remains best effort until the provider repaints after attach and resize.
+- Flattened retained TUI repaint history should be normalized on the client before xterm writes so Codex/OpenCode-style home redraw frames can contribute scrollback instead of only replacing the current viewport.

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,10 +28,14 @@ globalThis.fetch = fetchMock;
 let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 
 class MockWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSED = 3;
   static instances: MockWebSocket[] = [];
 
   sent: string[] = [];
   listeners: Record<string, Array<(event: any) => void>> = {};
+  readyState = MockWebSocket.CONNECTING;
 
   constructor(readonly url: string) {
     MockWebSocket.instances.push(this);
@@ -45,9 +49,13 @@ class MockWebSocket {
     this.sent.push(payload);
   }
 
-  close() {}
+  close() {
+    this.readyState = MockWebSocket.CLOSED;
+  }
 
   emit(type: string, event: any = {}) {
+    if (type === "open") this.readyState = MockWebSocket.OPEN;
+    if (type === "close") this.readyState = MockWebSocket.CLOSED;
     for (const listener of this.listeners[type] ?? []) listener(event);
   }
 }
@@ -55,6 +63,27 @@ class MockWebSocket {
 describe("RemoteMobileApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(Terminal).mockImplementation((options) => ({
+      open: vi.fn(),
+      write: vi.fn(),
+      resize: vi.fn(),
+      clear: vi.fn(),
+      onData: vi.fn(),
+      onBinary: vi.fn(),
+      onTitleChange: vi.fn(),
+      onResize: vi.fn(),
+      onScroll: vi.fn(),
+      reset: vi.fn(),
+      dispose: vi.fn(),
+      focus: vi.fn(),
+      loadAddon: vi.fn(),
+      scrollLines: vi.fn(),
+      scrollToBottom: vi.fn(),
+      scrollToTop: vi.fn(),
+      options: { ...(options ?? {}) },
+      cols: 80,
+      rows: 24,
+    }) as unknown as Terminal);
     scrollIntoViewMock = vi.fn();
     Object.defineProperty(Element.prototype, "scrollIntoView", {
       configurable: true,
@@ -492,8 +521,11 @@ describe("RemoteMobileApp", () => {
     expect(terminalCalls).toBe(0);
     expect(screen.getByTestId("remote-terminal-attach")).toBeVisible();
     expect(screen.getByTestId("remote-agent-detail")).toHaveClass("h-dvh", "overflow-hidden");
-    expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("min-h-0", "overflow-y-auto");
+    expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("flex", "min-h-0", "flex-col", "overflow-hidden");
+    expect(screen.getByTestId("remote-terminal-scroll-surface")).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
+    expect(screen.getByTestId("remote-terminal-scroll-surface")).not.toHaveClass("h-full");
     expect(screen.getByTestId("remote-terminal-attach")).not.toHaveClass("overflow-hidden");
+    expect(screen.getByTestId("remote-terminal-attach")).not.toHaveClass("min-h-[280px]");
     const terminalCallsForOptions = vi.mocked(Terminal).mock.calls;
     const terminalOptions = terminalCallsForOptions[terminalCallsForOptions.length - 1]?.[0] as Record<string, unknown> | undefined;
     expect(terminalOptions?.theme).toEqual(
@@ -504,13 +536,17 @@ describe("RemoteMobileApp", () => {
         selectionBackground: "rgb(229, 231, 235)",
       }),
     );
+    expect(terminalOptions?.cursorStyle).toBe("bar");
     expect(screen.getByRole("button", { name: "Terminal" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "false");
     expect(chatCalls).toBe(0);
     expect(scrollIntoViewMock).toHaveBeenCalled();
+    expect(screen.queryByLabelText("Prompt Coder")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send prompt" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Chat" }));
     expect(await screen.findByText("I can see the selected conversation.")).toBeVisible();
     expect(chatCalls).toBe(1);
+    expect(screen.getByLabelText("Prompt Coder")).toBeVisible();
     await userEvent.type(screen.getByLabelText("Prompt Coder"), "what changed?");
     await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
 
@@ -530,6 +566,759 @@ describe("RemoteMobileApp", () => {
       target: "agent-1",
       prompt: "what changed?",
     });
+  });
+
+  it("maps touch drag gestures in the terminal pane to xterm scrollback", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    const terminalHost = await screen.findByTestId("remote-terminal-attach");
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminalInstance = terminalResults[terminalResults.length - 1]?.value as { scrollLines?: ReturnType<typeof vi.fn> };
+    terminalInstance.scrollLines = vi.fn();
+
+    fireEvent.touchStart(terminalHost, { touches: [{ clientY: 220 }] });
+    fireEvent.touchMove(terminalHost, { touches: [{ clientY: 184 }] });
+
+    expect(terminalInstance.scrollLines).toHaveBeenCalledWith(2);
+  });
+
+  it("maps captured terminal child touch drags to xterm scrollback", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    const terminalHost = await screen.findByTestId("remote-terminal-attach");
+    const terminalChild = document.createElement("div");
+    terminalChild.addEventListener("touchstart", (event) => event.stopPropagation());
+    terminalChild.addEventListener("touchmove", (event) => event.stopPropagation());
+    terminalHost.appendChild(terminalChild);
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminalInstance = terminalResults[terminalResults.length - 1]?.value as { scrollLines?: ReturnType<typeof vi.fn> };
+    terminalInstance.scrollLines = vi.fn();
+
+    fireEvent.touchStart(terminalChild, { touches: [{ clientY: 220 }] });
+    fireEvent.touchMove(terminalChild, { touches: [{ clientY: 184 }] });
+
+    expect(terminalInstance.scrollLines).toHaveBeenCalledWith(2);
+  });
+
+  it("maps terminal pane drags outside the xterm host to xterm scrollback", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    const terminalSurface = await screen.findByTestId("remote-terminal-scroll-surface");
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminalInstance = terminalResults[terminalResults.length - 1]?.value as { scrollLines?: ReturnType<typeof vi.fn> };
+    terminalInstance.scrollLines = vi.fn();
+
+    fireEvent.touchStart(terminalSurface, { touches: [{ clientY: 220 }] });
+    fireEvent.touchMove(terminalSurface, { touches: [{ clientY: 184 }] });
+
+    expect(terminalInstance.scrollLines).toHaveBeenCalledWith(2);
+  });
+
+  it("sends terminal resize messages after mobile layout changes", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    try {
+      render(<RemoteMobileApp />);
+
+      await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+      act(() => {
+        MockWebSocket.instances[1]?.emit("open");
+      });
+
+      const terminalResults = vi.mocked(Terminal).mock.results;
+      const terminalInstance = terminalResults[terminalResults.length - 1]?.value as { cols: number; rows: number };
+      terminalInstance.cols = 112;
+      terminalInstance.rows = 31;
+
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+
+      expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+        type: "resize",
+        cols: 112,
+        rows: 31,
+      });
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("does not clear xterm scrollback when a later terminal snapshot arrives", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.reset?.mock && value?.write?.mock) as {
+      reset: ReturnType<typeof vi.fn>;
+      write: ReturnType<typeof vi.fn>;
+    };
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("history line 1\r\nhistory line 2\r\n"),
+        }),
+      });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 100,
+          rows: 30,
+          state_base64: btoa("current viewport"),
+        }),
+      });
+    });
+
+    expect(terminalInstance.reset).toHaveBeenCalledTimes(1);
+    expect(terminalInstance.write).toHaveBeenCalledTimes(2);
+  });
+
+  it("normalizes flattened Codex repaint history before writing to the remote terminal", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.write?.mock) as {
+      write: ReturnType<typeof vi.fn>;
+    };
+    const firstFrame = "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[H  60\u001b[K\r\n  61\u001b[K\r\n  62\u001b[K";
+    const secondFrame = "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[H  61\u001b[K\r\n  62\u001b[K\r\n  63\u001b[K";
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa(firstFrame + secondFrame),
+        }),
+      });
+    });
+
+    expect(terminalInstance.write.mock.calls[0]?.[0]).toContain("\u001b[999;1H  60\r\n");
+  });
+
+  it("does not reconstruct scrollback from live terminal update frames", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.write?.mock) as {
+      write: ReturnType<typeof vi.fn>;
+    };
+    const firstFrame = "\u001b[?2026h\u001b[H  60\u001b[K\r\n  61\u001b[K\r\n  62\u001b[K\u001b[?2026l";
+    const secondFrame = "\u001b[?2026h\u001b[H  61\u001b[K\r\n  62\u001b[K\r\n  63\u001b[K\u001b[?2026l";
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa(firstFrame),
+        }),
+      });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "update",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          state_base64: btoa(secondFrame),
+        }),
+      });
+    });
+
+    expect(terminalInstance.write.mock.calls[1]?.[0]).toBe(secondFrame);
+    expect(terminalInstance.write.mock.calls[1]?.[0]).not.toContain("\u001b[999;1H");
+  });
+
+  it("strips provider cursor-shape sequences from remote terminal writes", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.write?.mock) as {
+      write: ReturnType<typeof vi.fn>;
+    };
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("\u001b[0 qprompt\u001b[1 q"),
+        }),
+      });
+    });
+
+    const written = String(terminalInstance.write.mock.calls[0]?.[0] ?? "");
+    expect(written).toContain("prompt");
+    expect(written).not.toContain("\u001b[0 q");
+    expect(written).not.toContain("\u001b[1 q");
+  });
+
+  it("does not send terminal input or detach while the attach socket is not open", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    const { unmount } = render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalSocket = MockWebSocket.instances[1];
+    expect(terminalSocket?.readyState).toBe(MockWebSocket.CONNECTING);
+    const sendSpy = vi.spyOn(terminalSocket!, "send").mockImplementation(() => {
+      throw new Error("socket is not open");
+    });
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.onData?.mock && value?.onBinary?.mock) as {
+      onData: ReturnType<typeof vi.fn>;
+      onBinary: ReturnType<typeof vi.fn>;
+      options: { disableStdin?: boolean };
+    };
+    const onData = terminalInstance.onData.mock.calls[0]?.[0] as ((data: string) => void) | undefined;
+    const onBinary = terminalInstance.onBinary.mock.calls[0]?.[0] as ((data: string) => void) | undefined;
+
+    expect(terminalInstance.options.disableStdin).toBe(true);
+    expect(() => onData?.("a")).not.toThrow();
+    expect(() => onBinary?.("b")).not.toThrow();
+    expect(() => unmount()).not.toThrow();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("enables remote terminal stdin only while the attach stream is accepted", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.options) as { options: { disableStdin?: boolean } };
+    expect(terminalInstance.options.disableStdin).toBe(true);
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("ready"),
+        }),
+      });
+    });
+    expect(terminalInstance.options.disableStdin).toBe(false);
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("close");
+    });
+    expect(terminalInstance.options.disableStdin).toBe(true);
   });
 
   it("does not poll terminal snapshots when the status stream updates the attached terminal", async () => {
@@ -958,7 +1747,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
   });
 
-  it("shows pause and resume as mutually exclusive lifecycle actions", async () => {
+  it("shows lifecycle actions in agent detail while keeping roster cards action-free", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -1020,15 +1809,27 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     const runningCard = await screen.findByRole("article", { name: /Running Coder/i });
-    expect(within(runningCard).getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(within(runningCard).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    expect(within(runningCard).queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+    expect(within(runningCard).queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
     expect(within(runningCard).queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    await userEvent.click(within(runningCard).getByRole("button", { name: /Open Running Coder details/i }));
+    expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Back to remote agents/i }));
 
     const offlineCard = screen.getByRole("article", { name: /Offline Coder/i });
-    expect(within(offlineCard).getByRole("button", { name: "Resume" })).toBeVisible();
+    expect(within(offlineCard).queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
     expect(within(offlineCard).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    await userEvent.click(within(offlineCard).getByRole("button", { name: /Open Offline Coder details/i }));
+    expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
   });
 
-  it("runs card lifecycle actions without opening the conversation or reloading the roster", async () => {
+  it("runs detail lifecycle actions without reloading the roster", async () => {
     let agentListCalls = 0;
     let chatCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -1088,7 +1889,9 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     const card = await screen.findByRole("article", { name: /Coder/i });
-    await userEvent.click(within(card).getByRole("button", { name: "Pause" }));
+    expect(within(card).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -1100,7 +1903,7 @@ describe("RemoteMobileApp", () => {
       action: "pause",
       target: "agent-1",
     });
-    expect(screen.queryByTestId("remote-agent-detail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-agent-detail")).toBeVisible();
     expect(agentListCalls).toBe(1);
     expect(chatCalls).toBe(0);
   });
@@ -1273,6 +2076,7 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await screen.findByText("Coder");
+    await userEvent.click(screen.getByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(screen.getByRole("button", { name: "Kill" }));
 
     expect(window.confirm).toHaveBeenCalledWith("Kill Coder?");

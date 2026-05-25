@@ -1,6 +1,5 @@
 import React from "react";
 import type { RemoteAgentSummary } from "../../types";
-import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
 import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
@@ -36,8 +35,6 @@ export const RemoteAgentCard: React.FC<{ agent: RemoteAgentSummary }> = ({ agent
         {agent.latest_text && <p className="mt-3 line-clamp-3 text-xs leading-relaxed text-muted-neutral">{agent.latest_text}</p>}
         <div className="mt-2 truncate font-mono text-[11px] text-muted-neutral">{agent.workspace}</div>
       </button>
-
-      <RemoteAgentActions agent={agent} />
     </article>
   );
 };

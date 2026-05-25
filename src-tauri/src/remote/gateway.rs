@@ -30,6 +30,11 @@ const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration:
 const TERMINAL_ATTACH_WARM_DISPOSE_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
+const REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES: usize = 64 * 1024;
+const REMOTE_TERMINAL_MAX_INPUT_FRAME_BASE64_BYTES: usize =
+    REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES.div_ceil(3) * 4;
+const REMOTE_TERMINAL_INPUT_SEND_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), String> {
     crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
@@ -1091,13 +1096,29 @@ async fn handle_terminal_socket(
     }
 
     let attachment_id = uuid::Uuid::new_v4().to_string();
-    let mut subscription = match state.terminal_attach.attach(
+    let initial_output = match crate::remote::operations::remote_agent_terminal_raw_output(
+        &state,
         &session_id,
-        &attachment_id,
-        &ticket_record.session_id,
-        &ticket_record.device_id,
-        open_message.cols,
-        open_message.rows,
+        Some(REMOTE_TERMINAL_DEFAULT_TAIL_BYTES),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(_) => {
+            send_socket_error(&mut socket, "terminal_attach_failed").await;
+            return;
+        }
+    };
+    let mut subscription = match state.terminal_attach.attach(
+        crate::state::terminal_attach::TerminalAttachRequest {
+            session_id: &session_id,
+            attachment_id: &attachment_id,
+            remote_session_id: &ticket_record.session_id,
+            device_id: &ticket_record.device_id,
+            cols: open_message.cols,
+            rows: open_message.rows,
+            initial_output: initial_output.as_bytes(),
+        },
     ) {
         Ok(subscription) => subscription,
         Err(_) => {
@@ -1105,13 +1126,14 @@ async fn handle_terminal_socket(
             return;
         }
     };
-    let _ = crate::manager::resize_pty(
-        session_id.clone(),
-        subscription.snapshot.cols,
-        subscription.snapshot.rows,
-        &state,
-    )
-    .await;
+    if resize_initial_terminal_attach(&state, &session_id, &subscription.snapshot)
+        .await
+        .is_err()
+    {
+        send_socket_error(&mut socket, "terminal_attach_failed").await;
+        detach_terminal_attachment(state.terminal_attach.clone(), session_id, attachment_id);
+        return;
+    }
     if send_terminal_event(
         &mut socket,
         crate::state::terminal_attach::TerminalAttachEvent::Snapshot {
@@ -1159,9 +1181,13 @@ async fn handle_terminal_socket(
                 match message {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(message)) => {
-                        if handle_terminal_client_message(&state, &session_id, &attachment_id, message).await.is_err() {
-                            send_socket_error(&mut socket, "terminal_attach_message_failed").await;
-                            break;
+                        match handle_terminal_client_message(&state, &session_id, &attachment_id, message).await {
+                            Ok(TerminalAttachClientMessageAction::Continue) => {}
+                            Ok(TerminalAttachClientMessageAction::Close) => break,
+                            Err(_) => {
+                                send_socket_error(&mut socket, "terminal_attach_message_failed").await;
+                                break;
+                            }
                         }
                     }
                     Some(Err(_)) => break,
@@ -1194,6 +1220,16 @@ async fn send_terminal_event(
         r#"{"type":"error","code":"terminal_event_serialize_failed"}"#.to_string()
     });
     socket.send(Message::Text(payload.into())).await
+}
+
+async fn resize_initial_terminal_attach(
+    state: &crate::state::AppState,
+    session_id: &str,
+    snapshot: &crate::state::terminal_attach::TerminalScreenSnapshot,
+) -> Result<(), String> {
+    crate::manager::resize_pty(session_id.to_string(), snapshot.cols, snapshot.rows, state)
+        .await
+        .map_err(|_| "terminal_attach_failed".to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1257,27 +1293,44 @@ enum TerminalAttachClientMessage {
     Detach,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalAttachClientMessageAction {
+    Continue,
+    Close,
+}
+
 async fn handle_terminal_client_message(
     state: &crate::state::AppState,
     session_id: &str,
     attachment_id: &str,
     message: Message,
-) -> Result<(), String> {
+) -> Result<TerminalAttachClientMessageAction, String> {
     let Message::Text(text) = message else {
-        return Ok(());
+        return Ok(TerminalAttachClientMessageAction::Continue);
     };
     let parsed = serde_json::from_str::<TerminalAttachClientMessage>(text.as_str())
         .map_err(|_| "invalid_terminal_attach_message".to_string())?;
     match parsed {
         TerminalAttachClientMessage::Input { data } => {
             require_terminal_owner(state, session_id, attachment_id)?;
-            send_terminal_input_bytes(state, session_id, data.into_bytes())
+            if data.len() > REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES {
+                return Err("terminal_input_too_large".to_string());
+            }
+            send_terminal_input_bytes(state, session_id, data.into_bytes()).await?;
+            Ok(TerminalAttachClientMessageAction::Continue)
         }
         TerminalAttachClientMessage::Binary { data_base64 } => {
             require_terminal_owner(state, session_id, attachment_id)?;
+            if data_base64.len() > REMOTE_TERMINAL_MAX_INPUT_FRAME_BASE64_BYTES {
+                return Err("terminal_input_too_large".to_string());
+            }
             let bytes = decode_base64_standard(&data_base64)
                 .map_err(|_| "invalid_terminal_attach_message".to_string())?;
-            send_terminal_input_bytes(state, session_id, bytes)
+            if bytes.len() > REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES {
+                return Err("terminal_input_too_large".to_string());
+            }
+            send_terminal_input_bytes(state, session_id, bytes).await?;
+            Ok(TerminalAttachClientMessageAction::Continue)
         }
         TerminalAttachClientMessage::Resize { cols, rows } => {
             let snapshot = state
@@ -1289,9 +1342,10 @@ async fn handle_terminal_client_message(
                 snapshot.rows,
                 state,
             )
-            .await
+            .await?;
+            Ok(TerminalAttachClientMessageAction::Continue)
         }
-        TerminalAttachClientMessage::Detach => Err("terminal_attach_detached".to_string()),
+        TerminalAttachClientMessage::Detach => Ok(TerminalAttachClientMessageAction::Close),
     }
 }
 
@@ -1307,11 +1361,14 @@ fn require_terminal_owner(
     }
 }
 
-fn send_terminal_input_bytes(
+async fn send_terminal_input_bytes(
     state: &crate::state::AppState,
     session_id: &str,
     input: Vec<u8>,
 ) -> Result<(), String> {
+    if input.len() > REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES {
+        return Err("terminal_input_too_large".to_string());
+    }
     let tx = state
         .input_senders
         .try_read()
@@ -1319,12 +1376,10 @@ fn send_terminal_input_bytes(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "agent_not_found".to_string())?;
-    tx.try_send(input).map_err(|error| match error {
-        tokio::sync::mpsc::error::TrySendError::Full(_) => {
-            "terminal_input_buffer_full".to_string()
-        }
-        tokio::sync::mpsc::error::TrySendError::Closed(_) => "terminal_input_closed".to_string(),
-    })
+    tokio::time::timeout(REMOTE_TERMINAL_INPUT_SEND_TIMEOUT, tx.send(input))
+        .await
+        .map_err(|_| "terminal_input_buffer_full".to_string())?
+        .map_err(|_| "terminal_input_closed".to_string())
 }
 
 fn status_stream_session_is_active(
@@ -1989,6 +2044,115 @@ mod tests {
             parse_terminal_attach_open_message(message).expect_err("small geometry"),
             "invalid_terminal_attach_message"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_attach_detach_message_closes_without_error() {
+        let state = crate::state::AppState::new();
+
+        let action = handle_terminal_client_message(
+            &state,
+            "agent-1",
+            "attach-1",
+            axum::extract::ws::Message::Text(r#"{"type":"detach"}"#.into()),
+        )
+        .await
+        .expect("detach should be graceful");
+
+        assert_eq!(action, TerminalAttachClientMessageAction::Close);
+    }
+
+    #[tokio::test]
+    async fn terminal_attach_rejects_oversized_input_frame() {
+        let state = crate::state::AppState::new();
+        state
+            .terminal_attach
+            .attach(crate::state::terminal_attach::TerminalAttachRequest {
+                session_id: "agent-1",
+                attachment_id: "attach-1",
+                remote_session_id: "remote-session-1",
+                device_id: "device-1",
+                cols: 80,
+                rows: 24,
+                initial_output: &[],
+            })
+            .expect("attach owner");
+        let oversized_input = "x".repeat(REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES + 1);
+        let payload = serde_json::json!({ "type": "input", "data": oversized_input }).to_string();
+
+        let error = handle_terminal_client_message(
+            &state,
+            "agent-1",
+            "attach-1",
+            axum::extract::ws::Message::Text(payload.into()),
+        )
+        .await
+        .expect_err("oversized input must be rejected");
+
+        assert_eq!(error, "terminal_input_too_large");
+    }
+
+    #[tokio::test]
+    async fn terminal_attach_waits_for_backpressured_input_channel() {
+        let state = crate::state::AppState::new();
+        state
+            .terminal_attach
+            .attach(crate::state::terminal_attach::TerminalAttachRequest {
+                session_id: "agent-1",
+                attachment_id: "attach-1",
+                remote_session_id: "remote-session-1",
+                device_id: "device-1",
+                cols: 80,
+                rows: 24,
+                initial_output: &[],
+            })
+            .expect("attach owner");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        tx.try_send(b"queued".to_vec()).expect("fill channel");
+        state
+            .input_senders
+            .write()
+            .expect("input senders")
+            .insert("agent-1".to_string(), tx);
+        let drain = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert_eq!(rx.recv().await.expect("queued input"), b"queued");
+            assert_eq!(rx.recv().await.expect("next input"), b"next");
+        });
+
+        let action = handle_terminal_client_message(
+            &state,
+            "agent-1",
+            "attach-1",
+            axum::extract::ws::Message::Text(r#"{"type":"input","data":"next"}"#.into()),
+        )
+        .await
+        .expect("send should wait for channel capacity");
+
+        assert_eq!(action, TerminalAttachClientMessageAction::Continue);
+        tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+            .await
+            .expect("drain should finish")
+            .expect("drain task");
+    }
+
+    #[tokio::test]
+    async fn initial_terminal_attach_resize_failure_is_reported() {
+        let state = crate::state::AppState::new();
+        let snapshot = crate::state::terminal_attach::TerminalScreenSnapshot {
+            attachment_id: Some("attach-1".to_string()),
+            owner_attachment_id: Some("attach-1".to_string()),
+            cols: 80,
+            rows: 24,
+            state_base64: String::new(),
+            text: String::new(),
+        };
+
+        let error = resize_initial_terminal_attach(&state, "missing-agent", &snapshot)
+            .await
+            .expect_err("missing PTY should fail attach resize");
+
+        assert_eq!(error, "terminal_attach_failed");
     }
 
     #[test]

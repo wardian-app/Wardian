@@ -212,6 +212,7 @@ export const remoteClient = {
       onSessionExpired?: () => void;
       onError?: (message: string) => void;
       onClose?: () => void;
+      onOpen?: () => void;
     },
   ) {
     const ticket = await this.createTerminalStreamTicket();
@@ -222,6 +223,7 @@ export const remoteClient = {
 
     socket.addEventListener("open", () => {
       socket.send(JSON.stringify({ ticket: ticket.ticket, cols, rows }));
+      handlers.onOpen?.();
     });
     socket.addEventListener("message", (event) => {
       let data: RemoteTerminalStreamMessage;
