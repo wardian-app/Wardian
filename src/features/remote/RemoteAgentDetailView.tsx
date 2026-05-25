@@ -36,12 +36,20 @@ const iconButtonClass =
 const modeButtonClass =
   "min-h-9 flex-1 rounded-md px-3 text-xs font-semibold transition-colors";
 
-const REMOTE_TERMINAL_THEME = {
-  background: "#020402",
-  foreground: "#EEF2EE",
-  cursor: "#F1D382",
-  selectionBackground: "#1E261E",
-};
+function wardianColorToken(name: string, fallback: string) {
+  if (typeof window === "undefined") return fallback;
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function remoteTerminalTheme() {
+  return {
+    background: wardianColorToken("--color-wardian-card", "#f3f4f6"),
+    foreground: wardianColorToken("--color-wardian-text", "#111827"),
+    cursor: wardianColorToken("--color-wardian-accent", "#926a09"),
+    selectionBackground: wardianColorToken("--color-wardian-border", "#e5e7eb"),
+  };
+}
 
 export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({ agent }) => {
   const activeAgentViewMode = useRemoteStore((state) => state.activeAgentViewMode);
@@ -206,7 +214,7 @@ function TerminalPane({
       fontSize: 11,
       rows: 24,
       scrollback: 1_000,
-      theme: REMOTE_TERMINAL_THEME,
+      theme: remoteTerminalTheme(),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon?.(fitAddon);
@@ -219,6 +227,24 @@ function TerminalPane({
     });
     terminal.onBinary?.((data) => {
       socketRef.current?.send(JSON.stringify({ type: "binary", data_base64: binaryStringToBase64(data) }));
+    });
+
+    const themeObserver =
+      typeof MutationObserver === "undefined"
+        ? null
+        : new MutationObserver(() => {
+            const terminalWithOptions = terminal as Terminal & {
+              options?: { theme?: ReturnType<typeof remoteTerminalTheme> };
+              refresh?: (start: number, end: number) => void;
+            };
+            if (terminalWithOptions.options) {
+              terminalWithOptions.options.theme = remoteTerminalTheme();
+              terminalWithOptions.refresh?.(0, Math.max(terminal.rows - 1, 0));
+            }
+          });
+    themeObserver?.observe(document.documentElement, {
+      attributeFilter: ["class", "data-theme", "style"],
+      attributes: true,
     });
 
     let disposed = false;
@@ -264,13 +290,14 @@ function TerminalPane({
       socketRef.current?.close();
       socketRef.current = null;
       terminalRef.current = null;
+      themeObserver?.disconnect();
       terminal.dispose?.();
       host.replaceChildren();
     };
   }, [agent.session_id]);
 
   return (
-    <section className="min-h-0 flex-1 overflow-hidden px-3 py-3" aria-label={`${agent.session_name} terminal`}>
+    <section className="min-h-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} terminal`}>
       {(error || streamError) && <div className="mb-2 rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error || streamError}</div>}
       {(loading || !connected) && !streamError && (
         <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
@@ -278,8 +305,8 @@ function TerminalPane({
           Attaching terminal...
         </div>
       )}
-      <div className="mt-2 h-full min-h-0 overflow-hidden rounded-md border border-wardian-border bg-wardian-card">
-        <div ref={terminalHostRef} data-testid="remote-terminal-attach" className="h-full min-h-[280px] w-full overflow-hidden" />
+      <div className="mt-2 h-full min-h-[280px] overflow-auto rounded-md border border-wardian-border bg-wardian-card">
+        <div ref={terminalHostRef} data-testid="remote-terminal-attach" className="h-full min-h-[280px] w-full" />
       </div>
       <div ref={endRef} aria-hidden="true" />
     </section>

@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearStoredRemoteIdentity,
@@ -61,6 +62,7 @@ describe("RemoteMobileApp", () => {
     });
     MockWebSocket.instances = [];
     vi.stubGlobal("WebSocket", MockWebSocket);
+    document.documentElement.removeAttribute("style");
     window.history.pushState({}, "", "/remote");
     vi.mocked(createRemoteDeviceKeyPair).mockResolvedValue({
       privateKey: { type: "private" } as CryptoKey,
@@ -463,6 +465,11 @@ describe("RemoteMobileApp", () => {
       return Promise.resolve(new Response("{}", { status: 404 }));
     });
 
+    document.documentElement.style.setProperty("--color-wardian-card", "rgb(250, 251, 252)");
+    document.documentElement.style.setProperty("--color-wardian-text", "rgb(17, 24, 39)");
+    document.documentElement.style.setProperty("--color-wardian-accent", "rgb(146, 106, 9)");
+    document.documentElement.style.setProperty("--color-wardian-border", "rgb(229, 231, 235)");
+
     render(<RemoteMobileApp />);
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
@@ -485,7 +492,18 @@ describe("RemoteMobileApp", () => {
     expect(terminalCalls).toBe(0);
     expect(screen.getByTestId("remote-terminal-attach")).toBeVisible();
     expect(screen.getByTestId("remote-agent-detail")).toHaveClass("h-dvh", "overflow-hidden");
-    expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("min-h-0", "overflow-hidden");
+    expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("min-h-0", "overflow-y-auto");
+    expect(screen.getByTestId("remote-terminal-attach")).not.toHaveClass("overflow-hidden");
+    const terminalCallsForOptions = vi.mocked(Terminal).mock.calls;
+    const terminalOptions = terminalCallsForOptions[terminalCallsForOptions.length - 1]?.[0] as Record<string, unknown> | undefined;
+    expect(terminalOptions?.theme).toEqual(
+      expect.objectContaining({
+        background: "rgb(250, 251, 252)",
+        cursor: "rgb(146, 106, 9)",
+        foreground: "rgb(17, 24, 39)",
+        selectionBackground: "rgb(229, 231, 235)",
+      }),
+    );
     expect(screen.getByRole("button", { name: "Terminal" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "false");
     expect(chatCalls).toBe(0);
