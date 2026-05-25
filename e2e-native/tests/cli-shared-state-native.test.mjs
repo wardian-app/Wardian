@@ -23,6 +23,7 @@ const CONTROL_SESSION_NAME = `E2E-CLI-CONTROL-${RUN_ID}`;
 const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
 const ASK_SESSION_NAME = `E2E-CLI-ASK-${RUN_ID}`;
 const ASK_ECHO_SESSION_NAME = `E2E-CLI-ASK-ECHO-${RUN_ID}`;
+const ASK_STRUCTURED_SESSION_NAME = `E2E-CLI-ASK-STRUCTURED-${RUN_ID}`;
 const WATCH_READABLE_SESSION_NAME = `E2E-CLI-WATCH-READABLE-${RUN_ID}`;
 const ROUTE_QUEUE_SESSION_NAME = `E2E-CLI-ROUTE-QUEUE-${RUN_ID}`;
 const ROUTE_LIVE_ONLY_SESSION_NAME = `E2E-CLI-ROUTE-LIVE-${RUN_ID}`;
@@ -74,12 +75,14 @@ function buildCli(harness) {
 }
 
 function runCli(cliPath, harness, args) {
+  const env = {
+    ...process.env,
+    WARDIAN_HOME: harness.isolatedHome,
+  };
+  delete env.WARDIAN_SESSION_ID;
   const result = spawnSync(cliPath, args, {
     cwd: harness.repoRoot,
-    env: {
-      ...process.env,
-      WARDIAN_HOME: harness.isolatedHome,
-    },
+    env,
     encoding: "utf8",
   });
 
@@ -92,12 +95,14 @@ function runCli(cliPath, harness, args) {
 
 function runCliAsync(cliPath, harness, args) {
   return new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      WARDIAN_HOME: harness.isolatedHome,
+    };
+    delete env.WARDIAN_SESSION_ID;
     const child = spawn(cliPath, args, {
       cwd: harness.repoRoot,
-      env: {
-        ...process.env,
-        WARDIAN_HOME: harness.isolatedHome,
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -198,6 +203,44 @@ async function waitForDeliveryState(cliPath, harness, target, state, messageId, 
 
   assert.fail(
     `Timed out waiting for delivery ${state} message ${messageId}; last result: ${JSON.stringify(lastResult)}`,
+  );
+}
+
+async function waitForWatchEventKind(cliPath, harness, target, kind, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  let since = null;
+  let lastResult = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const args = [
+      "agent",
+      "watch",
+      target,
+      "--until",
+      `event:${kind}`,
+      "--include",
+      "events",
+      "--timeout",
+      "5s",
+    ];
+    if (since) {
+      args.push("--since", since);
+    }
+
+    lastResult = runCli(cliPath, harness, args);
+    if (lastResult.status === 0) {
+      const json = JSON.parse(lastResult.stdout);
+      const event = (json.events ?? []).find((entry) => entry.kind === kind);
+      if (event) {
+        return { json, event };
+      }
+      since = json.cursor;
+    }
+    await delay(250);
+  }
+
+  assert.fail(
+    `Timed out waiting for event ${kind}; last result: ${JSON.stringify(lastResult)}`,
   );
 }
 
@@ -798,6 +841,105 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
   assert.equal(askJson.delivery[0].delivery_state, "queued");
   assert.equal(askJson.delivery[0].runtime_state, "target_action_required");
   }, "700");
+});
+
+test("native CLI structured ask completes only on explicit reply", { timeout: 180000 }, async (t) => {
+  const harness = await createNativeHarness();
+  assert.ok(harness.appPath);
+
+  try {
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
+    }
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  prepareIsolatedHome(harness);
+
+  const cliPath = buildCli(harness);
+  const workspacePath = path.join(harness.repoRoot, "e2e-native");
+
+  let session;
+  try {
+    session = await startNativeSession(harness);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  t.after(async () => {
+    await session.close();
+  });
+
+  await waitForAppShell(session.driver, 20000);
+  await watchStep(harness, "Wardian app shell is ready for structured ask smoke");
+
+  const agent = await createMockAgent(session.driver, workspacePath, {
+    sessionId: `e2e-cli-ask-structured-${RUN_ID}`,
+    sessionName: ASK_STRUCTURED_SESSION_NAME,
+    isOff: false,
+  });
+  await setAgentStatus(session.driver, agent.session_id, "idle");
+
+  const askPromise = runCliAsync(cliPath, harness, [
+    "ask",
+    ASK_STRUCTURED_SESSION_NAME,
+    "Echo the request id text, but wait for wardian reply to complete.",
+    "--timeout",
+    "30s",
+  ]);
+
+  const request = await waitForWatchEventKind(
+    cliPath,
+    harness,
+    ASK_STRUCTURED_SESSION_NAME,
+    "request",
+  );
+  const requestId = request.event.payload.request_id;
+  assert.match(requestId, /^(ask|int)_/);
+
+  await pushAgentOutput(
+    session.driver,
+    agent.session_id,
+    `Echoed request id should not complete: ${requestId}\r\n`,
+  );
+  const earlyResult = await Promise.race([
+    askPromise.then(() => "completed"),
+    delay(750).then(() => "pending"),
+  ]);
+  assert.equal(earlyResult, "pending", "terminal output must not satisfy structured ask");
+
+  const replyFile = path.join(harness.isolatedHome, "structured-ask-reply.txt");
+  writeFileSync(replyFile, "structured reply complete");
+  const replyResult = runCliOk(cliPath, harness, [
+    "reply",
+    requestId,
+    "--status",
+    "done",
+    "--file",
+    replyFile,
+  ]);
+  const replyJson = JSON.parse(replyResult.stdout);
+  assert.equal(replyJson.reply.request_id, requestId);
+  assert.equal(replyJson.reply.status, "done");
+
+  const askOutput = await askPromise;
+  assert.equal(
+    askOutput.status,
+    0,
+    `wardian ask failed\nstdout:\n${askOutput.stdout}\nstderr:\n${askOutput.stderr}`,
+  );
+
+  const askJson = JSON.parse(askOutput.stdout);
+  assert.equal(askJson.ok, true);
+  assert.equal(askJson.target, ASK_STRUCTURED_SESSION_NAME);
+  assert.equal(askJson.condition, "reply");
+  assert.equal(askJson.request_id, requestId);
+  assert.equal(askJson.reply.status, "done");
+  assert.equal(askJson.reply.body, "structured reply complete");
+  assert.doesNotMatch(askJson.reply.body, /Echoed request id/);
 });
 
 test("native CLI send routes processing mock by queue policy", { timeout: 180000 }, async (t) => {
