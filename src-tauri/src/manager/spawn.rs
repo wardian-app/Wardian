@@ -10,6 +10,7 @@ use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
+use wardian_core::control::ProviderInputReadiness;
 use wardian_core::models::{AgentConfig, AgentEvent, ProviderConfig};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
@@ -222,7 +223,16 @@ pub async fn spawn_agent(
         created_at: Some(&born_to_save),
     });
 
+    let app_state = app.state::<AppState>();
     if config.is_off {
+        app_state
+            .interactions
+            .start_provider_input_generation(
+                &config.session_id,
+                ProviderInputReadiness::Unavailable,
+                None,
+            )
+            .await;
         let _ = wardian_core::db::update_agent_status(&config.session_id, "Off", None);
         let session_id = config.session_id.clone();
 
@@ -249,6 +259,11 @@ pub async fn spawn_agent(
             job_object: None,
         });
     }
+
+    app_state
+        .interactions
+        .start_provider_input_generation(&config.session_id, ProviderInputReadiness::Booting, None)
+        .await;
 
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 

@@ -11,6 +11,7 @@ use wardian_core::control::{
 pub struct InteractionState {
     records: Mutex<HashMap<String, InteractionRecord>>,
     replies: Mutex<HashMap<String, StructuredReply>>,
+    provider_generations: Mutex<HashMap<String, u64>>,
     provider_inputs: Mutex<HashMap<String, ProviderInputState>>,
 }
 
@@ -65,9 +66,17 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
+        {
+            let mut generations = self.provider_generations.lock().await;
+            let current = generations.entry(session_id.to_string()).or_insert(generation);
+            if generation > *current {
+                *current = generation;
+            }
+        }
+
         let mut inputs = self.provider_inputs.lock().await;
         if let Some(existing) = inputs.get(session_id) {
-            if generation < existing.generation {
+            if keep_existing_provider_input_state(existing, generation, state, ready_evidence) {
                 return existing.clone();
             }
         }
@@ -84,6 +93,31 @@ impl InteractionState {
 
     pub async fn provider_input_state(&self, session_id: &str) -> Option<ProviderInputState> {
         self.provider_inputs.lock().await.get(session_id).cloned()
+    }
+
+    pub async fn start_provider_input_generation(
+        &self,
+        session_id: &str,
+        state: ProviderInputReadiness,
+        ready_evidence: Option<ProviderReadyEvidence>,
+    ) -> ProviderInputState {
+        let generation = {
+            let mut generations = self.provider_generations.lock().await;
+            let generation = generations.get(session_id).copied().unwrap_or(0) + 1;
+            generations.insert(session_id.to_string(), generation);
+            generation
+        };
+        self.record_provider_input_state(session_id, generation, state, ready_evidence)
+            .await
+    }
+
+    pub async fn current_provider_input_generation(&self, session_id: &str) -> Option<u64> {
+        self.provider_generations.lock().await.get(session_id).copied()
+    }
+
+    pub async fn clear_provider_input_state(&self, session_id: &str) {
+        self.provider_generations.lock().await.remove(session_id);
+        self.provider_inputs.lock().await.remove(session_id);
     }
 
     pub async fn interaction(&self, id: &str) -> Option<InteractionRecord> {
@@ -167,6 +201,26 @@ fn now_rfc3339_millis() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn keep_existing_provider_input_state(
+    existing: &ProviderInputState,
+    generation: u64,
+    next_state: ProviderInputReadiness,
+    next_evidence: Option<ProviderReadyEvidence>,
+) -> bool {
+    if generation < existing.generation {
+        return true;
+    }
+    if generation > existing.generation {
+        return false;
+    }
+    next_state == ProviderInputReadiness::Ready
+        && !matches!(next_evidence, Some(ProviderReadyEvidence::ProviderEvent))
+        && matches!(
+            existing.state,
+            ProviderInputReadiness::Busy | ProviderInputReadiness::ActionRequired
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +274,99 @@ mod tests {
             current.ready_evidence,
             Some(ProviderReadyEvidence::PromptDetected)
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_readiness_does_not_override_same_generation_busy_or_action_required() {
+        let state = InteractionState::default();
+        state
+            .record_provider_input_state("agent-1", 1, ProviderInputReadiness::Busy, None)
+            .await;
+        state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::PromptDetected),
+            )
+            .await;
+
+        let busy = state.provider_input_state("agent-1").await.unwrap();
+        assert_eq!(busy.state, ProviderInputReadiness::Busy);
+
+        state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::ActionRequired,
+                None,
+            )
+            .await;
+        state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::TitleDetected),
+            )
+            .await;
+
+        let action_required = state.provider_input_state("agent-1").await.unwrap();
+        assert_eq!(
+            action_required.state,
+            ProviderInputReadiness::ActionRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_event_readiness_can_complete_same_generation_busy_state() {
+        let state = InteractionState::default();
+        state
+            .record_provider_input_state("agent-1", 1, ProviderInputReadiness::Busy, None)
+            .await;
+        state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+
+        let current = state.provider_input_state("agent-1").await.unwrap();
+        assert_eq!(current.state, ProviderInputReadiness::Ready);
+        assert_eq!(
+            current.ready_evidence,
+            Some(ProviderReadyEvidence::ProviderEvent)
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_new_provider_generation_invalidates_previous_ready_state() {
+        let state = InteractionState::default();
+        state
+            .start_provider_input_generation(
+                "agent-1",
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+        state
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
+            .await;
+        state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::PromptDetected),
+            )
+            .await;
+
+        let current = state.provider_input_state("agent-1").await.unwrap();
+        assert_eq!(current.generation, 2);
+        assert_eq!(current.state, ProviderInputReadiness::Booting);
+        assert_eq!(state.current_provider_input_generation("agent-1").await, Some(2));
     }
 }
 

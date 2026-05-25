@@ -1069,10 +1069,9 @@ async fn wait_for_terminal_ready_for_control_send(
     state: &AppState,
     info: &DeliveryTargetInfo,
 ) -> Result<(), String> {
-    if let Some(input) = state.interactions.provider_input_state(&info.uuid).await {
-        if input.state == ProviderInputReadiness::Ready {
-            return Ok(());
-        }
+    if provider_input_current_state(state, &info.uuid).await == Some(ProviderInputReadiness::Ready)
+    {
+        return Ok(());
     }
 
     if info.provider == "opencode" {
@@ -1089,11 +1088,21 @@ async fn wait_for_terminal_ready_for_control_send(
 }
 
 async fn provider_input_has_known_not_ready_state(state: &AppState, session_id: &str) -> bool {
-    state
-        .interactions
-        .provider_input_state(session_id)
+    provider_input_current_state(state, session_id)
         .await
-        .is_some_and(|input| input.state != ProviderInputReadiness::Ready)
+        .is_some_and(|input_state| input_state != ProviderInputReadiness::Ready)
+}
+
+async fn provider_input_current_state(
+    state: &AppState,
+    session_id: &str,
+) -> Option<ProviderInputReadiness> {
+    let input = state.interactions.provider_input_state(session_id).await?;
+    let current_generation = state
+        .interactions
+        .current_provider_input_generation(session_id)
+        .await?;
+    (input.generation == current_generation).then_some(input.state)
 }
 
 async fn record_provider_ready_evidence(
@@ -1105,6 +1114,7 @@ async fn record_provider_ready_evidence(
         .interactions
         .provider_input_state(session_id)
         .await
+        .filter(|input| input.state != ProviderInputReadiness::ActionRequired)
         .map(|input| input.generation)
         .unwrap_or(0);
     state

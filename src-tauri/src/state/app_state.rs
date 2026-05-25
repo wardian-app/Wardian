@@ -76,6 +76,9 @@ impl AppState {
             .lock()
             .await
             .remove_for_target(target_session_id);
+        self.interactions
+            .clear_provider_input_state(target_session_id)
+            .await;
     }
 }
 
