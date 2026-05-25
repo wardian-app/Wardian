@@ -94,6 +94,64 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         )",
         [],
     )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interactions (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            sender_session_id TEXT,
+            target_session_ids TEXT NOT NULL,
+            status TEXT NOT NULL,
+            trigger_policy TEXT NOT NULL,
+            body_ref TEXT NOT NULL,
+            parent_interaction_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interaction_delivery_attempts (
+            id TEXT PRIMARY KEY,
+            interaction_id TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            runtime_state TEXT NOT NULL,
+            delivery_state TEXT NOT NULL,
+            delivery_phase TEXT,
+            observed_state TEXT,
+            reason TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(interaction_id) REFERENCES interactions(id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interaction_events (
+            event_id TEXT PRIMARY KEY,
+            interaction_id TEXT,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS provider_input_state (
+            session_id TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            ready_evidence TEXT,
+            observed_at TEXT NOT NULL
+        )",
+        [],
+    )?;
 
     for (name, definition) in [
         ("provider", "TEXT"),
@@ -488,5 +546,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migrations_create_interaction_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        for table in [
+            "interactions",
+            "interaction_delivery_attempts",
+            "interaction_events",
+            "provider_input_state",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} should exist");
+        }
     }
 }
