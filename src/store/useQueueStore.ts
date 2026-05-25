@@ -23,7 +23,13 @@ interface QueueState {
   appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (sessionId: string, agentName: string, summaryOverride?: string | null) => void;
-  addActionNeeded: (sessionId: string, agentName: string, summary?: string | null) => void;
+  addActionNeeded: (
+    sessionId: string,
+    agentName: string,
+    summary?: string | null,
+    evidenceId?: string,
+    evidenceSource?: QueueItem["evidence_source"],
+  ) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
   addWorkflowCompletion: (
     payload: { workflow_id: string; run_instance_id?: string; status: "completed" | "failed"; error?: string },
@@ -165,11 +171,12 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     });
   },
 
-  addActionNeeded(sessionId, agentName, summary) {
+  addActionNeeded(sessionId, agentName, summary, evidenceId, evidenceSource) {
     const { items, _agentBuffers } = get();
-    const recent = items.find(
-      (i) => i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS,
-    );
+    const recent = items.find((i) => {
+      if (evidenceId) return i.evidence_id === evidenceId;
+      return i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS;
+    });
     if (recent) return;
 
     const explicitSummary = summary?.trim();
@@ -184,6 +191,8 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       agent_session_id: sessionId,
       agent_name: agentName,
       summary: boundSummary(itemSummary),
+      evidence_id: evidenceId,
+      evidence_source: evidenceSource,
     };
 
     set((s) => {

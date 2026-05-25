@@ -293,6 +293,29 @@ describe("useQueueStore - action needed", () => {
 
     expect(useQueueStore.getState().items).toHaveLength(1);
   });
+
+  it("deduplicates provider action-needed cards by stable evidence id", () => {
+    useQueueStore.getState().addActionNeeded("agent-1", "CoderOne", "Approve?", "provider-event-1", "provider_runtime");
+    useQueueStore.getState().addActionNeeded("agent-1", "CoderOne", "Approve?", "provider-event-1", "provider_runtime");
+
+    expect(useQueueStore.getState().items).toHaveLength(1);
+    expect(useQueueStore.getState().items[0]).toMatchObject({
+      type: "action_needed",
+      evidence_id: "provider-event-1",
+      evidence_source: "provider_runtime",
+    });
+  });
+
+  it("allows provider and interaction evidence to remain distinct", () => {
+    useQueueStore
+      .getState()
+      .addActionNeeded("agent-1", "CoderOne", "Provider approval", "provider-event-1", "provider_runtime");
+    useQueueStore
+      .getState()
+      .addActionNeeded("agent-1", "CoderOne", "Workflow review", "interaction-event-1", "interaction_store");
+
+    expect(useQueueStore.getState().items).toHaveLength(2);
+  });
 });
 
 describe("useQueueStore - workflow completion", () => {

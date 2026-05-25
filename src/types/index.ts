@@ -233,6 +233,8 @@ export interface QueueItem {
     type: "action_needed" | "agent_completed" | "workflow_completed";
     timestamp: number;
     read: boolean;
+    evidence_id?: string;
+    evidence_source?: "provider_runtime" | "interaction_store" | "live_runtime";
     // agent fields
     agent_session_id?: string;
     agent_name?: string;
