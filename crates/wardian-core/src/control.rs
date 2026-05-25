@@ -219,6 +219,91 @@ pub enum ReplyStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionKind {
+    Message,
+    Task,
+    Reply,
+    Notification,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionStatus {
+    Created,
+    Queued,
+    Delivering,
+    Delivered,
+    AwaitingReply,
+    Completed,
+    Failed,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionTriggerPolicy {
+    NotifyOnly,
+    StartTurn,
+    ReplyRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "storage", rename_all = "snake_case")]
+pub enum InteractionBodyRef {
+    Inline { body: String },
+    File { path: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractionRecord {
+    pub id: String,
+    pub kind: InteractionKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_session_id: Option<String>,
+    pub target_session_ids: Vec<String>,
+    pub status: InteractionStatus,
+    pub trigger_policy: InteractionTriggerPolicy,
+    pub body_ref: InteractionBodyRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_interaction_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderInputReadiness {
+    Unknown,
+    Booting,
+    Ready,
+    Busy,
+    ActionRequired,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderReadyEvidence {
+    ProviderEvent,
+    PromptDetected,
+    TitleDetected,
+    ManualStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderInputState {
+    pub session_id: String,
+    pub generation: u64,
+    pub state: ProviderInputReadiness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_evidence: Option<ProviderReadyEvidence>,
+    pub observed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StructuredReply {
     pub request_id: String,
@@ -811,6 +896,49 @@ mod tests {
         assert!(json.contains(r#""status":"done""#));
         assert!(json.contains(r#""body":"finished""#));
         assert_eq!(roundtrip, req);
+    }
+
+    #[test]
+    fn interaction_record_serializes_stable_fields() {
+        let record = InteractionRecord {
+            id: "int_001".to_string(),
+            kind: InteractionKind::Task,
+            sender_session_id: Some("source-1".to_string()),
+            target_session_ids: vec!["agent-1".to_string()],
+            status: InteractionStatus::AwaitingReply,
+            trigger_policy: InteractionTriggerPolicy::ReplyRequired,
+            body_ref: InteractionBodyRef::Inline {
+                body: "review this".to_string(),
+            },
+            parent_interaction_id: None,
+            created_at: "2026-05-25T00:00:00.000Z".to_string(),
+            updated_at: "2026-05-25T00:00:01.000Z".to_string(),
+            completed_at: None,
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+
+        assert!(json.contains(r#""id":"int_001""#));
+        assert!(json.contains(r#""kind":"task""#));
+        assert!(json.contains(r#""status":"awaiting_reply""#));
+        assert!(json.contains(r#""trigger_policy":"reply_required""#));
+    }
+
+    #[test]
+    fn provider_input_state_serializes_generation_and_evidence() {
+        let state = ProviderInputState {
+            session_id: "agent-1".to_string(),
+            generation: 7,
+            state: ProviderInputReadiness::Ready,
+            ready_evidence: Some(ProviderReadyEvidence::PromptDetected),
+            observed_at: "2026-05-25T00:00:00.000Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+
+        assert!(json.contains(r#""generation":7"#));
+        assert!(json.contains(r#""state":"ready""#));
+        assert!(json.contains(r#""ready_evidence":"prompt_detected""#));
     }
 
     #[test]
