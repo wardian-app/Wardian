@@ -14,8 +14,9 @@ on them.
 
 ## Goals
 
-- Make `wardian send`, `wardian ask`, and `wardian reply` operate on durable
-  backend interactions.
+- Make structured `wardian ask` and `wardian reply` operate on durable backend
+  interactions. Ordinary `wardian send` remains provider-aware delivery in this
+  release slice until durable message interactions are implemented.
 - Remove fixed-delay assumptions from Codex delivery. Delivery must wait for
   readiness evidence, not sleep and hope.
 - Preserve provider-specific runtime status as the authority for provider
@@ -57,9 +58,11 @@ Interaction {
 }
 ```
 
-`wardian send` creates a `message` interaction. `wardian ask` creates a `task`
-interaction with `reply_required`. `wardian reply` creates or attaches a `reply`
-interaction that completes the parent task.
+In this 0.3.7 slice, `wardian ask` creates a `task` interaction with
+`reply_required`, and `wardian reply` creates or attaches a `reply` interaction
+that completes the parent task. A future slice should promote ordinary
+`wardian send` calls into durable `message` interactions; today they route
+through provider-aware live delivery and mailbox state.
 
 Large bodies should continue to live as files under the target agent habitat,
 with database references. Mailbox entries should become pending delivery work
@@ -171,12 +174,14 @@ that Queue or watch consumers interpret as new live evidence.
 ## CLI Behavior
 
 `wardian ask` should wait on the parent task interaction reaching `completed`,
-`failed`, `expired`, or timeout. It should return the attached structured reply
-when completed.
+`failed`, or timeout. It should return the attached structured reply when
+completed. Expiry is a target interaction status but is not enforced in this
+slice.
 
 `wardian reply <request-id>` should resolve the target interaction by ID. Unknown
-or expired IDs must fail deterministically. Duplicate replies must be rejected or
-handled by an explicit idempotency policy.
+IDs must fail deterministically. Duplicate replies must be rejected or handled by
+an explicit idempotency policy. Expired-ID rejection should be added with the
+future expiry policy.
 
 Output-marker based waiting can remain for compatibility, but it is not the
 structured ask/reply path and must be documented as weaker evidence.
@@ -196,7 +201,8 @@ Backend and native tests should prove:
   interaction.
 - Echoed request IDs, terminal prompt echoes, and marker text cannot complete an
   ask.
-- A reply for an unknown or expired interaction fails deterministically.
+- A reply for an unknown interaction fails deterministically; expired
+  interaction handling belongs with the future expiry policy.
 - Duplicate replies are rejected or idempotently ignored by policy.
 - Delivery before provider readiness queues instead of injecting.
 - Queued delivery drains exactly once after a fresh readiness signal for the
@@ -209,8 +215,9 @@ Backend and native tests should prove:
 
 Implementation must update public and developer documentation alongside code:
 
-- `docs/guide/cli.md`: explain structured `ask`/`reply`, durable interactions,
-  and the distinction between structured reply waiting and output-marker waiting.
+- `docs/guide/cli.md`: explain structured `ask`/`reply`, durable task/reply
+  interactions, ordinary `send` delivery, and the distinction between structured
+  reply waiting and output-marker waiting.
 - `docs/guide/queue.md`: explain provider-sourced action-needed cards, completed
   interaction cards, persistence, and restart/replay guarantees.
 - `docs/developer/ipc-events.md`: document new interaction and provider runtime

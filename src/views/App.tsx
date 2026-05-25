@@ -150,19 +150,6 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
-function normalizeStatusEvidencePart(status: string | undefined) {
-  const normalized = status?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return normalized || "unknown";
-}
-
-function buildStatusActionNeededEvidenceId(sessionId: string, currentStatus: string, previousStatus: string) {
-  return [
-    "status-transition",
-    sessionId,
-    `${normalizeStatusEvidencePart(previousStatus)}-to-${normalizeStatusEvidencePart(currentStatus)}`,
-  ].join(":");
-}
-
 function App() {
   return (
     <ErrorBoundary>
@@ -271,8 +258,6 @@ function AppBody() {
       sessionId,
       agent?.session_name ?? sessionId,
       "Action needed",
-      buildStatusActionNeededEvidenceId(sessionId, currentStatus, previousStatus),
-      "provider_runtime",
     );
   }, [addActionNeeded]);
 

@@ -104,23 +104,47 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
-        let stale = {
-            let mut observations = self.provider_status_observations.lock().await;
-            match observations.get(session_id).copied() {
-                Some(current) if status_sequence < current => true,
-                _ => {
-                    observations.insert(session_id.to_string(), status_sequence);
-                    false
-                }
-            }
-        };
-        if stale {
-            if let Some(existing) = self.provider_input_state(session_id).await {
+        let mut observations = self.provider_status_observations.lock().await;
+        if matches!(
+            observations.get(session_id).copied(),
+            Some(current) if status_sequence < current
+        ) {
+            if let Some(existing) = self.provider_inputs.lock().await.get(session_id).cloned() {
                 return existing;
             }
+        } else {
+            observations.insert(session_id.to_string(), status_sequence);
         }
-        self.record_provider_input_state(session_id, generation, state, ready_evidence)
-            .await
+
+        {
+            let mut generations = self.provider_generations.lock().await;
+            let current = generations
+                .entry(session_id.to_string())
+                .or_insert(generation);
+            if generation > *current {
+                *current = generation;
+            }
+        }
+
+        let record = {
+            let mut inputs = self.provider_inputs.lock().await;
+            if let Some(existing) = inputs.get(session_id) {
+                if keep_existing_provider_input_state(existing, generation, state, ready_evidence) {
+                    return existing.clone();
+                }
+            }
+            let record = ProviderInputState {
+                session_id: session_id.to_string(),
+                generation,
+                state,
+                ready_evidence,
+                observed_at: now_rfc3339_millis(),
+            };
+            inputs.insert(session_id.to_string(), record.clone());
+            record
+        };
+        let _ = wardian_core::db::upsert_provider_input_state(&record);
+        record
     }
 
     pub async fn provider_input_state(&self, session_id: &str) -> Option<ProviderInputState> {
@@ -152,11 +176,11 @@ impl InteractionState {
     }
 
     pub async fn clear_provider_input_state(&self, session_id: &str) {
-        self.provider_generations.lock().await.remove(session_id);
         self.provider_status_observations
             .lock()
             .await
             .remove(session_id);
+        self.provider_generations.lock().await.remove(session_id);
         self.provider_inputs.lock().await.remove(session_id);
         let _ = wardian_core::db::delete_provider_input_state(session_id);
     }
