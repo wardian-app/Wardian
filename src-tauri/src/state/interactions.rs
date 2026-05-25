@@ -68,6 +68,18 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
+        let _observations = self.provider_status_observations.lock().await;
+        self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
+            .await
+    }
+
+    async fn record_provider_input_state_inner(
+        &self,
+        session_id: &str,
+        generation: u64,
+        state: ProviderInputReadiness,
+        ready_evidence: Option<ProviderReadyEvidence>,
+    ) -> ProviderInputState {
         {
             let mut generations = self.provider_generations.lock().await;
             let current = generations
@@ -116,35 +128,8 @@ impl InteractionState {
             observations.insert(session_id.to_string(), status_sequence);
         }
 
-        {
-            let mut generations = self.provider_generations.lock().await;
-            let current = generations
-                .entry(session_id.to_string())
-                .or_insert(generation);
-            if generation > *current {
-                *current = generation;
-            }
-        }
-
-        let record = {
-            let mut inputs = self.provider_inputs.lock().await;
-            if let Some(existing) = inputs.get(session_id) {
-                if keep_existing_provider_input_state(existing, generation, state, ready_evidence) {
-                    return existing.clone();
-                }
-            }
-            let record = ProviderInputState {
-                session_id: session_id.to_string(),
-                generation,
-                state,
-                ready_evidence,
-                observed_at: now_rfc3339_millis(),
-            };
-            inputs.insert(session_id.to_string(), record.clone());
-            record
-        };
-        let _ = wardian_core::db::upsert_provider_input_state(&record);
-        record
+        self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
+            .await
     }
 
     pub async fn provider_input_state(&self, session_id: &str) -> Option<ProviderInputState> {
@@ -157,13 +142,14 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
+        let _observations = self.provider_status_observations.lock().await;
         let generation = {
             let mut generations = self.provider_generations.lock().await;
             let generation = generations.get(session_id).copied().unwrap_or(0) + 1;
             generations.insert(session_id.to_string(), generation);
             generation
         };
-        self.record_provider_input_state(session_id, generation, state, ready_evidence)
+        self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
             .await
     }
 
