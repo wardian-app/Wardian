@@ -10,10 +10,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, DeliveryDetail, DeliveryErrorDetail, MessageInputMode, MessageOrigin,
-    OkResponse, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
-    WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError, WorkflowListResponse,
-    WorkflowResponse, WorkflowSummary,
+    ControlRequest, DeliveryDetail, DeliveryErrorDetail, InteractionBodyRef, MessageInputMode,
+    MessageOrigin, OkResponse, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse,
+    StructuredReply, WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
+    WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -1231,13 +1231,36 @@ async fn handle_structured_ask(
         .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
     let structured_delivery =
         build_structured_ask_delivery_message(&wardian_home, &target_uuid, message, &request_id)?;
-    create_pending_ask_request_with_id(
-        &state,
-        &target_uuid,
-        request_id.clone(),
-        structured_delivery.body_file.as_deref(),
-    )
-    .await?;
+    let sender_session_id =
+        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+    let body_ref = structured_delivery
+        .body_file
+        .as_ref()
+        .map(|path| InteractionBodyRef::File {
+            path: path.display().to_string(),
+        })
+        .unwrap_or_else(|| InteractionBodyRef::Inline {
+            body: message.to_string(),
+        });
+    let task = state
+        .interactions
+        .create_task_with_id(request_id.clone(), sender_session_id, target_uuid.clone(), body_ref)
+        .await;
+    let mut payload = serde_json::json!({
+        "request_id": task.id,
+        "target_session_id": target_uuid,
+        "status": "pending",
+        "created_at": task.created_at,
+    });
+    if let Some(body_file) = structured_delivery.body_file.as_deref() {
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert(
+                "body_file".to_string(),
+                serde_json::Value::String(body_file.display().to_string()),
+            );
+        }
+    }
+    push_watch_event_for_agent(&state, &target_uuid, "request", payload).await?;
     let delivery = match deliver_message_to_target(
         Some(app),
         &state,
@@ -1253,14 +1276,12 @@ async fn handle_structured_ask(
     {
         Ok(delivery) => delivery,
         Err(error) => {
-            cleanup_ask_request(&state, &request_id).await;
             return Err(error);
         }
     };
     let reply = match wait_for_structured_reply(&state, &request_id, timeout).await {
         Ok(reply) => reply,
         Err(error) => {
-            cleanup_ask_request(&state, &request_id).await;
             return Err(error);
         }
     };
@@ -1281,7 +1302,6 @@ async fn handle_structured_ask(
         fallback_agent,
         watch_result,
     );
-    cleanup_ask_request(&state, &request_id).await;
     ok_json(&response)
 }
 
@@ -1383,10 +1403,6 @@ async fn ask_fallback_agent_snapshot(
         })
 }
 
-async fn cleanup_ask_request(state: &AppState, request_id: &str) {
-    state.ask_requests.lock().await.remove(request_id);
-}
-
 fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
     format!(
         "{message}\n\nWardian request id: {request_id}\nRespond to this request with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the reply body on stdin."
@@ -1459,6 +1475,7 @@ async fn create_pending_ask_request(
     Ok(request_id)
 }
 
+#[cfg(test)]
 async fn create_pending_ask_request_with_id(
     state: &AppState,
     target_session_id: &str,
@@ -1508,6 +1525,47 @@ async fn submit_structured_reply(
 ) -> Result<StructuredReply, ControlError> {
     let source_session_id =
         origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+
+    if state.interactions.interaction(request_id).await.is_some() {
+        let reply = state
+            .interactions
+            .complete_task_with_reply(
+                request_id,
+                source_session_id.as_deref(),
+                status.clone(),
+                body,
+            )
+            .await
+            .map_err(|code| match code {
+                "not_found" => {
+                    ControlError::not_found(format!("ask request not found: {request_id}"))
+                }
+                "unauthorized" => ControlError::coded(
+                    "unauthorized",
+                    "reply origin does not match ask target",
+                ),
+                "duplicate_reply" => ControlError::coded(
+                    "duplicate_reply",
+                    "ask request already has a terminal reply",
+                ),
+                _ => ControlError::request_failed("failed to complete ask interaction"),
+            })?;
+
+        push_watch_event_for_agent(
+            state,
+            &reply.target_session_id,
+            "reply",
+            serde_json::json!({
+                "request_id": reply.request_id,
+                "status": reply.status,
+                "target_session_id": reply.target_session_id,
+                "source_session_id": reply.source_session_id,
+                "replied_at": reply.replied_at,
+            }),
+        )
+        .await?;
+        return Ok(reply);
+    }
 
     let reply = {
         let mut requests = state.ask_requests.lock().await;
@@ -1565,6 +1623,25 @@ async fn wait_for_structured_reply(
 ) -> Result<StructuredReply, ControlError> {
     let started = std::time::Instant::now();
     loop {
+        if state.interactions.interaction(request_id).await.is_some() {
+            if let Some(reply) = state.interactions.structured_reply(request_id).await {
+                return Ok(reply);
+            }
+            if started.elapsed() >= timeout {
+                return Err(
+                    ControlError::watch_timeout("structured reply timed out").with_details(
+                        serde_json::json!({
+                            "request_id": request_id,
+                            "until": "reply",
+                        }),
+                    ),
+                );
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+            continue;
+        }
+
         let reply = {
             let requests = state.ask_requests.lock().await;
             let request = requests.get(request_id).ok_or_else(|| {
