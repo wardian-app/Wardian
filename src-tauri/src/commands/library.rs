@@ -1069,8 +1069,10 @@ mod tests {
     use crate::state::AppState;
     use crate::utils::fs::create_directory_link;
     use std::fs;
+    use std::io::Write;
+    use std::path::Path;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct WardianHomeGuard;
 
@@ -1447,8 +1449,79 @@ mod tests {
         assert!(!is_current_library_watch_generation(&state, "skills", 1));
     }
 
-    fn wait_for_fs_event(rx: &mpsc::Receiver<()>, label: &str) {
-        rx.recv_timeout(Duration::from_secs(5))
+    fn fs_event_touches(event: &notify::Event, expected: &Path) -> bool {
+        let expected_paths = comparable_fs_event_paths(expected);
+        event.paths.iter().any(|path| {
+            let event_paths = comparable_fs_event_paths(path);
+            event_paths.iter().any(|event_path| {
+                expected_paths.iter().any(|expected_path| {
+                    comparable_fs_event_path_matches(event_path, expected_path)
+                })
+            })
+        })
+    }
+
+    fn comparable_fs_event_path_matches(path: &str, expected: &str) -> bool {
+        let separator = if cfg!(windows) { "\\" } else { "/" };
+        path == expected
+            || path.starts_with(&format!("{}{}", expected, separator))
+            || expected.starts_with(&format!("{}{}", path, separator))
+    }
+
+    fn comparable_fs_event_paths(path: &Path) -> Vec<String> {
+        let mut paths = vec![comparable_fs_event_path(path)];
+        if let Ok(canonical) = path.canonicalize() {
+            paths.push(comparable_fs_event_path(&canonical));
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn comparable_fs_event_path(path: &Path) -> String {
+        #[cfg(windows)]
+        {
+            let mut path = path.to_string_lossy().replace('/', "\\");
+            if let Some(stripped) = path.strip_prefix(r"\\?\UNC\") {
+                path = format!(r"\\{}", stripped);
+            } else if let Some(stripped) = path.strip_prefix(r"\\?\") {
+                path = stripped.to_string();
+            }
+            return path.trim_end_matches('\\').to_ascii_lowercase();
+        }
+
+        #[cfg(not(windows))]
+        {
+            path.to_string_lossy().trim_end_matches('/').to_string()
+        }
+    }
+
+    fn wait_for_fs_event(rx: &mpsc::Receiver<notify::Event>, label: &str, expected: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed = Vec::new();
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                panic!(
+                    "timed out waiting for filesystem event: {}; observed events: {:#?}",
+                    label, observed
+                );
+            };
+            let event = rx.recv_timeout(remaining).unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for filesystem event: {}; observed events: {:#?}",
+                    label, observed
+                )
+            });
+            if fs_event_touches(&event, expected) {
+                break;
+            }
+            observed.push((event.kind, event.paths));
+        }
+        while rx.try_recv().is_ok() {}
+    }
+
+    fn wait_for_any_fs_event(rx: &mpsc::Receiver<notify::Event>, label: &str) {
+        rx.recv_timeout(Duration::from_secs(10))
             .unwrap_or_else(|_| panic!("timed out waiting for filesystem event: {}", label));
         while rx.try_recv().is_ok() {}
     }
@@ -1460,10 +1533,10 @@ mod tests {
         fs::create_dir_all(&skills_dir).expect("skills dir");
 
         let targets = discover_skill_watch_targets(&skills_dir).expect("watch targets");
-        let (tx, rx) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel::<notify::Event>();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
-                let _ = tx.send(());
+            if let Ok(event) = res {
+                let _ = tx.send(event);
             }
         })
         .expect("watcher");
@@ -1474,15 +1547,21 @@ mod tests {
         }
 
         let skill_dir = skills_dir.join("planner");
+        let skill_file = skill_dir.join("SKILL.md");
         fs::create_dir_all(&skill_dir).expect("create skill dir");
-        fs::write(skill_dir.join("SKILL.md"), "one").expect("write skill");
-        wait_for_fs_event(&rx, "skill create");
+        fs::write(&skill_file, "one").expect("write skill");
+        wait_for_fs_event(&rx, "skill create", &skill_dir);
 
-        fs::write(skill_dir.join("SKILL.md"), "two").expect("modify skill");
-        wait_for_fs_event(&rx, "skill modify");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&skill_file)
+            .expect("open skill for modify");
+        file.write_all(b"\ntwo").expect("modify skill");
+        file.sync_all().expect("sync skill modify");
+        wait_for_fs_event(&rx, "skill modify", &skill_file);
 
         fs::remove_dir_all(&skill_dir).expect("remove skill");
-        wait_for_fs_event(&rx, "skill remove");
+        wait_for_any_fs_event(&rx, "skill remove");
     }
 
     #[test]
@@ -1499,10 +1578,10 @@ mod tests {
         create_directory_link(&external_skill, &linked_skill).expect("linked skill");
 
         let targets = discover_skill_watch_targets(&skills_dir).expect("watch targets");
-        let (tx, rx) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel::<notify::Event>();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
-                let _ = tx.send(());
+            if let Ok(event) = res {
+                let _ = tx.send(event);
             }
         })
         .expect("watcher");
@@ -1512,7 +1591,13 @@ mod tests {
                 .expect("watch target");
         }
 
-        fs::write(external_skill.join("SKILL.md"), "two").expect("modify linked target");
-        wait_for_fs_event(&rx, "linked target modify");
+        let external_skill_file = external_skill.join("SKILL.md");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&external_skill_file)
+            .expect("open linked target for modify");
+        file.write_all(b"\ntwo").expect("modify linked target");
+        file.sync_all().expect("sync linked target modify");
+        wait_for_fs_event(&rx, "linked target modify", &external_skill_file);
     }
 }

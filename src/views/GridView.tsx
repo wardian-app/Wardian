@@ -205,7 +205,7 @@ export const GridView: React.FC<GridViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative min-w-0 ${isAgentMaximized ? 'h-full w-full rounded-none border-none transition-none z-10' : 'transition-all rounded-[var(--density-card-radius)] border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
+            className={`bg-[var(--color-wardian-card)] overflow-hidden flex flex-col shadow-lg relative min-w-0 ${isAgentMaximized ? 'h-full w-full rounded-none border-none transition-none z-10' : 'transition-colors rounded-[var(--density-card-radius)] border border-wardian-border ' + (isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'ring-1 ring-[var(--color-wardian-accent)]/50 shadow-wardian-accent z-10' : '')} ${draggedAgentId === agentId && !isAgentMaximized ? 'opacity-50 scale-[0.98]' : ''}`}
           >
             <div
               data-testid={`agent-card-header-${agentId}`}
