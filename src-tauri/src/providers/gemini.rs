@@ -246,6 +246,7 @@ impl AgentProvider for GeminiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use wardian_core::models::{GeminiProviderConfig, ProviderConfig};
 
     fn make_provider() -> GeminiProvider {
@@ -279,8 +280,12 @@ mod tests {
         // On any platform, the binary name should be non-empty
         assert!(!bin.is_empty());
         if cfg!(target_os = "windows") {
-            // Should be either "node" or "gemini.cmd"
-            assert!(bin == "node" || bin == "gemini.cmd");
+            let binary_name = Path::new(&bin)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&bin);
+            // Should be either "node" or a Gemini cmd shim, including absolute fallback paths.
+            assert!(bin == "node" || binary_name.eq_ignore_ascii_case("gemini.cmd"));
         } else {
             assert_eq!(bin, "gemini");
         }

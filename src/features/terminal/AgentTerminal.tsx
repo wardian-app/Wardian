@@ -523,7 +523,7 @@ async function fitTerminalToContainer(
   sessionId: string,
   entry: TerminalSessionEntry,
   container: HTMLDivElement,
-  options?: { force?: boolean },
+  options?: { force?: boolean; reportUnchanged?: boolean },
 ) {
   const renderer = entry.renderer;
   if (!renderer) {
@@ -562,7 +562,7 @@ async function fitTerminalToContainer(
     }
     if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
       renderer.term.resize(nextCols, nextRows);
-    } else {
+    } else if (options?.reportUnchanged !== false) {
       void reportTerminalSize(sessionId, entry, nextCols, nextRows, { force: true });
     }
   } catch {
@@ -908,11 +908,14 @@ function mountRenderer(
   cancelRendererDisposal(session);
   const renderer = session.renderer ?? createRenderer(sessionId, session);
   session.renderer = renderer;
+  attachRendererHost(session, container);
 
   if (!renderer.term.element) {
     if (session.parser.cols !== renderer.term.cols || session.parser.rows !== renderer.term.rows) {
       renderer.term.resize(session.parser.cols, session.parser.rows);
     }
+
+    renderer.term.open(renderer.host);
 
     const seedState = session.parserSerializeAddon.serialize({
       scrollback: TERMINAL_SCROLLBACK_LINES,
@@ -920,11 +923,7 @@ function mountRenderer(
     if (seedState) {
       renderer.term.write(seedState);
     }
-
-    renderer.term.open(renderer.host);
   }
-  attachRendererHost(session, container);
-  activateWebglRenderer(renderer, sessionId);
 
   return renderer;
 }
@@ -1040,16 +1039,18 @@ export const AgentTerminal = memo(function AgentTerminal({
           height: Math.round(initialRect.height || 0),
         };
 
-        const checkSizing = (force = false) => {
+        const checkSizing = (options?: { force?: boolean; reportUnchanged?: boolean }) => {
           if (!isMounted || !terminalRef.current) {
             return;
           }
-          void fitTerminalToContainer(sessionId, session, terminalRef.current, { force });
+          void fitTerminalToContainer(sessionId, session, terminalRef.current, options);
         };
 
         void drainPty(sessionId);
-        requestAnimationFrame(() => checkSizing(true));
-        setTimeout(() => checkSizing(true), 50);
+        checkSizing({ force: true, reportUnchanged: false });
+        activateWebglRenderer(renderer, sessionId);
+        requestAnimationFrame(() => checkSizing({ force: true, reportUnchanged: false }));
+        setTimeout(() => checkSizing({ force: true, reportUnchanged: false }), 50);
 
         resizeObserver = new ResizeObserver(() => {
           if (!isMounted) {

@@ -23,11 +23,13 @@ function getLatestTerminalInstance() {
 describe("AgentTerminal scrollback", () => {
   let rectSpy: ReturnType<typeof vi.spyOn>;
   let fitDimensions: { cols: number; rows: number };
+  let openConnectedStates: boolean[];
 
   beforeEach(() => {
     vi.clearAllMocks();
     useSettingsStore.setState({ terminalFontSize: 14, terminalFontFamily: "" });
     useQueueStore.setState({ items: [], _agentBuffers: {}, _workflowLastOutput: {} });
+    openConnectedStates = [];
     rectSpy = vi
       .spyOn(HTMLElement.prototype, "getBoundingClientRect")
       .mockReturnValue({
@@ -65,6 +67,7 @@ describe("AgentTerminal scrollback", () => {
       const terminal = {
         element: undefined as HTMLElement | undefined,
         open: vi.fn((element: HTMLElement) => {
+          openConnectedStates.push(element.isConnected);
           terminal.element = element;
         }),
         write: vi.fn((data: string, callback?: () => void) => {
@@ -248,6 +251,32 @@ describe("AgentTerminal scrollback", () => {
       expect(window.__wardianTerminalDebug?.snapshot(domId!)?.renderer?.webglActive).toBe(true);
     });
     expect(webglActiveCount()).toBe(12);
+  });
+
+  it("opens xterm after its host is attached to the document", async () => {
+    render(<AgentTerminal sessionId="codex-connected-open" theme="dark" />);
+
+    await waitFor(() => {
+      expect(openConnectedStates).toContain(true);
+    });
+
+    expect(openConnectedStates).toEqual([true]);
+  });
+
+  it("fits the connected terminal before activating the WebGL renderer", async () => {
+    render(<AgentTerminal sessionId="codex-fit-before-webgl" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockWebglAddon).toHaveBeenCalled();
+    });
+
+    const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value as {
+      proposeDimensions: ReturnType<typeof vi.fn>;
+    };
+    expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+    expect(fitAddon.proposeDimensions.mock.invocationCallOrder[0]).toBeLessThan(
+      mockWebglAddon.mock.invocationCallOrder[0],
+    );
   });
 
   it("captures readable terminal output for queue summaries", async () => {

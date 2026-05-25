@@ -132,6 +132,14 @@ describe('GridView maximize behavior', () => {
     expect(card?.className).not.toContain('fixed');
   });
 
+  it('does not animate terminal card geometry during maximize restore', () => {
+    renderGrid(null);
+
+    const card = screen.getByTestId('terminal-agent-1').closest('#agent-card-agent-1');
+    expect(card?.className).not.toContain('transition-all');
+    expect(card?.className).toContain('transition-colors');
+  });
+
   it('falls back to the filtered grid when the maximized agent is no longer visible', () => {
     const visibleSubset = agents.filter((agent) => agent.session_id !== 'agent-1');
     const { container } = renderGrid('agent-1', visibleSubset);
