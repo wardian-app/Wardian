@@ -150,6 +150,19 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
+function normalizeStatusEvidencePart(status: string | undefined) {
+  const normalized = status?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || "unknown";
+}
+
+function buildStatusActionNeededEvidenceId(sessionId: string, currentStatus: string, previousStatus: string) {
+  return [
+    "status-transition",
+    sessionId,
+    `${normalizeStatusEvidencePart(previousStatus)}-to-${normalizeStatusEvidencePart(currentStatus)}`,
+  ].join(":");
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -254,7 +267,13 @@ function AppBody() {
   const maybeAddActionNeededQueueItem = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
     if (currentStatus !== "Action Needed" || !previousStatus || previousStatus === "Action Needed") return;
     const agent = agentsRef.current.find((a) => a.session_id === sessionId);
-    addActionNeeded(sessionId, agent?.session_name ?? sessionId, "Action needed");
+    addActionNeeded(
+      sessionId,
+      agent?.session_name ?? sessionId,
+      "Action needed",
+      buildStatusActionNeededEvidenceId(sessionId, currentStatus, previousStatus),
+      "provider_runtime",
+    );
   }, [addActionNeeded]);
 
   useEffect(() => {

@@ -306,13 +306,20 @@ describe("useQueueStore - action needed", () => {
     });
   });
 
-  it("allows provider and interaction evidence to remain distinct", () => {
+  it("allows provider and interaction evidence with the same local id to remain distinct", () => {
     useQueueStore
       .getState()
-      .addActionNeeded("agent-1", "CoderOne", "Provider approval", "provider-event-1", "provider_runtime");
+      .addActionNeeded("agent-1", "CoderOne", "Provider approval", "approval-1", "provider_runtime");
     useQueueStore
       .getState()
-      .addActionNeeded("agent-1", "CoderOne", "Workflow review", "interaction-event-1", "interaction_store");
+      .addActionNeeded("agent-1", "CoderOne", "Workflow review", "approval-1", "interaction_store");
+
+    expect(useQueueStore.getState().items).toHaveLength(2);
+  });
+
+  it("keeps provider evidence with the same local id distinct across agent sessions", () => {
+    useQueueStore.getState().addActionNeeded("agent-1", "CoderOne", "Approve?", "approval-1", "provider_runtime");
+    useQueueStore.getState().addActionNeeded("agent-2", "CoderTwo", "Approve?", "approval-1", "provider_runtime");
 
     expect(useQueueStore.getState().items).toHaveLength(2);
   });

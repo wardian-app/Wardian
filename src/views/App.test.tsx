@@ -1030,6 +1030,8 @@ describe("Agent Watchlist Sidebar", () => {
               agent_session_id: "agent-1",
               agent_name: "Alpha",
               summary: "Action needed",
+              evidence_id: "status-transition:agent-1:processing-to-action-needed",
+              evidence_source: "provider_runtime",
               read: false,
             }),
           ],

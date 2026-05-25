@@ -67,6 +67,22 @@ function boundSummary(text: string): string {
   return `${text.slice(0, headLength)}${marker}${text.slice(-tailLength)}`;
 }
 
+function isProviderScopedEvidence(evidenceSource: QueueItem["evidence_source"] | undefined) {
+  return evidenceSource === "provider_runtime";
+}
+
+function matchesActionNeededEvidence(
+  item: QueueItem,
+  sessionId: string,
+  evidenceId: string,
+  evidenceSource: QueueItem["evidence_source"] | undefined,
+) {
+  if (item.type !== "action_needed") return false;
+  if (item.evidence_id !== evidenceId || item.evidence_source !== evidenceSource) return false;
+  if (isProviderScopedEvidence(evidenceSource)) return item.agent_session_id === sessionId;
+  return true;
+}
+
 export const useQueueStore = create<QueueState>((set, get) => ({
   items: [],
   preferences: DEFAULT_QUEUE_PREFERENCES,
@@ -174,7 +190,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   addActionNeeded(sessionId, agentName, summary, evidenceId, evidenceSource) {
     const { items, _agentBuffers } = get();
     const recent = items.find((i) => {
-      if (evidenceId) return i.evidence_id === evidenceId;
+      if (evidenceId) return matchesActionNeededEvidence(i, sessionId, evidenceId, evidenceSource);
       return i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS;
     });
     if (recent) return;
