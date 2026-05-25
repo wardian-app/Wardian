@@ -56,6 +56,7 @@ impl InteractionState {
             .lock()
             .await
             .insert(record.id.clone(), record.clone());
+        let _ = wardian_core::db::upsert_interaction_record(&record);
         record
     }
 
@@ -88,6 +89,7 @@ impl InteractionState {
             observed_at: now_rfc3339_millis(),
         };
         inputs.insert(session_id.to_string(), record.clone());
+        let _ = wardian_core::db::upsert_provider_input_state(&record);
         record
     }
 
@@ -118,6 +120,30 @@ impl InteractionState {
     pub async fn clear_provider_input_state(&self, session_id: &str) {
         self.provider_generations.lock().await.remove(session_id);
         self.provider_inputs.lock().await.remove(session_id);
+        let _ = wardian_core::db::delete_provider_input_state(session_id);
+    }
+
+    pub async fn hydrate_from_persistence(&self) {
+        if let Ok(records) = wardian_core::db::list_interaction_records() {
+            let mut current = self.records.lock().await;
+            for record in records {
+                current.insert(record.id.clone(), record);
+            }
+        }
+        if let Ok(replies) = wardian_core::db::list_structured_replies() {
+            let mut current = self.replies.lock().await;
+            for reply in replies {
+                current.insert(reply.request_id.clone(), reply);
+            }
+        }
+        if let Ok(inputs) = wardian_core::db::list_provider_input_states() {
+            let mut generations = self.provider_generations.lock().await;
+            let mut current = self.provider_inputs.lock().await;
+            for input in inputs {
+                generations.insert(input.session_id.clone(), input.generation);
+                current.insert(input.session_id.clone(), input);
+            }
+        }
     }
 
     pub async fn interaction(&self, id: &str) -> Option<InteractionRecord> {
@@ -132,7 +158,7 @@ impl InteractionState {
         body: &str,
     ) -> Result<StructuredReply, &'static str> {
         let now = now_rfc3339_millis();
-        let structured_reply = {
+        let (structured_reply, completed_task, reply_record) = {
             let mut records = self.records.lock().await;
             let task = records.get_mut(task_id).ok_or("not_found")?;
             if task.status == InteractionStatus::Completed {
@@ -175,9 +201,13 @@ impl InteractionState {
                 source_session_id: source_session_id.map(str::to_string),
                 replied_at: now,
             };
+            let completed_task = task.clone();
             records.insert(reply.id.clone(), reply.clone());
-            structured_reply
+            (structured_reply, completed_task, reply)
         };
+        let _ = wardian_core::db::upsert_interaction_record(&completed_task);
+        let _ = wardian_core::db::upsert_interaction_record(&reply_record);
+        let _ = wardian_core::db::upsert_structured_reply(&structured_reply);
         self.replies
             .lock()
             .await
@@ -367,6 +397,56 @@ mod tests {
         assert_eq!(current.generation, 2);
         assert_eq!(current.state, ProviderInputReadiness::Booting);
         assert_eq!(state.current_provider_input_generation("agent-1").await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn interactions_and_provider_state_hydrate_from_persistence() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        wardian_core::db::init_db_at_path(&home.path().join("state.db")).unwrap();
+
+        let state = InteractionState::default();
+        let task = state
+            .create_task(
+                Some("planner-1".to_string()),
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "review".to_string(),
+                },
+            )
+            .await;
+        state
+            .complete_task_with_reply(
+                &task.id,
+                Some("agent-1"),
+                ReplyStatus::Blocked,
+                "blocked",
+            )
+            .await
+            .unwrap();
+        state
+            .start_provider_input_generation(
+                "agent-1",
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+
+        let hydrated = InteractionState::default();
+        hydrated.hydrate_from_persistence().await;
+
+        assert_eq!(
+            hydrated.interaction(&task.id).await.unwrap().status,
+            InteractionStatus::Completed
+        );
+        assert_eq!(
+            hydrated.structured_reply(&task.id).await.unwrap().status,
+            ReplyStatus::Blocked
+        );
+        assert_eq!(
+            hydrated.provider_input_state("agent-1").await.unwrap().state,
+            ProviderInputReadiness::Ready
+        );
     }
 }
 
