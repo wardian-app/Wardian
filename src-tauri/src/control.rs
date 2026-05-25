@@ -772,7 +772,9 @@ async fn deliver_message_to_target(
             info.status == "action_required",
         )
         .await;
-        let route = if matches!(queue_policy, QueuePolicy::MailboxOnly) {
+        let route = if input_mode == MessageInputMode::ApprovalAction
+            || matches!(queue_policy, QueuePolicy::MailboxOnly)
+        {
             decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
         } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
             match queue_policy {
@@ -1209,8 +1211,12 @@ async fn wait_for_terminal_output(
             .map(|snapshot| snapshot.output.text)
             .unwrap_or_default();
         if is_ready(&output) {
-            record_provider_ready_evidence(state, session_id, ProviderReadyEvidence::PromptDetected)
-                .await;
+            record_provider_ready_evidence(
+                state,
+                session_id,
+                ProviderReadyEvidence::PromptDetected,
+            )
+            .await;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1312,7 +1318,12 @@ async fn handle_structured_ask(
         });
     let task = state
         .interactions
-        .create_task_with_id(request_id.clone(), sender_session_id, target_uuid.clone(), body_ref)
+        .create_task_with_id(
+            request_id.clone(),
+            sender_session_id,
+            target_uuid.clone(),
+            body_ref,
+        )
         .await;
     let mut payload = serde_json::json!({
         "request_id": task.id,
@@ -1608,10 +1619,9 @@ async fn submit_structured_reply(
                 "not_found" => {
                     ControlError::not_found(format!("ask request not found: {request_id}"))
                 }
-                "unauthorized" => ControlError::coded(
-                    "unauthorized",
-                    "reply origin does not match ask target",
-                ),
+                "unauthorized" => {
+                    ControlError::coded("unauthorized", "reply origin does not match ask target")
+                }
                 "duplicate_reply" => ControlError::coded(
                     "duplicate_reply",
                     "ask request already has a terminal reply",
@@ -1696,14 +1706,11 @@ async fn wait_for_structured_reply(
                 return Ok(reply);
             }
             if started.elapsed() >= timeout {
-                return Err(
-                    ControlError::watch_timeout("structured reply timed out").with_details(
-                        serde_json::json!({
-                            "request_id": request_id,
-                            "until": "reply",
-                        }),
-                    ),
-                );
+                return Err(ControlError::watch_timeout("structured reply timed out")
+                    .with_details(serde_json::json!({
+                        "request_id": request_id,
+                        "until": "reply",
+                    })));
             }
             let remaining = timeout.saturating_sub(started.elapsed());
             tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
@@ -2754,7 +2761,8 @@ mod tests {
              otherwise we are not exercising the setup-hook code path"
         );
 
-        let claim = claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
+        let claim =
+            claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
         drop(claim);
 
         std::env::remove_var("WARDIAN_HOME");
@@ -3639,6 +3647,51 @@ mod tests {
 
         assert_eq!(delivery[0].runtime_state, "provider_input_not_ready");
         assert_eq!(delivery[0].delivery_state, "queued");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_non_ready_state_rejects_approval_action_instead_of_queueing() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Busy,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let error = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "approve",
+            None,
+            MessageInputMode::ApprovalAction,
+            QueuePolicy::QueueIfBusy,
+            Some(&ApprovalAction::Accept),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, "request_failed");
+        let records = state.mailbox.lock().await.list_for_target("agent-1");
+        assert!(records.is_empty());
         assert!(rx.try_recv().is_err());
     }
 

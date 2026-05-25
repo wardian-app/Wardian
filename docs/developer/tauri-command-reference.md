@@ -74,7 +74,7 @@ The CLI read-only `team` and `watchlist` commands read `watchlists/index.json` d
 
 Queue commands persist the frontend Queue projection and preferences for the active Wardian home. Queue items should carry stable `evidence_id` and `evidence_source` fields when they are derived from provider runtime events, interaction-store events, or other live runtime evidence. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
 
-`load_agent_interactions` and `save_agent_interactions` preserve the existing lightweight graph interaction projection. They are separate from the backend interaction control plane records used by structured `send`, `ask`, and `reply`.
+`load_agent_interactions` and `save_agent_interactions` preserve the existing lightweight graph interaction projection. They are separate from the backend interaction control plane records used by structured `ask` and `reply`.
 
 ## Filesystem and Explorer (`commands/fs.rs`)
 
@@ -190,11 +190,11 @@ The standalone `wardian` CLI primarily talks to the desktop app through Wardian'
 - `submit_reply`
 - `agent_watch`
 
-`send_message` creates a message interaction and routes provider-aware delivery to one or more targets. Delivery responses contain `runtime_state`, `delivery_state`, `input_mode`, optional `message_id`, `delivery_phase`, `observed_state`, `reason`, `profile`, and provider-specific error details. When the target runtime is not ready for live input, the command should queue the interaction or fail according to its queue policy instead of injecting text early.
+`send_message` routes provider-aware delivery to one or more targets. Delivery responses contain `runtime_state`, `delivery_state`, `input_mode`, optional `message_id`, `delivery_phase`, `observed_state`, `reason`, `profile`, and provider-specific error details. When the target runtime is not ready for live input, the command should queue the message in the mailbox or fail according to its queue policy instead of injecting text early. This slice does not create durable message interactions for ordinary `send` calls; structured durability belongs to `ask` and `reply`.
 
 `ask` creates a task interaction with `reply_required`, delivers the prompt plus reply instructions, and waits for the parent task to reach a terminal structured state. It returns the attached structured reply when complete. Output-marker waiting remains a compatibility mode, but it is not the structured ask/reply completion path.
 
-`submit_reply` resolves the request ID against the interaction store, creates or attaches a reply interaction, and completes the parent task. Unknown or expired request IDs fail deterministically. Duplicate replies must be rejected or handled by an explicit idempotency policy. When `origin` contains a Wardian agent session ID, the backend verifies that the sender is the task target.
+`submit_reply` resolves the request ID against the interaction store, creates or attaches a reply interaction, and completes the parent task. Unknown request IDs fail deterministically. Duplicate replies must be rejected or handled by an explicit idempotency policy. When `origin` contains a Wardian agent session ID, the backend verifies that the sender is the task target.
 
 `agent_watch` returns ordered status, transcript, output, and delivery evidence from watch state. `delivery` snapshots are derived from delivery watch events. Raw PTY output is opt-in and should be used only for terminal rendering or transport debugging.
 

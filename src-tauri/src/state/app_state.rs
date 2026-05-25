@@ -22,6 +22,7 @@ pub struct AppState {
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     pub mailbox: Mutex<MailboxState>,
     // Separate, lightweight map for stdin senders — completely independent from the
     // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
@@ -72,6 +73,9 @@ impl AppState {
 
     pub async fn remove_agent_delivery_state(&self, target_session_id: &str) {
         self.delivery_locks.lock().await.remove(target_session_id);
+        if let Ok(mut sequences) = self.status_observation_sequences.lock() {
+            sequences.remove(target_session_id);
+        }
         self.mailbox
             .lock()
             .await
@@ -79,6 +83,15 @@ impl AppState {
         self.interactions
             .clear_provider_input_state(target_session_id)
             .await;
+    }
+
+    pub fn next_status_observation_sequence(&self, target_session_id: &str) -> u64 {
+        let Ok(mut sequences) = self.status_observation_sequences.lock() else {
+            return 0;
+        };
+        let next = sequences.get(target_session_id).copied().unwrap_or(0) + 1;
+        sequences.insert(target_session_id.to_string(), next);
+        next
     }
 }
 
@@ -93,6 +106,7 @@ impl Default for AppState {
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
+            status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             mailbox: Mutex::new(MailboxState::default()),
             input_senders: RwLock::new(HashMap::new()),
             workflow_triggers: Mutex::new(HashMap::new()),

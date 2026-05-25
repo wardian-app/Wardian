@@ -162,9 +162,18 @@ pub(crate) fn set_agent_status(
             let status_app = app.clone();
             let status_session_id = session_id.to_string();
             let status = next_status.to_string();
+            let status_sequence = app
+                .state::<AppState>()
+                .next_status_observation_sequence(session_id);
             tauri::async_runtime::spawn(async move {
                 let state = status_app.state::<AppState>();
-                record_provider_input_from_status_state(&state, &status_session_id, &status).await;
+                record_provider_input_from_status_state(
+                    &state,
+                    &status_session_id,
+                    &status,
+                    status_sequence,
+                )
+                .await;
                 let agents = state.agents.lock().await;
                 if let Some(agent) = agents.get(&status_session_id) {
                     if let Ok(mut last_status_at) = agent.last_status_at.lock() {
@@ -202,6 +211,7 @@ async fn record_provider_input_from_status_state(
     state: &AppState,
     session_id: &str,
     next_status: &str,
+    status_sequence: u64,
 ) {
     let readiness = match wardian_core::identity::normalize_status(next_status).as_str() {
         "idle" => ProviderInputReadiness::Ready,
@@ -219,7 +229,13 @@ async fn record_provider_input_from_status_state(
         .unwrap_or(0);
     state
         .interactions
-        .record_provider_input_state(session_id, generation, readiness, evidence)
+        .record_provider_input_status_observation(
+            session_id,
+            status_sequence,
+            generation,
+            readiness,
+            evidence,
+        )
         .await;
 }
 
@@ -1030,8 +1046,32 @@ mod tests {
             .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
             .await;
 
-        record_provider_input_from_status_state(&state, "agent-1", "Action Needed").await;
-        record_provider_input_from_status_state(&state, "agent-1", "Idle").await;
+        record_provider_input_from_status_state(&state, "agent-1", "Action Needed", 1).await;
+        record_provider_input_from_status_state(&state, "agent-1", "Idle", 2).await;
+
+        let current = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(current.state, ProviderInputReadiness::Ready);
+        assert_eq!(current.generation, 1);
+        assert_eq!(
+            current.ready_evidence,
+            Some(ProviderReadyEvidence::ProviderEvent)
+        );
+    }
+
+    #[tokio::test]
+    async fn older_provider_status_observation_cannot_regress_newer_readiness() {
+        let state = AppState::new();
+        state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
+            .await;
+
+        record_provider_input_from_status_state(&state, "agent-1", "Idle", 2).await;
+        record_provider_input_from_status_state(&state, "agent-1", "Processing...", 1).await;
 
         let current = state
             .interactions

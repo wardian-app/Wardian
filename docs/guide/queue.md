@@ -16,7 +16,7 @@ Use it when you need to review finished work, catch failed workflow runs, respon
 
 Wardian records these item types:
 
-- **Agent task completed**: added from canonical completion evidence, such as a provider turn-completed event or a completed Wardian interaction. Wardian uses provider transcript text or structured reply text when available; otherwise it records a generic completion summary.
+- **Agent task completed**: added from the live app completion projection when an agent transitions out of active work or a workflow reports an outcome. Wardian uses provider transcript text or structured reply text when available; otherwise it records a generic completion summary. Completed structured ask/reply interactions are durable control-plane evidence; ordinary status-derived completion cards are Queue projections, not replayable interaction records.
 - **Workflow completed** or **Workflow failed**: added when the app receives a final workflow run status. If the workflow produced text output, Wardian can use that as the queue summary.
 - **Action needed**: added when provider runtime evidence shows that an agent needs input. Most Action needed cards are provider-sourced permission, approval, authentication, or selection prompts. They are not inferred from Wardian's structured ask/reply lifecycle.
 
@@ -58,9 +58,9 @@ Queue items are persisted under the active Wardian home, so unread work survives
 
 ## Evidence and Deduplication
 
-Queue cards are projections of canonical evidence. Each card can carry a stable `evidence_id` and an `evidence_source`:
+Queue cards are projections of live runtime or interaction evidence. Each card can carry a stable `evidence_id` and an `evidence_source`:
 
-- `provider_runtime`: a live provider event, such as a permission request or turn completion
+- `provider_runtime`: a live provider event or status transition, such as a permission request or turn completion projection
 - `interaction_store`: a Wardian interaction event, such as a completed structured ask/reply task
 - `live_runtime`: a live Wardian runtime event that has not been promoted to a more specific source
 
