@@ -43,6 +43,32 @@ Spawning an agent follows a deterministic sequence in `manager::spawn_agent`:
 - On Windows, `.cmd` and `.bat` provider shims may be re-routed through `cmd.exe` when the selected host shell is PowerShell, Git Bash, or WSL.
 - On Linux and macOS, Wardian resolves shells from the standard shell list and executes the provider command through that shell's command-string mode.
 
+## Input Readiness and Interaction Delivery
+
+PTY input is a transport, not Wardian's communication source of truth. The interaction control plane owns structured messages, asks, replies, delivery attempts, and Queue evidence. The PTY writer is only one possible way to deliver an interaction to a live provider runtime.
+
+Each interactive provider runtime has a provider input generation. The generation increments whenever Wardian creates or reattaches a runtime boundary, including spawn, resume, clear, and provider reattach. Readiness observations are valid only for the generation that produced them.
+
+```text
+ProviderInputState {
+  session_id,
+  generation,
+  state: unknown | booting | ready | busy | action_required | unavailable,
+  ready_evidence: provider_event | prompt_detected | title_detected | manual_status,
+  observed_at
+}
+```
+
+Delivery follows these rules:
+
+- Ready evidence for the current generation can drain queued interaction delivery.
+- Booting, busy, action-required, unavailable, or missing input-sender states keep delivery queued with a precise reason.
+- Readiness or status from an older generation cannot drain queued work for a newer runtime.
+- Provider action-required status remains provider-owned. It usually represents a provider permission or authentication prompt, not a Wardian human-in-the-loop interaction.
+- Codex readiness can use prompt detection as release evidence, but it must not depend on a fixed sleep before text injection.
+
+This model prevents first-input races where Wardian writes into a provider before the provider prompt is actually ready. It also keeps Queue and CLI behavior tied to durable interaction and provider events rather than terminal repaint artifacts.
+
 ## Testing Boundaries
 
 PTY behavior cannot be validated by browser-only UI tests.

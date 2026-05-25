@@ -16,9 +16,9 @@ Use it when you need to review finished work, catch failed workflow runs, respon
 
 Wardian records these item types:
 
-- **Agent task completed**: added when an agent that was active returns to Idle. Wardian uses captured provider or terminal output when available; otherwise it records a generic completion summary.
+- **Agent task completed**: added from canonical completion evidence, such as a provider turn-completed event or a completed Wardian interaction. Wardian uses provider transcript text or structured reply text when available; otherwise it records a generic completion summary.
 - **Workflow completed** or **Workflow failed**: added when the app receives a final workflow run status. If the workflow produced text output, Wardian can use that as the queue summary.
-- **Action needed**: added when an agent moves from another known status into Action Needed. Use it for approval prompts, blocked tasks, or provider requests that need a human response.
+- **Action needed**: added when provider runtime evidence shows that an agent needs input. Most Action needed cards are provider-sourced permission, approval, authentication, or selection prompts. They are not inferred from Wardian's structured ask/reply lifecycle.
 
 Workflow failures are filterable separately from successful workflow completions, even though both are workflow outcome cards.
 
@@ -56,6 +56,18 @@ These preferences persist under the active Wardian home.
 
 Queue items are persisted under the active Wardian home, so unread work survives app restarts. Items older than seven days are ignored when the Queue loads.
 
+## Evidence and Deduplication
+
+Queue cards are projections of canonical evidence. Each card can carry a stable `evidence_id` and an `evidence_source`:
+
+- `provider_runtime`: a live provider event, such as a permission request or turn completion
+- `interaction_store`: a Wardian interaction event, such as a completed structured ask/reply task
+- `live_runtime`: a live Wardian runtime event that has not been promoted to a more specific source
+
+Wardian uses stable evidence IDs to avoid duplicate cards when the app refreshes, terminals repaint, or provider logs are replayed. Startup hydration can restore existing queue cards, statuses, interactions, and provider input state, but hydration must not create new Action needed or completion evidence.
+
+This source split matters for status handling. Provider runtime status remains authoritative for provider-internal states such as `action_required`, permission prompts, and authentication prompts. Wardian interaction status tracks communication lifecycle states such as queued, delivered, awaiting reply, completed, failed, or expired.
+
 ## Alerts
 
 Queue alert preferences live in **Settings > Queue** and are per event type:
@@ -79,9 +91,10 @@ Desktop alerts use the operating system notification surface when the WebView ha
 
 - Items older than seven days are ignored on load.
 - A generic "Completed" summary means Wardian did not capture a provider-specific final answer for that transition.
-- Generic approval-looking text does not create response buttons. Queue only shows buttons when it can read explicit choices from the provider text.
+- Generic approval-looking text does not create response buttons. Queue only shows buttons when it can read explicit provider choices from canonical provider evidence.
 - Clearing read items removes them from the visible queue for the active Wardian home.
 - Desktop and sound alerts depend on operating system and WebView permissions.
+- Replayed terminal output and startup hydration should not create new queue cards. If duplicates appear after restart, capture the card evidence ID/source and file a bug.
 
 ## Related Links
 

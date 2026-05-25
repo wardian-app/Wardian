@@ -81,7 +81,8 @@ wardian workflow list
 wardian workflow show <id-or-name>
 wardian workflow run <id>
 wardian workflow stop <run-instance-id>
-wardian ask reviewer-a1 --stdin --until output:REVIEW_DONE --timeout 10m
+wardian ask reviewer-a1 --stdin --timeout 10m
+wardian reply ask_0123456789abcdef --status done --stdin
 wardian send "review this" --to coder-a1
 wardian send --as-command "/goal test" --to coder-a1
 wardian send "review this" --to reviewer-a1 --wait-until idle --timeout 10m
@@ -100,7 +101,15 @@ wardian agent list --scope all --fields name,class,provider,workspace,status,sta
 Hand a bounded review task to a peer and wait for response evidence:
 
 ```bash
-wardian ask reviewer-a1 --file review-prompt.md --until output:REVIEW_DONE --timeout 10m
+wardian ask reviewer-a1 --file review-prompt.md --timeout 10m
+```
+
+Answer a structured ask from inside the target agent session:
+
+```bash
+cat <<'EOF' | wardian reply ask_0123456789abcdef --status done --stdin
+Reviewed the patch. No blocking findings.
+EOF
 ```
 
 Send a prompt to an existing agent and wait for the next Idle transition:
@@ -156,11 +165,13 @@ Mutating commands use Wardian's local control endpoint and require the desktop a
 
 Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
 
-`ask <target>` sends one prompt to one live Wardian-managed agent and creates a live structured request id. By default, Wardian appends reply instructions to the delivered prompt and waits for the target to answer with `wardian reply <request-id> --status done --stdin`. The JSON response includes `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. `reply.status` can be `done`, `blocked`, or `failed`; timeout remains a separate `watch_timeout` error.
+`ask <target>` sends one prompt to one live Wardian-managed agent and creates a durable task interaction with a backend-owned `request_id`. Wardian appends reply instructions to the delivered prompt and waits for the target to answer with `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when the task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete the ask.
 
-Use `--until output:<token>` only when you explicitly need the older output-substring mode, such as manual provider output matching or compatibility with agents that cannot run `wardian reply`. Other explicit watch conditions such as `status:<status>`, `event:<kind>`, and `delivery:<state>` also preserve the watch-based behavior. `ask` rejects `all`, `class:<ClassName>`, and reserved `--thread` usage with `not_supported`.
+The JSON response includes `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. `reply.status` can be `done`, `blocked`, or `failed`; timeout remains a separate `watch_timeout` error. If the target runtime is booting, busy, action-required, or missing a safe input channel, Wardian keeps the interaction queued and reports the delivery state instead of relying on a fixed sleep before terminal injection.
 
-`reply <request-id> --status done|blocked|failed --stdin` records a structured reply through the live control endpoint. When run from a Wardian-managed agent terminal, `WARDIAN_SESSION_ID` is used to verify that the reply came from the target agent for that request. Replies submitted outside a Wardian-managed session are accepted for this first live-only slice so a human terminal can unblock a request, but that caller identity is not authenticated.
+Use `--until output:<token>` only when you explicitly need the older output-substring mode, such as manual provider output matching or compatibility with agents that cannot run `wardian reply`. Output markers are weaker evidence than structured replies because they are derived from transcript or terminal output. Other explicit watch conditions such as `status:<status>`, `event:<kind>`, and `delivery:<state>` also preserve the watch-based behavior. `ask` rejects `all`, `class:<ClassName>`, and reserved `--thread` usage with `not_supported`.
+
+`reply <request-id> --status done|blocked|failed --stdin` records a structured reply through the live control endpoint. Wardian resolves the request ID against the interaction store. Unknown or expired request IDs fail deterministically, and duplicate replies are rejected unless a future explicit idempotency policy says otherwise. When run from a Wardian-managed agent terminal, `WARDIAN_SESSION_ID` is used to verify that the reply came from the target agent for that request. Replies submitted outside a Wardian-managed session are accepted for this first live-control slice so a human terminal can unblock a request, but that caller identity is not authenticated.
 
 `send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. By default, Wardian keeps inter-agent attribution and delivers messages with a `From <sender>:` prefix when sender context is available. Use `--as-command` for provider slash commands that must start at the first input token:
 

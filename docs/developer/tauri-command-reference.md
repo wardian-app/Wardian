@@ -44,6 +44,12 @@ The live control protocol exposes CLI wrappers for the same worktree operations:
 - `resize_agent_terminal`
 - `read_agent_pty`
 
+`send_input_to_agent` and `send_binary_input_to_agent` are raw PTY input paths for terminal interaction. They must not be used as the source of truth for structured agent-to-agent communication.
+
+`submit_prompt_to_agent` is the provider-aware prompt path used when Wardian submits text into a live runtime. It should respect provider input readiness and delivery transaction results. Fixed sleeps before injection are not a correctness mechanism; delivery should wait for readiness evidence or queue the interaction.
+
+`read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Queue evidence, and provider status transitions must not depend on replaying this text.
+
 ## Classes (`commands/class.rs`)
 
 - `list_agent_classes`
@@ -57,8 +63,18 @@ The live control protocol exposes CLI wrappers for the same worktree operations:
 
 - `load_watchlists`
 - `save_watchlists`
+- `load_queue_items`
+- `save_queue_items`
+- `load_queue_preferences`
+- `save_queue_preferences`
+- `load_agent_interactions`
+- `save_agent_interactions`
 
 The CLI read-only `team` and `watchlist` commands read `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays but do not use a separate persistence format.
+
+Queue commands persist the frontend Queue projection and preferences for the active Wardian home. Queue items should carry stable `evidence_id` and `evidence_source` fields when they are derived from provider runtime events, interaction-store events, or other live runtime evidence. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
+
+`load_agent_interactions` and `save_agent_interactions` preserve the existing lightweight graph interaction projection. They are separate from the backend interaction control plane records used by structured `send`, `ask`, and `reply`.
 
 ## Filesystem and Explorer (`commands/fs.rs`)
 
@@ -164,6 +180,37 @@ Common app-level events:
 - `library-changed` with payload `{ "library_type": "skills" }`
 
 For payload semantics, see [IPC and Event Governance](./ipc-events.md) and the workflow engine docs.
+
+## Live Control Protocol
+
+The standalone `wardian` CLI primarily talks to the desktop app through Wardian's live control endpoint rather than Tauri `invoke`. These command contracts share DTOs with `crates/wardian-core/src/control.rs`:
+
+- `send_message`
+- `ask`
+- `submit_reply`
+- `agent_watch`
+
+`send_message` creates a message interaction and routes provider-aware delivery to one or more targets. Delivery responses contain `runtime_state`, `delivery_state`, `input_mode`, optional `message_id`, `delivery_phase`, `observed_state`, `reason`, `profile`, and provider-specific error details. When the target runtime is not ready for live input, the command should queue the interaction or fail according to its queue policy instead of injecting text early.
+
+`ask` creates a task interaction with `reply_required`, delivers the prompt plus reply instructions, and waits for the parent task to reach a terminal structured state. It returns the attached structured reply when complete. Output-marker waiting remains a compatibility mode, but it is not the structured ask/reply completion path.
+
+`submit_reply` resolves the request ID against the interaction store, creates or attaches a reply interaction, and completes the parent task. Unknown or expired request IDs fail deterministically. Duplicate replies must be rejected or handled by an explicit idempotency policy. When `origin` contains a Wardian agent session ID, the backend verifies that the sender is the task target.
+
+`agent_watch` returns ordered status, transcript, output, and delivery evidence from watch state. `delivery` snapshots are derived from delivery watch events. Raw PTY output is opt-in and should be used only for terminal rendering or transport debugging.
+
+Provider input readiness is tracked separately from provider install readiness. Live delivery gates on per-session provider input state:
+
+```json
+{
+  "session_id": "uuid-1",
+  "generation": 7,
+  "state": "ready",
+  "ready_evidence": "prompt_detected",
+  "observed_at": "2026-05-25T16:00:00.000Z"
+}
+```
+
+Provider runtime status remains authoritative for provider-internal states such as `action_required`. Interaction status tracks Wardian-owned delivery and reply lifecycle only.
 
 ## Change Management Guidance
 
