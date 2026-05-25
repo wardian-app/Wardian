@@ -1,4 +1,5 @@
 use crate::state::active_agent::ActiveAgent;
+use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -39,6 +40,7 @@ pub struct AppState {
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
     pub ask_requests: Mutex<HashMap<String, AskRequestRecord>>,
+    pub interactions: InteractionState,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
     // Last frontend-reported PTY size per session. Used to open a freshly-spawned
@@ -98,6 +100,7 @@ impl Default for AppState {
             library_watchers: Mutex::new(HashMap::new()),
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
+            interactions: InteractionState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             pty_sizes: RwLock::new(HashMap::new()),
         }
