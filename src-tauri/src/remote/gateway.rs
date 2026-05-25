@@ -28,13 +28,14 @@ const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
 const REMOTE_TERMINAL_ATTACH_STREAM_NAME: &str = "terminal_attach";
 const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const TERMINAL_ATTACH_WARM_DISPOSE_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const TERMINAL_ATTACH_SESSION_CHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
 const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
 const REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_INPUT_FRAME_BASE64_BYTES: usize =
     REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES.div_ceil(3) * 4;
-const REMOTE_TERMINAL_INPUT_SEND_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(2);
+const REMOTE_TERMINAL_INPUT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), String> {
     crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
@@ -1109,23 +1110,29 @@ async fn handle_terminal_socket(
             return;
         }
     };
-    let mut subscription = match state.terminal_attach.attach(
-        crate::state::terminal_attach::TerminalAttachRequest {
-            session_id: &session_id,
-            attachment_id: &attachment_id,
-            remote_session_id: &ticket_record.session_id,
-            device_id: &ticket_record.device_id,
-            cols: open_message.cols,
-            rows: open_message.rows,
-            initial_output: initial_output.as_bytes(),
-        },
-    ) {
-        Ok(subscription) => subscription,
-        Err(_) => {
-            send_socket_error(&mut socket, "terminal_attach_failed").await;
-            return;
-        }
-    };
+    let mut subscription =
+        match state
+            .terminal_attach
+            .attach(crate::state::terminal_attach::TerminalAttachRequest {
+                session_id: &session_id,
+                attachment_id: &attachment_id,
+                remote_session_id: &ticket_record.session_id,
+                device_id: &ticket_record.device_id,
+                cols: open_message.cols,
+                rows: open_message.rows,
+                initial_output: initial_output.as_bytes(),
+            }) {
+            Ok(subscription) => subscription,
+            Err(code) => {
+                let socket_code = if code == "terminal_attach_connection_limit" {
+                    "websocket_connection_limit"
+                } else {
+                    "terminal_attach_failed"
+                };
+                send_socket_error(&mut socket, socket_code).await;
+                return;
+            }
+        };
     if resize_initial_terminal_attach(&state, &session_id, &subscription.snapshot)
         .await
         .is_err()
@@ -1151,8 +1158,18 @@ async fn handle_terminal_socket(
         return;
     }
 
+    let mut session_check = tokio::time::interval(TERMINAL_ATTACH_SESSION_CHECK_INTERVAL);
+    session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    session_check.tick().await;
+
     loop {
         tokio::select! {
+            _ = session_check.tick() => {
+                if !remote_session_is_active(&state, &ticket_record.session_id).await {
+                    send_socket_error(&mut socket, "session_expired").await;
+                    break;
+                }
+            }
             event = subscription.receiver.recv() => {
                 match event {
                     Ok(event) => {
@@ -1181,6 +1198,10 @@ async fn handle_terminal_socket(
                 match message {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(message)) => {
+                        if !remote_session_is_active(&state, &ticket_record.session_id).await {
+                            send_socket_error(&mut socket, "session_expired").await;
+                            break;
+                        }
                         match handle_terminal_client_message(&state, &session_id, &attachment_id, message).await {
                             Ok(TerminalAttachClientMessageAction::Continue) => {}
                             Ok(TerminalAttachClientMessageAction::Close) => break,
@@ -1333,16 +1354,12 @@ async fn handle_terminal_client_message(
             Ok(TerminalAttachClientMessageAction::Continue)
         }
         TerminalAttachClientMessage::Resize { cols, rows } => {
-            let snapshot = state
-                .terminal_attach
-                .resize_owner(session_id, attachment_id, cols, rows)?;
-            crate::manager::resize_pty(
-                session_id.to_string(),
-                snapshot.cols,
-                snapshot.rows,
-                state,
-            )
-            .await?;
+            let snapshot =
+                state
+                    .terminal_attach
+                    .resize_owner(session_id, attachment_id, cols, rows)?;
+            crate::manager::resize_pty(session_id.to_string(), snapshot.cols, snapshot.rows, state)
+                .await?;
             Ok(TerminalAttachClientMessageAction::Continue)
         }
         TerminalAttachClientMessage::Detach => Ok(TerminalAttachClientMessageAction::Close),
@@ -1391,6 +1408,12 @@ fn status_stream_session_is_active(
         .sessions
         .get(session_id)
         .is_some_and(|session| crate::remote::auth::session_is_active(session, now_ms))
+}
+
+async fn remote_session_is_active(state: &crate::state::AppState, session_id: &str) -> bool {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let runtime = state.remote_runtime.lock().await;
+    status_stream_session_is_active(&runtime, session_id, now_ms)
 }
 
 async fn send_status_socket_error(socket: &mut WebSocket, code: &'static str) {
@@ -2210,6 +2233,29 @@ mod tests {
             &session.session_id,
             1_002_000,
         ));
+    }
+
+    #[tokio::test]
+    async fn remote_session_is_active_reflects_runtime_revocation() {
+        let state = crate::state::AppState::new();
+        let session_id = {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::create_session(
+                &mut runtime,
+                "dev-1",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .session_id
+        };
+
+        assert!(remote_session_is_active(&state, &session_id).await);
+
+        {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::revoke_sessions_for_device(&mut runtime, "dev-1");
+        }
+
+        assert!(!remote_session_is_active(&state, &session_id).await);
     }
 
     #[test]

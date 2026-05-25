@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 
 const TERMINAL_ATTACH_SCROLLBACK_LINES: usize = 1_000;
 const TERMINAL_ATTACH_UPDATE_BUFFER: usize = 64;
+const MAX_ACTIVE_TERMINAL_ATTACHMENTS_PER_AGENT: usize = 3;
 const MIN_ATTACH_COLS: u16 = 20;
 const MIN_ATTACH_ROWS: u16 = 8;
 const MAX_ATTACH_COLS: u16 = 240;
@@ -111,6 +112,11 @@ impl TerminalAttachState {
         runtime.parser.screen_mut().set_size(rows, cols);
         if created_runtime && !request.initial_output.is_empty() {
             runtime.parser.process(request.initial_output);
+        }
+        if runtime.attachments.len() >= MAX_ACTIVE_TERMINAL_ATTACHMENTS_PER_AGENT
+            && !runtime.attachments.contains_key(&attachment_id)
+        {
+            return Err("terminal_attach_connection_limit".to_string());
         }
         runtime.attach_sequence = runtime.attach_sequence.saturating_add(1);
         runtime.attachments.insert(
@@ -370,6 +376,53 @@ mod tests {
 
         assert!(!state.is_owner("agent-1", "attach-1"));
         assert!(state.is_owner("agent-1", "attach-2"));
+    }
+
+    #[test]
+    fn active_terminal_attachments_are_bounded_and_detach_frees_slot() {
+        let state = TerminalAttachState::default();
+        for idx in 1..=MAX_ACTIVE_TERMINAL_ATTACHMENTS_PER_AGENT {
+            state
+                .attach(TerminalAttachRequest {
+                    session_id: "agent-1",
+                    attachment_id: &format!("attach-{idx}"),
+                    remote_session_id: "remote-session-1",
+                    device_id: "device-1",
+                    cols: 80,
+                    rows: 24,
+                    initial_output: &[],
+                })
+                .expect("attach within limit");
+        }
+
+        let over_limit = state.attach(TerminalAttachRequest {
+            session_id: "agent-1",
+            attachment_id: "attach-over-limit",
+            remote_session_id: "remote-session-1",
+            device_id: "device-1",
+            cols: 80,
+            rows: 24,
+            initial_output: &[],
+        });
+        assert!(matches!(
+            over_limit,
+            Err(error) if error == "terminal_attach_connection_limit"
+        ));
+
+        state
+            .detach("agent-1", "attach-1")
+            .expect("detach frees slot");
+        state
+            .attach(TerminalAttachRequest {
+                session_id: "agent-1",
+                attachment_id: "attach-after-detach",
+                remote_session_id: "remote-session-1",
+                device_id: "device-1",
+                cols: 80,
+                rows: 24,
+                initial_output: &[],
+            })
+            .expect("attach after detach");
     }
 
     #[test]

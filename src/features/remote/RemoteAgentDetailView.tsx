@@ -383,6 +383,13 @@ function TerminalPane({
 
     let disposed = false;
     let seededInitialSnapshot = false;
+    let attachmentId: string | null = null;
+    let ownerAttachmentId: string | null = null;
+    const liveDecoder = new TextDecoder();
+    const updateTerminalOwnership = (nextOwnerAttachmentId: string | null) => {
+      ownerAttachmentId = nextOwnerAttachmentId;
+      setTerminalStdinEnabled(terminal, attachmentId !== null && attachmentId === ownerAttachmentId);
+    };
     const writeTerminalSnapshot = (stateBase64: string) => {
       terminal.write?.(
         normalizeRemoteTerminalOutput(
@@ -393,15 +400,22 @@ function TerminalPane({
       );
     };
     const writeTerminalUpdate = (stateBase64: string) => {
-      terminal.write?.(normalizeRemoteTerminalLiveOutput(base64ToTerminalString(stateBase64)));
+      const output = liveDecoder.decode(base64ToTerminalBytes(stateBase64), { stream: true });
+      if (output) {
+        terminal.write?.(normalizeRemoteTerminalLiveOutput(output));
+      }
     };
     void remoteClient
       .openTerminalStream(agent.session_id, terminal.cols || 80, terminal.rows || 24, {
         onMessage: (message) => {
           if (disposed) return;
           setConnected(true);
-          setTerminalStdinEnabled(terminal, true);
+          if ("owner_attachment_id" in message) {
+            updateTerminalOwnership(message.owner_attachment_id);
+          }
           if (message.type === "snapshot") {
+            attachmentId = message.attachment_id;
+            updateTerminalOwnership(message.owner_attachment_id);
             if (!seededInitialSnapshot) {
               terminal.reset?.();
               seededInitialSnapshot = true;
@@ -415,6 +429,7 @@ function TerminalPane({
             return;
           }
           if (message.type === "ownership") {
+            updateTerminalOwnership(message.owner_attachment_id);
             terminal.resize?.(message.cols, message.rows);
           }
         },
@@ -480,8 +495,11 @@ function TerminalPane({
 }
 
 function base64ToTerminalString(value: string) {
-  const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+  return new TextDecoder().decode(base64ToTerminalBytes(value));
+}
+
+function base64ToTerminalBytes(value: string) {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
 }
 
 function binaryStringToBase64(value: string) {

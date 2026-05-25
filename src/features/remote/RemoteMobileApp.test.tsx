@@ -60,6 +60,10 @@ class MockWebSocket {
   }
 }
 
+function bytesToBase64(bytes: number[]) {
+  return btoa(String.fromCharCode(...bytes));
+}
+
 describe("RemoteMobileApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1319,6 +1323,180 @@ describe("RemoteMobileApp", () => {
       MockWebSocket.instances[1]?.emit("close");
     });
     expect(terminalInstance.options.disableStdin).toBe(true);
+  });
+
+  it("disables remote terminal stdin when another attachment becomes owner", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.options) as { options: { disableStdin?: boolean } };
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("ready"),
+        }),
+      });
+    });
+    expect(terminalInstance.options.disableStdin).toBe(false);
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "ownership",
+          owner_attachment_id: "attach-2",
+          cols: 80,
+          rows: 24,
+        }),
+      });
+    });
+    expect(terminalInstance.options.disableStdin).toBe(true);
+  });
+
+  it("streams live terminal UTF-8 across split update frames", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.write?.mock) as { write: ReturnType<typeof vi.fn> };
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("ready"),
+        }),
+      });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "update",
+          attachment_id: null,
+          owner_attachment_id: "attach-1",
+          state_base64: bytesToBase64([0xe2]),
+        }),
+      });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "update",
+          attachment_id: null,
+          owner_attachment_id: "attach-1",
+          state_base64: bytesToBase64([0x82, 0xac]),
+        }),
+      });
+    });
+
+    expect(terminalInstance.write).toHaveBeenCalledTimes(2);
+    expect(terminalInstance.write).toHaveBeenLastCalledWith("\u20ac");
   });
 
   it("does not poll terminal snapshots when the status stream updates the attached terminal", async () => {

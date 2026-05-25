@@ -82,6 +82,8 @@ Proposed flow:
 6. Gateway forwards outbound terminal snapshots/deltas to the client.
 7. Gateway accepts input, binary input, resize, and detach messages from the current owner only.
 
+The gateway must continue validating the authenticated remote session after attach. It closes the terminal socket when the remote session expires or is revoked, and it checks session liveness before accepting input or resize messages.
+
 The existing text terminal snapshot endpoint may remain as a log fallback, but the remote terminal UI should not use it for interactive rendering.
 
 ## Ownership And Resize Semantics
@@ -99,6 +101,8 @@ When ownership changes, Wardian broadcasts the new owner and geometry to all att
 
 If the owner disconnects, Wardian detaches it and either promotes the most recent remaining attachment or clears ownership. If no remote attachments remain, the backend returns to the lazy warm-dispose path.
 
+The remote UI tracks its own attachment id and enables terminal stdin only when that id matches the current owner id reported by the backend.
+
 ## Frontend Remote UI
 
 The mobile remote terminal should use a real terminal component connected to the terminal WebSocket. It should not poll terminal snapshots for rendering.
@@ -108,6 +112,8 @@ On open, it sends measured terminal columns and rows. On resize/orientation chan
 On touch devices, drag and wheel gestures inside the whole terminal pane should be mapped to the terminal emulator's scrollback API. These listeners should run in the capture phase so xterm's internal DOM cannot swallow the drag before Wardian maps it to scrollback. The pane should also opt out of browser touch panning while active so a full-page swipe over either the rendered terminal or the surrounding terminal pane scrolls xterm, not the page. This keeps scrolling tied to xterm's actual buffer instead of exposing a page-level overflow wrapper that only works when the user grabs a narrow scrollbar.
 
 Remote terminal writes should filter provider cursor-shape control sequences that conflict with Wardian's mobile cursor style. The remote client owns the visible cursor shape so the insert caret remains a line across providers.
+
+Live update decoding should preserve UTF-8 boundaries across WebSocket frames. Snapshot/history payloads can be decoded as complete payloads, but live PTY updates should use streaming decode or byte-oriented terminal writes so split multibyte characters are not replaced.
 
 The UI should make ownership visible only when useful. The default behavior is that the open remote terminal is active and interactive.
 
@@ -119,6 +125,7 @@ Performance guardrails:
 
 - no backend screen parser unless a remote terminal attach is active or warm;
 - bounded scrollback and bounded outbound message buffers;
+- bounded active terminal attachments per agent;
 - backpressure behavior for slow remote clients;
 - coalesced screen updates at a modest frame rate;
 - warm parser disposal after a short grace period;
@@ -130,9 +137,9 @@ The parser may be seeded from recent bounded PTY output only as best effort, and
 
 Use the lowest layer that proves each behavior:
 
-- Rust unit tests for attachment lifecycle, owner selection, resize policy, warm disposal, and input authorization.
-- Remote gateway tests for ticket validation, authenticated attach, rejected stale owner input, and detach cleanup.
-- Browser tests for remote UI connection state, resize message emission, and keyboard forwarding.
+- Rust unit tests for attachment lifecycle, owner selection, attachment limits, resize policy, warm disposal, and input authorization.
+- Remote gateway tests for ticket validation, authenticated attach, revoked/expired sessions, rejected stale owner input, and detach cleanup.
+- Browser tests for remote UI connection state, owner-aware stdin, resize message emission, keyboard forwarding, mobile scroll bridging, and live UTF-8 decoding.
 - Native runtime E2E for real PTY behavior: attach, remote owns terminal, resize occurs, typed input reaches the provider PTY, and rendered screen updates continue after a TUI repaint.
 
 Browser E2E alone is not enough for claims about PTY fidelity.
