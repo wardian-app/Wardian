@@ -59,11 +59,11 @@ panel remains the multi-agent and command-center composition surface.
 
 The first implementation slice should be conservative:
 
-1. Add a low-friction affordance from terminal cards to Chat composition, such
-   as a compact `Compose` icon button in card chrome or a contextual terminal
-   action menu item.
-2. When activated, switch the selected agent card to Chat mode and focus the
-   Chat composer.
+1. Add a minimal per-card mode switch instead of a one-way compose button. The
+   control should be visible in both Terminal and Chat modes, show the current
+   mode, and let the user switch to the other mode.
+2. When switching from Terminal to Chat through this control, focus the Chat
+   composer for that agent.
 3. Preserve terminal mode as the default raw-control surface unless the user or
    future profile settings choose otherwise.
 4. Submit Chat prompts through the existing `submit_prompt_to_agent` path.
@@ -77,12 +77,13 @@ terminal control, and Command is for orchestration.
 
 ### Terminal Mode
 
-Terminal mode should not gain a permanent prompt editor. It may expose a small
-composition affordance that is easy to ignore:
+Terminal mode should not gain a permanent prompt editor. It should expose a
+small card-level mode switch that is easy to ignore:
 
-- Label or tooltip: `Compose in Chat`.
-- Action: switch to Chat mode for the same agent and focus the composer.
-- Placement: card header, compact toolbar, or existing card actions menu.
+- Label or tooltip: `Terminal` / `Chat`, with the current mode visible.
+- Action: switch modes for the same agent. Switching to Chat focuses the
+  composer.
+- Placement: card header or compact toolbar, not inside the terminal content.
 - Visibility: available on desktop terminal cards; no large overlay or footer.
 
 Terminal focus, selection, provider TUI input, and raw keyboard handling remain

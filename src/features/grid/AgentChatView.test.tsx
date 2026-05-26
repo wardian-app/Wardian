@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
 }));
 
 const invokeMock = vi.mocked(invoke);
+const listenMock = vi.mocked(listen);
 const writeTextMock = vi.mocked(writeText);
 
 function deferred<T>() {
@@ -46,6 +48,8 @@ const event = (overrides: Partial<AgentChatEvent>): AgentChatEvent => ({
 describe("AgentChatView", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(vi.fn());
     writeTextMock.mockReset();
   });
 
@@ -89,6 +93,37 @@ describe("AgentChatView", () => {
     expect(screen.queryByText("codex")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
+  });
+
+  it("clears rendered transcript rows when the backend clears the agent terminal", async () => {
+    let clearHandler: ((event: { payload?: { session_id?: string } }) => void) | null = null;
+    listenMock.mockImplementation(async (eventName, handler) => {
+      if (eventName === "agent-terminal-cleared") {
+        clearHandler = handler as typeof clearHandler;
+      }
+      return vi.fn();
+    });
+    invokeMock.mockResolvedValue([
+      event({
+        id: "message-before-clear",
+        kind: "message",
+        role: "assistant",
+        text: "This answer belongs to the old session",
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+    expect(await screen.findByText("This answer belongs to the old session")).toBeInTheDocument();
+    expect(clearHandler).toBeTruthy();
+
+    act(() => {
+      clearHandler?.({ payload: { session_id: "agent-1" } });
+    });
+
+    expect(screen.queryByText("This answer belongs to the old session")).not.toBeInTheDocument();
+    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
   });
 
   it("hides routine status lifecycle rows covered by the card header", async () => {
@@ -629,6 +664,52 @@ describe("AgentChatView", () => {
     expect(input).toHaveValue("");
   });
 
+  it("focuses the composer when requested", async () => {
+    invokeMock.mockResolvedValue([]);
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" autoFocusComposer />);
+
+    expect(await screen.findByLabelText("Message agent")).toHaveFocus();
+  });
+
+  it("notifies the parent when the requested composer focus is applied", async () => {
+    invokeMock.mockResolvedValue([]);
+    const onComposerAutoFocused = vi.fn();
+
+    render(
+      <AgentChatView
+        sessionId="agent-1"
+        status="Idle"
+        autoFocusComposer
+        onComposerAutoFocused={onComposerAutoFocused}
+      />,
+    );
+
+    expect(await screen.findByLabelText("Message agent")).toHaveFocus();
+    expect(onComposerAutoFocused).toHaveBeenCalledTimes(1);
+  });
+
+  it("can be controlled by a parent draft store", async () => {
+    invokeMock.mockResolvedValue([]);
+    const onDraftChange = vi.fn();
+
+    render(
+      <AgentChatView
+        sessionId="agent-1"
+        status="Idle"
+        draft="Saved draft"
+        onDraftChange={onDraftChange}
+      />,
+    );
+
+    const input = await screen.findByLabelText("Message agent");
+    expect(input).toHaveValue("Saved draft");
+
+    fireEvent.change(input, { target: { value: "Updated draft" } });
+
+    expect(onDraftChange).toHaveBeenCalledWith("Updated draft");
+  });
+
   it("submits on Enter and keeps Shift Enter as textarea input", async () => {
     invokeMock.mockImplementation((command) => {
       if (command === "load_agent_chat_transcript") return Promise.resolve([]);
@@ -725,6 +806,7 @@ describe("AgentChatView", () => {
   });
 
   it("refreshes the transcript while chat mode remains mounted", async () => {
+    vi.useFakeTimers();
     invokeMock
       .mockResolvedValueOnce([
         event({
@@ -754,10 +836,19 @@ describe("AgentChatView", () => {
         }),
       ]);
 
-    render(<AgentChatView sessionId="agent-1" refreshIntervalMs={10} />);
+    try {
+      render(<AgentChatView sessionId="agent-1" refreshIntervalMs={10} />);
 
-    expect(await screen.findByText("Initial transcript")).toBeInTheDocument();
-    expect(await screen.findByText("Updated transcript")).toBeInTheDocument();
+      await act(async () => {});
+      expect(screen.getByText("Initial transcript")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      expect(screen.getByText("Updated transcript")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores stale transcript responses that resolve after a newer refresh", async () => {

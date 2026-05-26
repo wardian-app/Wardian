@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useEffect } from 'react';
 import { GridView } from './GridView';
 import type { AgentConfig, AgentTelemetry } from '../types';
 import { useLayoutStore } from '../store/useLayoutStore';
@@ -26,10 +27,59 @@ vi.mock('../features/terminal/AgentTerminal', () => ({
 vi.mock('../features/grid/AgentChatView', () => ({
   AgentChatView: ({
     sessionId,
+    autoFocusComposer,
+    draft,
+    onComposerAutoFocused,
+    onDraftChange,
   }: {
     sessionId: string;
-  }) => <div data-testid={`chat-${sessionId}`}>Chat {sessionId}</div>,
+    autoFocusComposer?: boolean;
+    draft?: string;
+    onDraftChange?: (value: string) => void;
+    onComposerAutoFocused?: () => void;
+  }) => (
+    <MockAgentChatView
+      autoFocusComposer={autoFocusComposer}
+      draft={draft}
+      onComposerAutoFocused={onComposerAutoFocused}
+      onDraftChange={onDraftChange}
+      sessionId={sessionId}
+    />
+  ),
 }));
+
+function MockAgentChatView({
+  autoFocusComposer,
+  draft,
+  onComposerAutoFocused,
+  onDraftChange,
+  sessionId,
+}: {
+  autoFocusComposer?: boolean;
+  draft?: string;
+  onComposerAutoFocused?: () => void;
+  onDraftChange?: (value: string) => void;
+  sessionId: string;
+}) {
+  useEffect(() => {
+    if (!autoFocusComposer) return;
+    document.querySelector<HTMLTextAreaElement>(`[data-testid="chat-${sessionId}"]`)?.focus();
+    onComposerAutoFocused?.();
+  }, [autoFocusComposer, onComposerAutoFocused, sessionId]);
+
+  return (
+    <label>
+      Chat {sessionId}
+      <textarea
+        aria-label={`Mock chat composer ${sessionId}`}
+        data-autofocus={autoFocusComposer ? "true" : "false"}
+        data-testid={`chat-${sessionId}`}
+        onChange={(event) => onDraftChange?.(event.target.value)}
+        value={draft ?? ""}
+      />
+    </label>
+  );
+}
 
 const agents: AgentConfig[] = [
   { session_id: 'agent-1', session_name: 'Alpha', agent_class: 'Coder', folder: 'C:/project', is_off: false },
@@ -45,6 +95,7 @@ function renderGrid(
   options: {
     selectedAgentIds?: Set<string>;
     offAgentIds?: Set<string>;
+    onDelete?: (agentId: string) => void;
   } = {},
 ) {
   return render(
@@ -66,7 +117,7 @@ function renderGrid(
       onMouseDown={() => {}}
       onCardClick={() => {}}
       onMaximize={() => {}}
-      onDelete={() => {}}
+      onDelete={options.onDelete ?? (() => {})}
       onRename={() => {}}
       setEditingAgentId={() => {}}
       setTempName={() => {}}
@@ -189,6 +240,81 @@ describe('GridView maximize behavior', () => {
     expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
     expect(screen.getByTestId('chat-agent-2')).toBeInTheDocument();
     expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+  });
+
+  it('shows a per-card mode switch and toggles one terminal card into focused chat', async () => {
+    useSettingsStore.getState().setGridCardDisplayMode('terminal');
+
+    renderGrid(null, agents);
+
+    const alphaMode = screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' });
+    expect(screen.getByRole('button', { name: 'Beta mode: Terminal. Switch to Chat.' })).toBeInTheDocument();
+
+    fireEvent.click(alphaMode);
+
+    expect(screen.getByTestId('chat-agent-1')).toHaveFocus();
+    await waitFor(() => expect(screen.getByTestId('chat-agent-1')).toHaveAttribute('data-autofocus', 'false'));
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Alpha mode: Chat. Switch to Terminal.' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Chat. Switch to Terminal.' }));
+
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
+  });
+
+  it('keeps a per-agent chat draft when switching modes', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('terminal');
+
+    renderGrid(null, agents);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
+    fireEvent.change(screen.getByTestId('chat-agent-1'), { target: { value: 'Long prompt draft' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Chat. Switch to Terminal.' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
+
+    expect(screen.getByTestId('chat-agent-1')).toHaveValue('Long prompt draft');
+  });
+
+  it('clears per-agent chat mode and draft state when deleting a card', () => {
+    const onDelete = vi.fn();
+    useSettingsStore.getState().setGridCardDisplayMode('terminal');
+
+    renderGrid(null, agents, vi.fn(), { onDelete });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
+    fireEvent.change(screen.getByTestId('chat-agent-1'), { target: { value: 'Draft to discard' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Alpha' }));
+
+    expect(onDelete).toHaveBeenCalledWith('agent-1');
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
+
+    expect(screen.getByTestId('chat-agent-1')).toHaveValue('');
+  });
+
+  it('uses terminal card width when a chat-default card is switched to terminal', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('chat');
+
+    const { container } = renderGrid(null, [agents[0]]);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.minWidth).toBe('360px');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Chat. Switch to Terminal.' }));
+
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(root.style.minWidth).toBe('520px');
+  });
+
+  it('shows hidden card action buttons when they receive keyboard focus', () => {
+    renderGrid(null, agents);
+
+    expect(screen.getByRole('button', { name: 'Maximize Alpha' })).toHaveClass('focus:opacity-100');
+    expect(screen.getByRole('button', { name: 'Delete Alpha' })).toHaveClass('focus:opacity-100');
   });
 
   it('gives a single visible agent the full grid width instead of a stale narrow track', () => {

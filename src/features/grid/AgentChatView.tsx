@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, Copy, Loader2, SendHorizontal } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -7,7 +8,7 @@ import type { AgentChatEvent, AgentChatRole, AgentConfig, AgentTelemetry } from 
 import { submitInputToAgent } from "../../utils/terminalInput";
 import { toActivityBlock, type ActivityBlockModel, type ActivityTone } from "./activityBlocks";
 
-interface AgentChatViewProps {
+interface AgentChatViewBaseProps {
   sessionId: string;
   agent?: Pick<AgentConfig, "session_name" | "agent_class" | "provider">;
   provider?: AgentConfig["provider"];
@@ -17,7 +18,15 @@ interface AgentChatViewProps {
   telemetry?: Pick<AgentTelemetry, "current_status"> | null;
   className?: string;
   refreshIntervalMs?: number;
+  autoFocusComposer?: boolean;
+  onComposerAutoFocused?: () => void;
 }
+
+type AgentChatDraftControlProps =
+  | { draft?: undefined; onDraftChange?: undefined }
+  | { draft: string; onDraftChange: (value: string) => void };
+
+type AgentChatViewProps = AgentChatViewBaseProps & AgentChatDraftControlProps;
 
 type LoadState = "loading" | "ready" | "error";
 const CHAT_REFRESH_INTERVAL_MS = 3000;
@@ -60,16 +69,51 @@ export function AgentChatView({
   telemetry,
   className = "",
   refreshIntervalMs = CHAT_REFRESH_INTERVAL_MS,
+  autoFocusComposer = false,
+  draft,
+  onComposerAutoFocused,
+  onDraftChange,
 }: AgentChatViewProps) {
   const [events, setEvents] = useState<AgentChatEvent[]>([]);
   const [pendingMessages, setPendingMessages] = useState<AgentChatEvent[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [draft, setDraft] = useState("");
+  const [internalDraft, setInternalDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const transcriptRequestRef = useRef(0);
+  const activeDraft = draft ?? internalDraft;
+  const setActiveDraft = onDraftChange ?? setInternalDraft;
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
+      if (event.payload?.session_id !== sessionId) return;
+      setEvents([]);
+      setPendingMessages([]);
+      setLoadState("ready");
+      setError(null);
+      setSubmitError(null);
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((reason) => {
+        console.warn("agent-terminal-cleared chat listener error:", reason);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,7 +166,7 @@ export function AgentChatView({
     setSubmitError(null);
     try {
       await submitInputToAgent(sessionId, prompt);
-      if (clearDraft) setDraft("");
+      if (clearDraft) setActiveDraft("");
       setPendingMessages((pending) => [
         ...pending,
         createPendingUserMessage(sessionId, agent?.provider ?? provider ?? providerFromEvents(events), prompt, maxSequence(events)),
@@ -136,7 +180,7 @@ export function AgentChatView({
   };
 
   const handleSubmit = () => {
-    void submitPrompt(draft, true);
+    void submitPrompt(activeDraft, true);
   };
 
   const handleApprovalSubmit = (response: string) => {
@@ -173,11 +217,13 @@ export function AgentChatView({
         ) : null}
       </div>
       <ChatComposer
+        autoFocus={autoFocusComposer}
         disabledReason={disabledReason}
-        draft={draft}
+        draft={activeDraft}
         hasActionRequired={hasActionRequired}
         isSubmitting={isSubmitting}
-        onChange={setDraft}
+        onAutoFocused={onComposerAutoFocused}
+        onChange={setActiveDraft}
         onSubmit={handleSubmit}
         submitError={submitError}
       />
@@ -563,24 +609,42 @@ function CopyIconButton({ label, value }: { label: string; value: string }) {
 }
 
 function ChatComposer({
+  autoFocus,
   disabledReason,
   draft,
   hasActionRequired,
   isSubmitting,
+  onAutoFocused,
   onChange,
   onSubmit,
   submitError,
 }: {
+  autoFocus: boolean;
   disabledReason: string | null;
   draft: string;
   hasActionRequired: boolean;
   isSubmitting: boolean;
+  onAutoFocused?: () => void;
   onChange: (value: string) => void;
   onSubmit: () => void;
   submitError: string | null;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const autoFocusConsumedRef = useRef(false);
   const placeholder = disabledReason ?? (hasActionRequired ? "Respond to action needed..." : "Message agent...");
   const canSubmit = draft.trim().length > 0 && !disabledReason;
+
+  useEffect(() => {
+    if (!autoFocus) {
+      autoFocusConsumedRef.current = false;
+      return;
+    }
+    if (!disabledReason && !autoFocusConsumedRef.current) {
+      textareaRef.current?.focus();
+      autoFocusConsumedRef.current = true;
+      onAutoFocused?.();
+    }
+  }, [autoFocus, disabledReason, onAutoFocused]);
 
   return (
     <form
@@ -603,6 +667,7 @@ function ChatComposer({
             }
           }}
           placeholder={placeholder}
+          ref={textareaRef}
           rows={1}
           value={draft}
         />
