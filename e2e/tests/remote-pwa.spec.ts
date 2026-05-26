@@ -41,17 +41,38 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await page.route("**/remote/api/agents/agent-1/chat", async (route) => {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ events: [] }) });
   });
-  await page.route("**/remote/api/agents/agent-1/terminal", async (route) => {
+  await page.route("**/remote/api/ws-ticket", async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        snapshot: {
-          cursor: "agent-1:0000000000000001",
-          text: "terminal ready from e2e",
-          truncated: false,
-          omitted_bytes: 0,
-        },
+        ticket: "ws-ticket-e2e",
+        expires_at: "2099-05-21T08:05:00.000Z",
       }),
+    });
+  });
+  await page.routeWebSocket("**/remote/api/status-stream", async (ws) => {
+    ws.onMessage(() => {});
+  });
+  await page.routeWebSocket("**/remote/api/agents/agent-1/terminal-stream", async (ws) => {
+    let seeded = false;
+    ws.onMessage((message) => {
+      if (seeded) return;
+      expect(JSON.parse(String(message))).toMatchObject({
+        ticket: "ws-ticket-e2e",
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+      });
+      seeded = true;
+      ws.send(
+        JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-e2e",
+          owner_attachment_id: "attach-e2e",
+          cols: 80,
+          rows: 24,
+          state_base64: Buffer.from("terminal ready from e2e", "utf8").toString("base64"),
+        }),
+      );
     });
   });
   await page.route("**/remote/api/agents/action", async (route) => {
@@ -71,6 +92,7 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("terminal ready from e2e")).toBeVisible();
+  await page.getByRole("button", { name: "Chat", exact: true }).click();
   await page.getByLabel("Prompt Remote Coder").fill("status please");
   await page.getByRole("button", { name: "Send prompt" }).click();
 
