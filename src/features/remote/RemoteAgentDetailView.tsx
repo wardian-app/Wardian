@@ -15,6 +15,7 @@ import {
   normalizeRemoteTerminalOutput,
   type TerminalOutputState,
 } from "../terminal/terminalCapabilities";
+import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -338,6 +339,7 @@ function TerminalPane({
       scrollback: 1_000,
       theme: remoteTerminalTheme(),
     });
+    installConservativeTerminalShortcuts(terminal);
     const fitAddon = new FitAddon();
     terminal.loadAddon?.(fitAddon);
     terminal.open?.(host);

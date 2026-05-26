@@ -57,6 +57,8 @@ vi.mock("@xterm/xterm", () => ({
     reset: vi.fn(),
     dispose: vi.fn(),
     focus: vi.fn(),
+    attachCustomKeyEventHandler: vi.fn(),
+    selectAll: vi.fn(),
     loadAddon: vi.fn(),
     scrollLines: vi.fn(),
     scrollToBottom: vi.fn(),

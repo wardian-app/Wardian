@@ -14,6 +14,7 @@ import {
   shouldHomeCursorBeforeTransientResize,
   type TerminalOutputState,
 } from "./terminalCapabilities";
+import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 
@@ -804,6 +805,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     term.options.scrollOnUserInput = false;
     applyProviderTerminalOptions(term, entry.provider);
   }
+  installConservativeTerminalShortcuts(term);
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);

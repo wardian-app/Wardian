@@ -80,6 +80,8 @@ describe("RemoteMobileApp", () => {
       reset: vi.fn(),
       dispose: vi.fn(),
       focus: vi.fn(),
+      attachCustomKeyEventHandler: vi.fn(),
+      selectAll: vi.fn(),
       loadAddon: vi.fn(),
       scrollLines: vi.fn(),
       scrollToBottom: vi.fn(),
@@ -532,6 +534,11 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByTestId("remote-terminal-attach")).not.toHaveClass("min-h-[280px]");
     const terminalCallsForOptions = vi.mocked(Terminal).mock.calls;
     const terminalOptions = terminalCallsForOptions[terminalCallsForOptions.length - 1]?.[0] as Record<string, unknown> | undefined;
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminalInstance = terminalResults[terminalResults.length - 1]?.value as {
+      attachCustomKeyEventHandler?: ReturnType<typeof vi.fn>;
+    };
+    expect(terminalInstance.attachCustomKeyEventHandler).toHaveBeenCalledTimes(1);
     expect(terminalOptions?.theme).toEqual(
       expect.objectContaining({
         background: "rgb(250, 251, 252)",
