@@ -1107,6 +1107,17 @@ async fn provider_input_current_state(
     (input.generation == current_generation).then_some(input.state)
 }
 
+async fn provider_input_blocks_mailbox_drain(state: &AppState, session_id: &str) -> bool {
+    matches!(
+        provider_input_current_state(state, session_id).await,
+        Some(
+            ProviderInputReadiness::Busy
+                | ProviderInputReadiness::ActionRequired
+                | ProviderInputReadiness::Unavailable
+        )
+    )
+}
+
 async fn record_provider_ready_evidence(
     state: &AppState,
     session_id: &str,
@@ -2407,7 +2418,7 @@ async fn drain_next_mailbox_message_for_idle_agent(
     if info.status != "idle" {
         return Ok(None);
     }
-    if provider_input_has_known_not_ready_state(state, session_id).await {
+    if provider_input_blocks_mailbox_drain(state, session_id).await {
         return Ok(None);
     }
 
@@ -3648,6 +3659,73 @@ mod tests {
         assert_eq!(delivery[0].runtime_state, "provider_input_not_ready");
         assert_eq!(delivery[0].delivery_state, "queued");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_can_complete_booting_provider_from_prompt_evidence() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            agent
+                .watch_state
+                .lock()
+                .unwrap()
+                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap()
+            .expect("drained message");
+
+        assert_eq!(rx.recv().await.unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        assert_eq!(drained.runtime_state, "mailbox_drain");
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Ready
+        );
     }
 
     #[tokio::test]
