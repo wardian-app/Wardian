@@ -92,6 +92,8 @@ describe("AgentTerminal scrollback", () => {
         reset: vi.fn(),
         dispose: vi.fn(),
         focus: vi.fn(),
+        attachCustomKeyEventHandler: vi.fn(),
+        selectAll: vi.fn(),
         scrollToBottom: vi.fn(),
         scrollToLine: vi.fn((line: number) => {
           terminal.buffer.active.viewportY = line;
@@ -151,6 +153,14 @@ describe("AgentTerminal scrollback", () => {
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(false);
     expect(shouldExposeTerminalDebug({ DEV: true, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(true);
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
+  });
+
+  it("installs conservative terminal shortcuts on the renderer", async () => {
+    render(<AgentTerminal sessionId="codex-shortcuts" theme="dark" />);
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance().attachCustomKeyEventHandler).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("reuses the live renderer on a quick remount without recreating the WebGL context", async () => {

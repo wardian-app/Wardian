@@ -19,6 +19,8 @@ const onDataMock = vi.fn((_handler: (data: string) => void) => ({ dispose: vi.fn
 const onBinaryMock = vi.fn((_handler: (data: string) => void) => ({ dispose: vi.fn() }));
 const disposeMock = vi.fn();
 const focusMock = vi.fn();
+const attachCustomKeyEventHandlerMock = vi.fn();
+const selectAllMock = vi.fn();
 const writeMock = vi.fn();
 const clearMock = vi.fn();
 const refreshMock = vi.fn();
@@ -34,6 +36,8 @@ vi.mock("@xterm/xterm", () => ({
     onBinary: onBinaryMock,
     dispose: disposeMock,
     focus: focusMock,
+    attachCustomKeyEventHandler: attachCustomKeyEventHandlerMock,
+    selectAll: selectAllMock,
     write: writeMock,
     clear: clearMock,
     refresh: refreshMock,
@@ -91,6 +95,22 @@ describe("UserTerminalPanel", () => {
       "href",
       "https://docs.wardian.org/guide/cli",
     );
+  });
+
+  it("installs conservative terminal shortcuts", async () => {
+    render(
+      <UserTerminalPanel
+        theme="dark"
+        height={320}
+        selectedWorkspace={null}
+        onHeightChange={vi.fn()}
+        onHide={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(attachCustomKeyEventHandlerMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("drains all queued PTY output when mounted", async () => {
