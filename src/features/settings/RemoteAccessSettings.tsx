@@ -8,6 +8,8 @@ import type {
   RemoteDeviceRecord,
   RemoteGatewayConfig,
   RemotePendingPairingRequest,
+  RemoteSetupCheck,
+  RemoteSetupCheckResult,
 } from "../../types";
 
 const actionButtonClass =
@@ -58,6 +60,7 @@ const activeRemoteDevices = (records: RemoteDeviceRecord[] | null | undefined): 
 export const RemoteAccessSettings: React.FC = () => {
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
   const [config, setConfig] = useState<RemoteGatewayConfig | null>(null);
+  const [setupCheck, setSetupCheck] = useState<RemoteSetupCheckResult | null>(null);
   const [devices, setDevices] = useState<RemoteDeviceRecord[]>([]);
   const [pendingPairings, setPendingPairings] = useState<RemotePendingPairingRequest[]>([]);
   const [pairing, setPairing] = useState<PairingQrPayload | null>(null);
@@ -76,14 +79,16 @@ export const RemoteAccessSettings: React.FC = () => {
     setError("");
     setLoading(true);
     try {
-      const [loadedStatus, loadedConfig, loadedDevices, loadedPendingPairings] = await Promise.all([
+      const [loadedStatus, loadedConfig, loadedDevices, loadedPendingPairings, loadedSetupCheck] = await Promise.all([
         invoke<RemoteAccessStatus>("load_remote_access_status"),
         invoke<RemoteGatewayConfig | null>("load_remote_gateway_config"),
         invoke<RemoteDeviceRecord[] | null>("list_remote_devices"),
         invoke<RemotePendingPairingRequest[] | null>("list_pending_remote_pairing_requests"),
+        invoke<RemoteSetupCheckResult>("load_remote_setup_check"),
       ]);
       setStatus(loadedStatus);
       setConfig(loadedConfig);
+      setSetupCheck(loadedSetupCheck);
       setRemoteEnabledInput(loadedConfig?.enabled ?? false);
       setOriginInput(loadedConfig?.canonical_origin ?? "");
       setPortInput(loadedConfig?.loopback_port ? String(loadedConfig.loopback_port) : "41241");
@@ -192,6 +197,7 @@ export const RemoteAccessSettings: React.FC = () => {
       setOriginInput(saved.canonical_origin);
       setPortInput(String(saved.loopback_port || parsedPort));
       setStatus(saved.enabled ? "enabled" : "disabled");
+      setSetupCheck(await invoke<RemoteSetupCheckResult>("load_remote_setup_check"));
       if (!saved.enabled) {
         setPairing(null);
         setPendingPairings([]);
@@ -253,6 +259,31 @@ export const RemoteAccessSettings: React.FC = () => {
     status === "enabled" ? "Enabled" : status === "needs_repair" ? "Needs repair" : status === "disabled" ? "Disabled" : "Loading";
   const statusClass =
     status === "enabled" ? "mt-1 text-wardian-success" : status === "needs_repair" ? "mt-1 text-wardian-warning" : "mt-1 text-muted-neutral";
+  const setupNeedsAction = setupCheck?.overall_status === "needs_action";
+  const setupStatusLabel = (entryStatus: RemoteSetupCheck["status"]) => {
+    switch (entryStatus) {
+      case "ok":
+        return "Ready";
+      case "warning":
+        return "Check";
+      case "error":
+        return "Missing";
+      default:
+        return "Check";
+    }
+  };
+  const setupStatusClass = (entryStatus: RemoteSetupCheck["status"]) => {
+    switch (entryStatus) {
+      case "ok":
+        return "text-wardian-success";
+      case "warning":
+        return "text-wardian-warning";
+      case "error":
+        return "text-wardian-error";
+      default:
+        return "text-muted-neutral";
+    }
+  };
 
   return (
     <section aria-label="Remote Access" className="px-4 py-4">
@@ -307,6 +338,48 @@ export const RemoteAccessSettings: React.FC = () => {
           <dd className={statusClass}>{statusLabel}</dd>
         </div>
       </dl>
+
+      {config?.enabled && setupCheck ? (
+        <div className="mt-4 border-t border-wardian-border pt-4" aria-label="Remote setup checks">
+          <div
+            className={`flex items-start gap-2 text-xs leading-relaxed ${
+              setupNeedsAction ? "text-wardian-warning" : "text-wardian-success"
+            }`}
+            role="status"
+          >
+            {setupNeedsAction ? (
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            ) : (
+              <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            )}
+            <span>
+              {setupNeedsAction
+                ? "Remote access is enabled, but Wardian detected setup steps that may prevent your phone from connecting."
+                : "Remote access setup is ready for pairing."}
+            </span>
+          </div>
+
+          <div className="mt-3 divide-y divide-wardian-border rounded-md border border-wardian-border">
+            {setupCheck.checks.map((entry) => (
+              <div key={entry.id} className="grid gap-2 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+                <div className="min-w-0">
+                  <div className="font-semibold text-primary">{entry.label}</div>
+                  <div className="mt-1 leading-relaxed text-muted-neutral">{entry.message}</div>
+                  {entry.details ? <div className="mt-1 break-all font-mono text-[11px] text-muted-neutral">{entry.details}</div> : null}
+                </div>
+                <div className={`font-semibold ${setupStatusClass(entry.status)}`}>{setupStatusLabel(entry.status)}</div>
+              </div>
+            ))}
+          </div>
+
+          {setupNeedsAction && setupCheck.setup_command ? (
+            <div className="mt-3 text-xs text-muted-neutral">
+              <div className="font-semibold text-primary">{setupCheck.setup_command.label}</div>
+              <div className="mt-1 break-all font-mono text-[11px] text-muted-neutral">{setupCheck.setup_command.command}</div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="mt-4 border-t border-wardian-border pt-4">
         <div className="mb-3 flex items-center justify-between gap-3">

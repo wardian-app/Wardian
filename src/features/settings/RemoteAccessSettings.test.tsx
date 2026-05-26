@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import QRCode from "qrcode";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
+import type { RemoteSetupCheckResult } from "../../types";
 
 const mockInvoke = vi.mocked(invoke);
 const mockToDataURL = vi.mocked(
@@ -26,6 +27,63 @@ const enabledConfig = {
   gateway_identity_fingerprint: "fp",
 };
 
+const readySetupCheck = {
+  overall_status: "ready",
+  checks: [
+    {
+      id: "wardian_config",
+      label: "Wardian remote config",
+      status: "ok",
+      message: "Remote access is enabled in Wardian.",
+      details: "127.0.0.1:41241",
+    },
+    {
+      id: "tailscale_serve",
+      label: "Tailscale Serve",
+      status: "ok",
+      message: "Tailscale Serve forwards HTTPS traffic to Wardian's local gateway.",
+      details: "http://127.0.0.1:41241",
+    },
+    {
+      id: "https_gateway",
+      label: "HTTPS remote gateway",
+      status: "ok",
+      message: "The HTTPS remote gateway is reachable.",
+      details: "https://wardian.tailnet.ts.net/remote/api/health",
+    },
+  ],
+  inferred_origin: "https://wardian.tailnet.ts.net",
+  serve_target: "http://127.0.0.1:41241",
+  setup_command: {
+    label: "Configure Tailscale Serve",
+    command: "tailscale serve --bg --https=443 http://127.0.0.1:41241",
+  },
+} satisfies RemoteSetupCheckResult;
+
+const missingServeSetupCheck = {
+  ...readySetupCheck,
+  overall_status: "needs_action",
+  checks: [
+    readySetupCheck.checks[0],
+    {
+      id: "tailscale_serve",
+      label: "Tailscale Serve",
+      status: "error",
+      message: "Tailscale Serve is not forwarding to Wardian's configured gateway port.",
+      details: "http://127.0.0.1:41241",
+    },
+  ],
+  serve_target: null,
+} satisfies RemoteSetupCheckResult;
+
+const disabledSetupCheck = {
+  overall_status: "disabled",
+  checks: [],
+  inferred_origin: null,
+  serve_target: null,
+  setup_command: null,
+} satisfies RemoteSetupCheckResult;
+
 describe("RemoteAccessSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -40,6 +98,8 @@ describe("RemoteAccessSettings", () => {
           return [];
         case "list_pending_remote_pairing_requests":
           return [];
+        case "load_remote_setup_check":
+          return readySetupCheck;
         case "create_remote_pairing_offer":
           return {
             gateway_origin: "https://wardian.tailnet.ts.net",
@@ -77,6 +137,42 @@ describe("RemoteAccessSettings", () => {
     );
   });
 
+  it("shows remote setup as ready when diagnostics pass", async () => {
+    render(<RemoteAccessSettings />);
+
+    expect(await screen.findByText("Remote access setup is ready for pairing.")).toBeVisible();
+    expect(screen.getByText("Tailscale Serve")).toBeVisible();
+    expect(screen.getAllByText("Ready").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("warns when Tailscale Serve is missing or mismatched", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "load_remote_access_status":
+          return "enabled";
+        case "load_remote_gateway_config":
+          return enabledConfig;
+        case "list_remote_devices":
+          return [];
+        case "list_pending_remote_pairing_requests":
+          return [];
+        case "load_remote_setup_check":
+          return missingServeSetupCheck;
+        default:
+          return null;
+      }
+    });
+
+    render(<RemoteAccessSettings />);
+
+    expect(
+      await screen.findByText(/Wardian detected setup steps that may prevent your phone from connecting/i),
+    ).toBeVisible();
+    expect(screen.getByText("Tailscale Serve")).toBeVisible();
+    expect(screen.getByText("Missing")).toBeVisible();
+    expect(screen.getByText("tailscale serve --bg --https=443 http://127.0.0.1:41241")).toBeVisible();
+  });
+
   it("uses the backend access status before enabling pairing", async () => {
     mockInvoke.mockImplementation(async (command) => {
       switch (command) {
@@ -91,6 +187,8 @@ describe("RemoteAccessSettings", () => {
           return [];
         case "list_pending_remote_pairing_requests":
           return [];
+        case "load_remote_setup_check":
+          return readySetupCheck;
         default:
           return null;
       }
@@ -99,12 +197,13 @@ describe("RemoteAccessSettings", () => {
     render(<RemoteAccessSettings />);
 
     expect(await screen.findByText("Needs repair")).toBeVisible();
-    expect(screen.getByText("127.0.0.1:41241")).toBeVisible();
+    expect(screen.getAllByText("127.0.0.1:41241").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole("button", { name: /create pairing code/i })).toBeDisabled();
     expect(mockInvoke).toHaveBeenCalledWith("load_remote_access_status");
   });
 
   it("lets users configure remote access before creating a pairing code", async () => {
+    let setupLoads = 0;
     mockInvoke.mockImplementation(async (command, args) => {
       switch (command) {
         case "load_remote_access_status":
@@ -115,6 +214,9 @@ describe("RemoteAccessSettings", () => {
           return [];
         case "list_pending_remote_pairing_requests":
           return [];
+        case "load_remote_setup_check":
+          setupLoads += 1;
+          return setupLoads > 1 ? readySetupCheck : disabledSetupCheck;
         case "save_remote_gateway_config": {
           const saveArgs = args as { config: typeof enabledConfig };
           expect(args).toEqual({
@@ -160,6 +262,7 @@ describe("RemoteAccessSettings", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("save_remote_gateway_config", expect.any(Object));
     });
+    expect(mockInvoke).toHaveBeenCalledWith("load_remote_setup_check");
     expect(screen.getByText("Enabled")).toBeVisible();
     expect(screen.getByRole("button", { name: /create pairing code/i })).toBeEnabled();
   });
@@ -185,6 +288,8 @@ describe("RemoteAccessSettings", () => {
           ];
         case "list_pending_remote_pairing_requests":
           return [];
+        case "load_remote_setup_check":
+          return readySetupCheck;
         case "revoke_remote_device":
           return [
             {
@@ -226,6 +331,8 @@ describe("RemoteAccessSettings", () => {
           return enabledConfig;
         case "list_remote_devices":
           return [];
+        case "load_remote_setup_check":
+          return readySetupCheck;
         case "list_pending_remote_pairing_requests":
           return [
             {
@@ -282,6 +389,8 @@ describe("RemoteAccessSettings", () => {
           return enabledConfig;
         case "list_remote_devices":
           return [];
+        case "load_remote_setup_check":
+          return readySetupCheck;
         case "list_pending_remote_pairing_requests":
           pendingPolls += 1;
           return pendingPolls > 2
