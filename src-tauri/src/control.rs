@@ -10,10 +10,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, DeliveryDetail, DeliveryErrorDetail, MessageInputMode, MessageOrigin,
-    OkResponse, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
-    WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError, WorkflowListResponse,
-    WorkflowResponse, WorkflowSummary,
+    ControlRequest, DeliveryDetail, DeliveryErrorDetail, InteractionBodyRef, MessageInputMode,
+    MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy,
+    ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
+    WatchDeliverySnapshot, WatchEvidenceError, WorkflowListResponse, WorkflowResponse,
+    WorkflowSummary,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -771,7 +772,24 @@ async fn deliver_message_to_target(
             info.status == "action_required",
         )
         .await;
-        match decide_delivery_route(&info.status, input_mode, queue_policy, approval_action) {
+        let route = if input_mode == MessageInputMode::ApprovalAction
+            || matches!(queue_policy, QueuePolicy::MailboxOnly)
+        {
+            decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
+        } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
+            match queue_policy {
+                QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
+                    runtime_state: "provider_input_not_ready",
+                },
+                QueuePolicy::LiveOnly => DeliveryRoute::Reject {
+                    failure: "not_input_ready",
+                },
+                QueuePolicy::MailboxOnly => unreachable!("handled above"),
+            }
+        } else {
+            decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
+        };
+        match route {
             DeliveryRoute::Mailbox { runtime_state } => {
                 queued += 1;
                 let queued_uuid = info.uuid.clone();
@@ -1053,15 +1071,76 @@ async fn wait_for_terminal_ready_for_control_send(
     state: &AppState,
     info: &DeliveryTargetInfo,
 ) -> Result<(), String> {
+    if provider_input_current_state(state, &info.uuid).await == Some(ProviderInputReadiness::Ready)
+    {
+        return Ok(());
+    }
+
     if info.provider == "opencode" {
         wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await
     } else if info.provider == "codex" {
         wait_for_terminal_output(state, &info.uuid, 15_000, codex_output_has_ready_prompt).await
+    } else if info.provider == "claude" {
+        wait_for_terminal_output(state, &info.uuid, 15_000, claude_output_has_ready_prompt).await
+    } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
+        Err(format!("Agent {} provider input is not ready", info.uuid))
     } else if current_agent_status_is_idle(state, &info.uuid).await? {
         Ok(())
     } else {
         Err(format!("Agent {} is not idle", info.uuid))
     }
+}
+
+async fn provider_input_has_known_not_ready_state(state: &AppState, session_id: &str) -> bool {
+    provider_input_current_state(state, session_id)
+        .await
+        .is_some_and(|input_state| input_state != ProviderInputReadiness::Ready)
+}
+
+async fn provider_input_current_state(
+    state: &AppState,
+    session_id: &str,
+) -> Option<ProviderInputReadiness> {
+    let input = state.interactions.provider_input_state(session_id).await?;
+    let current_generation = state
+        .interactions
+        .current_provider_input_generation(session_id)
+        .await?;
+    (input.generation == current_generation).then_some(input.state)
+}
+
+async fn provider_input_blocks_mailbox_drain(state: &AppState, session_id: &str) -> bool {
+    matches!(
+        provider_input_current_state(state, session_id).await,
+        Some(
+            ProviderInputReadiness::Busy
+                | ProviderInputReadiness::ActionRequired
+                | ProviderInputReadiness::Unavailable
+        )
+    )
+}
+
+async fn record_provider_ready_evidence(
+    state: &AppState,
+    session_id: &str,
+    evidence: ProviderReadyEvidence,
+) {
+    let generation = state
+        .interactions
+        .provider_input_state(session_id)
+        .await
+        .filter(|input| input.state != ProviderInputReadiness::ActionRequired)
+        .map(|input| input.generation)
+        .unwrap_or(0);
+    state
+        .interactions
+        .record_provider_input_state(
+            session_id,
+            generation,
+            ProviderInputReadiness::Ready,
+            Some(evidence),
+        )
+        .await;
 }
 
 async fn current_agent_status_is_idle(state: &AppState, session_id: &str) -> Result<bool, String> {
@@ -1106,6 +1185,8 @@ async fn wait_for_opencode_terminal_ready(
         if wardian_core::identity::normalize_status(&status) == "idle"
             && (title == "OpenCode" || title.starts_with("OC | "))
         {
+            record_provider_ready_evidence(state, session_id, ProviderReadyEvidence::TitleDetected)
+                .await;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1143,6 +1224,12 @@ async fn wait_for_terminal_output(
             .map(|snapshot| snapshot.output.text)
             .unwrap_or_default();
         if is_ready(&output) {
+            record_provider_ready_evidence(
+                state,
+                session_id,
+                ProviderReadyEvidence::PromptDetected,
+            )
+            .await;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1178,6 +1265,33 @@ fn codex_ready_prompt_trailing_metadata_line(line: &str) -> bool {
     }
     let lower = line.to_ascii_lowercase();
     lower.starts_with("gpt-") && (line.contains('·') || lower.contains("context"))
+}
+
+fn claude_output_has_ready_prompt(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    let mut trailing_metadata_lines = 0usize;
+    for line in cleaned.lines().rev().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('❯') {
+            return true;
+        }
+        if trailing_metadata_lines < 4 && claude_ready_prompt_trailing_metadata_line(line) {
+            trailing_metadata_lines += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn claude_ready_prompt_trailing_metadata_line(line: &str) -> bool {
+    if line.contains('⏵') {
+        return true;
+    }
+    line.chars()
+        .all(|ch| ch == '─' || ch == '-' || ch.is_whitespace())
 }
 
 async fn mark_delivered_agents_prompt_started(
@@ -1231,13 +1345,41 @@ async fn handle_structured_ask(
         .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
     let structured_delivery =
         build_structured_ask_delivery_message(&wardian_home, &target_uuid, message, &request_id)?;
-    create_pending_ask_request_with_id(
-        &state,
-        &target_uuid,
-        request_id.clone(),
-        structured_delivery.body_file.as_deref(),
-    )
-    .await?;
+    let sender_session_id =
+        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+    let body_ref = structured_delivery
+        .body_file
+        .as_ref()
+        .map(|path| InteractionBodyRef::File {
+            path: path.display().to_string(),
+        })
+        .unwrap_or_else(|| InteractionBodyRef::Inline {
+            body: message.to_string(),
+        });
+    let task = state
+        .interactions
+        .create_task_with_id(
+            request_id.clone(),
+            sender_session_id,
+            target_uuid.clone(),
+            body_ref,
+        )
+        .await;
+    let mut payload = serde_json::json!({
+        "request_id": task.id,
+        "target_session_id": target_uuid,
+        "status": "pending",
+        "created_at": task.created_at,
+    });
+    if let Some(body_file) = structured_delivery.body_file.as_deref() {
+        if let Some(payload) = payload.as_object_mut() {
+            payload.insert(
+                "body_file".to_string(),
+                serde_json::Value::String(body_file.display().to_string()),
+            );
+        }
+    }
+    push_watch_event_for_agent(&state, &target_uuid, "request", payload).await?;
     let delivery = match deliver_message_to_target(
         Some(app),
         &state,
@@ -1253,14 +1395,12 @@ async fn handle_structured_ask(
     {
         Ok(delivery) => delivery,
         Err(error) => {
-            cleanup_ask_request(&state, &request_id).await;
             return Err(error);
         }
     };
     let reply = match wait_for_structured_reply(&state, &request_id, timeout).await {
         Ok(reply) => reply,
         Err(error) => {
-            cleanup_ask_request(&state, &request_id).await;
             return Err(error);
         }
     };
@@ -1281,7 +1421,6 @@ async fn handle_structured_ask(
         fallback_agent,
         watch_result,
     );
-    cleanup_ask_request(&state, &request_id).await;
     ok_json(&response)
 }
 
@@ -1383,10 +1522,6 @@ async fn ask_fallback_agent_snapshot(
         })
 }
 
-async fn cleanup_ask_request(state: &AppState, request_id: &str) {
-    state.ask_requests.lock().await.remove(request_id);
-}
-
 fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
     format!(
         "{message}\n\nWardian request id: {request_id}\nRespond to this request with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the reply body on stdin."
@@ -1459,6 +1594,7 @@ async fn create_pending_ask_request(
     Ok(request_id)
 }
 
+#[cfg(test)]
 async fn create_pending_ask_request_with_id(
     state: &AppState,
     target_session_id: &str,
@@ -1508,6 +1644,46 @@ async fn submit_structured_reply(
 ) -> Result<StructuredReply, ControlError> {
     let source_session_id =
         origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+
+    if state.interactions.interaction(request_id).await.is_some() {
+        let reply = state
+            .interactions
+            .complete_task_with_reply(
+                request_id,
+                source_session_id.as_deref(),
+                status.clone(),
+                body,
+            )
+            .await
+            .map_err(|code| match code {
+                "not_found" => {
+                    ControlError::not_found(format!("ask request not found: {request_id}"))
+                }
+                "unauthorized" => {
+                    ControlError::coded("unauthorized", "reply origin does not match ask target")
+                }
+                "duplicate_reply" => ControlError::coded(
+                    "duplicate_reply",
+                    "ask request already has a terminal reply",
+                ),
+                _ => ControlError::request_failed("failed to complete ask interaction"),
+            })?;
+
+        push_watch_event_for_agent(
+            state,
+            &reply.target_session_id,
+            "reply",
+            serde_json::json!({
+                "request_id": reply.request_id,
+                "status": reply.status,
+                "target_session_id": reply.target_session_id,
+                "source_session_id": reply.source_session_id,
+                "replied_at": reply.replied_at,
+            }),
+        )
+        .await?;
+        return Ok(reply);
+    }
 
     let reply = {
         let mut requests = state.ask_requests.lock().await;
@@ -1565,6 +1741,22 @@ async fn wait_for_structured_reply(
 ) -> Result<StructuredReply, ControlError> {
     let started = std::time::Instant::now();
     loop {
+        if state.interactions.interaction(request_id).await.is_some() {
+            if let Some(reply) = state.interactions.structured_reply(request_id).await {
+                return Ok(reply);
+            }
+            if started.elapsed() >= timeout {
+                return Err(ControlError::watch_timeout("structured reply timed out")
+                    .with_details(serde_json::json!({
+                        "request_id": request_id,
+                        "until": "reply",
+                    })));
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+            continue;
+        }
+
         let reply = {
             let requests = state.ask_requests.lock().await;
             let request = requests.get(request_id).ok_or_else(|| {
@@ -2255,6 +2447,9 @@ async fn drain_next_mailbox_message_for_idle_agent(
     if info.status != "idle" {
         return Ok(None);
     }
+    if provider_input_blocks_mailbox_drain(state, session_id).await {
+        return Ok(None);
+    }
 
     let record = {
         let mut mailbox = state.mailbox.lock().await;
@@ -2606,7 +2801,8 @@ mod tests {
              otherwise we are not exercising the setup-hook code path"
         );
 
-        let claim = claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
+        let claim =
+            claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
         drop(claim);
 
         std::env::remove_var("WARDIAN_HOME");
@@ -3448,6 +3644,290 @@ mod tests {
             records[0].phase,
             crate::state::MailboxDeliveryPhase::Terminal
         );
+    }
+
+    #[tokio::test]
+    async fn provider_non_ready_state_queues_live_delivery_when_status_is_idle() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Busy,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let delivery = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(delivery[0].runtime_state, "provider_input_not_ready");
+        assert_eq!(delivery[0].delivery_state, "queued");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_can_complete_booting_provider_from_prompt_evidence() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            agent
+                .watch_state
+                .lock()
+                .unwrap()
+                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap()
+            .expect("drained message");
+
+        assert_eq!(rx.recv().await.unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        assert_eq!(drained.runtime_state, "mailbox_drain");
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_can_complete_booting_claude_from_prompt_evidence() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "claude".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            agent.watch_state.lock().unwrap().push_output(
+                "ClaudeCode v2.1.150\r\n❯ Try \"write a test\"\r\n────────────────⏵⏵ dontask on · Haiku 4.5"
+                    .as_bytes(),
+            );
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "ClaudeOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1"),
+        )
+        .await
+        .expect("mailbox drain should not hang")
+        .unwrap()
+        .expect("drained message");
+
+        assert_eq!(drained.runtime_state, "mailbox_drain");
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_non_ready_state_rejects_approval_action_instead_of_queueing() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Busy,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let error = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "approve",
+            None,
+            MessageInputMode::ApprovalAction,
+            QueuePolicy::QueueIfBusy,
+            Some(&ApprovalAction::Accept),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, "request_failed");
+        let records = state.mailbox.lock().await.list_for_target("agent-1");
+        assert!(records.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_readiness_generation_does_not_drain_mailbox() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                2,
+                wardian_core::control::ProviderInputReadiness::Busy,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(queued[0].delivery_state, "queued");
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                wardian_core::control::ProviderInputReadiness::Ready,
+                Some(wardian_core::control::ProviderReadyEvidence::PromptDetected),
+            )
+            .await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap();
+
+        assert!(drained.is_none());
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

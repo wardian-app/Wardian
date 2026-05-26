@@ -1030,11 +1030,45 @@ describe("Agent Watchlist Sidebar", () => {
               agent_session_id: "agent-1",
               agent_name: "Alpha",
               summary: "Action needed",
+              evidence_id: undefined,
+              evidence_source: undefined,
               read: false,
             }),
           ],
         }),
       );
+    });
+  });
+
+  it("allows later status-derived action-needed cards after the short dedupe window", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitStatus } = captureQueueAgentListeners();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+
+    await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Processing..." });
+      emitStatus({ session_id: "agent-1", current_status: "Action Needed" });
+    });
+
+    await waitFor(() => {
+      expect(useQueueStore.getState().items.filter((item) => item.type === "action_needed")).toHaveLength(1);
+    });
+
+    useQueueStore.setState((state) => ({
+      items: state.items.map((item) => ({ ...item, timestamp: Date.now() - 10_000 })),
+    }));
+
+    await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Processing..." });
+      emitStatus({ session_id: "agent-1", current_status: "Action Needed" });
+    });
+
+    await waitFor(() => {
+      expect(useQueueStore.getState().items.filter((item) => item.type === "action_needed")).toHaveLength(2);
     });
   });
 

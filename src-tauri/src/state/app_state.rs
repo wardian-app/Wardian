@@ -1,4 +1,5 @@
 use crate::state::active_agent::ActiveAgent;
+use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
 use crate::state::terminal_attach::TerminalAttachState;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,7 @@ pub struct AppState {
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     pub mailbox: Mutex<MailboxState>,
     // Separate, lightweight map for stdin senders — completely independent from the
     // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
@@ -40,6 +42,7 @@ pub struct AppState {
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
     pub ask_requests: Mutex<HashMap<String, AskRequestRecord>>,
+    pub interactions: InteractionState,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
     // Last frontend-reported PTY size per session. Used to open a freshly-spawned
@@ -74,10 +77,25 @@ impl AppState {
 
     pub async fn remove_agent_delivery_state(&self, target_session_id: &str) {
         self.delivery_locks.lock().await.remove(target_session_id);
+        if let Ok(mut sequences) = self.status_observation_sequences.lock() {
+            sequences.remove(target_session_id);
+        }
         self.mailbox
             .lock()
             .await
             .remove_for_target(target_session_id);
+        self.interactions
+            .clear_provider_input_state(target_session_id)
+            .await;
+    }
+
+    pub fn next_status_observation_sequence(&self, target_session_id: &str) -> u64 {
+        let Ok(mut sequences) = self.status_observation_sequences.lock() else {
+            return 0;
+        };
+        let next = sequences.get(target_session_id).copied().unwrap_or(0) + 1;
+        sequences.insert(target_session_id.to_string(), next);
+        next
     }
 }
 
@@ -92,6 +110,7 @@ impl Default for AppState {
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
+            status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             mailbox: Mutex::new(MailboxState::default()),
             input_senders: RwLock::new(HashMap::new()),
             workflow_triggers: Mutex::new(HashMap::new()),
@@ -102,6 +121,7 @@ impl Default for AppState {
             library_watchers: Mutex::new(HashMap::new()),
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
+            interactions: InteractionState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             pty_sizes: RwLock::new(HashMap::new()),
             terminal_attach: Arc::new(TerminalAttachState::default()),

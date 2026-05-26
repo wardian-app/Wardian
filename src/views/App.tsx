@@ -254,7 +254,11 @@ function AppBody() {
   const maybeAddActionNeededQueueItem = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
     if (currentStatus !== "Action Needed" || !previousStatus || previousStatus === "Action Needed") return;
     const agent = agentsRef.current.find((a) => a.session_id === sessionId);
-    addActionNeeded(sessionId, agent?.session_name ?? sessionId, "Action needed");
+    addActionNeeded(
+      sessionId,
+      agent?.session_name ?? sessionId,
+      "Action needed",
+    );
   }, [addActionNeeded]);
 
   useEffect(() => {

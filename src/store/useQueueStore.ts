@@ -23,7 +23,13 @@ interface QueueState {
   appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (sessionId: string, agentName: string, summaryOverride?: string | null) => void;
-  addActionNeeded: (sessionId: string, agentName: string, summary?: string | null) => void;
+  addActionNeeded: (
+    sessionId: string,
+    agentName: string,
+    summary?: string | null,
+    evidenceId?: string,
+    evidenceSource?: QueueItem["evidence_source"],
+  ) => void;
   trackWorkflowNodeOutput: (event: WorkflowTelemetryEvent) => void;
   addWorkflowCompletion: (
     payload: { workflow_id: string; run_instance_id?: string; status: "completed" | "failed"; error?: string },
@@ -59,6 +65,22 @@ function boundSummary(text: string): string {
   const headLength = Math.ceil(available * 0.72);
   const tailLength = available - headLength;
   return `${text.slice(0, headLength)}${marker}${text.slice(-tailLength)}`;
+}
+
+function isProviderScopedEvidence(evidenceSource: QueueItem["evidence_source"] | undefined) {
+  return evidenceSource === "provider_runtime";
+}
+
+function matchesActionNeededEvidence(
+  item: QueueItem,
+  sessionId: string,
+  evidenceId: string,
+  evidenceSource: QueueItem["evidence_source"] | undefined,
+) {
+  if (item.type !== "action_needed") return false;
+  if (item.evidence_id !== evidenceId || item.evidence_source !== evidenceSource) return false;
+  if (isProviderScopedEvidence(evidenceSource)) return item.agent_session_id === sessionId;
+  return true;
 }
 
 export const useQueueStore = create<QueueState>((set, get) => ({
@@ -165,11 +187,12 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     });
   },
 
-  addActionNeeded(sessionId, agentName, summary) {
+  addActionNeeded(sessionId, agentName, summary, evidenceId, evidenceSource) {
     const { items, _agentBuffers } = get();
-    const recent = items.find(
-      (i) => i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS,
-    );
+    const recent = items.find((i) => {
+      if (evidenceId) return matchesActionNeededEvidence(i, sessionId, evidenceId, evidenceSource);
+      return i.type === "action_needed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS;
+    });
     if (recent) return;
 
     const explicitSummary = summary?.trim();
@@ -184,6 +207,8 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       agent_session_id: sessionId,
       agent_name: agentName,
       summary: boundSummary(itemSummary),
+      evidence_id: evidenceId,
+      evidence_source: evidenceSource,
     };
 
     set((s) => {

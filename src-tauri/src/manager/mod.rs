@@ -41,6 +41,7 @@ use crate::state::{ActiveAgent, AppState};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
+use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 use wardian_core::models::{AgentConfig, AgentEvent};
 pub(crate) fn session_bootstrap_prompt() -> &'static str {
     "Introduce yourself"
@@ -158,13 +159,23 @@ pub(crate) fn set_agent_status(
             // Phase 2: Persist status change to SQLite
             let _ = wardian_core::db::update_agent_status(session_id, next_status, None);
 
-            let watch_app = app.clone();
-            let watch_session_id = session_id.to_string();
-            let watch_status = next_status.to_string();
+            let status_app = app.clone();
+            let status_session_id = session_id.to_string();
+            let status = next_status.to_string();
+            let status_sequence = app
+                .state::<AppState>()
+                .next_status_observation_sequence(session_id);
             tauri::async_runtime::spawn(async move {
-                let state = watch_app.state::<AppState>();
+                let state = status_app.state::<AppState>();
+                record_provider_input_from_status_state(
+                    &state,
+                    &status_session_id,
+                    &status,
+                    status_sequence,
+                )
+                .await;
                 let agents = state.agents.lock().await;
-                if let Some(agent) = agents.get(&watch_session_id) {
+                if let Some(agent) = agents.get(&status_session_id) {
                     if let Ok(mut last_status_at) = agent.last_status_at.lock() {
                         *last_status_at = Some(observed_at.clone());
                     }
@@ -172,25 +183,60 @@ pub(crate) fn set_agent_status(
                         watch_state.push_event(
                             "status",
                             serde_json::json!({
-                                "status": wardian_core::identity::normalize_status(&watch_status),
+                                "status": wardian_core::identity::normalize_status(&status),
                                 "observed_at": observed_at,
                             }),
                         );
                     }
                 }
+
+                let _ = status_app.emit(
+                    "agent-status-updated",
+                    serde_json::json!({
+                        "session_id": status_session_id.clone(),
+                        "current_status": status.clone(),
+                    }),
+                );
+                crate::control::spawn_mailbox_drain_if_idle(
+                    &status_app,
+                    &status_session_id,
+                    &status,
+                );
             });
-
-            let _ = app.emit(
-                "agent-status-updated",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "current_status": next_status,
-                }),
-            );
-
-            crate::control::spawn_mailbox_drain_if_idle(app, session_id, next_status);
         }
     }
+}
+
+async fn record_provider_input_from_status_state(
+    state: &AppState,
+    session_id: &str,
+    next_status: &str,
+    status_sequence: u64,
+) {
+    let readiness = match wardian_core::identity::normalize_status(next_status).as_str() {
+        "idle" => ProviderInputReadiness::Ready,
+        "processing" => ProviderInputReadiness::Busy,
+        "action_required" => ProviderInputReadiness::ActionRequired,
+        "off" | "error" => ProviderInputReadiness::Unavailable,
+        _ => ProviderInputReadiness::Unknown,
+    };
+    let evidence = (readiness == ProviderInputReadiness::Ready)
+        .then_some(ProviderReadyEvidence::ProviderEvent);
+    let generation = state
+        .interactions
+        .current_provider_input_generation(session_id)
+        .await
+        .unwrap_or(0);
+    state
+        .interactions
+        .record_provider_input_status_observation(
+            session_id,
+            status_sequence,
+            generation,
+            readiness,
+            evidence,
+        )
+        .await;
 }
 
 pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
@@ -990,5 +1036,53 @@ mod tests {
             "Action Needed"
         );
         assert_eq!(*agent.query_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_status_events_update_input_readiness_before_drain() {
+        let state = AppState::new();
+        state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
+            .await;
+
+        record_provider_input_from_status_state(&state, "agent-1", "Action Needed", 1).await;
+        record_provider_input_from_status_state(&state, "agent-1", "Idle", 2).await;
+
+        let current = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(current.state, ProviderInputReadiness::Ready);
+        assert_eq!(current.generation, 1);
+        assert_eq!(
+            current.ready_evidence,
+            Some(ProviderReadyEvidence::ProviderEvent)
+        );
+    }
+
+    #[tokio::test]
+    async fn older_provider_status_observation_cannot_regress_newer_readiness() {
+        let state = AppState::new();
+        state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Booting, None)
+            .await;
+
+        record_provider_input_from_status_state(&state, "agent-1", "Idle", 2).await;
+        record_provider_input_from_status_state(&state, "agent-1", "Processing...", 1).await;
+
+        let current = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(current.state, ProviderInputReadiness::Ready);
+        assert_eq!(current.generation, 1);
+        assert_eq!(
+            current.ready_evidence,
+            Some(ProviderReadyEvidence::ProviderEvent)
+        );
     }
 }

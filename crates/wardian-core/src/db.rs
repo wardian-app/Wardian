@@ -3,6 +3,12 @@ use once_cell::sync::Lazy;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::{Arc, Mutex};
 
+use crate::control::{
+    InteractionBodyRef, InteractionKind, InteractionRecord, InteractionStatus,
+    InteractionTriggerPolicy, ProviderInputReadiness, ProviderInputState, ProviderReadyEvidence,
+    ReplyStatus, StructuredReply,
+};
+
 static DB_CONN: Lazy<Arc<Mutex<Option<Connection>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
 
 #[derive(Debug, Clone)]
@@ -91,6 +97,75 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             payload TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(session_id) REFERENCES agents(session_id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interactions (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            sender_session_id TEXT,
+            target_session_ids TEXT NOT NULL,
+            status TEXT NOT NULL,
+            trigger_policy TEXT NOT NULL,
+            body_ref TEXT NOT NULL,
+            parent_interaction_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interaction_delivery_attempts (
+            id TEXT PRIMARY KEY,
+            interaction_id TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            runtime_state TEXT NOT NULL,
+            delivery_state TEXT NOT NULL,
+            delivery_phase TEXT,
+            observed_state TEXT,
+            reason TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(interaction_id) REFERENCES interactions(id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interaction_events (
+            event_id TEXT PRIMARY KEY,
+            interaction_id TEXT,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS provider_input_state (
+            session_id TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            ready_evidence TEXT,
+            observed_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS structured_replies (
+            request_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            body TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            source_session_id TEXT,
+            replied_at TEXT NOT NULL
         )",
         [],
     )?;
@@ -271,6 +346,267 @@ pub fn get_all_agents() -> Result<Vec<AgentRow>, Box<dyn std::error::Error>> {
     get_db_conn(|conn| Ok(get_all_agents_with_conn(conn)?))
 }
 
+pub fn upsert_interaction_record(
+    record: &InteractionRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        upsert_interaction_record_with_conn(conn, record)?;
+        Ok(())
+    })
+}
+
+pub fn upsert_interaction_record_with_conn(
+    conn: &Connection,
+    record: &InteractionRecord,
+) -> rusqlite::Result<()> {
+    let target_session_ids =
+        serde_json::to_string(&record.target_session_ids).map_err(to_sql_error)?;
+    let body_ref = serde_json::to_string(&record.body_ref).map_err(to_sql_error)?;
+    conn.execute(
+        "INSERT INTO interactions (
+            id,
+            kind,
+            sender_session_id,
+            target_session_ids,
+            status,
+            trigger_policy,
+            body_ref,
+            parent_interaction_id,
+            created_at,
+            updated_at,
+            completed_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(id) DO UPDATE SET
+            kind = excluded.kind,
+            sender_session_id = excluded.sender_session_id,
+            target_session_ids = excluded.target_session_ids,
+            status = excluded.status,
+            trigger_policy = excluded.trigger_policy,
+            body_ref = excluded.body_ref,
+            parent_interaction_id = excluded.parent_interaction_id,
+            updated_at = excluded.updated_at,
+            completed_at = excluded.completed_at",
+        params![
+            record.id,
+            enum_value(&record.kind)?,
+            record.sender_session_id,
+            target_session_ids,
+            enum_value(&record.status)?,
+            enum_value(&record.trigger_policy)?,
+            body_ref,
+            record.parent_interaction_id,
+            record.created_at,
+            record.updated_at,
+            record.completed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_interaction_records() -> Result<Vec<InteractionRecord>, Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        let records = list_interaction_records_with_conn(conn)?;
+        Ok(records)
+    })
+}
+
+pub fn list_interaction_records_with_conn(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<InteractionRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, sender_session_id, target_session_ids, status, trigger_policy,
+            body_ref, parent_interaction_id, created_at, updated_at, completed_at
+         FROM interactions",
+    )?;
+    let rows = stmt.query_map([], row_to_interaction_record)?;
+    rows.collect()
+}
+
+fn row_to_interaction_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<InteractionRecord> {
+    let kind: String = row.get(1)?;
+    let target_session_ids: String = row.get(3)?;
+    let status: String = row.get(4)?;
+    let trigger_policy: String = row.get(5)?;
+    let body_ref: String = row.get(6)?;
+    Ok(InteractionRecord {
+        id: row.get(0)?,
+        kind: enum_from_value::<InteractionKind>(&kind)?,
+        sender_session_id: row.get(2)?,
+        target_session_ids: serde_json::from_str(&target_session_ids).map_err(to_sql_error)?,
+        status: enum_from_value::<InteractionStatus>(&status)?,
+        trigger_policy: enum_from_value::<InteractionTriggerPolicy>(&trigger_policy)?,
+        body_ref: serde_json::from_str::<InteractionBodyRef>(&body_ref).map_err(to_sql_error)?,
+        parent_interaction_id: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
+pub fn upsert_structured_reply(reply: &StructuredReply) -> Result<(), Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        upsert_structured_reply_with_conn(conn, reply)?;
+        Ok(())
+    })
+}
+
+pub fn upsert_structured_reply_with_conn(
+    conn: &Connection,
+    reply: &StructuredReply,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO structured_replies (
+            request_id,
+            status,
+            body,
+            target_session_id,
+            source_session_id,
+            replied_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(request_id) DO UPDATE SET
+            status = excluded.status,
+            body = excluded.body,
+            target_session_id = excluded.target_session_id,
+            source_session_id = excluded.source_session_id,
+            replied_at = excluded.replied_at",
+        params![
+            reply.request_id,
+            enum_value(&reply.status)?,
+            reply.body,
+            reply.target_session_id,
+            reply.source_session_id,
+            reply.replied_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_structured_replies() -> Result<Vec<StructuredReply>, Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        let replies = list_structured_replies_with_conn(conn)?;
+        Ok(replies)
+    })
+}
+
+pub fn list_structured_replies_with_conn(conn: &Connection) -> rusqlite::Result<Vec<StructuredReply>> {
+    let mut stmt = conn.prepare(
+        "SELECT request_id, status, body, target_session_id, source_session_id, replied_at
+         FROM structured_replies",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let status: String = row.get(1)?;
+        Ok(StructuredReply {
+            request_id: row.get(0)?,
+            status: enum_from_value::<ReplyStatus>(&status)?,
+            body: row.get(2)?,
+            target_session_id: row.get(3)?,
+            source_session_id: row.get(4)?,
+            replied_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn upsert_provider_input_state(
+    state: &ProviderInputState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        upsert_provider_input_state_with_conn(conn, state)?;
+        Ok(())
+    })
+}
+
+pub fn upsert_provider_input_state_with_conn(
+    conn: &Connection,
+    state: &ProviderInputState,
+) -> rusqlite::Result<()> {
+    let ready_evidence = state
+        .ready_evidence
+        .map(|evidence| enum_value(&evidence))
+        .transpose()?;
+    conn.execute(
+        "INSERT INTO provider_input_state (
+            session_id,
+            generation,
+            state,
+            ready_evidence,
+            observed_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(session_id) DO UPDATE SET
+            generation = excluded.generation,
+            state = excluded.state,
+            ready_evidence = excluded.ready_evidence,
+            observed_at = excluded.observed_at",
+        params![
+            state.session_id,
+            state.generation as i64,
+            enum_value(&state.state)?,
+            ready_evidence,
+            state.observed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_provider_input_states() -> Result<Vec<ProviderInputState>, Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        let states = list_provider_input_states_with_conn(conn)?;
+        Ok(states)
+    })
+}
+
+pub fn list_provider_input_states_with_conn(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<ProviderInputState>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, generation, state, ready_evidence, observed_at FROM provider_input_state",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let state: String = row.get(2)?;
+        let ready_evidence: Option<String> = row.get(3)?;
+        Ok(ProviderInputState {
+            session_id: row.get(0)?,
+            generation: row.get::<_, i64>(1)? as u64,
+            state: enum_from_value::<ProviderInputReadiness>(&state)?,
+            ready_evidence: ready_evidence
+                .as_deref()
+                .map(enum_from_value::<ProviderReadyEvidence>)
+                .transpose()?,
+            observed_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_provider_input_state(session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        conn.execute(
+            "DELETE FROM provider_input_state WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    })
+}
+
+fn enum_value<T: serde::Serialize>(value: &T) -> rusqlite::Result<String> {
+    serde_json::to_value(value)
+        .map_err(to_sql_error)?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| to_sql_error(std::io::Error::other("serialized enum was not a string")))
+}
+
+fn enum_from_value<T: serde::de::DeserializeOwned>(value: &str) -> rusqlite::Result<T> {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).map_err(to_sql_error)
+}
+
+fn to_sql_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
 pub fn get_all_agents_with_conn(conn: &Connection) -> rusqlite::Result<Vec<AgentRow>> {
     let sql = agent_select_sql("");
     let mut stmt = conn.prepare(&sql)?;
@@ -395,6 +731,69 @@ mod tests {
     }
 
     #[test]
+    fn interaction_records_round_trip_through_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let record = InteractionRecord {
+            id: "ask_001".to_string(),
+            kind: InteractionKind::Task,
+            sender_session_id: Some("planner-1".to_string()),
+            target_session_ids: vec!["agent-1".to_string()],
+            status: InteractionStatus::AwaitingReply,
+            trigger_policy: InteractionTriggerPolicy::ReplyRequired,
+            body_ref: InteractionBodyRef::Inline {
+                body: "review".to_string(),
+            },
+            parent_interaction_id: None,
+            created_at: "2026-05-25T00:00:00.000Z".to_string(),
+            updated_at: "2026-05-25T00:00:00.000Z".to_string(),
+            completed_at: None,
+        };
+
+        upsert_interaction_record_with_conn(&conn, &record).unwrap();
+
+        let records = list_interaction_records_with_conn(&conn).unwrap();
+        assert_eq!(records, vec![record]);
+    }
+
+    #[test]
+    fn provider_input_state_round_trips_through_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let state = ProviderInputState {
+            session_id: "agent-1".to_string(),
+            generation: 7,
+            state: ProviderInputReadiness::Ready,
+            ready_evidence: Some(ProviderReadyEvidence::ProviderEvent),
+            observed_at: "2026-05-25T00:00:00.000Z".to_string(),
+        };
+
+        upsert_provider_input_state_with_conn(&conn, &state).unwrap();
+
+        let states = list_provider_input_states_with_conn(&conn).unwrap();
+        assert_eq!(states, vec![state]);
+    }
+
+    #[test]
+    fn structured_replies_round_trip_through_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let reply = StructuredReply {
+            request_id: "ask_001".to_string(),
+            status: ReplyStatus::Blocked,
+            body: "blocked".to_string(),
+            target_session_id: "agent-1".to_string(),
+            source_session_id: Some("agent-1".to_string()),
+            replied_at: "2026-05-25T00:00:01.000Z".to_string(),
+        };
+
+        upsert_structured_reply_with_conn(&conn, &reply).unwrap();
+
+        let replies = list_structured_replies_with_conn(&conn).unwrap();
+        assert_eq!(replies, vec![reply]);
+    }
+
+    #[test]
     fn status_update_sets_last_status_at() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
@@ -488,5 +887,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migrations_create_interaction_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        for table in [
+            "interactions",
+            "interaction_delivery_attempts",
+            "interaction_events",
+            "provider_input_state",
+            "structured_replies",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} should exist");
+        }
     }
 }

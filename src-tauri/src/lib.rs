@@ -179,6 +179,13 @@ pub fn run() {
     builder
         .manage(AppState::new())
         .setup(|app| {
+            {
+                let state = app.state::<AppState>();
+                tauri::async_runtime::block_on(async {
+                    state.interactions.hydrate_from_persistence().await;
+                });
+            }
+
             let control_endpoint_claim = control::claim_control_endpoint().map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
