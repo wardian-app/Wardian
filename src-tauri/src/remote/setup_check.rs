@@ -8,6 +8,8 @@ use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(3);
+const LOCAL_GATEWAY_RETRY_DELAY: Duration = Duration::from_millis(250);
+const LOCAL_GATEWAY_RETRY_ATTEMPTS: usize = 5;
 
 #[derive(Debug, Deserialize)]
 struct TailscaleStatusJson {
@@ -257,6 +259,9 @@ fn tailscale_serve_check(
 ) -> Option<String> {
     let parsed = serde_json::from_str::<TailscaleServeStatusJson>(json);
     let expected = format!("http://{}:{}", config.loopback_host, config.loopback_port);
+    let expected_host = crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)
+        .ok()
+        .map(|origin| origin.host().to_string());
     let Ok(parsed) = parsed else {
         checks.push(check(
             "tailscale_serve",
@@ -270,7 +275,10 @@ fn tailscale_serve_check(
 
     let mut detected = None;
     if let Some(web) = parsed.web {
-        for (_host, web_config) in web {
+        for (host, web_config) in web {
+            if !serve_host_matches(&host, expected_host.as_deref()) {
+                continue;
+            }
             if let Some(handlers) = web_config.handlers {
                 for (_path, handler) in handlers {
                     if let Some(proxy) = handler.proxy {
@@ -304,17 +312,27 @@ fn tailscale_serve_check(
     detected
 }
 
+fn serve_host_matches(host: &str, expected_host: Option<&str>) -> bool {
+    let Some(expected_host) = expected_host else {
+        return false;
+    };
+    host.eq_ignore_ascii_case(expected_host)
+        || host.eq_ignore_ascii_case(&format!("{expected_host}:443"))
+}
+
 async fn local_gateway_check(config: &RemoteGatewayConfig) -> RemoteSetupCheck {
     let url = format!(
         "http://{}:{}/remote/api/health",
         config.loopback_host, config.loopback_port
     );
-    probe_url(
+    probe_url_with_retries(
         "local_gateway",
         "Wardian local gateway",
         &url,
         "Wardian's local gateway is responding.",
         "Wardian's local gateway is not responding on the configured port.",
+        LOCAL_GATEWAY_RETRY_ATTEMPTS,
+        LOCAL_GATEWAY_RETRY_DELAY,
     )
     .await
 }
@@ -377,6 +395,27 @@ async fn probe_url(
             Some(error.to_string()),
         ),
     }
+}
+
+async fn probe_url_with_retries(
+    id: &str,
+    label: &str,
+    url: &str,
+    ok_message: &str,
+    error_message: &str,
+    attempts: usize,
+    retry_delay: Duration,
+) -> RemoteSetupCheck {
+    let attempts = attempts.max(1);
+    let mut last = probe_url(id, label, url, ok_message, error_message).await;
+    for _ in 1..attempts {
+        if last.status == RemoteSetupCheckStatus::Ok {
+            return last;
+        }
+        tokio::time::sleep(retry_delay).await;
+        last = probe_url(id, label, url, ok_message, error_message).await;
+    }
+    last
 }
 
 fn setup_command(config: &RemoteGatewayConfig) -> RemoteSetupCommandHint {
@@ -485,5 +524,37 @@ mod tests {
             .iter()
             .any(|check| check.id == "tailscale_serve"
                 && check.status == RemoteSetupCheckStatus::Error));
+    }
+
+    #[test]
+    fn serve_json_rejects_matching_proxy_on_wrong_origin_host() {
+        let mut checks = Vec::new();
+        let target = tailscale_serve_check(
+            r#"{"Web":{"other.tailb6e29a.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:41241"}}}}}"#,
+            &config(),
+            &mut checks,
+        );
+
+        assert_eq!(target, None);
+        assert!(checks
+            .iter()
+            .any(|check| check.id == "tailscale_serve"
+                && check.status == RemoteSetupCheckStatus::Error));
+    }
+
+    #[test]
+    fn serve_host_match_accepts_https_default_port_key() {
+        assert!(serve_host_matches(
+            "inanna.tailb6e29a.ts.net:443",
+            Some("inanna.tailb6e29a.ts.net")
+        ));
+        assert!(serve_host_matches(
+            "inanna.tailb6e29a.ts.net",
+            Some("inanna.tailb6e29a.ts.net")
+        ));
+        assert!(!serve_host_matches(
+            "other.tailb6e29a.ts.net:443",
+            Some("inanna.tailb6e29a.ts.net")
+        ));
     }
 }

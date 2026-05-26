@@ -173,6 +173,39 @@ describe("RemoteAccessSettings", () => {
     expect(screen.getByText("tailscale serve --bg --https=443 http://127.0.0.1:41241")).toBeVisible();
   });
 
+  it("keeps settings usable while setup diagnostics are still loading", async () => {
+    let resolveSetupCheck: (value: RemoteSetupCheckResult) => void = () => undefined;
+    const setupCheckPromise = new Promise<RemoteSetupCheckResult>((resolve) => {
+      resolveSetupCheck = resolve;
+    });
+    mockInvoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "load_remote_access_status":
+          return "enabled";
+        case "load_remote_gateway_config":
+          return enabledConfig;
+        case "list_remote_devices":
+          return [];
+        case "list_pending_remote_pairing_requests":
+          return [];
+        case "load_remote_setup_check":
+          return setupCheckPromise;
+        default:
+          return null;
+      }
+    });
+
+    render(<RemoteAccessSettings />);
+
+    expect(await screen.findByText("Enabled")).toBeVisible();
+    expect(screen.getByRole("button", { name: /create pairing code/i })).toBeEnabled();
+    expect(screen.queryByText("Remote access setup is ready for pairing.")).not.toBeInTheDocument();
+
+    resolveSetupCheck(readySetupCheck);
+
+    expect(await screen.findByText("Remote access setup is ready for pairing.")).toBeVisible();
+  });
+
   it("uses the backend access status before enabling pairing", async () => {
     mockInvoke.mockImplementation(async (command) => {
       switch (command) {
@@ -262,7 +295,9 @@ describe("RemoteAccessSettings", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("save_remote_gateway_config", expect.any(Object));
     });
-    expect(mockInvoke).toHaveBeenCalledWith("load_remote_setup_check");
+    await waitFor(() => {
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "load_remote_setup_check").length).toBeGreaterThanOrEqual(2);
+    });
     expect(screen.getByText("Enabled")).toBeVisible();
     expect(screen.getByRole("button", { name: /create pairing code/i })).toBeEnabled();
   });

@@ -75,31 +75,42 @@ export const RemoteAccessSettings: React.FC = () => {
   const [reviewingPairingId, setReviewingPairingId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
+  const refreshSetupCheck = useCallback(async (delayMs = 0) => {
+    if (delayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    try {
+      setSetupCheck(await invoke<RemoteSetupCheckResult>("load_remote_setup_check"));
+    } catch (err) {
+      setSetupCheck(null);
+      setError((current) => current || `Unable to load remote setup checks: ${String(err)}`);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     setError("");
     setLoading(true);
     try {
-      const [loadedStatus, loadedConfig, loadedDevices, loadedPendingPairings, loadedSetupCheck] = await Promise.all([
+      const [loadedStatus, loadedConfig, loadedDevices, loadedPendingPairings] = await Promise.all([
         invoke<RemoteAccessStatus>("load_remote_access_status"),
         invoke<RemoteGatewayConfig | null>("load_remote_gateway_config"),
         invoke<RemoteDeviceRecord[] | null>("list_remote_devices"),
         invoke<RemotePendingPairingRequest[] | null>("list_pending_remote_pairing_requests"),
-        invoke<RemoteSetupCheckResult>("load_remote_setup_check"),
       ]);
       setStatus(loadedStatus);
       setConfig(loadedConfig);
-      setSetupCheck(loadedSetupCheck);
       setRemoteEnabledInput(loadedConfig?.enabled ?? false);
       setOriginInput(loadedConfig?.canonical_origin ?? "");
       setPortInput(loadedConfig?.loopback_port ? String(loadedConfig.loopback_port) : "41241");
       setDevices(activeRemoteDevices(loadedDevices));
       setPendingPairings(loadedPendingPairings ?? []);
+      void refreshSetupCheck();
     } catch (err) {
       setError(`Unable to load remote access settings: ${String(err)}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshSetupCheck]);
 
   const refreshPendingPairings = useCallback(async () => {
     try {
@@ -197,7 +208,8 @@ export const RemoteAccessSettings: React.FC = () => {
       setOriginInput(saved.canonical_origin);
       setPortInput(String(saved.loopback_port || parsedPort));
       setStatus(saved.enabled ? "enabled" : "disabled");
-      setSetupCheck(await invoke<RemoteSetupCheckResult>("load_remote_setup_check"));
+      setSetupCheck(null);
+      void refreshSetupCheck(saved.enabled ? 500 : 0);
       if (!saved.enabled) {
         setPairing(null);
         setPendingPairings([]);
