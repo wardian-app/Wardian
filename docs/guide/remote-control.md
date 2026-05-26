@@ -26,6 +26,19 @@ The pairing code is short-lived and single use. The phone generates its own
 device key during pairing, then waits for explicit desktop approval before it
 can create a remote session.
 
+Wardian starts the local remote gateway after remote access is enabled. The
+Remote Access settings panel also checks the parts Wardian can safely inspect:
+whether the local gateway responds, whether the Tailscale CLI is available,
+whether this desktop appears signed into Tailscale, whether Tailscale Serve
+forwards the HTTPS origin to Wardian's loopback port, and whether the HTTPS
+gateway responds.
+
+Wardian does not automatically change Tailscale Serve, Funnel, certificate,
+firewall, or admin-console settings. If the checklist reports a missing
+forwarding rule, review the suggested command before running it.
+
+![Remote Access setup diagnostics](../assets/screenshots/remote-control/setup-diagnostics.png)
+
 When the origin field contains a bare hostname, Wardian saves it as HTTPS. For
 example, `<machine>.<tailnet>.ts.net` becomes
 `https://<machine>.<tailnet>.ts.net`. Enter the scheme explicitly only when you

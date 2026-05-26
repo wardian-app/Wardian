@@ -139,6 +139,7 @@ Queue commands persist the frontend Queue projection and preferences for the act
 - `create_remote_pairing_offer`
 - `list_remote_devices`
 - `list_pending_remote_pairing_requests`
+- `load_remote_setup_check`
 - `approve_remote_pairing_request`
 - `reject_remote_pairing_request`
 - `revoke_remote_device`

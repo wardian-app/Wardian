@@ -5,4 +5,5 @@ pub mod gateway;
 pub mod models;
 pub mod operations;
 pub mod policy;
+pub mod setup_check;
 pub mod storage;
