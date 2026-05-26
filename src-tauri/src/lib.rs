@@ -461,6 +461,7 @@ pub fn run() {
             commands::remote::list_remote_devices,
             commands::remote::load_remote_access_status,
             commands::remote::load_remote_gateway_config,
+            commands::remote::load_remote_setup_check,
             commands::remote::reject_remote_pairing_request,
             commands::remote::revoke_remote_device,
             commands::remote::save_remote_gateway_config,
