@@ -58,6 +58,7 @@ vi.mock("@xterm/xterm", () => ({
     dispose: vi.fn(),
     focus: vi.fn(),
     loadAddon: vi.fn(),
+    scrollLines: vi.fn(),
     scrollToBottom: vi.fn(),
     scrollToTop: vi.fn(),
     cols: 80,

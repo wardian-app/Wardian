@@ -63,6 +63,40 @@ export interface RemoteTerminalSnapshot {
   omitted_bytes: number;
 }
 
+export interface RemoteTerminalSnapshotMessage {
+  type: "snapshot";
+  attachment_id: string | null;
+  owner_attachment_id: string | null;
+  cols: number;
+  rows: number;
+  state_base64: string;
+}
+
+export interface RemoteTerminalUpdateMessage {
+  type: "update";
+  attachment_id: string | null;
+  owner_attachment_id: string | null;
+  state_base64: string;
+}
+
+export interface RemoteTerminalOwnershipMessage {
+  type: "ownership";
+  owner_attachment_id: string | null;
+  cols: number;
+  rows: number;
+}
+
+export interface RemoteTerminalErrorMessage {
+  type: "error";
+  code: string;
+}
+
+export type RemoteTerminalStreamMessage =
+  | RemoteTerminalSnapshotMessage
+  | RemoteTerminalUpdateMessage
+  | RemoteTerminalOwnershipMessage
+  | RemoteTerminalErrorMessage;
+
 export interface RemoteAgentActionRequest {
   action: string;
   target: string;

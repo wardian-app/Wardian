@@ -216,7 +216,7 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
         const nextRefreshKey = activeAgentRefreshKey(activeAgent);
         const refreshKeyChanged = nextRefreshKey !== lastActiveAgentRefreshKey;
         lastActiveAgentRefreshKey = nextRefreshKey;
-        if (refreshKeyChanged || get().activeAgentViewMode === "terminal") {
+        if (refreshKeyChanged && get().activeAgentViewMode === "chat") {
           scheduleBackgroundActiveChatRefresh(set, get);
         }
       } else {
@@ -433,13 +433,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       activeAgentId: id,
       activeAgentViewMode: "terminal",
       terminalSnapshot: null,
-      terminalLoading: true,
+      terminalLoading: false,
       terminalError: "",
       chatEvents: [],
       chatLoading: false,
       chatError: "",
     });
-    await get().refreshActiveAgentTerminal();
   },
   closeAgent() {
     clearBackgroundChatRefresh();
@@ -461,36 +460,13 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       await get().refreshActiveAgentChat();
       return;
     }
-    if (mode === "terminal" && !get().terminalSnapshot) {
-      await get().refreshActiveAgentTerminal();
-    }
+    if (mode === "terminal") set({ terminalLoading: false, terminalError: "" });
   },
   async refreshActiveAgentTerminal(options) {
     const activeAgentId = get().activeAgentId;
     if (!activeAgentId) return;
-    const requestSerial = ++terminalRefreshRequestSerial;
-    if (!options?.background) {
-      set({ terminalLoading: true, terminalError: "" });
-    }
-    try {
-      const terminalSnapshot = await remoteClient.loadAgentTerminal(activeAgentId);
-      set((state) => {
-        if (state.activeAgentId !== activeAgentId || requestSerial !== terminalRefreshRequestSerial) return {};
-        return { terminalSnapshot, terminalLoading: false, terminalError: "" };
-      });
-    } catch (error) {
-      if (error instanceof RemoteRequestError && error.status === 401) {
-        set({ terminalLoading: false, status: "session_expired" });
-        return;
-      }
-      set((state) => {
-        if (state.activeAgentId !== activeAgentId || requestSerial !== terminalRefreshRequestSerial) return {};
-        return {
-          terminalLoading: false,
-          terminalError: error instanceof Error ? error.message : String(error),
-        };
-      });
-    }
+    terminalRefreshRequestSerial += 1;
+    if (!options?.background) set({ terminalLoading: false, terminalError: "" });
   },
   async refreshActiveAgentChat(options) {
     const activeAgentId = get().activeAgentId;

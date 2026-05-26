@@ -13,10 +13,12 @@ const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
+const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
 const HOME_CURSOR = "\u001b[H";
 const TOP_CURSOR_ADDRESS = /\u001b\[(\d+);1H/;
+const REMOTE_HISTORY_FRAME_START = /\u001b\[\?2026h|\u001b\[\?25l\u001b\[H|\u001b\[H/g;
 
 export type TerminalCapabilityContext = {
   cursorRow: number;
@@ -148,6 +150,10 @@ function normalizeFullscreenClearByNewlines(data: string) {
 
 function stripProviderScrollbackErase(data: string, provider?: string) {
   return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
+}
+
+function stripCursorStyleControls(data: string) {
+  return data.replace(CURSOR_STYLE_SEQUENCE, "");
 }
 
 function parseNumberedTail(line: string) {
@@ -334,6 +340,39 @@ export function normalizeTerminalOutputBatch(
   return provider === "opencode"
     ? normalizedOutput
     : normalizeFullscreenClearByNewlines(normalizedOutput);
+}
+
+function splitRemoteTerminalHistoryFrames(data: string) {
+  const starts: number[] = [0];
+  for (const match of data.matchAll(REMOTE_HISTORY_FRAME_START)) {
+    const index = match.index ?? -1;
+    if (index > 0 && starts[starts.length - 1] !== index) {
+      starts.push(index);
+    }
+  }
+
+  if (starts.length === 1) {
+    return [data];
+  }
+
+  return starts.map((start, index) => data.slice(start, starts[index + 1] ?? data.length));
+}
+
+export function normalizeRemoteTerminalOutput(
+  data: string,
+  provider?: string,
+  state?: TerminalOutputState,
+) {
+  if (!data) {
+    return data;
+  }
+  return stripCursorStyleControls(
+    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state),
+  );
+}
+
+export function normalizeRemoteTerminalLiveOutput(data: string) {
+  return stripCursorStyleControls(data);
 }
 
 export function planTerminalCapabilityResponses(
