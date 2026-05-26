@@ -66,7 +66,7 @@ pub fn provider_readiness(provider_id: &str) -> ProviderReadiness {
     };
 
     let (executable, base_args) = provider.get_executable();
-    readiness_from_launch_parts(&provider_id, provider.name(), &executable, &base_args, None)
+    readiness_from_launch_parts(&provider_id, &display_name, &executable, &base_args, None)
 }
 
 pub fn ensure_provider_available_for_launch(provider_id: &str) -> Result<(), String> {
@@ -276,6 +276,37 @@ mod tests {
             .expect("antigravity descriptor");
 
         assert_eq!(descriptor.display_name, "Antigravity");
+    }
+
+    #[test]
+    fn antigravity_readiness_uses_capitalized_descriptor_label() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let previous_pathext = std::env::var_os("PATHEXT");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let executable = if cfg!(windows) {
+            temp.path().join("agy.exe")
+        } else {
+            temp.path().join("agy")
+        };
+        std::fs::write(&executable, "").expect("fake agy");
+        std::env::set_var("PATH", temp.path());
+        #[cfg(windows)]
+        std::env::set_var("PATHEXT", ".EXE");
+
+        let readiness = provider_readiness("antigravity");
+
+        assert!(readiness.available);
+        assert_eq!(readiness.display_name, "Antigravity");
+
+        match previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match previous_pathext {
+            Some(value) => std::env::set_var("PATHEXT", value),
+            None => std::env::remove_var("PATHEXT"),
+        }
     }
 
     #[test]
