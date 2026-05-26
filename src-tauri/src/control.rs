@@ -1080,6 +1080,8 @@ async fn wait_for_terminal_ready_for_control_send(
         wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await
     } else if info.provider == "codex" {
         wait_for_terminal_output(state, &info.uuid, 15_000, codex_output_has_ready_prompt).await
+    } else if info.provider == "claude" {
+        wait_for_terminal_output(state, &info.uuid, 15_000, claude_output_has_ready_prompt).await
     } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
         Err(format!("Agent {} provider input is not ready", info.uuid))
     } else if current_agent_status_is_idle(state, &info.uuid).await? {
@@ -1263,6 +1265,33 @@ fn codex_ready_prompt_trailing_metadata_line(line: &str) -> bool {
     }
     let lower = line.to_ascii_lowercase();
     lower.starts_with("gpt-") && (line.contains('·') || lower.contains("context"))
+}
+
+fn claude_output_has_ready_prompt(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    let mut trailing_metadata_lines = 0usize;
+    for line in cleaned.lines().rev().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('❯') {
+            return true;
+        }
+        if trailing_metadata_lines < 4 && claude_ready_prompt_trailing_metadata_line(line) {
+            trailing_metadata_lines += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn claude_ready_prompt_trailing_metadata_line(line: &str) -> bool {
+    if line.contains('⏵') {
+        return true;
+    }
+    line.chars()
+        .all(|ch| ch == '─' || ch == '-' || ch.is_whitespace())
 }
 
 async fn mark_delivered_agents_prompt_started(
@@ -3717,6 +3746,76 @@ mod tests {
         assert_eq!(drained.runtime_state, "mailbox_drain");
         assert_eq!(drained.delivery_state, "submit_sent_unverified");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_can_complete_booting_claude_from_prompt_evidence() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "claude".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            agent.watch_state.lock().unwrap().push_output(
+                "ClaudeCode v2.1.150\r\n❯ Try \"write a test\"\r\n────────────────⏵⏵ dontask on · Haiku 4.5"
+                    .as_bytes(),
+            );
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "ClaudeOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1"),
+        )
+        .await
+        .expect("mailbox drain should not hang")
+        .unwrap()
+        .expect("drained message");
+
+        assert_eq!(drained.runtime_state, "mailbox_drain");
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
         let input_state = state
             .interactions
             .provider_input_state("agent-1")
