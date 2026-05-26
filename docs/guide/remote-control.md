@@ -37,6 +37,8 @@ Wardian does not automatically change Tailscale Serve, Funnel, certificate,
 firewall, or admin-console settings. If the checklist reports a missing
 forwarding rule, review the suggested command before running it.
 
+![Remote Access setup diagnostics](../assets/screenshots/remote-control/setup-diagnostics.png)
+
 When the origin field contains a bare hostname, Wardian saves it as HTTPS. For
 example, `<machine>.<tailnet>.ts.net` becomes
 `https://<machine>.<tailnet>.ts.net`. Enter the scheme explicitly only when you
