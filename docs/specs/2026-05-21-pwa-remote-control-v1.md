@@ -97,6 +97,12 @@ If the canonical Tailscale hostname or certificate identity changes, Wardian
 must require an explicit repair or re-enable flow from the desktop before remote
 access resumes.
 
+Wardian may diagnose local remote-access readiness, including the loopback
+gateway, Tailscale login state, and whether Tailscale Serve points the canonical
+HTTPS origin at the Wardian gateway. Wardian should present those findings and
+suggest concrete recovery commands, but it must not automatically mutate
+Tailscale Serve, Funnel, certificate, firewall, or tailnet admin-console state.
+
 ## Security Requirements
 
 Remote access is disabled by default and must be enabled from the desktop app.

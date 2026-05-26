@@ -42,6 +42,8 @@ Categories:
   provider-specific runtime defaults such as the Codex subsection.
 - **Provider Utilities**: provider-specific maintenance actions such as Gemini
   patching.
+- **Remote Access**: phone pairing, local gateway configuration, paired
+  devices, and setup diagnostics for Tailscale HTTPS access.
 - **Advanced**: settings file and diagnostics information.
 
 Each row includes a short detail line. For example, the default provider row
