@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderReadiness } from '../../types';
-import { buildUngatedProviderOptions, resolveEffectiveProvider } from './providerOptions';
+import { buildProviderOptions, buildUngatedProviderOptions, resolveEffectiveProvider } from './providerOptions';
 
 const readiness = (provider: ProviderReadiness['provider'], available: boolean): ProviderReadiness => ({
   provider,
@@ -19,6 +19,23 @@ describe('provider option helpers', () => {
       { value: 'antigravity', label: 'Antigravity', available: true, reason: null },
       { value: 'opencode', label: 'OpenCode', available: true, reason: null },
     ]);
+  });
+
+  it('uses canonical labels for known providers when readiness labels are stale', () => {
+    expect(buildProviderOptions([
+      {
+        provider: 'antigravity',
+        display_name: 'antigravity',
+        available: true,
+        executable: 'agy',
+        reason: null,
+      },
+    ])).toContainEqual({
+      value: 'antigravity',
+      label: 'Antigravity',
+      available: true,
+      reason: null,
+    });
   });
 
   it('auto prefers Claude when available', () => {

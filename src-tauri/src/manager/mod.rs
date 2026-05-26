@@ -547,7 +547,7 @@ pub(crate) fn interactive_provider_launch(
     provider_args: &[String],
 ) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
     #[cfg(windows)]
-    if provider_name == "opencode" {
+    if matches!(provider_name, "opencode" | "antigravity") {
         let bin_path = std::path::Path::new(bin);
         let is_native_exe = bin_path
             .extension()
@@ -675,6 +675,23 @@ mod tests {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn antigravity_interactive_launch_wraps_windows_cmd_shims() {
+        let launch = interactive_provider_launch(
+            "antigravity",
+            r"C:\Users\test\AppData\Roaming\npm\agy.cmd",
+            &["--prompt-interactive".to_string(), String::new()],
+        )
+        .expect("launch");
+
+        assert!(launch.executable.ends_with("cmd.exe") || launch.executable == "cmd.exe");
+        assert_eq!(launch.args[0], "/d");
+        assert_eq!(launch.args[1], "/c");
+        assert!(launch.args[2].contains("agy.cmd"));
+        assert!(launch.args[2].contains("--prompt-interactive"));
     }
 
     #[test]
