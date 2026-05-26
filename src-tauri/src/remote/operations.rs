@@ -81,6 +81,27 @@ pub async fn remote_agent_terminal_snapshot(
     })
 }
 
+pub async fn remote_agent_terminal_raw_output(
+    state: &AppState,
+    session_id: &str,
+    tail_bytes: Option<usize>,
+) -> Result<String, String> {
+    let watch_state = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(session_id)
+            .map(|agent| agent.watch_state.clone())
+            .ok_or_else(|| "agent_not_found".to_string())?
+    };
+    let snapshot = watch_state
+        .lock()
+        .map_err(|_| "watch_state_unavailable".to_string())?
+        .raw_snapshot_since(None, tail_bytes)
+        .map_err(|error| error.code().to_string())?;
+
+    Ok(snapshot.text)
+}
+
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
     match request.action.as_str() {
         "send_prompt"
@@ -351,6 +372,27 @@ mod tests {
         assert_eq!(snapshot.text, "gamma");
         assert!(snapshot.truncated);
         assert!(snapshot.omitted_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn remote_agent_terminal_raw_output_preserves_escape_sequences_without_draining() {
+        let state = AppState::new();
+        let agent = test_agent("agent-1", "CoderOne", "Coder", "Processing");
+        {
+            let mut watch = agent.watch_state.lock().expect("watch state");
+            watch.push_output(b"\x1b[31mred terminal\x1b[0m\nsecond line");
+        }
+        insert_agent(&state, agent).await;
+
+        let first = remote_agent_terminal_raw_output(&state, "agent-1", Some(4096))
+            .await
+            .expect("first raw terminal output");
+        let second = remote_agent_terminal_raw_output(&state, "agent-1", Some(4096))
+            .await
+            .expect("second raw terminal output");
+
+        assert_eq!(first, "\x1b[31mred terminal\x1b[0m\nsecond line");
+        assert_eq!(second, first);
     }
 
     #[tokio::test]

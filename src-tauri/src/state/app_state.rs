@@ -1,6 +1,7 @@
 use crate::state::active_agent::ActiveAgent;
 use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
+use crate::state::terminal_attach::TerminalAttachState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -48,6 +49,9 @@ pub struct AppState {
     // PTY at the user's actual terminal dimensions instead of the 80x24 default,
     // which otherwise causes deformed/duplicated TUI output across clear/resume.
     pub pty_sizes: RwLock<HashMap<String, (u16, u16)>>,
+    // Lazy remote terminal attach state. This remains idle unless a remote
+    // terminal opens an interactive attachment for an agent.
+    pub terminal_attach: Arc<TerminalAttachState>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +124,7 @@ impl Default for AppState {
             interactions: InteractionState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             pty_sizes: RwLock::new(HashMap::new()),
+            terminal_attach: Arc::new(TerminalAttachState::default()),
         }
     }
 }
@@ -134,6 +139,7 @@ mod tests {
     fn app_state_constructs_without_panic() {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
+        assert!(state.terminal_attach.snapshot("missing-agent").is_none());
         drop(state);
     }
 
