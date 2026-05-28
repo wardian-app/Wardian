@@ -1140,6 +1140,15 @@ fn normalize_existing_workspace_record_path(path: &std::path::Path) -> String {
     normalize_workspace_record_path(&path)
 }
 
+fn normalize_maybe_existing_workspace_record_path(path: &str) -> String {
+    let normalized = strip_windows_verbatim_prefix(path.trim().replace('\\', "/"));
+    let path = std::path::Path::new(&normalized);
+    if path.exists() {
+        return normalize_existing_workspace_record_path(path);
+    }
+    normalized
+}
+
 fn strip_windows_verbatim_prefix(path: String) -> String {
     if let Some(stripped) = path.strip_prefix("//?/UNC/") {
         return format!("//{stripped}");
@@ -1310,7 +1319,8 @@ struct DiscoveredGitWorktree {
 fn is_under_wardian_agent_worktree_root(wardian_home: &std::path::Path, path: &str) -> bool {
     let normalized_home =
         normalize_path_for_prefix_compare(&normalize_existing_workspace_record_path(wardian_home));
-    let normalized_path = normalize_path_for_prefix_compare(path);
+    let normalized_path =
+        normalize_path_for_prefix_compare(&normalize_maybe_existing_workspace_record_path(path));
     let prefix = format!("{normalized_home}/agents/");
     if !normalized_path.starts_with(&prefix) {
         return false;
@@ -1378,7 +1388,8 @@ fn collect_agent_worktrees_with_discovered(
         .collect::<BTreeMap<_, _>>();
 
     for worktree in discovered {
-        let normalized_worktree = worktree.worktree_folder.replace('\\', "/");
+        let normalized_worktree =
+            normalize_maybe_existing_workspace_record_path(&worktree.worktree_folder);
         if !is_under_wardian_agent_worktree_root(wardian_home, &normalized_worktree) {
             continue;
         }
@@ -1464,7 +1475,7 @@ fn find_assignable_worktree(
     worktree_folder: &str,
     discovered: Vec<DiscoveredGitWorktree>,
 ) -> Option<AgentWorktreeSummary> {
-    let normalized_worktree_folder = worktree_folder.trim().replace('\\', "/");
+    let normalized_worktree_folder = normalize_maybe_existing_workspace_record_path(worktree_folder);
     collect_agent_worktrees_with_discovered(configs, wardian_home, discovered)
         .into_iter()
         .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
@@ -3050,7 +3061,8 @@ mod tests {
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_wardian_agent_worktree_root, lock_agent_lifecycle, mark_agent_paused_off,
         normalize_clone_folder_override, normalize_discovered_git_worktree_path,
-        normalize_spawn_folder, normalize_workspace_record_path, persisted_resume_session_for_provider,
+        normalize_existing_workspace_record_path, normalize_spawn_folder,
+        normalize_workspace_record_path, persisted_resume_session_for_provider,
         prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
         prepare_resume_config,
         prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
@@ -4240,7 +4252,7 @@ mod tests {
         assert_eq!(worktrees[0].source_folder, "/repo");
         assert_eq!(
             worktrees[0].worktree_folder,
-            normalize_workspace_record_path(&discovered_path)
+            normalize_existing_workspace_record_path(&discovered_path)
         );
         assert!(worktrees[0].member_agent_ids.is_empty());
     }
