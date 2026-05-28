@@ -65,6 +65,12 @@ Source Control also exposes worktree actions:
 
 When enabled, Wardian creates a named worktree under `<wardian-home>/agents/<session-id>/worktrees/`, creates a matching `wardian/<worktree-name>` branch, shares supported build caches with the source checkout, and moves the agent runtime to that path with a fresh provider session. Joining an existing shared worktree assigns the same worktree path to another agent and also starts that agent fresh in the shared path.
 
+Wardian-created worktrees are real Git worktrees. They are created through `git worktree add`, so they appear in `git worktree list` for the source checkout.
+
+Wardian also discovers Git worktrees that already exist under `<wardian-home>/agents/<session-id>/worktrees/` when they belong to a known source workspace. Discovered worktrees with no assigned agent appear as joinable shared worktrees.
+
+If a target worktree folder already exists but Git does not recognize it as a worktree for the source checkout, Wardian refuses to assign it. Create it with `git worktree add` or remove the folder and let Wardian create it.
+
 The same agent worktree controls are available from the CLI when the desktop app is running for the same `WARDIAN_HOME`:
 
 ```bash

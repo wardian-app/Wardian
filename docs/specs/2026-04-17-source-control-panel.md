@@ -56,6 +56,17 @@ Directories inherit amber coloring if any descendant has changes. When git is un
 
 `git_worktree?: boolean`, `git_worktree_source?: string`, and `git_worktree_folder?: string` are present in `AgentConfig` in both TypeScript (`src/types/index.ts`) and Rust (`models/agent_config.rs`). These fields are optional and default cleanly for older saved configs. In worktree mode, `folder` is the provider launch workspace and is set to the active worktree; `git_worktree_source` records the original checkout so removing the worktree can return the agent to the source workspace.
 
+### Git Worktree Registry Contract
+
+Git is the authority for worktree existence. Wardian assignment fields (`git_worktree`, `git_worktree_source`, and `git_worktree_folder`) record which agent is using a worktree, but they do not create a valid Git worktree by themselves.
+
+`list_agent_worktrees` returns the union of:
+
+- Wardian-assigned worktrees from agent config.
+- Git-registered worktrees under Wardian agent worktree roots for known source workspaces.
+
+`enable_agent_worktree` must verify that any existing target folder is already present in `git worktree list --porcelain` for the source checkout before saving Wardian assignment state.
+
 ## Consequences
 
 - **Positive**: Full git workflow (review, stage, commit, push) without leaving Wardian
