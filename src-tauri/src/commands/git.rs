@@ -879,6 +879,26 @@ mod tests {
     }
 
     #[test]
+    fn git_worktree_contains_path_detects_created_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let cwd = repo.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        std::fs::write(repo.join("README.md"), "initial\n").unwrap();
+        run_git(cwd, &["add", "README.md"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        let worktree = temp.path().join("review");
+        create_worktree_with_build_caches(&repo, &worktree, "feat/review").unwrap();
+
+        assert!(git_worktree_contains_path(&repo, &worktree).unwrap());
+        assert!(!git_worktree_contains_path(&repo, &temp.path().join("not-a-worktree")).unwrap());
+    }
+
+    #[test]
     fn parse_git_worktree_list_porcelain_extracts_paths_and_branches() {
         let raw = "\
 worktree /repo

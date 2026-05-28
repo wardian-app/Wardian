@@ -1396,6 +1396,21 @@ fn discover_git_worktrees_for_configs(
     discovered.into_values().collect()
 }
 
+fn ensure_existing_worktree_is_git_registered(
+    workspace_path: &std::path::Path,
+    worktree_path: &std::path::Path,
+) -> Result<(), String> {
+    if worktree_path.exists()
+        && !crate::commands::git::git_worktree_contains_path(workspace_path, worktree_path)?
+    {
+        return Err(
+            "Worktree folder already exists but is not registered with Git for this workspace."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn assign_worktree_config(config: &mut AgentConfig, worktree_folder: &str) -> Result<(), String> {
     let worktree_folder = worktree_folder.trim();
     if worktree_folder.is_empty() {
@@ -2810,6 +2825,7 @@ pub async fn enable_agent_worktree(
 
     let workspace_path = std::path::PathBuf::from(&workspace_folder);
     if worktree_path.exists() {
+        ensure_existing_worktree_is_git_registered(&workspace_path, &worktree_path)?;
         crate::commands::git::setup_worktree_build_caches(&worktree_path, &workspace_path)?;
     } else {
         crate::commands::git::create_worktree_with_build_caches(
@@ -2817,6 +2833,9 @@ pub async fn enable_agent_worktree(
             &worktree_path,
             &branch_name,
         )?;
+        if !crate::commands::git::git_worktree_contains_path(&workspace_path, &worktree_path)? {
+            return Err("Git did not register the created worktree.".to_string());
+        }
     }
 
     let mut agents = state.agents.lock().await;
@@ -2961,12 +2980,12 @@ mod tests {
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
         disable_worktree_config, discover_git_worktrees_for_configs, enable_worktree_config,
+        ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
-        generated_agent_name, insert_new_agent_order, lock_agent_lifecycle,
-        mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
-        normalize_workspace_record_path, persisted_resume_session_for_provider,
-        prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
-        prepare_resume_config, prepare_resume_config_for_runtime,
+        generated_agent_name, insert_new_agent_order, lock_agent_lifecycle, mark_agent_paused_off,
+        normalize_clone_folder_override, normalize_spawn_folder, normalize_workspace_record_path,
+        persisted_resume_session_for_provider, prepare_agent_for_clear, prepare_clear_config,
+        prepare_restored_config_for_spawn, prepare_resume_config, prepare_resume_config_for_runtime,
         promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
@@ -4223,6 +4242,28 @@ mod tests {
             discovered[0].worktree_folder,
             normalize_workspace_record_path(&worktree)
         );
+    }
+
+    #[test]
+    fn existing_non_git_worktree_folder_is_rejected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        let existing = temp
+            .path()
+            .join("wardian-home")
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("review");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&existing).unwrap();
+        let cwd = repo.to_str().unwrap();
+        crate::commands::git::run_git(cwd, &["init"]).unwrap();
+
+        let err = ensure_existing_worktree_is_git_registered(&repo, &existing)
+            .expect_err("existing non-git worktree should be rejected");
+
+        assert!(err.contains("not registered with Git"));
     }
 
     #[test]
