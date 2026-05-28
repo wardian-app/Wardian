@@ -14,6 +14,8 @@ export const QUEUE_EVENT_TYPES: QueueEventType[] = [
   "workflow_failed",
 ];
 
+export const DEFAULT_QUEUE_SOUND_VOLUME = 0.5;
+
 export const DEFAULT_QUEUE_PREFERENCES: QueuePreferences = {
   visible_event_types: {
     action_needed: true,
@@ -33,6 +35,7 @@ export const DEFAULT_QUEUE_PREFERENCES: QueuePreferences = {
     workflow_completed: false,
     workflow_failed: false,
   },
+  sound_volume: DEFAULT_QUEUE_SOUND_VOLUME,
 };
 
 function normalizeEventRecord(value: unknown, fallback: Record<QueueEventType, boolean>) {
@@ -41,6 +44,11 @@ function normalizeEventRecord(value: unknown, fallback: Record<QueueEventType, b
     record[type] = typeof source[type] === "boolean" ? source[type] : fallback[type];
     return record;
   }, { ...fallback });
+}
+
+export function normalizeQueueSoundVolume(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_QUEUE_SOUND_VOLUME;
+  return Math.min(1, Math.max(0, value));
 }
 
 export function normalizeQueuePreferences(value: unknown): QueuePreferences {
@@ -58,6 +66,7 @@ export function normalizeQueuePreferences(value: unknown): QueuePreferences {
       source.sound_notifications,
       DEFAULT_QUEUE_PREFERENCES.sound_notifications,
     ),
+    sound_volume: normalizeQueueSoundVolume(source.sound_volume),
   };
 }
 

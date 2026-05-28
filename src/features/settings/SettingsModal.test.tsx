@@ -142,10 +142,14 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Queue" }));
     fireEvent.click(screen.getByLabelText("Desktop alert for workflow failures"));
     fireEvent.click(screen.getByLabelText("Sound alert for action needed"));
+    fireEvent.change(screen.getByLabelText("Sound alert volume"), {
+      target: { value: "75" },
+    });
 
     const { preferences } = useQueueStore.getState();
     expect(preferences.desktop_notifications.workflow_failed).toBe(true);
     expect(preferences.sound_notifications.action_needed).toBe(false);
+    expect(preferences.sound_volume).toBe(0.75);
   });
 
   it("filters settings by search text across labels and details", () => {

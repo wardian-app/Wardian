@@ -41,6 +41,7 @@ describe("useQueueStore - preferences", () => {
       workflow_completed: false,
       workflow_failed: false,
     });
+    expect(preferences.sound_volume).toBe(0.5);
   });
 
   it("loads persisted queue preferences and merges missing event keys with defaults", async () => {
@@ -50,6 +51,7 @@ describe("useQueueStore - preferences", () => {
           visible_event_types: { agent_completed: false },
           desktop_notifications: { workflow_failed: true },
           sound_notifications: { action_needed: false },
+          sound_volume: 0.75,
         });
       }
       return Promise.resolve([]);
@@ -65,18 +67,27 @@ describe("useQueueStore - preferences", () => {
     });
     expect(useQueueStore.getState().preferences.desktop_notifications.workflow_failed).toBe(true);
     expect(useQueueStore.getState().preferences.sound_notifications.action_needed).toBe(false);
+    expect(useQueueStore.getState().preferences.sound_volume).toBe(0.75);
   });
 
   it("persists filter and alert preference changes", () => {
     useQueueStore.getState().setEventVisible("workflow_completed", false);
     useQueueStore.getState().setDesktopNotification("workflow_failed", true);
     useQueueStore.getState().setSoundNotification("action_needed", false);
+    useQueueStore.getState().setSoundVolume(0.75);
 
     const { preferences } = useQueueStore.getState();
     expect(preferences.visible_event_types.workflow_completed).toBe(false);
     expect(preferences.desktop_notifications.workflow_failed).toBe(true);
     expect(preferences.sound_notifications.action_needed).toBe(false);
+    expect(preferences.sound_volume).toBe(0.75);
     expect(mockInvoke).toHaveBeenCalledWith("save_queue_preferences", { preferences });
+  });
+
+  it("clamps persisted sound volume preference changes", () => {
+    useQueueStore.getState().setSoundVolume(2);
+
+    expect(useQueueStore.getState().preferences.sound_volume).toBe(1);
   });
 });
 
