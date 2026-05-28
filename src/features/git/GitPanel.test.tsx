@@ -472,6 +472,7 @@ describe("GitPanel", () => {
             source_folder: "C:/repo",
             worktree_folder: "C:/repo-worktree",
             member_agent_ids: ["agent-2"],
+            can_delete: false,
           },
         ];
       }
@@ -495,6 +496,155 @@ describe("GitPanel", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
 
+  it("shows join options when source paths differ only by Windows spelling", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "c:/repo/",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: [],
+            can_delete: true,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel({ agentOverride: { folder: "C:\\repo" } });
+
+    expect(await screen.findByText("Move to repo-worktree")).toBeInTheDocument();
+  });
+
+  it("deletes an unassigned available worktree after confirmation", async () => {
+    const onAgentsUpdated = vi.fn();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: [],
+            can_delete: true,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      if (command === "delete_agent_worktree") return null;
+      return null;
+    });
+
+    render(
+      <ConfirmProvider>
+        <GitPanel
+          selectedAgentIds={new Set(["agent-1"])}
+          agents={[agent]}
+          onAgentsUpdated={onAgentsUpdated}
+          telemetry={telemetry}
+        />
+      </ConfirmProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete repo-worktree worktree" }));
+    fireEvent.click(await screen.findByText("Confirm"));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("delete_agent_worktree", {
+        worktreeFolder: "C:/repo-worktree",
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByText("Move to repo-worktree")).not.toBeInTheDocument();
+    });
+    expect(onAgentsUpdated).toHaveBeenCalled();
+  });
+
+  it("does not show delete controls for worktrees assigned to another agent", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: ["agent-2"],
+            can_delete: false,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to repo-worktree")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete repo-worktree worktree" })).not.toBeInTheDocument();
+  });
+
+  it("does not show delete controls for external unassigned worktrees", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/external-worktree",
+            name: "external-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/external-worktree",
+            member_agent_ids: [],
+            can_delete: false,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to external-worktree")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete external-worktree worktree" })).not.toBeInTheDocument();
+  });
+
+  it("shows discovered unassigned worktrees as join options", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/wardian/agents/agent-1/worktrees/manual-review",
+            name: "manual-review",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/wardian/agents/agent-1/worktrees/manual-review",
+            member_agent_ids: [],
+            can_delete: true,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", upstream: "origin/main", has_upstream: true, ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to manual-review")).toBeInTheDocument();
+  });
+
   it("repairs a stale worktree assignment by moving the runtime fresh", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo-worktree";
@@ -505,6 +655,7 @@ describe("GitPanel", () => {
           source_folder: "C:/repo",
           worktree_folder: "C:/repo-worktree",
           member_agent_ids: ["agent-1"],
+          can_delete: false,
         },
       ];
       if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };
@@ -544,6 +695,7 @@ describe("GitPanel", () => {
           source_folder: "C:/repo",
           worktree_folder: "C:/repo-worktree",
           member_agent_ids: ["agent-1"],
+          can_delete: false,
         },
       ];
       if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };

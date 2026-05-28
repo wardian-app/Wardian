@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Check, GitBranch, X } from "lucide-react";
+import { Check, GitBranch, Trash2, X } from "lucide-react";
 import { AgentConfig, AgentWorktreeSummary, GitStatusResult, GitLogEntry } from "../../types";
 import { GitFileList } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
@@ -9,6 +9,16 @@ import { useConfirm } from "../../components/ConfirmDialog";
 
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
 const GIT_STATUS_POLL_INTERVAL_MS = 3000;
+
+const normalizeComparablePath = (path: string): string => {
+  const normalized = path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/\/\?\/UNC\//i, "//")
+    .replace(/^\/\/\?\//, "")
+    .replace(/\/+$/g, "");
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+};
 
 interface GitPanelProps {
   selectedAgentIds: Set<string>;
@@ -65,7 +75,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     errorMessage.toLowerCase().includes("not a git repository") ||
     errorMessage.toLowerCase().includes("not a git directory");
   const isWorktreeActive = selectedAgent?.git_worktree === true || (status?.branch?.startsWith("wardian/") ?? false);
-  const selectedSourceFolder = (selectedAgent?.git_worktree_source ?? selectedAgent?.folder ?? "").replace(/\\/g, "/");
+  const selectedSourceFolder = normalizeComparablePath(selectedAgent?.git_worktree_source ?? selectedAgent?.folder ?? "");
   const selectedRuntimeFolder = selectedAgent?.folder?.replace(/\\/g, "/") ?? rootPath ?? "";
   const selectedWorktreeFolder = selectedAgent?.git_worktree_folder?.replace(/\\/g, "/") ?? "";
   const worktreeFolderName = (folder: string) => {
@@ -232,7 +242,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         );
         setAvailableWorktrees(
           summaries.filter((worktree) => {
-            const sameSource = worktree.source_folder.replace(/\\/g, "/") === selectedSourceFolder;
+            const sameSource = normalizeComparablePath(worktree.source_folder) === selectedSourceFolder;
             const notCurrent = worktree.worktree_folder.replace(/\\/g, "/") !== currentWorktree;
             const notMember = !worktree.member_agent_ids.includes(selectedAgentId);
             return sameSource && notCurrent && notMember;
@@ -416,6 +426,29 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         worktreeFolder: worktree.worktree_folder,
       });
       await invoke("clear_agent_session", { sessionId: selectedAgentId });
+      onAgentsUpdated();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setWorktreeLoading(false);
+    }
+  };
+
+  const handleDeleteWorktree = async (worktree: AgentWorktreeSummary) => {
+    if (worktree.member_agent_ids.length > 0) return;
+    const confirmed = await confirm(
+      `Delete worktree "${worktree.name}"?\n\nThis removes the Git worktree folder but keeps the branch.`,
+    );
+    if (!confirmed) return;
+
+    setWorktreeLoading(true);
+    try {
+      await invoke("delete_agent_worktree", {
+        worktreeFolder: worktree.worktree_folder,
+      });
+      setAvailableWorktrees((current) =>
+        current.filter((candidate) => candidate.worktree_folder !== worktree.worktree_folder),
+      );
       onAgentsUpdated();
     } catch (err) {
       setError(formatError(err));
@@ -668,16 +701,31 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <div className="flex flex-col gap-1">
                 <div className="text-[10px] uppercase tracking-wide text-muted px-1">Available Worktrees</div>
                 {availableWorktrees.map((worktree) => (
-                  <button
+                  <div
                     key={worktree.id}
-                    onClick={() => handleJoinWorktree(worktree)}
-                    disabled={worktreeLoading}
-                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg border border-wardian-border text-[var(--color-wardian-text-muted)] hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)] transition-colors disabled:opacity-40"
+                    className="w-full flex items-stretch rounded-lg border border-wardian-border overflow-hidden"
                     title={worktree.worktree_folder}
                   >
-                    <span className="text-[11px] truncate">Move to {worktree.name}</span>
-                    <span className="ml-auto text-[10px] font-mono text-muted">{worktree.member_agent_ids.length}</span>
-                  </button>
+                    <button
+                      onClick={() => handleJoinWorktree(worktree)}
+                      disabled={worktreeLoading}
+                      className="min-w-0 flex-1 flex items-center gap-2 px-2 py-1.5 text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-accent)] hover:bg-wardian-card-bg-muted transition-colors disabled:opacity-40"
+                    >
+                      <span className="text-[11px] truncate">Move to {worktree.name}</span>
+                      <span className="ml-auto text-[10px] font-mono text-muted">{worktree.member_agent_ids.length}</span>
+                    </button>
+                    {worktree.can_delete && worktree.member_agent_ids.length === 0 && (
+                      <button
+                        onClick={() => handleDeleteWorktree(worktree)}
+                        disabled={worktreeLoading}
+                        className="w-8 shrink-0 flex items-center justify-center border-l border-wardian-border text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] hover:bg-wardian-card-bg-muted transition-colors disabled:opacity-40"
+                        title={`Delete ${worktree.name} worktree`}
+                        aria-label={`Delete ${worktree.name} worktree`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             )}

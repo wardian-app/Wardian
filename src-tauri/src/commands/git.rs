@@ -13,7 +13,7 @@ use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 /// captured without flashing a console window.
 /// Sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` so git never blocks
 /// waiting for credential input (mirrors VS Code's git extension behaviour).
-fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
     run_git_with_candidates(cwd, args, &git_command_candidates())
 }
 
@@ -442,12 +442,172 @@ pub(crate) fn create_worktree_with_build_caches(
 }
 
 pub(crate) fn remove_worktree(workspace_path: &Path, worktree_path: &Path) -> Result<(), String> {
+    remove_worktree_with_options(workspace_path, worktree_path, true)
+}
+
+pub(crate) fn remove_worktree_without_force(
+    workspace_path: &Path,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    cleanup_generated_worktree_build_caches(workspace_path, worktree_path)?;
+    remove_worktree_with_options(workspace_path, worktree_path, false)
+}
+
+fn cleanup_generated_worktree_build_caches(
+    workspace_path: &Path,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    let workspace_path = absolute_existing_path(workspace_path)?;
+    let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
+
+    if workspace_path.join("Cargo.toml").is_file() {
+        remove_generated_cargo_config(&worktree_path, &workspace_path)?;
+    }
+
+    if workspace_path.join("package.json").is_file() {
+        remove_generated_cache_link(
+            &worktree_path.join("node_modules"),
+            &workspace_path.join("node_modules"),
+        )?;
+    }
+
+    if workspace_path.join("pyproject.toml").is_file()
+        || workspace_path.join("requirements.txt").is_file()
+    {
+        remove_generated_cache_link(&worktree_path.join(".venv"), &workspace_path.join(".venv"))?;
+    }
+
+    Ok(())
+}
+
+fn remove_generated_cargo_config(
+    worktree_path: &Path,
+    workspace_path: &Path,
+) -> Result<(), String> {
+    let cargo_dir = worktree_path.join(".cargo");
+    let config_path = cargo_dir.join("config.toml");
+    if !config_path.is_file() {
+        return Ok(());
+    }
+
+    let target_dir = workspace_path.join("target");
+    let expected = format!(
+        "[build]\ntarget-dir = \"{}\"\n",
+        escape_toml_basic_string(&target_dir.to_string_lossy())
+    );
+    let actual = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+    if actual != expected {
+        return Ok(());
+    }
+
+    std::fs::remove_file(&config_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir(&cargo_dir);
+    Ok(())
+}
+
+fn remove_generated_cache_link(link: &Path, target: &Path) -> Result<(), String> {
+    if !(link.exists() || link.symlink_metadata().is_ok()) {
+        return Ok(());
+    }
+    if !target.exists() || !link_matches_target(link, target) {
+        return Ok(());
+    }
+
+    remove_link_path(link)
+}
+
+fn remove_link_path(path: &Path) -> Result<(), String> {
+    std::fs::remove_dir(path)
+        .or_else(|_| std::fs::remove_file(path))
+        .map_err(|e| e.to_string())
+}
+
+fn remove_worktree_with_options(
+    workspace_path: &Path,
+    worktree_path: &Path,
+    force: bool,
+) -> Result<(), String> {
     let workspace_path = absolute_existing_path(workspace_path)?;
     let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
     let workspace = path_to_git_arg(&workspace_path)?;
     let worktree = path_to_git_arg(&worktree_path)?;
-    run_git(&workspace, &["worktree", "remove", &worktree, "--force"])?;
+    if force {
+        run_git(&workspace, &["worktree", "remove", &worktree, "--force"])?;
+    } else {
+        run_git(&workspace, &["worktree", "remove", &worktree])?;
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitWorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+pub(crate) fn parse_git_worktree_list_porcelain(raw: &str) -> Vec<GitWorktreeInfo> {
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+
+    for line in raw.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            if let Some(path) = current_path.take() {
+                entries.push(GitWorktreeInfo {
+                    path,
+                    branch: current_branch.take(),
+                });
+            } else {
+                current_branch = None;
+            }
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(previous_path) = current_path.replace(PathBuf::from(path)) {
+                entries.push(GitWorktreeInfo {
+                    path: previous_path,
+                    branch: current_branch.take(),
+                });
+            }
+            continue;
+        }
+
+        if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            current_branch = Some(branch.to_string());
+        }
+    }
+
+    if let Some(path) = current_path {
+        entries.push(GitWorktreeInfo {
+            path,
+            branch: current_branch,
+        });
+    }
+
+    entries
+}
+
+pub(crate) fn list_git_worktrees(source_path: &Path) -> Result<Vec<GitWorktreeInfo>, String> {
+    let source_path = absolute_existing_path(source_path)?;
+    let workspace = path_to_git_arg(&source_path)?;
+    let raw = run_git(&workspace, &["worktree", "list", "--porcelain"])?;
+    Ok(parse_git_worktree_list_porcelain(&raw))
+}
+
+pub(crate) fn git_worktree_contains_path(
+    source_path: &Path,
+    worktree_path: &Path,
+) -> Result<bool, String> {
+    let source_path = absolute_existing_path(source_path)?;
+    let expected = absolute_existing_path(worktree_path)
+        .unwrap_or_else(|_| absolute_worktree_target_path(&source_path, worktree_path));
+    let expected = normalize_path_for_compare(&expected);
+
+    Ok(list_git_worktrees(&source_path)?
+        .into_iter()
+        .any(|entry| normalize_path_for_compare(&entry.path) == expected))
 }
 
 fn absolute_worktree_target_path(workspace_path: &Path, worktree_path: &Path) -> PathBuf {
@@ -554,6 +714,15 @@ fn normalize_canonical_path(path: &Path) -> Result<PathBuf, String> {
     }
 
     Ok(canonical)
+}
+
+fn normalize_path_for_compare(path: &Path) -> String {
+    normalize_canonical_path(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn escape_toml_basic_string(value: &str) -> String {
@@ -796,6 +965,131 @@ mod tests {
             "wardian/repo-agent"
         );
         assert!(worktree.join(".cargo").join("config.toml").exists());
+    }
+
+    #[test]
+    fn remove_worktree_without_force_cleans_generated_cache_redirects() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("agents").join("agent-1").join("worktree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\n",
+        )
+        .unwrap();
+
+        let cwd = workspace.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        run_git(cwd, &["add", "Cargo.toml"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        create_worktree_with_build_caches(&workspace, &worktree, "wardian/repo-agent").unwrap();
+        assert!(worktree.join(".cargo").join("config.toml").exists());
+
+        remove_worktree_without_force(&workspace, &worktree).unwrap();
+
+        assert!(!worktree.exists());
+        assert!(!git_worktree_contains_path(&workspace, &worktree).unwrap());
+    }
+
+    #[test]
+    fn remove_worktree_without_force_preserves_dirty_worktree_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("agents").join("agent-1").join("worktree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\n",
+        )
+        .unwrap();
+
+        let cwd = workspace.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        run_git(cwd, &["add", "Cargo.toml"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        create_worktree_with_build_caches(&workspace, &worktree, "wardian/repo-agent").unwrap();
+        std::fs::write(worktree.join("local.txt"), "keep me\n").unwrap();
+
+        let err = remove_worktree_without_force(&workspace, &worktree)
+            .expect_err("dirty worktree should block non-force removal");
+
+        assert!(
+            err.contains("modified or untracked") || err.contains("contains"),
+            "{err}"
+        );
+        assert!(worktree.join("local.txt").exists());
+        assert!(git_worktree_contains_path(&workspace, &worktree).unwrap());
+    }
+
+    #[test]
+    fn git_worktree_contains_path_detects_created_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let cwd = repo.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        std::fs::write(repo.join("README.md"), "initial\n").unwrap();
+        run_git(cwd, &["add", "README.md"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        let worktree = temp.path().join("review");
+        create_worktree_with_build_caches(&repo, &worktree, "feat/review").unwrap();
+
+        assert!(git_worktree_contains_path(&repo, &worktree).unwrap());
+        assert!(!git_worktree_contains_path(&repo, &temp.path().join("not-a-worktree")).unwrap());
+    }
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_extracts_paths_and_branches() {
+        let raw = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/.wardian/agents/agent-1/worktrees/review
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/feat/review
+
+";
+
+        let worktrees = parse_git_worktree_list_porcelain(raw);
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].path, std::path::PathBuf::from("/repo"));
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(
+            worktrees[1].path,
+            std::path::PathBuf::from("/repo/.wardian/agents/agent-1/worktrees/review")
+        );
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feat/review"));
+    }
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_handles_detached_or_bare_entries() {
+        let raw = "\
+worktree /repo-detached
+HEAD 3333333333333333333333333333333333333333
+detached
+
+worktree /repo-bare
+bare
+
+";
+
+        let worktrees = parse_git_worktree_list_porcelain(raw);
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].branch, None);
+        assert_eq!(worktrees[1].branch, None);
     }
 
     #[test]

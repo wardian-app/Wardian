@@ -427,6 +427,8 @@ pub struct AgentWorktreeSummary {
     pub source_folder: String,
     pub worktree_folder: String,
     pub member_agent_ids: Vec<String>,
+    #[serde(default)]
+    pub can_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -995,6 +997,7 @@ mod tests {
                 source_folder: "D:/repo".to_string(),
                 worktree_folder: "D:/repo/worktrees/review".to_string(),
                 member_agent_ids: vec!["uuid-1".to_string()],
+                can_delete: false,
             }),
             previous_worktree: None,
             previous_workspace: Some("D:/repo".to_string()),
@@ -1009,6 +1012,7 @@ mod tests {
         assert!(json.contains(r#""action":"enable""#));
         assert!(json.contains(r#""source_folder":"D:/repo""#));
         assert!(json.contains(r#""member_agent_ids":["uuid-1"]"#));
+        assert!(json.contains(r#""can_delete":false"#));
         assert!(json.contains(r#""cleared_session":true"#));
     }
 

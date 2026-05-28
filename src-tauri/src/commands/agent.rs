@@ -1,7 +1,7 @@
 use crate::manager;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
@@ -97,6 +97,7 @@ pub struct AgentWorktreeSummary {
     pub source_folder: String,
     pub worktree_folder: String,
     pub member_agent_ids: Vec<String>,
+    pub can_delete: bool,
 }
 
 fn clone_unique_name(
@@ -1132,29 +1133,53 @@ async fn release_spawn_name_reservation(state: &AppState, session_name: &str) {
 }
 
 fn normalize_workspace_record_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    strip_windows_verbatim_prefix(path.to_string_lossy().replace('\\', "/"))
+}
+
+fn normalize_existing_workspace_record_path(path: &std::path::Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    normalize_workspace_record_path(&path)
+}
+
+fn normalize_maybe_existing_workspace_record_path(path: &str) -> String {
+    let normalized = strip_windows_verbatim_prefix(path.trim().replace('\\', "/"));
+    let path = std::path::Path::new(&normalized);
+    if path.exists() {
+        return normalize_existing_workspace_record_path(path);
+    }
+    normalized
+}
+
+fn strip_windows_verbatim_prefix(path: String) -> String {
+    if let Some(stripped) = path.strip_prefix("//?/UNC/") {
+        return format!("//{stripped}");
+    }
+    if let Some(stripped) = path.strip_prefix("//?/") {
+        return stripped.to_string();
+    }
+    path
 }
 
 fn resolve_agent_worktree_path(
     wardian_home: &std::path::Path,
     session_id: &str,
     worktree_name: Option<&str>,
+    default_name: &str,
 ) -> std::path::PathBuf {
-    if let Some(slug) = worktree_name
+    let slug = worktree_name
         .map(slugify_worktree_name)
         .filter(|slug| !slug.is_empty())
-    {
-        return wardian_home
-            .join("agents")
-            .join(session_id)
-            .join("worktrees")
-            .join(slug);
-    }
+        .or_else(|| {
+            let default_slug = slugify_worktree_name(default_name);
+            (!default_slug.is_empty()).then_some(default_slug)
+        })
+        .unwrap_or_else(|| "worktree".to_string());
 
     wardian_home
         .join("agents")
         .join(session_id)
-        .join("worktree")
+        .join("worktrees")
+        .join(slug)
 }
 
 fn slugify_worktree_name(name: &str) -> String {
@@ -1256,7 +1281,7 @@ fn collect_agent_worktrees(configs: &[AgentConfig]) -> Vec<AgentWorktreeSummary>
             continue;
         }
 
-        let normalized_worktree = worktree_folder.replace('\\', "/");
+        let normalized_worktree = normalize_maybe_existing_workspace_record_path(worktree_folder);
         let entry = summaries
             .entry(normalized_worktree.clone())
             .or_insert_with(|| {
@@ -1275,15 +1300,238 @@ fn collect_agent_worktrees(configs: &[AgentConfig]) -> Vec<AgentWorktreeSummary>
                 AgentWorktreeSummary {
                     id: normalized_worktree.clone(),
                     name,
-                    source_folder: source_folder.replace('\\', "/"),
+                    source_folder: normalize_maybe_existing_workspace_record_path(source_folder),
                     worktree_folder: normalized_worktree.clone(),
                     member_agent_ids: Vec::new(),
+                    can_delete: false,
                 }
             });
         entry.member_agent_ids.push(config.session_id.clone());
     }
 
     summaries.into_values().collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredGitWorktree {
+    source_folder: String,
+    worktree_folder: String,
+}
+
+fn is_under_wardian_agent_worktree_root(wardian_home: &std::path::Path, path: &str) -> bool {
+    let normalized_home =
+        normalize_path_for_prefix_compare(&normalize_existing_workspace_record_path(wardian_home));
+    let normalized_path =
+        normalize_path_for_prefix_compare(&normalize_maybe_existing_workspace_record_path(path));
+    let prefix = format!("{normalized_home}/agents/");
+    if !normalized_path.starts_with(&prefix) {
+        return false;
+    }
+
+    let relative = &normalized_path[prefix.len()..];
+    let parts = relative.split('/').collect::<Vec<_>>();
+    parts.len() >= 3 && parts[1] == "worktrees" && !parts[0].is_empty() && !parts[2].is_empty()
+}
+
+fn normalize_path_for_prefix_compare(path: &str) -> String {
+    let normalized = path
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .trim_end_matches('/')
+        .to_string();
+
+    #[cfg(windows)]
+    {
+        let normalized = normalized.to_ascii_lowercase();
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b'/'
+        {
+            let drive = bytes[1] as char;
+            return format!("{drive}:{}", &normalized[2..]);
+        }
+        normalized
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
+fn source_folder_for_config(config: &AgentConfig) -> Option<String> {
+    if let Some(source) = config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+    {
+        return Some(normalize_maybe_existing_workspace_record_path(source));
+    }
+
+    let folder = config.folder.trim();
+    if folder.is_empty() {
+        None
+    } else {
+        Some(normalize_maybe_existing_workspace_record_path(folder))
+    }
+}
+
+fn collect_agent_worktrees_with_discovered(
+    configs: &[AgentConfig],
+    wardian_home: &std::path::Path,
+    discovered: Vec<DiscoveredGitWorktree>,
+) -> Vec<AgentWorktreeSummary> {
+    let mut summaries = collect_agent_worktrees(configs)
+        .into_iter()
+        .map(|summary| (summary.worktree_folder.clone(), summary))
+        .collect::<BTreeMap<_, _>>();
+
+    for worktree in discovered {
+        let normalized_worktree =
+            normalize_maybe_existing_workspace_record_path(&worktree.worktree_folder);
+
+        summaries
+            .entry(normalized_worktree.clone())
+            .or_insert_with(|| {
+                let name = std::path::Path::new(&normalized_worktree)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or("worktree")
+                    .to_string();
+                AgentWorktreeSummary {
+                    id: normalized_worktree.clone(),
+                    name,
+                    source_folder: normalize_maybe_existing_workspace_record_path(
+                        &worktree.source_folder,
+                    ),
+                    worktree_folder: normalized_worktree.clone(),
+                    member_agent_ids: Vec::new(),
+                    can_delete: is_under_wardian_agent_worktree_root(
+                        wardian_home,
+                        &normalized_worktree,
+                    ),
+                }
+            });
+    }
+
+    summaries.into_values().collect()
+}
+
+fn discover_git_worktrees_for_configs(
+    configs: &[AgentConfig],
+    _wardian_home: &std::path::Path,
+) -> Vec<DiscoveredGitWorktree> {
+    let sources = configs
+        .iter()
+        .filter_map(source_folder_for_config)
+        .collect::<BTreeSet<_>>();
+
+    let mut discovered = BTreeMap::<String, DiscoveredGitWorktree>::new();
+    for source in sources {
+        let source_path = std::path::Path::new(&source);
+        let Ok(worktrees) = crate::commands::git::list_git_worktrees(source_path) else {
+            continue;
+        };
+
+        for worktree in worktrees {
+            let normalized = normalize_discovered_git_worktree_path(&worktree.path);
+            if workspace_paths_match(&source, &normalized) {
+                continue;
+            }
+            discovered
+                .entry(normalized.clone())
+                .or_insert_with(|| DiscoveredGitWorktree {
+                    source_folder: source.clone(),
+                    worktree_folder: normalized,
+                });
+        }
+    }
+
+    discovered.into_values().collect()
+}
+
+fn normalize_discovered_git_worktree_path(path: &std::path::Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    normalize_workspace_record_path(&path)
+}
+
+fn ensure_existing_worktree_is_git_registered(
+    workspace_path: &std::path::Path,
+    worktree_path: &std::path::Path,
+) -> Result<(), String> {
+    if worktree_path.exists()
+        && !crate::commands::git::git_worktree_contains_path(workspace_path, worktree_path)?
+    {
+        return Err(
+            "Worktree folder already exists but is not registered with Git for this workspace."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn workspace_paths_match(left: &str, right: &str) -> bool {
+    normalize_path_for_prefix_compare(&normalize_maybe_existing_workspace_record_path(left))
+        == normalize_path_for_prefix_compare(&normalize_maybe_existing_workspace_record_path(right))
+}
+
+fn find_assignable_worktree(
+    configs: &[AgentConfig],
+    wardian_home: &std::path::Path,
+    worktree_folder: &str,
+    discovered: Vec<DiscoveredGitWorktree>,
+) -> Option<AgentWorktreeSummary> {
+    let normalized_worktree_folder =
+        normalize_maybe_existing_workspace_record_path(worktree_folder);
+    collect_agent_worktrees_with_discovered(configs, wardian_home, discovered)
+        .into_iter()
+        .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
+}
+
+fn validate_assignable_worktree_for_agent(
+    source_folder: &str,
+    managed_worktree: &AgentWorktreeSummary,
+    worktree_path: &std::path::Path,
+) -> Result<(), String> {
+    if !workspace_paths_match(source_folder, &managed_worktree.source_folder) {
+        return Err(
+            "Cannot assign an agent to a worktree from another source workspace".to_string(),
+        );
+    }
+
+    ensure_existing_worktree_is_git_registered(
+        std::path::Path::new(&managed_worktree.source_folder),
+        worktree_path,
+    )
+}
+
+fn validate_deletable_agent_worktree(
+    wardian_home: &std::path::Path,
+    managed_worktree: &AgentWorktreeSummary,
+) -> Result<(), String> {
+    if !managed_worktree.member_agent_ids.is_empty() {
+        return Err("Cannot delete a worktree while agents are assigned to it.".to_string());
+    }
+
+    if !is_under_wardian_agent_worktree_root(wardian_home, &managed_worktree.worktree_folder) {
+        return Err("Only Wardian agent worktrees can be deleted from Wardian.".to_string());
+    }
+
+    if workspace_paths_match(
+        &managed_worktree.source_folder,
+        &managed_worktree.worktree_folder,
+    ) {
+        return Err("Refusing to delete the source checkout as a worktree.".to_string());
+    }
+
+    ensure_existing_worktree_is_git_registered(
+        std::path::Path::new(&managed_worktree.source_folder),
+        std::path::Path::new(&managed_worktree.worktree_folder),
+    )
 }
 
 fn assign_worktree_config(config: &mut AgentConfig, worktree_folder: &str) -> Result<(), String> {
@@ -2673,9 +2921,7 @@ pub async fn enable_agent_worktree(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string);
-    let worktree_path =
-        resolve_agent_worktree_path(&wardian_home, &session_id, worktree_name.as_deref());
-    let (workspace_folder, branch_name) = {
+    let (workspace_folder, branch_name, worktree_path) = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&session_id)
@@ -2695,11 +2941,18 @@ pub async fn enable_agent_worktree(
         (
             workspace_folder,
             resolve_agent_worktree_branch_name(branch_source),
+            resolve_agent_worktree_path(
+                &wardian_home,
+                &session_id,
+                worktree_name.as_deref(),
+                &config.session_name,
+            ),
         )
     };
 
     let workspace_path = std::path::PathBuf::from(&workspace_folder);
     if worktree_path.exists() {
+        ensure_existing_worktree_is_git_registered(&workspace_path, &worktree_path)?;
         crate::commands::git::setup_worktree_build_caches(&worktree_path, &workspace_path)?;
     } else {
         crate::commands::git::create_worktree_with_build_caches(
@@ -2707,6 +2960,9 @@ pub async fn enable_agent_worktree(
             &worktree_path,
             &branch_name,
         )?;
+        if !crate::commands::git::git_worktree_contains_path(&workspace_path, &worktree_path)? {
+            return Err("Git did not register the created worktree.".to_string());
+        }
     }
 
     let mut agents = state.agents.lock().await;
@@ -2728,12 +2984,21 @@ pub async fn enable_agent_worktree(
 pub async fn list_agent_worktrees(
     state: State<'_, AppState>,
 ) -> Result<Vec<AgentWorktreeSummary>, String> {
-    let agents = state.agents.lock().await;
-    let configs = agents
-        .values()
-        .map(|agent| agent.config.lock().unwrap().clone())
-        .collect::<Vec<_>>();
-    Ok(collect_agent_worktrees(&configs))
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
+    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+    Ok(collect_agent_worktrees_with_discovered(
+        &configs,
+        &wardian_home,
+        discovered,
+    ))
 }
 
 #[tauri::command]
@@ -2751,18 +3016,22 @@ pub async fn assign_agent_worktree(
     if !worktree_path.is_dir() {
         return Err("Worktree folder does not exist".to_string());
     }
-    let normalized_worktree_folder = worktree_folder.trim().replace('\\', "/");
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
 
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
+    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+    let managed_worktree =
+        find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
+            .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
     let mut agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
-    let configs = agents
-        .values()
-        .map(|agent| agent.config.lock().unwrap().clone())
-        .collect::<Vec<_>>();
-    let managed_worktree = collect_agent_worktrees(&configs)
-        .into_iter()
-        .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
-        .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
     if let Some(agent) = agents.get_mut(&session_id) {
         {
             let mut config = agent.config.lock().unwrap();
@@ -2772,13 +3041,12 @@ pub async fn assign_agent_worktree(
                 .map(str::trim)
                 .filter(|folder| !folder.is_empty())
                 .unwrap_or(config.folder.trim())
-                .replace('\\', "/");
-            if source_folder != managed_worktree.source_folder {
-                return Err(
-                    "Cannot assign an agent to a worktree from another source workspace"
-                        .to_string(),
-                );
-            }
+                .to_string();
+            validate_assignable_worktree_for_agent(
+                &source_folder,
+                &managed_worktree,
+                worktree_path,
+            )?;
             assign_worktree_config(&mut config, &worktree_folder)?;
         }
         manager::save_state(&app, &agents, &order);
@@ -2787,6 +3055,45 @@ pub async fn assign_agent_worktree(
     } else {
         Err(format!("Agent {} not found", session_id))
     }
+}
+
+#[tauri::command]
+pub async fn delete_agent_worktree(
+    worktree_folder: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let worktree_folder = worktree_folder.trim().to_string();
+    if worktree_folder.is_empty() {
+        return Err("Worktree folder is required".to_string());
+    }
+    let worktree_path = std::path::Path::new(&worktree_folder);
+    if !worktree_path.is_dir() {
+        return Err("Worktree folder does not exist".to_string());
+    }
+
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
+    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+    let managed_worktree =
+        find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
+            .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
+
+    validate_deletable_agent_worktree(&wardian_home, &managed_worktree)?;
+    crate::commands::git::remove_worktree_without_force(
+        std::path::Path::new(&managed_worktree.source_folder),
+        std::path::Path::new(&managed_worktree.worktree_folder),
+    )?;
+
+    let _ = app.emit("agents-updated", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -2842,19 +3149,25 @@ mod tests {
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
-        collect_agent_worktrees, detach_agent_for_kill, disable_worktree_config,
-        enable_worktree_config, ensure_provider_available_before_session_bootstrap,
+        collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
+        disable_worktree_config, discover_git_worktrees_for_configs, enable_worktree_config,
+        ensure_existing_worktree_is_git_registered,
+        ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
-        lock_agent_lifecycle, mark_agent_paused_off, normalize_clone_folder_override,
-        normalize_spawn_folder, persisted_resume_session_for_provider, prepare_agent_for_clear,
-        prepare_clear_config, prepare_restored_config_for_spawn, prepare_resume_config,
-        prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
-        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
-        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        take_agent_runtime_for_termination, terminal_cleared_payload, AgentOrderPlacement,
-        CloneProfileCopyPlan, CloneProfileSelection,
+        is_under_wardian_agent_worktree_root, lock_agent_lifecycle, mark_agent_paused_off,
+        normalize_clone_folder_override, normalize_discovered_git_worktree_path,
+        normalize_existing_workspace_record_path, normalize_spawn_folder,
+        normalize_workspace_record_path, persisted_resume_session_for_provider,
+        prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
+        prepare_resume_config, prepare_resume_config_for_runtime,
+        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, reserve_spawn_session_name,
+        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
+        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
+        sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
+        validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
+        workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
+        CloneProfileSelection, DiscoveredGitWorktree,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -3874,15 +4187,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_worktree_path_uses_agent_worktree_directory() {
+    fn resolve_agent_worktree_path_uses_session_name_when_worktree_name_is_missing() {
         let home = std::path::Path::new("C:/wardian");
 
         assert_eq!(
-            resolve_agent_worktree_path(home, "agent-1", None),
+            resolve_agent_worktree_path(home, "agent-1", None, "Repo Agent"),
             std::path::PathBuf::from("C:/wardian")
                 .join("agents")
                 .join("agent-1")
-                .join("worktree")
+                .join("worktrees")
+                .join("repo-agent")
         );
     }
 
@@ -3891,7 +4205,7 @@ mod tests {
         let home = std::path::Path::new("C:/wardian");
 
         assert_eq!(
-            resolve_agent_worktree_path(home, "agent-1", Some("Review Fixes")),
+            resolve_agent_worktree_path(home, "agent-1", Some("Review Fixes"), "Repo Agent"),
             std::path::PathBuf::from("C:/wardian")
                 .join("agents")
                 .join("agent-1")
@@ -4004,6 +4318,373 @@ mod tests {
             worktrees[0].member_agent_ids,
             vec!["agent-1".to_string(), "agent-2".to_string()]
         );
+    }
+
+    #[test]
+    fn collect_agent_worktrees_includes_unassigned_git_worktrees_under_agent_roots() {
+        let home = tempfile::tempdir().expect("home");
+        let wardian_home = home.path();
+        let discovered_path = wardian_home
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        std::fs::create_dir_all(&discovered_path).expect("create discovered worktree");
+
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            session_name: "agent-one".to_string(),
+            folder: "/repo".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/repo".to_string(),
+            worktree_folder: normalize_workspace_record_path(&discovered_path),
+        }];
+
+        let worktrees = collect_agent_worktrees_with_discovered(&configs, wardian_home, discovered);
+
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].name, "manual-review");
+        assert_eq!(worktrees[0].source_folder, "/repo");
+        assert_eq!(
+            worktrees[0].worktree_folder,
+            normalize_existing_workspace_record_path(&discovered_path)
+        );
+        assert!(worktrees[0].member_agent_ids.is_empty());
+        assert!(worktrees[0].can_delete);
+    }
+
+    #[test]
+    fn collect_agent_worktrees_includes_external_git_worktrees_without_delete_capability() {
+        let home = tempfile::tempdir().expect("home");
+        let outside = home.path().join("outside-review");
+        std::fs::create_dir_all(&outside).expect("create outside worktree");
+
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: "/repo".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/repo".to_string(),
+            worktree_folder: normalize_workspace_record_path(&outside),
+        }];
+
+        let worktrees = collect_agent_worktrees_with_discovered(&configs, home.path(), discovered);
+
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].name, "outside-review");
+        assert_eq!(
+            worktrees[0].worktree_folder,
+            normalize_existing_workspace_record_path(&outside)
+        );
+        assert!(worktrees[0].member_agent_ids.is_empty());
+        assert!(!worktrees[0].can_delete);
+    }
+
+    #[test]
+    fn agent_worktree_root_match_handles_windows_verbatim_home_prefix() {
+        let home = std::path::Path::new(r"\\?\D:\a\Wardian\wardian-home");
+        let worktree = "D:/a/Wardian/wardian-home/agents/agent-1/worktrees/manual-review";
+
+        assert!(is_under_wardian_agent_worktree_root(home, worktree));
+    }
+
+    #[test]
+    fn agent_worktree_root_match_handles_windows_msys_worktree_path() {
+        let home = std::path::Path::new(r"D:\a\Wardian\wardian-home");
+        let worktree = "/d/a/Wardian/wardian-home/agents/agent-1/worktrees/manual-review";
+
+        if cfg!(windows) {
+            assert!(is_under_wardian_agent_worktree_root(home, worktree));
+        } else {
+            assert!(!is_under_wardian_agent_worktree_root(home, worktree));
+        }
+    }
+
+    #[test]
+    fn workspace_path_match_handles_windows_source_variants() {
+        let left = r"\\?\D:\a\Wardian\repo";
+        let right = "d:/a/Wardian/repo/";
+
+        if cfg!(windows) {
+            assert!(workspace_paths_match(left, right));
+        } else {
+            assert!(!workspace_paths_match(left, right));
+        }
+    }
+
+    #[test]
+    fn discover_git_worktrees_reads_git_registry_for_known_sources() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cwd = repo.to_str().unwrap();
+        crate::commands::git::run_git(cwd, &["init"]).expect("git init");
+        crate::commands::git::run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        crate::commands::git::run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        std::fs::write(repo.join("README.md"), "initial\n").expect("readme");
+        crate::commands::git::run_git(cwd, &["add", "README.md"]).unwrap();
+        crate::commands::git::run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        let wardian_home = temp.path().join("wardian-home");
+        let worktree = wardian_home
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        let external_worktree = temp.path().join("external-review");
+        crate::commands::git::create_worktree_with_build_caches(
+            &repo,
+            &worktree,
+            "feat/manual-review",
+        )
+        .expect("create git worktree");
+        crate::commands::git::create_worktree_with_build_caches(
+            &repo,
+            &external_worktree,
+            "feat/external-review",
+        )
+        .expect("create external git worktree");
+
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: normalize_workspace_record_path(&repo),
+            ..Default::default()
+        }];
+
+        let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+
+        let raw_worktree_list =
+            crate::commands::git::run_git(cwd, &["worktree", "list", "--porcelain"])
+                .unwrap_or_else(|error| format!("<git worktree list failed: {error}>"));
+        let listed_worktrees = crate::commands::git::list_git_worktrees(&repo)
+            .map(|worktrees| {
+                worktrees
+                    .into_iter()
+                    .map(|worktree| {
+                        let normalized = normalize_discovered_git_worktree_path(&worktree.path);
+                        format!(
+                            "path={:?}, normalized={normalized:?}, under_root={}",
+                            worktree.path,
+                            is_under_wardian_agent_worktree_root(&wardian_home, &normalized)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|error| vec![format!("<list_git_worktrees failed: {error}>")]);
+
+        assert_eq!(
+            discovered.len(),
+            2,
+            "repo={}, wardian_home={}, worktree={}, external_worktree={}, raw_worktree_list={raw_worktree_list:?}, listed_worktrees={listed_worktrees:#?}",
+            normalize_workspace_record_path(&repo),
+            normalize_workspace_record_path(&wardian_home),
+            normalize_workspace_record_path(&worktree),
+            normalize_workspace_record_path(&external_worktree)
+        );
+        assert!(discovered
+            .iter()
+            .all(|entry| entry.source_folder == normalize_existing_workspace_record_path(&repo)));
+        assert!(discovered.iter().any(
+            |entry| entry.worktree_folder == normalize_discovered_git_worktree_path(&worktree)
+        ));
+        assert!(discovered.iter().any(|entry| entry.worktree_folder
+            == normalize_discovered_git_worktree_path(&external_worktree)));
+        assert!(!discovered.iter().any(|entry| workspace_paths_match(
+            &entry.worktree_folder,
+            &normalize_workspace_record_path(&repo)
+        )));
+    }
+
+    #[test]
+    fn existing_non_git_worktree_folder_is_rejected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        let existing = temp
+            .path()
+            .join("wardian-home")
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("review");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&existing).unwrap();
+        let cwd = repo.to_str().unwrap();
+        crate::commands::git::run_git(cwd, &["init"]).unwrap();
+
+        let err = ensure_existing_worktree_is_git_registered(&repo, &existing)
+            .expect_err("existing non-git worktree should be rejected");
+
+        assert!(err.contains("not registered with Git"));
+    }
+
+    #[test]
+    fn assignable_worktree_validation_rejects_stale_non_git_assignment() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        let stale_worktree = temp
+            .path()
+            .join("wardian-home")
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&stale_worktree).unwrap();
+        let cwd = repo.to_str().unwrap();
+        crate::commands::git::run_git(cwd, &["init"]).unwrap();
+
+        let managed_worktree = AgentWorktreeSummary {
+            id: normalize_existing_workspace_record_path(&stale_worktree),
+            name: "manual-review".to_string(),
+            source_folder: normalize_existing_workspace_record_path(&repo),
+            worktree_folder: normalize_existing_workspace_record_path(&stale_worktree),
+            member_agent_ids: vec!["agent-2".to_string()],
+            can_delete: false,
+        };
+
+        let err = validate_assignable_worktree_for_agent(
+            &normalize_workspace_record_path(&repo),
+            &managed_worktree,
+            &stale_worktree,
+        )
+        .expect_err("stale non-git assignment should not be assignable");
+
+        assert!(err.contains("not registered with Git"));
+    }
+
+    #[test]
+    fn deletable_worktree_validation_rejects_assigned_worktree() {
+        let home = tempfile::tempdir().expect("home");
+        let managed_worktree = AgentWorktreeSummary {
+            id: normalize_workspace_record_path(
+                &home
+                    .path()
+                    .join("agents")
+                    .join("agent-1")
+                    .join("worktrees")
+                    .join("review"),
+            ),
+            name: "review".to_string(),
+            source_folder: normalize_workspace_record_path(std::path::Path::new("C:/repo")),
+            worktree_folder: normalize_workspace_record_path(
+                &home
+                    .path()
+                    .join("agents")
+                    .join("agent-1")
+                    .join("worktrees")
+                    .join("review"),
+            ),
+            member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
+        };
+
+        let err = validate_deletable_agent_worktree(home.path(), &managed_worktree)
+            .expect_err("assigned worktree should not be deletable");
+
+        assert!(err.contains("assigned"));
+    }
+
+    #[test]
+    fn deletable_worktree_validation_rejects_paths_outside_wardian_root() {
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside");
+        let managed_worktree = AgentWorktreeSummary {
+            id: normalize_workspace_record_path(outside.path()),
+            name: "outside".to_string(),
+            source_folder: normalize_workspace_record_path(std::path::Path::new("C:/repo")),
+            worktree_folder: normalize_workspace_record_path(outside.path()),
+            member_agent_ids: Vec::new(),
+            can_delete: false,
+        };
+
+        let err = validate_deletable_agent_worktree(home.path(), &managed_worktree)
+            .expect_err("outside worktree should not be deletable");
+
+        assert!(err.contains("Wardian agent worktree"));
+    }
+
+    #[test]
+    fn deletable_worktree_validation_rejects_source_checkout_path() {
+        let home = tempfile::tempdir().expect("home");
+        let source = home
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("review");
+        std::fs::create_dir_all(&source).expect("source path");
+        let source_folder = normalize_workspace_record_path(&source);
+        let managed_worktree = AgentWorktreeSummary {
+            id: source_folder.clone(),
+            name: "review".to_string(),
+            source_folder: source_folder.clone(),
+            worktree_folder: source_folder,
+            member_agent_ids: Vec::new(),
+            can_delete: true,
+        };
+
+        let err = validate_deletable_agent_worktree(home.path(), &managed_worktree)
+            .expect_err("source checkout should not be deletable as a worktree");
+
+        assert!(err.contains("source checkout"));
+    }
+
+    #[test]
+    fn find_assignable_worktree_matches_discovered_unassigned_worktree() {
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let worktree_folder = normalize_workspace_record_path(&worktree);
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: "/repo".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/repo".to_string(),
+            worktree_folder: worktree_folder.clone(),
+        }];
+
+        let found = find_assignable_worktree(&configs, home.path(), &worktree_folder, discovered)
+            .expect("discovered worktree should be assignable");
+
+        assert_eq!(found.name, "manual-review");
+        assert!(found.member_agent_ids.is_empty());
+        assert!(found.can_delete);
+    }
+
+    #[test]
+    fn find_assignable_worktree_matches_external_discovered_worktree_but_marks_not_deletable() {
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside");
+        let worktree_folder = normalize_workspace_record_path(outside.path());
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: "/repo".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/repo".to_string(),
+            worktree_folder: worktree_folder.clone(),
+        }];
+
+        let found = find_assignable_worktree(&configs, home.path(), &worktree_folder, discovered)
+            .expect("external discovered worktree should be assignable");
+
+        assert_eq!(
+            found.name,
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(found.member_agent_ids.is_empty());
+        assert!(!found.can_delete);
     }
 
     #[test]

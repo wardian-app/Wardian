@@ -201,6 +201,7 @@ export interface AgentWorktreeSummary {
     source_folder: string;
     worktree_folder: string;
     member_agent_ids: string[];
+    can_delete: boolean;
 }
 
 export * from "./workflow";

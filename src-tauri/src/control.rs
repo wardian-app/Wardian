@@ -459,6 +459,7 @@ fn core_worktree_summary(
         source_folder: summary.source_folder,
         worktree_folder: summary.worktree_folder,
         member_agent_ids: summary.member_agent_ids,
+        can_delete: summary.can_delete,
     }
 }
 
@@ -481,11 +482,36 @@ fn worktree_by_folder(
     worktrees: &[AgentWorktreeSummary],
     folder: &str,
 ) -> Option<AgentWorktreeSummary> {
-    let normalized = folder.trim().replace('\\', "/");
+    let normalized = normalize_worktree_lookup_path(folder);
     worktrees
         .iter()
-        .find(|worktree| worktree.worktree_folder == normalized || worktree.id == normalized)
+        .find(|worktree| {
+            normalize_worktree_lookup_path(&worktree.worktree_folder) == normalized
+                || normalize_worktree_lookup_path(&worktree.id) == normalized
+        })
         .cloned()
+}
+
+fn normalize_worktree_lookup_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    let normalized = if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{stripped}")
+    } else if let Some(stripped) = normalized.strip_prefix("//?/") {
+        stripped.to_string()
+    } else {
+        normalized
+    };
+    let normalized = normalized.trim_end_matches('/').to_string();
+
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 async fn handle_agent_worktree_enable(
@@ -3369,11 +3395,32 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
         }];
 
         let matched = worktree_by_folder(&worktrees, "C:\\repo\\worktrees\\review").unwrap();
 
         assert_eq!(matched.id, "C:/repo/worktrees/review");
+    }
+
+    #[test]
+    fn worktree_by_folder_matches_windows_case_and_trailing_slash_variants() {
+        let worktrees = vec![AgentWorktreeSummary {
+            id: "C:/repo/worktrees/review".to_string(),
+            name: "review".to_string(),
+            source_folder: "C:/repo".to_string(),
+            worktree_folder: "C:/repo/worktrees/review".to_string(),
+            member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
+        }];
+
+        let matched = worktree_by_folder(&worktrees, "c:\\repo\\worktrees\\review\\");
+
+        if cfg!(windows) {
+            assert!(matched.is_some());
+        } else {
+            assert!(matched.is_none());
+        }
     }
 
     #[test]
@@ -3384,6 +3431,7 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string(), "agent-2".to_string()],
+            can_delete: false,
         }];
 
         assert_eq!(

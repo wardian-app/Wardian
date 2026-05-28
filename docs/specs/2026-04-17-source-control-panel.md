@@ -21,7 +21,7 @@ A new `"git"` tab is added to the sidebar icon rail, represented by a commit-gra
 Layout matches VS Code Source Control conventions:
 - **Branch bar**: shows current branch name
 - **Publish behavior**: when the selected branch has no upstream, the push action publishes it with `git push --set-upstream origin <branch>`, matching VS Code's one-click publish flow.
-- **Worktree action row**: action-first UX - `Create Worktree` when inactive; clicking it expands the row into an inline name field with check/cancel controls. Enabling calls `enable_agent_worktree` with the entered name, which creates `<wardian-home>/agents/<session-id>/worktrees/<slug>`, configures build-cache redirects, records the original workspace in `git_worktree_source`, records the worktree in `git_worktree_folder`, and moves `folder` to that worktree. Joining an existing shared worktree calls `assign_agent_worktree`. The frontend follows both actions with `clear_agent_session`, so providers start fresh in the new path instead of resuming across a cwd change.
+- **Worktree action row**: action-first UX - `Create Worktree` when inactive; clicking it expands the row into an inline name field with check/cancel controls. Enabling calls `enable_agent_worktree` with the entered name, which creates `<wardian-home>/agents/<session-id>/worktrees/<slug>`, configures build-cache redirects, records the original workspace in `git_worktree_source`, records the worktree in `git_worktree_folder`, and moves `folder` to that worktree. Joining an existing shared worktree calls `assign_agent_worktree`. Unassigned available worktrees show a delete control that calls `delete_agent_worktree` after confirmation. The frontend follows create/join actions with `clear_agent_session`, so providers start fresh in the new path instead of resuming across a cwd change.
 - **Commit box at top**: text area + commit button with checkmark icon
 - **File sections**: "Staged Changes" and "Changes" with pill count badges; files show status letter (M/A/D/?) on the right and hover actions (stage/unstage/discard) in the middle
 - **Diff view**: modal overlay with line-level colorization using `color-mix(in srgb, var(--color-wardian-*), transparent 90%)`
@@ -55,6 +55,19 @@ Directories inherit amber coloring if any descendant has changes. When git is un
 ### AgentConfig: worktree fields
 
 `git_worktree?: boolean`, `git_worktree_source?: string`, and `git_worktree_folder?: string` are present in `AgentConfig` in both TypeScript (`src/types/index.ts`) and Rust (`models/agent_config.rs`). These fields are optional and default cleanly for older saved configs. In worktree mode, `folder` is the provider launch workspace and is set to the active worktree; `git_worktree_source` records the original checkout so removing the worktree can return the agent to the source workspace.
+
+### Git Worktree Registry Contract
+
+Git is the authority for worktree existence. Wardian assignment fields (`git_worktree`, `git_worktree_source`, and `git_worktree_folder`) record which agent is using a worktree, but they do not create a valid Git worktree by themselves.
+
+`list_agent_worktrees` returns the union of:
+
+- Wardian-assigned worktrees from agent config.
+- Git-registered worktrees for known source workspaces, including external worktrees that were created outside Wardian.
+
+`enable_agent_worktree` must verify that any existing target folder is already present in `git worktree list --porcelain` for the source checkout before saving Wardian assignment state.
+
+Disabling or leaving a worktree only removes Wardian assignment metadata. It does not delete the Git worktree. Physical deletion is a separate cleanup flow: `delete_agent_worktree` accepts only unassigned Git-registered worktrees under Wardian's agent worktree root, rejects assigned or external paths, removes Wardian-generated build-cache redirects, and uses non-force `git worktree remove` so dirty worktrees fail safely. External Git worktrees remain joinable from Wardian but are deleted with normal Git tooling.
 
 ## Consequences
 
