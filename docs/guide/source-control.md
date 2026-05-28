@@ -18,7 +18,7 @@ At the top, Wardian shows:
 - ahead/behind indicators
 - pull and push actions
 
-This is a quick sync layer for checking divergence and moving changes without leaving the app.
+This is a quick sync layer for checking divergence and moving changes without leaving the app. If the selected branch has not been published yet, the push action publishes it to `origin` and sets the upstream branch.
 
 ## File Sections
 
@@ -35,7 +35,7 @@ Available actions include:
 - discard tracked edits
 - open file diff
 
-Clicking a file opens an inline diff modal with colored additions, deletions, and hunk markers.
+Clicking a file opens an inline diff modal with colored additions, deletions, and hunk markers. Untracked files show a new-file diff so you can inspect them before staging.
 
 ## Commit Flow
 
@@ -44,10 +44,12 @@ Use the commit box to enter a message, then commit:
 - button: **Commit**
 - shortcut: `Ctrl+Enter` (or `Cmd+Enter` on macOS)
 
-The commit action is enabled only when:
+The commit action is enabled when:
 
 - there is a commit message, and
-- at least one file is staged
+- at least one file is staged or unstaged
+
+If there are only unstaged changes, Wardian stages them before creating the commit.
 
 ## History
 

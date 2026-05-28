@@ -181,6 +181,8 @@ export interface GitFileEntry {
 
 export interface GitStatusResult {
     branch: string;
+    upstream: string | null;
+    has_upstream: boolean;
     files: GitFileEntry[];
     ahead: number;
     behind: number;

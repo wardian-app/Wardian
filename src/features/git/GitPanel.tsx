@@ -8,6 +8,7 @@ import { GitDiffView } from "./GitDiffView";
 import { useConfirm } from "../../components/ConfirmDialog";
 
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
+const GIT_STATUS_POLL_INTERVAL_MS = 3000;
 
 interface GitPanelProps {
   selectedAgentIds: Set<string>;
@@ -27,6 +28,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
   const [diffContent, setDiffContent] = useState<string | null>(null);
   const [diffFilePath, setDiffFilePath] = useState<string>("");
@@ -114,6 +116,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setHistory([]);
       setHistoryError(null);
       setError(null);
+      setOperationError(null);
       setRootPath(null);
 
       if (!selectedAgentId) {
@@ -165,6 +168,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
     refreshStatus();
     refreshHistory();
+    const pollId = window.setInterval(() => {
+      void refreshStatus();
+    }, GIT_STATUS_POLL_INTERVAL_MS);
 
     invoke("git_watch", { cwd: rootPath }).catch(() => {});
 
@@ -176,6 +182,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     });
 
     return () => {
+      window.clearInterval(pollId);
       invoke("git_unwatch", { cwd: rootPath }).catch(() => {});
       unlistenPromise.then((fn) => fn());
     };
@@ -239,43 +246,47 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   // File operations
   const handleStage = async (path: string) => {
     if (!rootPath) return;
+    setOperationError(null);
     try {
       await invoke("git_stage", { cwd: rootPath, paths: [path] });
       await refreshStatus();
     } catch (err) {
-      console.error("Stage failed:", err);
+      setOperationError(formatError(err));
     }
   };
 
   const handleUnstage = async (path: string) => {
     if (!rootPath) return;
+    setOperationError(null);
     try {
       await invoke("git_unstage", { cwd: rootPath, paths: [path] });
       await refreshStatus();
     } catch (err) {
-      console.error("Unstage failed:", err);
+      setOperationError(formatError(err));
     }
   };
 
   const handleDiscard = async (path: string) => {
     if (!rootPath) return;
     if (!(await confirm(`Discard changes to ${path}?`))) return;
+    setOperationError(null);
     try {
       await invoke("git_discard_changes", { cwd: rootPath, paths: [path] });
       await refreshStatus();
     } catch (err) {
-      console.error("Discard failed:", err);
+      setOperationError(formatError(err));
     }
   };
 
   const handleDiff = async (path: string, staged: boolean) => {
     if (!rootPath) return;
+    setOperationError(null);
     try {
       const diff = await invoke<string>("git_diff_file", { cwd: rootPath, path, staged });
       setDiffContent(diff);
       setDiffFilePath(path);
     } catch (err) {
-      console.error("Diff failed:", err);
+      setOperationError(formatError(err));
     }
   };
 
@@ -284,11 +295,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     if (!rootPath || !status) return;
     const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
     if (unstaged.length === 0) return;
+    setOperationError(null);
     try {
       await invoke("git_stage", { cwd: rootPath, paths: unstaged });
       await refreshStatus();
     } catch (err) {
-      console.error("Stage all failed:", err);
+      setOperationError(formatError(err));
     }
   };
 
@@ -296,25 +308,31 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     if (!rootPath || !status) return;
     const staged = status.files.filter((f) => f.is_staged).map((f) => f.path);
     if (staged.length === 0) return;
+    setOperationError(null);
     try {
       await invoke("git_unstage", { cwd: rootPath, paths: staged });
       await refreshStatus();
     } catch (err) {
-      console.error("Unstage all failed:", err);
+      setOperationError(formatError(err));
     }
   };
 
   // Commit
   const handleCommit = async () => {
-    if (!rootPath || !commitMsg.trim()) return;
+    if (!rootPath || !commitMsg.trim() || !status) return;
+    const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
     setLoading(true);
+    setOperationError(null);
     try {
+      if (!hasStagedFiles && unstaged.length > 0) {
+        await invoke("git_stage", { cwd: rootPath, paths: unstaged });
+      }
       await invoke("git_commit", { cwd: rootPath, message: commitMsg.trim() });
       setCommitMsg("");
       await refreshStatus();
       await refreshHistory();
     } catch (err) {
-      console.error("Commit failed:", err);
+      setOperationError(formatError(err));
     } finally {
       setLoading(false);
     }
@@ -410,11 +428,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const handlePull = async () => {
     if (!rootPath) return;
     setSyncing(true);
+    setOperationError(null);
     try {
       await invoke<string>("git_pull", { cwd: rootPath });
       await refreshStatus();
     } catch (err) {
-      console.error("Pull failed:", err);
+      setOperationError(formatError(err));
     } finally {
       setSyncing(false);
     }
@@ -423,11 +442,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const handlePush = async () => {
     if (!rootPath) return;
     setSyncing(true);
+    setOperationError(null);
     try {
       await invoke<string>("git_push", { cwd: rootPath });
       await refreshStatus();
     } catch (err) {
-      console.error("Push failed:", err);
+      setOperationError(formatError(err));
     } finally {
       setSyncing(false);
     }
@@ -490,6 +510,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const unstagedTracked = status.files.filter((f) => !f.is_staged && f.status !== "?");
   const untrackedFiles = status.files.filter((f) => !f.is_staged && f.status === "?");
   const hasStagedFiles = stagedFiles.length > 0;
+  const hasUnstagedFiles = unstagedTracked.length > 0 || untrackedFiles.length > 0;
+  const canCommit = commitMsg.trim().length > 0 && (hasStagedFiles || hasUnstagedFiles);
+  const pushTitle = status.has_upstream === false ? "Publish Branch" : "Push";
 
   return (
     <div className="flex flex-col h-full w-full relative">
@@ -523,13 +546,19 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           onClick={handlePush}
           disabled={syncing}
           className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-          title="Push"
+          title={pushTitle}
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
         </button>
       </div>
+
+      {operationError && (
+        <div className="mb-3 px-2 py-1.5 rounded border border-[color-mix(in_srgb,var(--color-wardian-error),transparent_60%)] bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_88%)] text-[11px] text-[var(--color-wardian-error)]">
+          {operationError}
+        </div>
+      )}
 
       {/* Worktree action row */}
       <div className="mb-3">
@@ -655,7 +684,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         />
         <button
           onClick={handleCommit}
-          disabled={loading || !commitMsg.trim() || !hasStagedFiles}
+          disabled={loading || !canCommit}
           className="w-full py-1.5 rounded text-xs font-bold transition-colors bg-[var(--color-wardian-accent)] text-black hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
