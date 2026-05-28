@@ -686,6 +686,8 @@ fn control_error(e: std::io::Error) -> CliError {
         .and_then(|inner| inner.downcast_ref::<live::WaitTargetNotFoundError>())
     {
         CliError::backend(ExitCode::NotFound, "not_found", wait_not_found.to_string())
+    } else if e.kind() == std::io::ErrorKind::TimedOut {
+        CliError::control_endpoint_timeout(e.to_string())
     } else if is_control_endpoint_unavailable(&e) {
         CliError::app_not_running()
     } else if let Some(endpoint_error) = e
@@ -761,9 +763,7 @@ fn parse_timeout(value: &str) -> Result<Duration, CliError> {
 fn is_control_endpoint_unavailable(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::TimedOut
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
     )
 }
 
@@ -990,6 +990,37 @@ mod tests {
         assert_eq!(cli_error.code, "not_found");
         assert_eq!(cli_error.code_i32(), 2);
         assert!(cli_error.message.contains("ghost"));
+    }
+
+    #[test]
+    fn control_error_reports_endpoint_timeout_separately_from_app_not_running() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Wardian control endpoint timed out",
+        );
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "control_endpoint_timeout");
+        assert_ne!(cli_error.code_i32(), ExitCode::AppNotRunning as i32);
+        assert!(cli_error.message.contains("timed out"));
+        assert!(cli_error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("overloaded")));
+    }
+
+    #[test]
+    fn control_error_still_maps_refused_endpoint_to_app_not_running() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "could not connect to Wardian control endpoint",
+        );
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "app_not_running");
+        assert_eq!(cli_error.code_i32(), ExitCode::AppNotRunning as i32);
     }
 
     #[test]
