@@ -4397,7 +4397,7 @@ mod tests {
         );
         assert_eq!(
             discovered[0].source_folder,
-            normalize_workspace_record_path(&repo)
+            normalize_existing_workspace_record_path(&repo)
         );
         assert_eq!(
             discovered[0].worktree_folder,
