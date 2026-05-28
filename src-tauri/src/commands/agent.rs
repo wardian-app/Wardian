@@ -1132,7 +1132,17 @@ async fn release_spawn_name_reservation(state: &AppState, session_name: &str) {
 }
 
 fn normalize_workspace_record_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    strip_windows_verbatim_prefix(path.to_string_lossy().replace('\\', "/"))
+}
+
+fn strip_windows_verbatim_prefix(path: String) -> String {
+    if let Some(stripped) = path.strip_prefix("//?/UNC/") {
+        return format!("//{stripped}");
+    }
+    if let Some(stripped) = path.strip_prefix("//?/") {
+        return stripped.to_string();
+    }
+    path
 }
 
 fn resolve_agent_worktree_path(
@@ -1315,7 +1325,17 @@ fn normalize_path_for_prefix_compare(path: &str) -> String {
 
     #[cfg(windows)]
     {
-        normalized.to_ascii_lowercase()
+        let normalized = normalized.to_ascii_lowercase();
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b'/'
+        {
+            let drive = bytes[1] as char;
+            return format!("{drive}:{}", &normalized[2..]);
+        }
+        normalized
     }
 
     #[cfg(not(windows))]
@@ -1397,7 +1417,7 @@ fn discover_git_worktrees_for_configs(
         };
 
         for worktree in worktrees {
-            let normalized = normalize_workspace_record_path(&worktree.path);
+            let normalized = normalize_discovered_git_worktree_path(&worktree.path);
             if !is_under_wardian_agent_worktree_root(wardian_home, &normalized) {
                 continue;
             }
@@ -1411,6 +1431,11 @@ fn discover_git_worktrees_for_configs(
     }
 
     discovered.into_values().collect()
+}
+
+fn normalize_discovered_git_worktree_path(path: &std::path::Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    normalize_workspace_record_path(&path)
 }
 
 fn ensure_existing_worktree_is_git_registered(
@@ -4241,6 +4266,18 @@ mod tests {
         let worktree = "D:/a/Wardian/wardian-home/agents/agent-1/worktrees/manual-review";
 
         assert!(is_under_wardian_agent_worktree_root(home, worktree));
+    }
+
+    #[test]
+    fn agent_worktree_root_match_handles_windows_msys_worktree_path() {
+        let home = std::path::Path::new(r"D:\a\Wardian\wardian-home");
+        let worktree = "/d/a/Wardian/wardian-home/agents/agent-1/worktrees/manual-review";
+
+        if cfg!(windows) {
+            assert!(is_under_wardian_agent_worktree_root(home, worktree));
+        } else {
+            assert!(!is_under_wardian_agent_worktree_root(home, worktree));
+        }
     }
 
     #[test]
