@@ -2871,11 +2871,13 @@ pub async fn list_agent_worktrees(
 ) -> Result<Vec<AgentWorktreeSummary>, String> {
     let wardian_home = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
-    let agents = state.agents.lock().await;
-    let configs = agents
-        .values()
-        .map(|agent| agent.config.lock().unwrap().clone())
-        .collect::<Vec<_>>();
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
     let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
     Ok(collect_agent_worktrees_with_discovered(
         &configs,
@@ -2902,16 +2904,19 @@ pub async fn assign_agent_worktree(
     let wardian_home = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
 
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    let configs = agents
-        .values()
-        .map(|agent| agent.config.lock().unwrap().clone())
-        .collect::<Vec<_>>();
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
     let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
     let managed_worktree =
         find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
-        .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
+            .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
     if let Some(agent) = agents.get_mut(&session_id) {
         {
             let mut config = agent.config.lock().unwrap();
