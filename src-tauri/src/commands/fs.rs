@@ -1,7 +1,20 @@
+use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use wardian_core::models::AgentConfig;
 use wardian_core::models::FileNode;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExternalEditorLaunchSettings {
+    pub external_editor: String,
+    pub external_editor_custom_executable: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalEditorLaunchSpec {
+    program: String,
+    args: Vec<String>,
+}
 
 fn resolve_agent_visible_workspace(config: &AgentConfig) -> String {
     if config.git_worktree == Some(true) {
@@ -125,6 +138,79 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub async fn open_in_external_editor(
+    path: String,
+    editor: ExternalEditorLaunchSettings,
+) -> Result<(), String> {
+    let launch = external_editor_launch(Path::new(&path), &editor)?;
+    std::process::Command::new(&launch.program)
+        .args(&launch.args)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn external_editor_launch(
+    path: &Path,
+    editor: &ExternalEditorLaunchSettings,
+) -> Result<ExternalEditorLaunchSpec, String> {
+    let path_arg = path.to_string_lossy().into_owned();
+    match editor.external_editor.trim() {
+        "vscode" => Ok(ExternalEditorLaunchSpec {
+            program: vscode_command().to_string(),
+            args: vec![path_arg],
+        }),
+        "custom" => {
+            let program = editor
+                .external_editor_custom_executable
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Custom editor executable is not configured.".to_string())?;
+            Ok(ExternalEditorLaunchSpec {
+                program: program.to_string(),
+                args: vec![path_arg],
+            })
+        }
+        _ => Ok(system_default_open_launch(path_arg)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn vscode_command() -> &'static str {
+    "code.cmd"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn vscode_command() -> &'static str {
+    "code"
+}
+
+#[cfg(target_os = "windows")]
+fn system_default_open_launch(path: String) -> ExternalEditorLaunchSpec {
+    ExternalEditorLaunchSpec {
+        program: "cmd".to_string(),
+        args: vec!["/C".to_string(), "start".to_string(), "".to_string(), path],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system_default_open_launch(path: String) -> ExternalEditorLaunchSpec {
+    ExternalEditorLaunchSpec {
+        program: "open".to_string(),
+        args: vec![path],
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn system_default_open_launch(path: String) -> ExternalEditorLaunchSpec {
+    ExternalEditorLaunchSpec {
+        program: "xdg-open".to_string(),
+        args: vec![path],
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn windows_explorer_args(path: &Path) -> Vec<String> {
     let normalized_path = path.to_string_lossy().replace('/', "\\");
@@ -201,5 +287,119 @@ mod tests {
         let args = windows_explorer_args(&dir_path);
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], dir_path.to_string_lossy().replace('/', "\\"));
+    }
+
+    #[test]
+    fn external_editor_launch_uses_system_default_by_default() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "system".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert!(launch.args.contains(&"/tmp/project/notes.md".to_string()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn external_editor_launch_uses_windows_start_for_system_default() {
+        let launch = external_editor_launch(
+            Path::new("C:/Users/Test Project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "system".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert_eq!(launch.program, "cmd");
+        assert_eq!(
+            launch.args,
+            vec![
+                "/C".to_string(),
+                "start".to_string(),
+                "".to_string(),
+                "C:/Users/Test Project/notes.md".to_string()
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn external_editor_launch_uses_macos_open_for_system_default() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "system".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert_eq!(launch.program, "open");
+        assert_eq!(launch.args, vec!["/tmp/project/notes.md".to_string()]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn external_editor_launch_uses_xdg_open_for_system_default() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "system".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert_eq!(launch.program, "xdg-open");
+        assert_eq!(launch.args, vec!["/tmp/project/notes.md".to_string()]);
+    }
+
+    #[test]
+    fn external_editor_launch_uses_vscode_command_when_selected() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "vscode".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert!(launch.program == "code" || launch.program == "code.cmd");
+        assert_eq!(launch.args, vec!["/tmp/project/notes.md".to_string()]);
+    }
+
+    #[test]
+    fn external_editor_launch_uses_custom_executable_when_selected() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "custom".to_string(),
+                external_editor_custom_executable: Some("/opt/editor/bin/editor".to_string()),
+            },
+        )
+        .expect("launch spec");
+
+        assert_eq!(launch.program, "/opt/editor/bin/editor");
+        assert_eq!(launch.args, vec!["/tmp/project/notes.md".to_string()]);
+    }
+
+    #[test]
+    fn external_editor_launch_rejects_custom_without_executable() {
+        let error = external_editor_launch(
+            Path::new("/tmp/project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "custom".to_string(),
+                external_editor_custom_executable: Some("   ".to_string()),
+            },
+        )
+        .expect_err("custom editor should require executable");
+
+        assert_eq!(error, "Custom editor executable is not configured.");
     }
 }

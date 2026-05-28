@@ -21,6 +21,10 @@ pub struct AppSettings {
     pub watchlist_new_agent_position: String,
     #[serde(default = "default_titlebar_telemetry_visible")]
     pub titlebar_telemetry_visible: bool,
+    #[serde(default = "default_external_editor")]
+    pub external_editor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_editor_custom_executable: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +43,10 @@ pub struct AppSettingsOverrides {
     pub watchlist_new_agent_position: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub titlebar_telemetry_visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_editor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_editor_custom_executable: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +75,8 @@ impl Default for AppSettings {
             grid_card_display_mode: default_grid_card_display_mode(),
             watchlist_new_agent_position: default_watchlist_new_agent_position(),
             titlebar_telemetry_visible: default_titlebar_telemetry_visible(),
+            external_editor: default_external_editor(),
+            external_editor_custom_executable: None,
         }
     }
 }
@@ -92,6 +102,10 @@ fn default_titlebar_telemetry_visible() -> bool {
         cfg!(debug_assertions),
         option_env!("WARDIAN_UPDATE_CHANNEL"),
     )
+}
+
+fn default_external_editor() -> String {
+    "system".to_string()
 }
 
 fn titlebar_telemetry_visible_default_for_build(
@@ -221,6 +235,10 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
         normalize_grid_card_display_mode(&settings.grid_card_display_mode);
     settings.watchlist_new_agent_position =
         normalize_watchlist_new_agent_position(&settings.watchlist_new_agent_position);
+    settings.external_editor = normalize_external_editor(&settings.external_editor);
+    settings.external_editor_custom_executable = settings
+        .external_editor_custom_executable
+        .and_then(|value| trim_to_option(&value));
     settings
 }
 
@@ -274,6 +292,14 @@ fn app_settings_from_overrides_for_build(
         titlebar_telemetry_visible: overrides.titlebar_telemetry_visible.unwrap_or_else(|| {
             titlebar_telemetry_visible_default_for_build(debug_build, update_channel)
         }),
+        external_editor: overrides
+            .external_editor
+            .clone()
+            .unwrap_or(defaults.external_editor),
+        external_editor_custom_executable: overrides
+            .external_editor_custom_executable
+            .clone()
+            .unwrap_or(defaults.external_editor_custom_executable),
     })
 }
 
@@ -291,6 +317,12 @@ fn normalize_app_overrides(mut overrides: AppSettingsOverrides) -> AppSettingsOv
     overrides.watchlist_new_agent_position = overrides
         .watchlist_new_agent_position
         .map(|position| normalize_watchlist_new_agent_position(&position));
+    overrides.external_editor = overrides
+        .external_editor
+        .map(|editor| normalize_external_editor(&editor));
+    overrides.external_editor_custom_executable = overrides
+        .external_editor_custom_executable
+        .map(|executable| executable.and_then(|value| trim_to_option(&value)));
     overrides
 }
 
@@ -315,6 +347,11 @@ fn app_overrides_from_settings(
         titlebar_telemetry_visible: (settings.titlebar_telemetry_visible
             != defaults.titlebar_telemetry_visible)
             .then_some(settings.titlebar_telemetry_visible),
+        external_editor: (settings.external_editor != defaults.external_editor)
+            .then(|| settings.external_editor.clone()),
+        external_editor_custom_executable: (settings.external_editor_custom_executable
+            != defaults.external_editor_custom_executable)
+            .then(|| settings.external_editor_custom_executable.clone()),
     }
 }
 
@@ -337,6 +374,14 @@ fn normalize_watchlist_new_agent_position(value: &str) -> String {
     match value.trim() {
         "bottom" => "bottom".to_string(),
         _ => "top".to_string(),
+    }
+}
+
+fn normalize_external_editor(value: &str) -> String {
+    match value.trim() {
+        "vscode" => "vscode".to_string(),
+        "custom" => "custom".to_string(),
+        _ => "system".to_string(),
     }
 }
 
@@ -371,6 +416,8 @@ mod tests {
         assert_eq!(settings.grid_card_display_mode, "terminal");
         assert_eq!(settings.watchlist_new_agent_position, "top");
         assert!(settings.titlebar_telemetry_visible);
+        assert_eq!(settings.external_editor, "system");
+        assert_eq!(settings.external_editor_custom_executable, None);
     }
 
     #[test]
@@ -432,6 +479,8 @@ mod tests {
             grid_card_display_mode: "chat".to_string(),
             watchlist_new_agent_position: "top".to_string(),
             titlebar_telemetry_visible: true,
+            external_editor: "custom".to_string(),
+            external_editor_custom_executable: Some("/opt/editor/bin/editor".to_string()),
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -455,6 +504,8 @@ mod tests {
             grid_card_display_mode: "terminal".to_string(),
             watchlist_new_agent_position: "top".to_string(),
             titlebar_telemetry_visible: true,
+            external_editor: "system".to_string(),
+            external_editor_custom_executable: None,
         };
 
         save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -479,7 +530,8 @@ mod tests {
               "schema_version": 2,
               "overrides": {
                 "terminal_font_family": "JetBrains Mono, monospace",
-                "watchlist_new_agent_position": "bottom"
+                "watchlist_new_agent_position": "bottom",
+                "external_editor": "vscode"
               }
             }"#,
         )
@@ -496,6 +548,7 @@ mod tests {
         );
         assert_eq!(loaded.grid_card_display_mode, "terminal");
         assert_eq!(loaded.watchlist_new_agent_position, "bottom");
+        assert_eq!(loaded.external_editor, "vscode");
     }
 
     #[test]
@@ -511,7 +564,9 @@ mod tests {
               "terminal_font_size": 4,
               "terminal_font_family": "   ",
               "grid_card_display_mode": "cards",
-              "watchlist_new_agent_position": "middle"
+              "watchlist_new_agent_position": "middle",
+              "external_editor": "emacs",
+              "external_editor_custom_executable": "   "
             }"#,
         )
         .expect("write settings");
@@ -524,5 +579,7 @@ mod tests {
         assert_eq!(loaded.terminal_font_family, None);
         assert_eq!(loaded.grid_card_display_mode, "terminal");
         assert_eq!(loaded.watchlist_new_agent_position, "top");
+        assert_eq!(loaded.external_editor, "system");
+        assert_eq!(loaded.external_editor_custom_executable, None);
     }
 }

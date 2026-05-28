@@ -10,6 +10,7 @@ export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'n
 export type DefaultProviderSetting = 'auto' | 'claude' | 'codex' | 'gemini' | 'antigravity' | 'opencode';
 export type AppThemeSetting = 'dark' | 'light' | 'system';
 export type WatchlistNewAgentPosition = 'top' | 'bottom';
+export type ExternalEditorSetting = 'system' | 'vscode' | 'custom';
 
 export interface CodexRuntimePolicy {
   sandbox_mode: CodexSandboxMode;
@@ -49,6 +50,8 @@ export interface AppSettings {
   grid_card_display_mode: 'terminal' | 'chat';
   watchlist_new_agent_position: WatchlistNewAgentPosition;
   titlebar_telemetry_visible: boolean;
+  external_editor: ExternalEditorSetting;
+  external_editor_custom_executable: string | null;
 }
 
 export interface AppSettingsOverrides {
@@ -59,6 +62,8 @@ export interface AppSettingsOverrides {
   grid_card_display_mode?: 'terminal' | 'chat';
   watchlist_new_agent_position?: WatchlistNewAgentPosition;
   titlebar_telemetry_visible?: boolean;
+  external_editor?: ExternalEditorSetting;
+  external_editor_custom_executable?: string | null;
 }
 
 export interface SettingsDocument<TSettings, TOverrides> {

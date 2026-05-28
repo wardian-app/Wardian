@@ -11,6 +11,7 @@ Use it when you need to inspect generated files, logs, prompt assets, or the sel
 - Browse the workspace for the agent selected in [Watchlists](./watchlists.md).
 - Inspect files after an agent reports completion in [Queue](./queue.md).
 - Open a quick preview before deciding whether to edit files in an external tool.
+- Open a file or folder in your configured local app or editor.
 - Reveal a file in the system file manager when you need native OS actions.
 
 ## Basic Workflow
@@ -18,7 +19,7 @@ Use it when you need to inspect generated files, logs, prompt assets, or the sel
 1. Select an agent in the right roster, or clear selection for global Wardian home browsing.
 2. Open the **Explorer** tab in the left sidebar.
 3. Expand folders to inspect files.
-4. Use preview, reveal, copy path, or delete from the file context menu.
+4. Use preview, open externally, reveal, copy path, or delete from the file context menu.
 5. Move to [Source Control](./source-control.md) when the selected root is a Git workspace and you need to review changes.
 
 ## Root Behavior
@@ -40,6 +41,7 @@ This allows you to manually browse common data, shared lineages, and global conf
 The Explorer supports standard right-click actions for rapid file management:
 
 - **Open Preview**: Opens a read-only plaintext viewer within Wardian for quick inspection of markdown, JSON, or log files.
+- **Open in External App**: Opens the selected file or folder using the configured Explorer editor preference. The default is the operating system's default app for that path. You can switch to VS Code or a custom executable in [Settings](./settings.md).
 - **Reveal in System Explorer**: Opens your OS file manager (Windows Explorer or macOS Finder) directly to the selected file or folder.
 - **Copy Path**: Copies the absolute path of the file to your clipboard.
 - **Delete**: Permanently removes the file or directory from your disk (requires confirmation).
