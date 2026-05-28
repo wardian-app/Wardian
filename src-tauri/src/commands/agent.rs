@@ -1280,7 +1280,7 @@ fn collect_agent_worktrees(configs: &[AgentConfig]) -> Vec<AgentWorktreeSummary>
             continue;
         }
 
-        let normalized_worktree = worktree_folder.replace('\\', "/");
+        let normalized_worktree = normalize_maybe_existing_workspace_record_path(worktree_folder);
         let entry = summaries
             .entry(normalized_worktree.clone())
             .or_insert_with(|| {
@@ -1299,7 +1299,7 @@ fn collect_agent_worktrees(configs: &[AgentConfig]) -> Vec<AgentWorktreeSummary>
                 AgentWorktreeSummary {
                     id: normalized_worktree.clone(),
                     name,
-                    source_folder: source_folder.replace('\\', "/"),
+                    source_folder: normalize_maybe_existing_workspace_record_path(source_folder),
                     worktree_folder: normalized_worktree.clone(),
                     member_agent_ids: Vec::new(),
                 }
@@ -1366,14 +1366,14 @@ fn source_folder_for_config(config: &AgentConfig) -> Option<String> {
         .map(str::trim)
         .filter(|source| !source.is_empty())
     {
-        return Some(source.replace('\\', "/"));
+        return Some(normalize_maybe_existing_workspace_record_path(source));
     }
 
     let folder = config.folder.trim();
     if folder.is_empty() {
         None
     } else {
-        Some(folder.replace('\\', "/"))
+        Some(normalize_maybe_existing_workspace_record_path(folder))
     }
 }
 
@@ -1406,7 +1406,9 @@ fn collect_agent_worktrees_with_discovered(
                 AgentWorktreeSummary {
                     id: normalized_worktree.clone(),
                     name,
-                    source_folder: worktree.source_folder.replace('\\', "/"),
+                    source_folder: normalize_maybe_existing_workspace_record_path(
+                        &worktree.source_folder,
+                    ),
                     worktree_folder: normalized_worktree,
                     member_agent_ids: Vec::new(),
                 }
@@ -1469,16 +1471,39 @@ fn ensure_existing_worktree_is_git_registered(
     Ok(())
 }
 
+fn workspace_paths_match(left: &str, right: &str) -> bool {
+    normalize_path_for_prefix_compare(&normalize_maybe_existing_workspace_record_path(left))
+        == normalize_path_for_prefix_compare(&normalize_maybe_existing_workspace_record_path(right))
+}
+
 fn find_assignable_worktree(
     configs: &[AgentConfig],
     wardian_home: &std::path::Path,
     worktree_folder: &str,
     discovered: Vec<DiscoveredGitWorktree>,
 ) -> Option<AgentWorktreeSummary> {
-    let normalized_worktree_folder = normalize_maybe_existing_workspace_record_path(worktree_folder);
+    let normalized_worktree_folder =
+        normalize_maybe_existing_workspace_record_path(worktree_folder);
     collect_agent_worktrees_with_discovered(configs, wardian_home, discovered)
         .into_iter()
         .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
+}
+
+fn validate_assignable_worktree_for_agent(
+    source_folder: &str,
+    managed_worktree: &AgentWorktreeSummary,
+    worktree_path: &std::path::Path,
+) -> Result<(), String> {
+    if !workspace_paths_match(source_folder, &managed_worktree.source_folder) {
+        return Err(
+            "Cannot assign an agent to a worktree from another source workspace".to_string(),
+        );
+    }
+
+    ensure_existing_worktree_is_git_registered(
+        std::path::Path::new(&managed_worktree.source_folder),
+        worktree_path,
+    )
 }
 
 fn assign_worktree_config(config: &mut AgentConfig, worktree_folder: &str) -> Result<(), String> {
@@ -2984,13 +3009,12 @@ pub async fn assign_agent_worktree(
                 .map(str::trim)
                 .filter(|folder| !folder.is_empty())
                 .unwrap_or(config.folder.trim())
-                .replace('\\', "/");
-            if source_folder != managed_worktree.source_folder {
-                return Err(
-                    "Cannot assign an agent to a worktree from another source workspace"
-                        .to_string(),
-                );
-            }
+                .to_string();
+            validate_assignable_worktree_for_agent(
+                &source_folder,
+                &managed_worktree,
+                worktree_path,
+            )?;
             assign_worktree_config(&mut config, &worktree_folder)?;
         }
         manager::save_state(&app, &agents, &order);
@@ -3064,14 +3088,14 @@ mod tests {
         normalize_existing_workspace_record_path, normalize_spawn_folder,
         normalize_workspace_record_path, persisted_resume_session_for_provider,
         prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
-        prepare_resume_config,
-        prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
-        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
-        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        take_agent_runtime_for_termination, terminal_cleared_payload, AgentOrderPlacement,
-        CloneProfileCopyPlan, CloneProfileSelection, DiscoveredGitWorktree,
+        prepare_resume_config, prepare_resume_config_for_runtime,
+        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, reserve_spawn_session_name,
+        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
+        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
+        sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
+        validate_assignable_worktree_for_agent, workspace_paths_match, AgentOrderPlacement,
+        AgentWorktreeSummary, CloneProfileCopyPlan, CloneProfileSelection, DiscoveredGitWorktree,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -4299,6 +4323,18 @@ mod tests {
     }
 
     #[test]
+    fn workspace_path_match_handles_windows_source_variants() {
+        let left = r"\\?\D:\a\Wardian\repo";
+        let right = "d:/a/Wardian/repo/";
+
+        if cfg!(windows) {
+            assert!(workspace_paths_match(left, right));
+        } else {
+            assert!(!workspace_paths_match(left, right));
+        }
+    }
+
+    #[test]
     fn discover_git_worktrees_reads_git_registry_for_known_sources() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repo = temp.path().join("repo");
@@ -4387,6 +4423,40 @@ mod tests {
 
         let err = ensure_existing_worktree_is_git_registered(&repo, &existing)
             .expect_err("existing non-git worktree should be rejected");
+
+        assert!(err.contains("not registered with Git"));
+    }
+
+    #[test]
+    fn assignable_worktree_validation_rejects_stale_non_git_assignment() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        let stale_worktree = temp
+            .path()
+            .join("wardian-home")
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&stale_worktree).unwrap();
+        let cwd = repo.to_str().unwrap();
+        crate::commands::git::run_git(cwd, &["init"]).unwrap();
+
+        let managed_worktree = AgentWorktreeSummary {
+            id: normalize_existing_workspace_record_path(&stale_worktree),
+            name: "manual-review".to_string(),
+            source_folder: normalize_existing_workspace_record_path(&repo),
+            worktree_folder: normalize_existing_workspace_record_path(&stale_worktree),
+            member_agent_ids: vec!["agent-2".to_string()],
+        };
+
+        let err = validate_assignable_worktree_for_agent(
+            &normalize_workspace_record_path(&repo),
+            &managed_worktree,
+            &stale_worktree,
+        )
+        .expect_err("stale non-git assignment should not be assignable");
 
         assert!(err.contains("not registered with Git"));
     }

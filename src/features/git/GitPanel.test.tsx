@@ -495,6 +495,30 @@ describe("GitPanel", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
 
+  it("shows join options when source paths differ only by Windows spelling", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "c:/repo/",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: [],
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel({ agentOverride: { folder: "C:\\repo" } });
+
+    expect(await screen.findByText("Move to repo-worktree")).toBeInTheDocument();
+  });
+
   it("shows discovered unassigned worktrees as join options", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo";

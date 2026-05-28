@@ -10,6 +10,16 @@ import { useConfirm } from "../../components/ConfirmDialog";
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
 const GIT_STATUS_POLL_INTERVAL_MS = 3000;
 
+const normalizeComparablePath = (path: string): string => {
+  const normalized = path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/\/\?\/UNC\//i, "//")
+    .replace(/^\/\/\?\//, "")
+    .replace(/\/+$/g, "");
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+};
+
 interface GitPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
@@ -65,7 +75,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     errorMessage.toLowerCase().includes("not a git repository") ||
     errorMessage.toLowerCase().includes("not a git directory");
   const isWorktreeActive = selectedAgent?.git_worktree === true || (status?.branch?.startsWith("wardian/") ?? false);
-  const selectedSourceFolder = (selectedAgent?.git_worktree_source ?? selectedAgent?.folder ?? "").replace(/\\/g, "/");
+  const selectedSourceFolder = normalizeComparablePath(selectedAgent?.git_worktree_source ?? selectedAgent?.folder ?? "");
   const selectedRuntimeFolder = selectedAgent?.folder?.replace(/\\/g, "/") ?? rootPath ?? "";
   const selectedWorktreeFolder = selectedAgent?.git_worktree_folder?.replace(/\\/g, "/") ?? "";
   const worktreeFolderName = (folder: string) => {
@@ -232,7 +242,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         );
         setAvailableWorktrees(
           summaries.filter((worktree) => {
-            const sameSource = worktree.source_folder.replace(/\\/g, "/") === selectedSourceFolder;
+            const sameSource = normalizeComparablePath(worktree.source_folder) === selectedSourceFolder;
             const notCurrent = worktree.worktree_folder.replace(/\\/g, "/") !== currentWorktree;
             const notMember = !worktree.member_agent_ids.includes(selectedAgentId);
             return sameSource && notCurrent && notMember;
