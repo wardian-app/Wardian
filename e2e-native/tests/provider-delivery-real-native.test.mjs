@@ -104,7 +104,7 @@ function parseDeliveryProviders(value) {
 
 function parseDeliveryCases(value) {
   const requested = parseCommaList(value, DEFAULT_CASES);
-  if (requested.includes("all")) {
+  if (requested.length === 1 && requested[0] === "all") {
     return INPUT_CASES.map((inputCase) => inputCase.name);
   }
   return requested;
@@ -268,6 +268,14 @@ async function runRealDeliveryCase({ cliPath, harness, provider, agentName, inpu
     assert.match(`${transcript}\n${output}`, new RegExp(expected));
   }
 }
+
+test("real provider delivery case parser expands all only as the sole entry", () => {
+  assert.deepEqual(
+    parseDeliveryCases("all"),
+    INPUT_CASES.map((inputCase) => inputCase.name),
+  );
+  assert.deepEqual(parseDeliveryCases("all,mailbox-short"), ["all", "mailbox-short"]);
+});
 
 test("real provider delivery validation uses actual provider CLIs", { timeout: 900000 }, async (t) => {
   const providers = parseDeliveryProviders(process.env.WARDIAN_E2E_DELIVERY_PROVIDERS);
