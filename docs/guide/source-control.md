@@ -71,6 +71,8 @@ Wardian also discovers Git worktrees that already exist under `<wardian-home>/ag
 
 If a target worktree folder already exists but Git does not recognize it as a worktree for the source checkout, Wardian refuses to assign it. Create it with `git worktree add` or remove the folder and let Wardian create it.
 
+Removing a Wardian assignment does not delete the physical worktree, including worktrees created outside Wardian. Delete physical worktrees with Git, for example `git worktree remove <absolute-worktree-path>`, after no agent is using that path.
+
 The same agent worktree controls are available from the CLI when the desktop app is running for the same `WARDIAN_HOME`:
 
 ```bash

@@ -67,6 +67,8 @@ Git is the authority for worktree existence. Wardian assignment fields (`git_wor
 
 `enable_agent_worktree` must verify that any existing target folder is already present in `git worktree list --porcelain` for the source checkout before saving Wardian assignment state.
 
+Disabling or leaving a worktree only removes Wardian assignment metadata. It does not delete the Git worktree, especially for discovered worktrees that were created outside Wardian. Physical deletion remains an explicit Git operation (`git worktree remove`) or a separate cleanup flow.
+
 ## Consequences
 
 - **Positive**: Full git workflow (review, stage, commit, push) without leaving Wardian

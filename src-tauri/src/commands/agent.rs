@@ -1293,10 +1293,9 @@ struct DiscoveredGitWorktree {
 }
 
 fn is_under_wardian_agent_worktree_root(wardian_home: &std::path::Path, path: &str) -> bool {
-    let normalized_home = normalize_workspace_record_path(wardian_home)
-        .trim_end_matches('/')
-        .to_string();
-    let normalized_path = path.replace('\\', "/");
+    let normalized_home =
+        normalize_path_for_prefix_compare(&normalize_workspace_record_path(wardian_home));
+    let normalized_path = normalize_path_for_prefix_compare(path);
     let prefix = format!("{normalized_home}/agents/");
     if !normalized_path.starts_with(&prefix) {
         return false;
@@ -1305,6 +1304,24 @@ fn is_under_wardian_agent_worktree_root(wardian_home: &std::path::Path, path: &s
     let relative = &normalized_path[prefix.len()..];
     let parts = relative.split('/').collect::<Vec<_>>();
     parts.len() >= 3 && parts[1] == "worktrees" && !parts[0].is_empty() && !parts[2].is_empty()
+}
+
+fn normalize_path_for_prefix_compare(path: &str) -> String {
+    let normalized = path
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .trim_end_matches('/')
+        .to_string();
+
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 fn source_folder_for_config(config: &AgentConfig) -> Option<String> {
@@ -2998,18 +3015,20 @@ mod tests {
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
         disable_worktree_config, discover_git_worktrees_for_configs, enable_worktree_config,
-        ensure_existing_worktree_is_git_registered, find_assignable_worktree,
-        ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
-        generated_agent_name, insert_new_agent_order, lock_agent_lifecycle, mark_agent_paused_off,
+        ensure_existing_worktree_is_git_registered,
+        ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
+        flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
+        is_under_wardian_agent_worktree_root, lock_agent_lifecycle, mark_agent_paused_off,
         normalize_clone_folder_override, normalize_spawn_folder, normalize_workspace_record_path,
         persisted_resume_session_for_provider, prepare_agent_for_clear, prepare_clear_config,
-        prepare_restored_config_for_spawn, prepare_resume_config, prepare_resume_config_for_runtime,
-        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, reserve_spawn_session_name,
-        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
-        AgentOrderPlacement, CloneProfileCopyPlan, CloneProfileSelection, DiscoveredGitWorktree,
+        prepare_restored_config_for_spawn, prepare_resume_config,
+        prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
+        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
+        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
+        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
+        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
+        take_agent_runtime_for_termination, terminal_cleared_payload, AgentOrderPlacement,
+        CloneProfileCopyPlan, CloneProfileSelection, DiscoveredGitWorktree,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -4217,14 +4236,21 @@ mod tests {
     }
 
     #[test]
+    fn agent_worktree_root_match_handles_windows_verbatim_home_prefix() {
+        let home = std::path::Path::new(r"\\?\D:\a\Wardian\wardian-home");
+        let worktree = "D:/a/Wardian/wardian-home/agents/agent-1/worktrees/manual-review";
+
+        assert!(is_under_wardian_agent_worktree_root(home, worktree));
+    }
+
+    #[test]
     fn discover_git_worktrees_reads_git_registry_for_known_sources() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let cwd = repo.to_str().unwrap();
         crate::commands::git::run_git(cwd, &["init"]).expect("git init");
-        crate::commands::git::run_git(cwd, &["config", "user.email", "test@example.com"])
-            .unwrap();
+        crate::commands::git::run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
         crate::commands::git::run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
         std::fs::write(repo.join("README.md"), "initial\n").expect("readme");
         crate::commands::git::run_git(cwd, &["add", "README.md"]).unwrap();
