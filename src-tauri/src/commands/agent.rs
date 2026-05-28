@@ -1135,6 +1135,11 @@ fn normalize_workspace_record_path(path: &std::path::Path) -> String {
     strip_windows_verbatim_prefix(path.to_string_lossy().replace('\\', "/"))
 }
 
+fn normalize_existing_workspace_record_path(path: &std::path::Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    normalize_workspace_record_path(&path)
+}
+
 fn strip_windows_verbatim_prefix(path: String) -> String {
     if let Some(stripped) = path.strip_prefix("//?/UNC/") {
         return format!("//{stripped}");
@@ -1304,7 +1309,7 @@ struct DiscoveredGitWorktree {
 
 fn is_under_wardian_agent_worktree_root(wardian_home: &std::path::Path, path: &str) -> bool {
     let normalized_home =
-        normalize_path_for_prefix_compare(&normalize_workspace_record_path(wardian_home));
+        normalize_path_for_prefix_compare(&normalize_existing_workspace_record_path(wardian_home));
     let normalized_path = normalize_path_for_prefix_compare(path);
     let prefix = format!("{normalized_home}/agents/");
     if !normalized_path.starts_with(&prefix) {
@@ -4348,7 +4353,7 @@ mod tests {
         );
         assert_eq!(
             discovered[0].worktree_folder,
-            normalize_workspace_record_path(&worktree)
+            normalize_discovered_git_worktree_path(&worktree)
         );
     }
 
