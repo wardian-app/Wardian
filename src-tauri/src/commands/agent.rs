@@ -97,6 +97,7 @@ pub struct AgentWorktreeSummary {
     pub source_folder: String,
     pub worktree_folder: String,
     pub member_agent_ids: Vec<String>,
+    pub can_delete: bool,
 }
 
 fn clone_unique_name(
@@ -1302,6 +1303,7 @@ fn collect_agent_worktrees(configs: &[AgentConfig]) -> Vec<AgentWorktreeSummary>
                     source_folder: normalize_maybe_existing_workspace_record_path(source_folder),
                     worktree_folder: normalized_worktree.clone(),
                     member_agent_ids: Vec::new(),
+                    can_delete: false,
                 }
             });
         entry.member_agent_ids.push(config.session_id.clone());
@@ -1390,9 +1392,6 @@ fn collect_agent_worktrees_with_discovered(
     for worktree in discovered {
         let normalized_worktree =
             normalize_maybe_existing_workspace_record_path(&worktree.worktree_folder);
-        if !is_under_wardian_agent_worktree_root(wardian_home, &normalized_worktree) {
-            continue;
-        }
 
         summaries
             .entry(normalized_worktree.clone())
@@ -1409,8 +1408,12 @@ fn collect_agent_worktrees_with_discovered(
                     source_folder: normalize_maybe_existing_workspace_record_path(
                         &worktree.source_folder,
                     ),
-                    worktree_folder: normalized_worktree,
+                    worktree_folder: normalized_worktree.clone(),
                     member_agent_ids: Vec::new(),
+                    can_delete: is_under_wardian_agent_worktree_root(
+                        wardian_home,
+                        &normalized_worktree,
+                    ),
                 }
             });
     }
@@ -1420,7 +1423,7 @@ fn collect_agent_worktrees_with_discovered(
 
 fn discover_git_worktrees_for_configs(
     configs: &[AgentConfig],
-    wardian_home: &std::path::Path,
+    _wardian_home: &std::path::Path,
 ) -> Vec<DiscoveredGitWorktree> {
     let sources = configs
         .iter()
@@ -1436,7 +1439,7 @@ fn discover_git_worktrees_for_configs(
 
         for worktree in worktrees {
             let normalized = normalize_discovered_git_worktree_path(&worktree.path);
-            if !is_under_wardian_agent_worktree_root(wardian_home, &normalized) {
+            if workspace_paths_match(&source, &normalized) {
                 continue;
             }
             discovered
@@ -1503,6 +1506,31 @@ fn validate_assignable_worktree_for_agent(
     ensure_existing_worktree_is_git_registered(
         std::path::Path::new(&managed_worktree.source_folder),
         worktree_path,
+    )
+}
+
+fn validate_deletable_agent_worktree(
+    wardian_home: &std::path::Path,
+    managed_worktree: &AgentWorktreeSummary,
+) -> Result<(), String> {
+    if !managed_worktree.member_agent_ids.is_empty() {
+        return Err("Cannot delete a worktree while agents are assigned to it.".to_string());
+    }
+
+    if !is_under_wardian_agent_worktree_root(wardian_home, &managed_worktree.worktree_folder) {
+        return Err("Only Wardian agent worktrees can be deleted from Wardian.".to_string());
+    }
+
+    if workspace_paths_match(
+        &managed_worktree.source_folder,
+        &managed_worktree.worktree_folder,
+    ) {
+        return Err("Refusing to delete the source checkout as a worktree.".to_string());
+    }
+
+    ensure_existing_worktree_is_git_registered(
+        std::path::Path::new(&managed_worktree.source_folder),
+        std::path::Path::new(&managed_worktree.worktree_folder),
     )
 }
 
@@ -3030,6 +3058,45 @@ pub async fn assign_agent_worktree(
 }
 
 #[tauri::command]
+pub async fn delete_agent_worktree(
+    worktree_folder: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let worktree_folder = worktree_folder.trim().to_string();
+    if worktree_folder.is_empty() {
+        return Err("Worktree folder is required".to_string());
+    }
+    let worktree_path = std::path::Path::new(&worktree_folder);
+    if !worktree_path.is_dir() {
+        return Err("Worktree folder does not exist".to_string());
+    }
+
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
+    let configs = {
+        let agents = state.agents.lock().await;
+        agents
+            .values()
+            .map(|agent| agent.config.lock().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
+    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+    let managed_worktree =
+        find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
+            .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
+
+    validate_deletable_agent_worktree(&wardian_home, &managed_worktree)?;
+    crate::commands::git::remove_worktree_without_force(
+        std::path::Path::new(&managed_worktree.source_folder),
+        std::path::Path::new(&managed_worktree.worktree_folder),
+    )?;
+
+    let _ = app.emit("agents-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn disable_agent_worktree(
     session_id: String,
     state: State<'_, AppState>,
@@ -3098,8 +3165,9 @@ mod tests {
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
         sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
-        validate_assignable_worktree_for_agent, workspace_paths_match, AgentOrderPlacement,
-        AgentWorktreeSummary, CloneProfileCopyPlan, CloneProfileSelection, DiscoveredGitWorktree,
+        validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
+        workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
+        CloneProfileSelection, DiscoveredGitWorktree,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -4284,10 +4352,11 @@ mod tests {
             normalize_existing_workspace_record_path(&discovered_path)
         );
         assert!(worktrees[0].member_agent_ids.is_empty());
+        assert!(worktrees[0].can_delete);
     }
 
     #[test]
-    fn collect_agent_worktrees_excludes_git_worktrees_outside_agent_roots() {
+    fn collect_agent_worktrees_includes_external_git_worktrees_without_delete_capability() {
         let home = tempfile::tempdir().expect("home");
         let outside = home.path().join("outside-review");
         std::fs::create_dir_all(&outside).expect("create outside worktree");
@@ -4304,7 +4373,14 @@ mod tests {
 
         let worktrees = collect_agent_worktrees_with_discovered(&configs, home.path(), discovered);
 
-        assert!(worktrees.is_empty());
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].name, "outside-review");
+        assert_eq!(
+            worktrees[0].worktree_folder,
+            normalize_existing_workspace_record_path(&outside)
+        );
+        assert!(worktrees[0].member_agent_ids.is_empty());
+        assert!(!worktrees[0].can_delete);
     }
 
     #[test]
@@ -4358,12 +4434,19 @@ mod tests {
             .join("agent-1")
             .join("worktrees")
             .join("manual-review");
+        let external_worktree = temp.path().join("external-review");
         crate::commands::git::create_worktree_with_build_caches(
             &repo,
             &worktree,
             "feat/manual-review",
         )
         .expect("create git worktree");
+        crate::commands::git::create_worktree_with_build_caches(
+            &repo,
+            &external_worktree,
+            "feat/external-review",
+        )
+        .expect("create external git worktree");
 
         let configs = vec![AgentConfig {
             session_id: "agent-1".to_string(),
@@ -4394,20 +4477,25 @@ mod tests {
 
         assert_eq!(
             discovered.len(),
-            1,
-            "repo={}, wardian_home={}, worktree={}, raw_worktree_list={raw_worktree_list:?}, listed_worktrees={listed_worktrees:#?}",
+            2,
+            "repo={}, wardian_home={}, worktree={}, external_worktree={}, raw_worktree_list={raw_worktree_list:?}, listed_worktrees={listed_worktrees:#?}",
             normalize_workspace_record_path(&repo),
             normalize_workspace_record_path(&wardian_home),
-            normalize_workspace_record_path(&worktree)
+            normalize_workspace_record_path(&worktree),
+            normalize_workspace_record_path(&external_worktree)
         );
-        assert_eq!(
-            discovered[0].source_folder,
-            normalize_existing_workspace_record_path(&repo)
-        );
-        assert_eq!(
-            discovered[0].worktree_folder,
-            normalize_discovered_git_worktree_path(&worktree)
-        );
+        assert!(discovered
+            .iter()
+            .all(|entry| entry.source_folder == normalize_existing_workspace_record_path(&repo)));
+        assert!(discovered.iter().any(
+            |entry| entry.worktree_folder == normalize_discovered_git_worktree_path(&worktree)
+        ));
+        assert!(discovered.iter().any(|entry| entry.worktree_folder
+            == normalize_discovered_git_worktree_path(&external_worktree)));
+        assert!(!discovered.iter().any(|entry| workspace_paths_match(
+            &entry.worktree_folder,
+            &normalize_workspace_record_path(&repo)
+        )));
     }
 
     #[test]
@@ -4454,6 +4542,7 @@ mod tests {
             source_folder: normalize_existing_workspace_record_path(&repo),
             worktree_folder: normalize_existing_workspace_record_path(&stale_worktree),
             member_agent_ids: vec!["agent-2".to_string()],
+            can_delete: false,
         };
 
         let err = validate_assignable_worktree_for_agent(
@@ -4464,6 +4553,83 @@ mod tests {
         .expect_err("stale non-git assignment should not be assignable");
 
         assert!(err.contains("not registered with Git"));
+    }
+
+    #[test]
+    fn deletable_worktree_validation_rejects_assigned_worktree() {
+        let home = tempfile::tempdir().expect("home");
+        let managed_worktree = AgentWorktreeSummary {
+            id: normalize_workspace_record_path(
+                &home
+                    .path()
+                    .join("agents")
+                    .join("agent-1")
+                    .join("worktrees")
+                    .join("review"),
+            ),
+            name: "review".to_string(),
+            source_folder: normalize_workspace_record_path(std::path::Path::new("C:/repo")),
+            worktree_folder: normalize_workspace_record_path(
+                &home
+                    .path()
+                    .join("agents")
+                    .join("agent-1")
+                    .join("worktrees")
+                    .join("review"),
+            ),
+            member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
+        };
+
+        let err = validate_deletable_agent_worktree(home.path(), &managed_worktree)
+            .expect_err("assigned worktree should not be deletable");
+
+        assert!(err.contains("assigned"));
+    }
+
+    #[test]
+    fn deletable_worktree_validation_rejects_paths_outside_wardian_root() {
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside");
+        let managed_worktree = AgentWorktreeSummary {
+            id: normalize_workspace_record_path(outside.path()),
+            name: "outside".to_string(),
+            source_folder: normalize_workspace_record_path(std::path::Path::new("C:/repo")),
+            worktree_folder: normalize_workspace_record_path(outside.path()),
+            member_agent_ids: Vec::new(),
+            can_delete: false,
+        };
+
+        let err = validate_deletable_agent_worktree(home.path(), &managed_worktree)
+            .expect_err("outside worktree should not be deletable");
+
+        assert!(err.contains("Wardian agent worktree"));
+    }
+
+    #[test]
+    fn deletable_worktree_validation_rejects_source_checkout_path() {
+        let home = tempfile::tempdir().expect("home");
+        let source = home
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("review");
+        std::fs::create_dir_all(&source).expect("source path");
+        let source_folder = normalize_workspace_record_path(&source);
+        let managed_worktree = AgentWorktreeSummary {
+            id: source_folder.clone(),
+            name: "review".to_string(),
+            source_folder: source_folder.clone(),
+            worktree_folder: source_folder,
+            member_agent_ids: Vec::new(),
+            can_delete: true,
+        };
+
+        let err = validate_deletable_agent_worktree(home.path(), &managed_worktree)
+            .expect_err("source checkout should not be deletable as a worktree");
+
+        assert!(err.contains("source checkout"));
     }
 
     #[test]
@@ -4492,6 +4658,33 @@ mod tests {
 
         assert_eq!(found.name, "manual-review");
         assert!(found.member_agent_ids.is_empty());
+        assert!(found.can_delete);
+    }
+
+    #[test]
+    fn find_assignable_worktree_matches_external_discovered_worktree_but_marks_not_deletable() {
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside");
+        let worktree_folder = normalize_workspace_record_path(outside.path());
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: "/repo".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/repo".to_string(),
+            worktree_folder: worktree_folder.clone(),
+        }];
+
+        let found = find_assignable_worktree(&configs, home.path(), &worktree_folder, discovered)
+            .expect("external discovered worktree should be assignable");
+
+        assert_eq!(
+            found.name,
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(found.member_agent_ids.is_empty());
+        assert!(!found.can_delete);
     }
 
     #[test]

@@ -459,6 +459,7 @@ fn core_worktree_summary(
         source_folder: summary.source_folder,
         worktree_folder: summary.worktree_folder,
         member_agent_ids: summary.member_agent_ids,
+        can_delete: summary.can_delete,
     }
 }
 
@@ -3394,6 +3395,7 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
         }];
 
         let matched = worktree_by_folder(&worktrees, "C:\\repo\\worktrees\\review").unwrap();
@@ -3409,6 +3411,7 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
         }];
 
         let matched = worktree_by_folder(&worktrees, "c:\\repo\\worktrees\\review\\");
@@ -3428,6 +3431,7 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string(), "agent-2".to_string()],
+            can_delete: false,
         }];
 
         assert_eq!(

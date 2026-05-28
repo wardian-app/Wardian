@@ -370,6 +370,7 @@ pub fn run() {
             commands::agent::enable_agent_worktree,
             commands::agent::list_agent_worktrees,
             commands::agent::assign_agent_worktree,
+            commands::agent::delete_agent_worktree,
             commands::agent::disable_agent_worktree,
             commands::chat::load_agent_chat_transcript,
             commands::debug::debug_remove_agent_input_sender,

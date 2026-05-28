@@ -1233,6 +1233,7 @@ mod tests {
                 source_folder: "D:/repo".to_string(),
                 worktree_folder: "D:/repo/worktrees/review".to_string(),
                 member_agent_ids: vec!["agent-1".to_string(), "agent-2".to_string()],
+                can_delete: false,
             }),
             previous_worktree: None,
             previous_workspace: Some("D:/repo".to_string()),
@@ -1249,7 +1250,27 @@ mod tests {
         assert_eq!(json["agent"]["uuid"], "agent-1");
         assert_eq!(json["worktree"]["source_folder"], "D:/repo");
         assert_eq!(json["worktree"]["member_agent_ids"][1], "agent-2");
+        assert_eq!(json["worktree"]["can_delete"], false);
         assert_eq!(json["cleared_session"], true);
+    }
+
+    #[test]
+    fn render_worktree_list_includes_delete_capability() {
+        let worktrees = vec![wardian_core::control::AgentWorktreeSummary {
+            id: "D:/repo/worktrees/review".to_string(),
+            name: "review".to_string(),
+            source_folder: "D:/repo".to_string(),
+            worktree_folder: "D:/repo/worktrees/review".to_string(),
+            member_agent_ids: Vec::new(),
+            can_delete: true,
+        }];
+
+        let rendered = render_worktree_list(&worktrees).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(json["schema"], 1);
+        assert_eq!(json["worktrees"][0]["name"], "review");
+        assert_eq!(json["worktrees"][0]["can_delete"], true);
     }
 
     #[test]
