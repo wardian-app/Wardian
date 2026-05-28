@@ -1411,6 +1411,18 @@ fn ensure_existing_worktree_is_git_registered(
     Ok(())
 }
 
+fn find_assignable_worktree(
+    configs: &[AgentConfig],
+    wardian_home: &std::path::Path,
+    worktree_folder: &str,
+    discovered: Vec<DiscoveredGitWorktree>,
+) -> Option<AgentWorktreeSummary> {
+    let normalized_worktree_folder = worktree_folder.trim().replace('\\', "/");
+    collect_agent_worktrees_with_discovered(configs, wardian_home, discovered)
+        .into_iter()
+        .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
+}
+
 fn assign_worktree_config(config: &mut AgentConfig, worktree_folder: &str) -> Result<(), String> {
     let worktree_folder = worktree_folder.trim();
     if worktree_folder.is_empty() {
@@ -2887,7 +2899,8 @@ pub async fn assign_agent_worktree(
     if !worktree_path.is_dir() {
         return Err("Worktree folder does not exist".to_string());
     }
-    let normalized_worktree_folder = worktree_folder.trim().replace('\\', "/");
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
 
     let mut agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
@@ -2895,9 +2908,9 @@ pub async fn assign_agent_worktree(
         .values()
         .map(|agent| agent.config.lock().unwrap().clone())
         .collect::<Vec<_>>();
-    let managed_worktree = collect_agent_worktrees(&configs)
-        .into_iter()
-        .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
+    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+    let managed_worktree =
+        find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
         .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
     if let Some(agent) = agents.get_mut(&session_id) {
         {
@@ -2980,7 +2993,7 @@ mod tests {
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
         disable_worktree_config, discover_git_worktrees_for_configs, enable_worktree_config,
-        ensure_existing_worktree_is_git_registered,
+        ensure_existing_worktree_is_git_registered, find_assignable_worktree,
         ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
         generated_agent_name, insert_new_agent_order, lock_agent_lifecycle, mark_agent_paused_off,
         normalize_clone_folder_override, normalize_spawn_folder, normalize_workspace_record_path,
@@ -4264,6 +4277,34 @@ mod tests {
             .expect_err("existing non-git worktree should be rejected");
 
         assert!(err.contains("not registered with Git"));
+    }
+
+    #[test]
+    fn find_assignable_worktree_matches_discovered_unassigned_worktree() {
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let worktree_folder = normalize_workspace_record_path(&worktree);
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: "/repo".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/repo".to_string(),
+            worktree_folder: worktree_folder.clone(),
+        }];
+
+        let found = find_assignable_worktree(&configs, home.path(), &worktree_folder, discovered)
+            .expect("discovered worktree should be assignable");
+
+        assert_eq!(found.name, "manual-review");
+        assert!(found.member_agent_ids.is_empty());
     }
 
     #[test]

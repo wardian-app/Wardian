@@ -495,6 +495,30 @@ describe("GitPanel", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
 
+  it("shows discovered unassigned worktrees as join options", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/wardian/agents/agent-1/worktrees/manual-review",
+            name: "manual-review",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/wardian/agents/agent-1/worktrees/manual-review",
+            member_agent_ids: [],
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", upstream: "origin/main", has_upstream: true, ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to manual-review")).toBeInTheDocument();
+  });
+
   it("repairs a stale worktree assignment by moving the runtime fresh", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo-worktree";
