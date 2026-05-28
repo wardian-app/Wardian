@@ -1163,22 +1163,22 @@ fn resolve_agent_worktree_path(
     wardian_home: &std::path::Path,
     session_id: &str,
     worktree_name: Option<&str>,
+    default_name: &str,
 ) -> std::path::PathBuf {
-    if let Some(slug) = worktree_name
+    let slug = worktree_name
         .map(slugify_worktree_name)
         .filter(|slug| !slug.is_empty())
-    {
-        return wardian_home
-            .join("agents")
-            .join(session_id)
-            .join("worktrees")
-            .join(slug);
-    }
+        .or_else(|| {
+            let default_slug = slugify_worktree_name(default_name);
+            (!default_slug.is_empty()).then_some(default_slug)
+        })
+        .unwrap_or_else(|| "worktree".to_string());
 
     wardian_home
         .join("agents")
         .join(session_id)
-        .join("worktree")
+        .join("worktrees")
+        .join(slug)
 }
 
 fn slugify_worktree_name(name: &str) -> String {
@@ -2893,9 +2893,7 @@ pub async fn enable_agent_worktree(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string);
-    let worktree_path =
-        resolve_agent_worktree_path(&wardian_home, &session_id, worktree_name.as_deref());
-    let (workspace_folder, branch_name) = {
+    let (workspace_folder, branch_name, worktree_path) = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&session_id)
@@ -2915,6 +2913,12 @@ pub async fn enable_agent_worktree(
         (
             workspace_folder,
             resolve_agent_worktree_branch_name(branch_source),
+            resolve_agent_worktree_path(
+                &wardian_home,
+                &session_id,
+                worktree_name.as_deref(),
+                &config.session_name,
+            ),
         )
     };
 
@@ -4115,15 +4119,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_worktree_path_uses_agent_worktree_directory() {
+    fn resolve_agent_worktree_path_uses_session_name_when_worktree_name_is_missing() {
         let home = std::path::Path::new("C:/wardian");
 
         assert_eq!(
-            resolve_agent_worktree_path(home, "agent-1", None),
+            resolve_agent_worktree_path(home, "agent-1", None, "Repo Agent"),
             std::path::PathBuf::from("C:/wardian")
                 .join("agents")
                 .join("agent-1")
-                .join("worktree")
+                .join("worktrees")
+                .join("repo-agent")
         );
     }
 
@@ -4132,7 +4137,7 @@ mod tests {
         let home = std::path::Path::new("C:/wardian");
 
         assert_eq!(
-            resolve_agent_worktree_path(home, "agent-1", Some("Review Fixes")),
+            resolve_agent_worktree_path(home, "agent-1", Some("Review Fixes"), "Repo Agent"),
             std::path::PathBuf::from("C:/wardian")
                 .join("agents")
                 .join("agent-1")

@@ -30,7 +30,7 @@ This page documents the current command surface registered in `src-tauri/src/lib
 - `disable_agent_worktree`
 
 Worktree commands update agent config only. UI callers that move an agent between the source checkout and a worktree must follow the config command with `clear_agent_session` so the provider starts fresh in the new workspace instead of resuming across a cwd change.
-`enable_agent_worktree` accepts an optional `worktree_name`; when present, Wardian uses it for the `wardian/<slug>` branch and the per-agent `worktrees/<slug>` folder.
+`enable_agent_worktree` accepts an optional `worktree_name`. Wardian uses the provided name, or the agent session name when it is omitted, for the `wardian/<slug>` branch and the per-agent `worktrees/<slug>` folder.
 
 The live control protocol exposes CLI wrappers for the same worktree operations: `agent_worktree_list`, `agent_worktree_enable`, `agent_worktree_join`, and `agent_worktree_disable`. Unlike the raw Tauri worktree commands, the control mutation handlers call `clear_agent_session` after moving an agent workspace so CLI behavior matches the GUI flow.
 
