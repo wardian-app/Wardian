@@ -1,7 +1,7 @@
 use crate::manager;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
@@ -1361,6 +1361,39 @@ fn collect_agent_worktrees_with_discovered(
     }
 
     summaries.into_values().collect()
+}
+
+fn discover_git_worktrees_for_configs(
+    configs: &[AgentConfig],
+    wardian_home: &std::path::Path,
+) -> Vec<DiscoveredGitWorktree> {
+    let sources = configs
+        .iter()
+        .filter_map(source_folder_for_config)
+        .collect::<BTreeSet<_>>();
+
+    let mut discovered = BTreeMap::<String, DiscoveredGitWorktree>::new();
+    for source in sources {
+        let source_path = std::path::Path::new(&source);
+        let Ok(worktrees) = crate::commands::git::list_git_worktrees(source_path) else {
+            continue;
+        };
+
+        for worktree in worktrees {
+            let normalized = normalize_workspace_record_path(&worktree.path);
+            if !is_under_wardian_agent_worktree_root(wardian_home, &normalized) {
+                continue;
+            }
+            discovered
+                .entry(normalized.clone())
+                .or_insert_with(|| DiscoveredGitWorktree {
+                    source_folder: source.clone(),
+                    worktree_folder: normalized,
+                });
+        }
+    }
+
+    discovered.into_values().collect()
 }
 
 fn assign_worktree_config(config: &mut AgentConfig, worktree_folder: &str) -> Result<(), String> {
@@ -2805,12 +2838,19 @@ pub async fn enable_agent_worktree(
 pub async fn list_agent_worktrees(
     state: State<'_, AppState>,
 ) -> Result<Vec<AgentWorktreeSummary>, String> {
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
     let agents = state.agents.lock().await;
     let configs = agents
         .values()
         .map(|agent| agent.config.lock().unwrap().clone())
         .collect::<Vec<_>>();
-    Ok(collect_agent_worktrees(&configs))
+    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+    Ok(collect_agent_worktrees_with_discovered(
+        &configs,
+        &wardian_home,
+        discovered,
+    ))
 }
 
 #[tauri::command]
@@ -2920,7 +2960,7 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
-        disable_worktree_config, enable_worktree_config,
+        disable_worktree_config, discover_git_worktrees_for_configs, enable_worktree_config,
         ensure_provider_available_before_session_bootstrap, flatten_clone_file_paths,
         generated_agent_name, insert_new_agent_order, lock_agent_lifecycle,
         mark_agent_paused_off, normalize_clone_folder_override, normalize_spawn_folder,
@@ -4137,6 +4177,52 @@ mod tests {
         let worktrees = collect_agent_worktrees_with_discovered(&configs, home.path(), discovered);
 
         assert!(worktrees.is_empty());
+    }
+
+    #[test]
+    fn discover_git_worktrees_reads_git_registry_for_known_sources() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let cwd = repo.to_str().unwrap();
+        crate::commands::git::run_git(cwd, &["init"]).expect("git init");
+        crate::commands::git::run_git(cwd, &["config", "user.email", "test@example.com"])
+            .unwrap();
+        crate::commands::git::run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        std::fs::write(repo.join("README.md"), "initial\n").expect("readme");
+        crate::commands::git::run_git(cwd, &["add", "README.md"]).unwrap();
+        crate::commands::git::run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        let wardian_home = temp.path().join("wardian-home");
+        let worktree = wardian_home
+            .join("agents")
+            .join("agent-1")
+            .join("worktrees")
+            .join("manual-review");
+        crate::commands::git::create_worktree_with_build_caches(
+            &repo,
+            &worktree,
+            "feat/manual-review",
+        )
+        .expect("create git worktree");
+
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: normalize_workspace_record_path(&repo),
+            ..Default::default()
+        }];
+
+        let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(
+            discovered[0].source_folder,
+            normalize_workspace_record_path(&repo)
+        );
+        assert_eq!(
+            discovered[0].worktree_folder,
+            normalize_workspace_record_path(&worktree)
+        );
     }
 
     #[test]
