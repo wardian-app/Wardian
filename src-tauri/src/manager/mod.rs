@@ -49,16 +49,28 @@ pub(crate) fn session_bootstrap_prompt() -> &'static str {
 
 #[cfg(windows)]
 pub(crate) fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
-    for pid in find_wardian_session_process_roots(session_id, Some(std::process::id())) {
-        log_debug(&format!(
-            "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
-            provider, session_id, pid
-        ));
-        if let Err(err) = force_kill_process_tree(pid) {
+    let mut attempted = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let roots = find_wardian_session_process_roots(session_id, Some(std::process::id()));
+        let pending = roots
+            .into_iter()
+            .filter(|pid| attempted.insert(*pid))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            break;
+        }
+
+        for pid in pending {
             log_debug(&format!(
-                "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
-                session_id, pid, err
+                "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
+                provider, session_id, pid
             ));
+            if let Err(err) = force_kill_process_tree(pid) {
+                log_debug(&format!(
+                    "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
+                    session_id, pid, err
+                ));
+            }
         }
     }
 }

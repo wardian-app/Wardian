@@ -164,6 +164,22 @@ pub fn assign_pid_to_job(job: &win32job::Job, pid: u32, context: &str) -> Result
 }
 
 #[cfg(windows)]
+pub fn process_exists(pid: u32) -> bool {
+    unsafe {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        CloseHandle(handle);
+        true
+    }
+}
+
+#[cfg(windows)]
 fn is_supported_terminal_wrapper_process(process_name: &str) -> bool {
     matches!(
         process_name,
@@ -262,7 +278,27 @@ pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<
 }
 
 #[cfg(windows)]
+fn taskkill_failure_indicates_process_gone(
+    stdout: &str,
+    stderr: &str,
+    process_exists_after_taskkill: bool,
+) -> bool {
+    if !process_exists_after_taskkill {
+        return true;
+    }
+
+    let combined = format!("{} {}", stdout, stderr).to_ascii_lowercase();
+    combined.contains("not found")
+        || combined.contains("no running instance")
+        || (combined.contains("process") && combined.contains("not running"))
+}
+
+#[cfg(windows)]
 pub fn force_kill_process_tree(pid: u32) -> Result<(), String> {
+    if !process_exists(pid) {
+        return Ok(());
+    }
+
     let output = new_headless_std_command("taskkill.exe")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()
@@ -272,17 +308,13 @@ pub fn force_kill_process_tree(pid: u32) -> Result<(), String> {
         return Ok(());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    let combined = format!("{} {}", stdout, stderr);
-
-    if combined.contains("not found")
-        || combined.contains("no running instance")
-        || combined.contains("process") && combined.contains("not running")
-    {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if taskkill_failure_indicates_process_gone(&stdout, &stderr, process_exists(pid)) {
         return Ok(());
     }
 
+    let combined = format!("{} {}", stdout, stderr).to_ascii_lowercase();
     Err(format!(
         "taskkill /PID {} /T /F failed: {}",
         pid,
@@ -369,6 +401,27 @@ mod tests {
         assert!(!super::is_wardian_session_environment_candidate(
             &["WARDIAN_SESSION_ID=other-session".to_string()],
             "019d331a-0500-7592-969f-8f437886f42b",
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskkill_empty_failure_is_success_only_when_process_is_already_gone() {
+        assert!(super::taskkill_failure_indicates_process_gone(
+            "", "", false
+        ));
+        assert!(!super::taskkill_failure_indicates_process_gone(
+            "", "", true
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskkill_process_not_found_text_is_success_even_if_exit_status_failed() {
+        assert!(super::taskkill_failure_indicates_process_gone(
+            "ERROR: The process \"123456\" not found.",
+            "",
+            true,
         ));
     }
 }
