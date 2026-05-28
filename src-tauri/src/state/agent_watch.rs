@@ -61,6 +61,12 @@ impl AgentWatchState {
         self.push_record(WatchRecordKind::Transcript { message })
     }
 
+    pub fn clear(&mut self) {
+        self.records.clear();
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.notify.notify_waiters();
+    }
+
     pub fn snapshot_since(
         &self,
         since: Option<&str>,

@@ -11,6 +11,22 @@ import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
 const MIN_TERMINAL_CARD_WIDTH = 520;
 const MIN_CHAT_CARD_WIDTH = 360;
+type GridCardMode = "terminal" | "chat";
+
+function pruneRecordToIds<T>(record: Record<string, T>, allowedIds: Set<string>): Record<string, T> {
+  let changed = false;
+  const next: Record<string, T> = {};
+
+  Object.entries(record).forEach(([id, value]) => {
+    if (allowedIds.has(id)) {
+      next[id] = value;
+    } else {
+      changed = true;
+    }
+  });
+
+  return changed ? next : record;
+}
 
 interface GridViewProps {
   filteredAgents: AgentConfig[];
@@ -88,6 +104,9 @@ export const GridView: React.FC<GridViewProps> = ({
   const gridCardDisplayMode = useSettingsStore((state) => state.gridCardDisplayMode);
   const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+  const [cardModeOverrides, setCardModeOverrides] = useState<Record<string, GridCardMode>>({});
+  const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
+  const [composerFocusAgentId, setComposerFocusAgentId] = useState<string | null>(null);
 
   const [bgContextMenu, setBgContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0, y: 0, visible: false
@@ -139,7 +158,36 @@ export const GridView: React.FC<GridViewProps> = ({
   const visibleRowCount = renderedColumnCount > 0
     ? Math.ceil(visibleAgents.length / renderedColumnCount)
     : 0;
-  const minCardWidth = gridCardDisplayMode === 'chat' ? MIN_CHAT_CARD_WIDTH : MIN_TERMINAL_CARD_WIDTH;
+  const cardModeForAgent = (agentId: string): GridCardMode => cardModeOverrides[agentId] ?? gridCardDisplayMode;
+  const visibleCardModes = visibleAgents.map((agent) => cardModeForAgent(agent.session_id.toString()));
+  const visibleAgentIdKey = visibleAgents.map((agent) => agent.session_id.toString()).join('\0');
+
+  useEffect(() => {
+    const visibleIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);
+    setCardModeOverrides((current) => pruneRecordToIds(current, visibleIds));
+    setChatDrafts((current) => pruneRecordToIds(current, visibleIds));
+    setComposerFocusAgentId((current) => current && visibleIds.has(current) ? current : null);
+  }, [visibleAgentIdKey]);
+
+  const clearLocalCardState = (agentId: string) => {
+    setCardModeOverrides((current) => {
+      if (!(agentId in current)) return current;
+      const next = { ...current };
+      delete next[agentId];
+      return next;
+    });
+    setChatDrafts((current) => {
+      if (!(agentId in current)) return current;
+      const next = { ...current };
+      delete next[agentId];
+      return next;
+    });
+    setComposerFocusAgentId((current) => current === agentId ? null : current);
+  };
+
+  const minCardWidth = visibleCardModes.some((mode) => mode === 'terminal')
+    ? MIN_TERMINAL_CARD_WIDTH
+    : MIN_CHAT_CARD_WIDTH;
   const idealGridMinWidth = (renderedColumnCount * minCardWidth) + (Math.max(0, renderedColumnCount - 1) * 8);
   const gridMinWidth = visibleAgents.length > 0
     ? renderedColumnCount > 1
@@ -196,6 +244,23 @@ export const GridView: React.FC<GridViewProps> = ({
         );
 
         const statusColorClass = getStatusColorClass(effectiveStatus);
+        const cardMode = cardModeForAgent(agentId);
+        const modeLabel = cardMode === 'chat' ? 'Chat' : 'Terminal';
+        const nextMode: GridCardMode = cardMode === 'chat' ? 'terminal' : 'chat';
+        const nextModeLabel = nextMode === 'chat' ? 'Chat' : 'Terminal';
+        const switchCardMode = (event: React.MouseEvent<HTMLButtonElement>) => {
+          event.stopPropagation();
+          setCardModeOverrides((current) => {
+            const nextOverrides = { ...current };
+            if (nextMode === gridCardDisplayMode) {
+              delete nextOverrides[agentId];
+            } else {
+              nextOverrides[agentId] = nextMode;
+            }
+            return nextOverrides;
+          });
+          setComposerFocusAgentId(nextMode === 'chat' ? agentId : null);
+        };
 
         return (
           <div
@@ -238,8 +303,19 @@ export const GridView: React.FC<GridViewProps> = ({
                 )}
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
+                   <button
+                     aria-label={`${agent.session_name} mode: ${modeLabel}. Switch to ${nextModeLabel}.`}
+                   className="inline-flex h-6 items-center rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-2 text-[10px] font-semibold leading-none text-muted-neutral transition-colors hover:text-primary focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
+                   onClick={switchCardMode}
+                   onMouseDown={(e) => e.stopPropagation()}
+                   title={`Switch to ${nextModeLabel}`}
+                   type="button"
+                 >
+                   {modeLabel}
+                 </button>
                  {isAgentMaximized ? (
                    <button 
+                     aria-label={`Minimize ${agent.session_name}`}
                      onClick={(e) => { e.stopPropagation(); onMaximize(null); }}
                      className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary h-6 px-2 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                    >
@@ -247,11 +323,11 @@ export const GridView: React.FC<GridViewProps> = ({
                      Minimize
                    </button>
                  ) : (
-                   <button onClick={(e) => { e.stopPropagation(); onMaximize(agentId); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 h-6 w-6 p-1 flex items-center justify-center">
+                   <button aria-label={`Maximize ${agent.session_name}`} onClick={(e) => { e.stopPropagation(); onMaximize(agentId); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] h-6 w-6 p-1 flex items-center justify-center">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                    </button>
                  )}
-                  <button onClick={(e) => { e.stopPropagation(); onDelete(agentId); }} className="text-bright-neutral hover:text-wardian-error transition-colors opacity-0 group-hover:opacity-100 h-6 w-6 p-1 flex items-center justify-center"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                  <button aria-label={`Delete ${agent.session_name}`} onClick={(e) => { e.stopPropagation(); clearLocalCardState(agentId); onDelete(agentId); }} className="text-bright-neutral hover:text-wardian-error transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] h-6 w-6 p-1 flex items-center justify-center"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                </div>
             </div>
 
@@ -260,8 +336,10 @@ export const GridView: React.FC<GridViewProps> = ({
                 className="absolute inset-4 select-text"
                 onClick={(e) => e.stopPropagation()}
               >
-                {gridCardDisplayMode === 'chat' ? (
+                {cardMode === 'chat' ? (
                   <AgentChatView
+                    autoFocusComposer={composerFocusAgentId === agentId}
+                    draft={chatDrafts[agentId] ?? ""}
                     sessionId={agentId}
                     agent={agent}
                     provider={agent.provider}
@@ -269,6 +347,12 @@ export const GridView: React.FC<GridViewProps> = ({
                     status={effectiveStatus}
                     telemetry={metrics}
                     theme={theme}
+                    onComposerAutoFocused={() => {
+                      setComposerFocusAgentId((current) => current === agentId ? null : current);
+                    }}
+                    onDraftChange={(value) => {
+                      setChatDrafts((current) => ({ ...current, [agentId]: value }));
+                    }}
                   />
                 ) : (
                   <AgentTerminal
@@ -383,7 +467,10 @@ export const GridView: React.FC<GridViewProps> = ({
           onClone={onClone}
           onAddToList={onAddToList}
           onRemoveFromList={onRemoveFromList}
-          onDelete={onDelete}
+          onDelete={(agentId) => {
+            clearLocalCardState(agentId);
+            onDelete(agentId);
+          }}
           onClose={() => setContextMenu({ ...contextMenu, visible: false })}
         />
       )}

@@ -107,7 +107,8 @@ main Grid view:
   Wardian recognizes an action-required prompt.
 
 Use Terminal mode when you need raw TUI controls, provider-specific keybindings,
-or detailed terminal behavior.
+or detailed terminal behavior. Individual Grid cards can still be switched
+between Terminal and Chat from the card header without changing this default.
 
 ## Watchlist
 

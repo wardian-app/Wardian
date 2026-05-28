@@ -203,6 +203,9 @@ fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
     if let Ok(mut log_last_modified) = agent.log_last_modified.lock() {
         *log_last_modified = None;
     }
+    if let Ok(mut watch_state) = agent.watch_state.lock() {
+        watch_state.clear();
+    }
 
     PreparedAgentClear {
         termination,
@@ -4522,6 +4525,17 @@ mod tests {
         *active.log_path.lock().unwrap() = Some(std::path::PathBuf::from("D:/tmp/agent.log"));
         *active.log_last_modified.lock().unwrap() = Some(std::time::SystemTime::now());
         *active.init_timestamp.lock().unwrap() = Some("2026-05-20T00:00:00Z".to_string());
+        {
+            let mut watch = active.watch_state.lock().unwrap();
+            watch.push_output(b"old terminal output");
+            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "old chat answer".to_string(),
+                provider: "codex".to_string(),
+                turn_id: Some("turn-before-clear".to_string()),
+                source: Some("transcript".to_string()),
+            });
+        }
 
         let prepared = prepare_agent_for_clear(&mut active);
 
@@ -4545,6 +4559,14 @@ mod tests {
         assert_eq!(*active.query_count.lock().unwrap(), 0);
         assert!(active.log_path.lock().unwrap().is_none());
         assert!(active.log_last_modified.lock().unwrap().is_none());
+        let watch_snapshot = active
+            .watch_state
+            .lock()
+            .unwrap()
+            .snapshot_since(None, None)
+            .expect("watch snapshot after clear");
+        assert!(watch_snapshot.output.text.is_empty());
+        assert!(watch_snapshot.transcript.messages.is_empty());
     }
 
     #[test]
