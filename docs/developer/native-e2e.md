@@ -86,7 +86,9 @@ It starts the native app with an isolated `WARDIAN_HOME`, creates agents through
 
 ## Real Providers
 
-Real-provider checks are opt-in. Keep them isolated and only use them when the mock provider cannot prove the behavior.
+Real-provider checks are opt-in. Keep them isolated and use them for every provider-runtime claim. The mock provider can prove Wardian-owned behavior such as routing, queueing, rendering, state sharing, and deterministic PTY plumbing. It cannot prove that a real provider CLI accepts input, exposes a ready prompt, clears a compose field, resumes a session, or responds through its real transcript path.
+
+Never make a mock-backed test spoof a real provider identity to validate Codex, Claude, Gemini, OpenCode, or Antigravity behavior. If a test would need that, write an opt-in real-provider native E2E test or leave a skipped test with `// @real-provider-only`.
 
 ```bash
 WARDIAN_E2E_REAL_OPENCODE=1 WARDIAN_E2E_REAL_WORKSPACE=<absolute-workspace-path> npm run test:e2e:native

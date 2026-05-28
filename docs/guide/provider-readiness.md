@@ -26,7 +26,7 @@ You can choose a preferred launch provider in [Settings](./settings.md). `Auto` 
 
 ## Opt-In Delivery Validation
 
-Maintainers can run the real-provider delivery matrix after all provider CLIs are installed, authenticated, and trusted for the target workspace. This validation is opt-in because it can send prompts to live provider accounts.
+Maintainers can run the real-provider delivery matrix after all provider CLIs are installed, authenticated, and trusted for the target workspace. This validation is opt-in because it sends prompts to live provider accounts. Provider-runtime claims must use this real-provider layer or another real-provider native E2E test; mock-provider tests are only valid for Wardian-owned routing, state, queueing, UI, and deterministic terminal plumbing.
 
 The full delivery matrix includes Codex, Claude, Gemini, OpenCode, and Antigravity:
 
@@ -63,6 +63,28 @@ Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
 ```
 
 When `WARDIAN_E2E_REAL_DELIVERY=1` is set, unknown provider names fail the test. Antigravity is required in the matrix unless `WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1` is also set.
+
+By default the real delivery test runs one short mailbox-only prompt per selected provider. Use `WARDIAN_E2E_DELIVERY_CASES=all` for the full input case set, or a comma list such as `mailbox-short,mailbox-multiline`.
+
+Use cheap or fast model overrides where the provider exposes a model flag. The test defaults Claude to `haiku`, Gemini to `gemini-2.5-flash`, and OpenCode to `opencode/deepseek-v4-flash-free`. Override these with provider-specific environment variables:
+
+```bash
+WARDIAN_E2E_DELIVERY_CLAUDE_MODEL=haiku WARDIAN_E2E_REAL_DELIVERY=1 WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 WARDIAN_E2E_DELIVERY_PROVIDERS=claude npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_DELIVERY_CLAUDE_MODEL = "haiku"
+$env:WARDIAN_E2E_REAL_DELIVERY = "1"
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = "1"
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = "claude"
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_CLAUDE_MODEL
+Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+```
 
 ## Shared Checks
 
