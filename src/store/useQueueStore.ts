@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { QueueEventType, QueueItem, QueuePreferences } from "../types";
 import { extractQueueContent, extractTerminalQueueContent } from "../utils/statusUtils";
 import { WorkflowTelemetryEvent } from "../types/workflow";
-import { DEFAULT_QUEUE_PREFERENCES, normalizeQueuePreferences } from "../features/queue/queueFilters";
+import { DEFAULT_QUEUE_PREFERENCES, normalizeQueuePreferences, normalizeQueueSoundVolume } from "../features/queue/queueFilters";
 import { dispatchQueueNotification } from "../features/queue/queueNotifications";
 
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
@@ -42,6 +42,7 @@ interface QueueState {
   setEventVisible: (eventType: QueueEventType, visible: boolean) => void;
   setDesktopNotification: (eventType: QueueEventType, enabled: boolean) => void;
   setSoundNotification: (eventType: QueueEventType, enabled: boolean) => void;
+  setSoundVolume: (volume: number) => void;
 }
 
 function persistItems(items: QueueItem[]) {
@@ -315,6 +316,17 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       const preferences = {
         ...s.preferences,
         sound_notifications: { ...s.preferences.sound_notifications, [eventType]: enabled },
+      };
+      persistPreferences(preferences);
+      return { preferences };
+    });
+  },
+
+  setSoundVolume(volume) {
+    set((s) => {
+      const preferences = {
+        ...s.preferences,
+        sound_volume: normalizeQueueSoundVolume(volume),
       };
       persistPreferences(preferences);
       return { preferences };

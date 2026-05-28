@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { queueEventTypeForItem, queueItemIsVisible } from "./queueFilters";
+import { normalizeQueuePreferences, queueEventTypeForItem, queueItemIsVisible } from "./queueFilters";
 import type { QueuePreferences } from "../../types";
 
 const preferences: QueuePreferences = {
@@ -21,6 +21,7 @@ const preferences: QueuePreferences = {
     workflow_completed: false,
     workflow_failed: false,
   },
+  sound_volume: 0.5,
 };
 
 describe("queueFilters", () => {
@@ -59,5 +60,12 @@ describe("queueFilters", () => {
       read: false,
       status: "completed",
     }, preferences)).toBe(false);
+  });
+
+  it("defaults sound volume to 50 percent and clamps persisted values", () => {
+    expect(normalizeQueuePreferences({}).sound_volume).toBe(0.5);
+    expect(normalizeQueuePreferences({ sound_volume: 0.8 }).sound_volume).toBe(0.8);
+    expect(normalizeQueuePreferences({ sound_volume: -1 }).sound_volume).toBe(0);
+    expect(normalizeQueuePreferences({ sound_volume: 2 }).sound_volume).toBe(1);
   });
 });

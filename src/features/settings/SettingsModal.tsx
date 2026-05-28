@@ -114,6 +114,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     keywords: ["queue", "notifications", "sound", "tone", "action needed"],
   },
   {
+    id: "queue-sound-volume",
+    category: "Queue",
+    label: "Sound volume",
+    detail: "Sets the volume for Wardian's local notification tone.",
+    keywords: ["queue", "notifications", "sound", "tone", "volume"],
+  },
+  {
     id: "external-editor",
     category: "Explorer",
     label: "External editor",
@@ -380,6 +387,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const queuePreferences = useQueueStore((state) => state.preferences);
   const setDesktopNotification = useQueueStore((state) => state.setDesktopNotification);
   const setSoundNotification = useQueueStore((state) => state.setSoundNotification);
+  const setSoundVolume = useQueueStore((state) => state.setSoundVolume);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -757,6 +765,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             </div>
           </SettingRow>
         );
+      case "queue-sound-volume": {
+        const soundVolumePercent = Math.round(queuePreferences.sound_volume * 100);
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <div className="flex w-full max-w-[320px] items-center gap-3">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                aria-label="Sound alert volume"
+                value={soundVolumePercent}
+                onChange={(event) => setSoundVolume(Number(event.target.value) / 100)}
+                className="h-2 min-w-[180px] flex-1 accent-[var(--color-wardian-accent)]"
+              />
+              <span className="w-10 text-right text-xs font-semibold tabular-nums text-muted-neutral">
+                {soundVolumePercent}%
+              </span>
+            </div>
+          </SettingRow>
+        );
+      }
       case "external-editor":
         return (
           <SettingRow key={row.id} label={row.label} detail={row.detail}>

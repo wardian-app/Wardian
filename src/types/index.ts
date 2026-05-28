@@ -229,6 +229,7 @@ export interface QueuePreferences {
     visible_event_types: Record<QueueEventType, boolean>;
     desktop_notifications: Record<QueueEventType, boolean>;
     sound_notifications: Record<QueueEventType, boolean>;
+    sound_volume: number;
 }
 
 export interface QueueItem {

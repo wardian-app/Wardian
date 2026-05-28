@@ -42,6 +42,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: vi.fn(async () => false),
+  requestPermission: vi.fn(async () => "denied"),
+  sendNotification: vi.fn(),
+}));
+
 // Mock xterm since it requires a real DOM canvas
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(() => ({
