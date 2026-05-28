@@ -207,6 +207,6 @@ describe("dispatchQueueNotification", () => {
 
     playQueueNotificationSound(1);
 
-    expect(gain.gain.exponentialRampToValueAtTime).toHaveBeenCalledWith(0.28, 0.02);
+    expect(gain.gain.exponentialRampToValueAtTime).toHaveBeenCalledWith(0.36, 0.02);
   });
 });

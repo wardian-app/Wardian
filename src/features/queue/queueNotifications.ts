@@ -14,6 +14,8 @@ type QueueNotificationDependencies = {
   ) => boolean | Promise<boolean>;
 };
 
+const QUEUE_NOTIFICATION_PEAK_GAIN = 0.36;
+
 function notificationTitle(item: QueueItem): string {
   const source = item.agent_name ?? item.workflow_name ?? "Wardian";
   const eventType = queueEventTypeForItem(item);
@@ -77,7 +79,7 @@ export function playQueueNotificationSound(volume = DEFAULT_QUEUE_SOUND_VOLUME) 
     gain.connect(context.destination);
 
     const startTone = () => {
-      const peakGain = 0.28 * normalizedVolume;
+      const peakGain = QUEUE_NOTIFICATION_PEAK_GAIN * normalizedVolume;
       oscillator.start();
       gain.gain.exponentialRampToValueAtTime(peakGain, context.currentTime + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.32);
