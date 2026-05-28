@@ -13,7 +13,7 @@ use wardian_core::models::git::{GitFileEntry, GitLogEntry, GitStatusResult};
 /// captured without flashing a console window.
 /// Sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` so git never blocks
 /// waiting for credential input (mirrors VS Code's git extension behaviour).
-fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
     run_git_with_candidates(cwd, args, &git_command_candidates())
 }
 
@@ -450,6 +450,77 @@ pub(crate) fn remove_worktree(workspace_path: &Path, worktree_path: &Path) -> Re
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitWorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+pub(crate) fn parse_git_worktree_list_porcelain(raw: &str) -> Vec<GitWorktreeInfo> {
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+
+    for line in raw.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            if let Some(path) = current_path.take() {
+                entries.push(GitWorktreeInfo {
+                    path,
+                    branch: current_branch.take(),
+                });
+            } else {
+                current_branch = None;
+            }
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(previous_path) = current_path.replace(PathBuf::from(path)) {
+                entries.push(GitWorktreeInfo {
+                    path: previous_path,
+                    branch: current_branch.take(),
+                });
+            }
+            continue;
+        }
+
+        if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            current_branch = Some(branch.to_string());
+        }
+    }
+
+    if let Some(path) = current_path {
+        entries.push(GitWorktreeInfo {
+            path,
+            branch: current_branch,
+        });
+    }
+
+    entries
+}
+
+pub(crate) fn list_git_worktrees(source_path: &Path) -> Result<Vec<GitWorktreeInfo>, String> {
+    let source_path = absolute_existing_path(source_path)?;
+    let workspace = path_to_git_arg(&source_path)?;
+    let raw = run_git(&workspace, &["worktree", "list", "--porcelain"])?;
+    Ok(parse_git_worktree_list_porcelain(&raw))
+}
+
+pub(crate) fn git_worktree_contains_path(
+    source_path: &Path,
+    worktree_path: &Path,
+) -> Result<bool, String> {
+    let source_path = absolute_existing_path(source_path)?;
+    let expected = absolute_existing_path(worktree_path)
+        .unwrap_or_else(|_| absolute_worktree_target_path(&source_path, worktree_path));
+    let expected = normalize_path_for_compare(&expected);
+
+    Ok(list_git_worktrees(&source_path)?.into_iter().any(|entry| {
+        normalize_path_for_compare(&entry.path) == expected
+    }))
+}
+
 fn absolute_worktree_target_path(workspace_path: &Path, worktree_path: &Path) -> PathBuf {
     if worktree_path.is_absolute() {
         worktree_path.to_path_buf()
@@ -554,6 +625,15 @@ fn normalize_canonical_path(path: &Path) -> Result<PathBuf, String> {
     }
 
     Ok(canonical)
+}
+
+fn normalize_path_for_compare(path: &Path) -> String {
+    normalize_canonical_path(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn escape_toml_basic_string(value: &str) -> String {
@@ -796,6 +876,50 @@ mod tests {
             "wardian/repo-agent"
         );
         assert!(worktree.join(".cargo").join("config.toml").exists());
+    }
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_extracts_paths_and_branches() {
+        let raw = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/.wardian/agents/agent-1/worktrees/review
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/feat/review
+
+";
+
+        let worktrees = parse_git_worktree_list_porcelain(raw);
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].path, std::path::PathBuf::from("/repo"));
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(
+            worktrees[1].path,
+            std::path::PathBuf::from("/repo/.wardian/agents/agent-1/worktrees/review")
+        );
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feat/review"));
+    }
+
+    #[test]
+    fn parse_git_worktree_list_porcelain_handles_detached_or_bare_entries() {
+        let raw = "\
+worktree /repo-detached
+HEAD 3333333333333333333333333333333333333333
+detached
+
+worktree /repo-bare
+bare
+
+";
+
+        let worktrees = parse_git_worktree_list_porcelain(raw);
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].branch, None);
+        assert_eq!(worktrees[1].branch, None);
     }
 
     #[test]
