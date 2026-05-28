@@ -1,8 +1,8 @@
 # Settings
 
 Settings controls Wardian's global app preferences, display behavior, terminal
-defaults, watchlist behavior, provider defaults, and provider maintenance
-utilities.
+defaults, Explorer behavior, watchlist behavior, provider defaults, and provider
+maintenance utilities.
 
 Open Settings from the gear icon on the left icon rail. It opens as a
 near-full-screen app modal and does not change the currently selected sidebar
@@ -19,7 +19,7 @@ computed defaults for the app and operating system.
 
 - `settings/app.json`: app preferences such as theme, top bar telemetry
   visibility, Grid card display, Watchlist new agent position, terminal font
-  size, terminal font family, and Gemini auto-patch.
+  size, terminal font family, Explorer external editor, and Gemini auto-patch.
 - `settings/shell.json`: runtime preferences such as shell selection, default
   provider, regular agent session policy, and Codex runtime defaults.
 
@@ -36,6 +36,8 @@ Categories:
 - **General**: app version and update status.
 - **Appearance**: app theme and top bar telemetry visibility.
 - **Grid**: display mode for agent cards in the main Grid view.
+- **Queue**: queue event desktop and sound notification rules.
+- **Explorer**: external app or editor used by the Explorer right-click menu.
 - **Watchlist**: roster behavior for newly spawned agents.
 - **Terminal**: terminal font and shell defaults.
 - **Agent Runtime**: default provider, regular agent session behavior, and
@@ -109,6 +111,23 @@ main Grid view:
 Use Terminal mode when you need raw TUI controls, provider-specific keybindings,
 or detailed terminal behavior. Individual Grid cards can still be switched
 between Terminal and Chat from the card header without changing this default.
+
+## Explorer
+
+The **External editor** control sets what happens when you choose **Open in
+External App** from the Explorer right-click menu:
+
+- **System default app** uses the operating system's registered app for the
+  selected file or folder. This is Wardian's default because it respects file
+  type associations and works without extra editor setup.
+- **VS Code (code command)** launches the `code` command-line entry point with
+  the selected path.
+- **Custom executable** launches the configured executable with the selected
+  path as its argument.
+
+If VS Code does not open, Wardian shows the launch error in Explorer. Verify the
+`code` command is available on Wardian's app process PATH or use Custom
+executable to point directly at your editor.
 
 ## Watchlist
 

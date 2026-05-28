@@ -2,16 +2,34 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import type React from 'react';
 import { ExplorerPanel } from './ExplorerPanel';
 import type { AgentConfig } from '../../types';
+import { useSettingsStore } from '../../store/useSettingsStore';
 
 vi.mock('./FileTree', () => ({
-  FileTree: ({ path }: { path: string }) => <div data-testid="file-tree">{path}</div>,
+  FileTree: ({ path, onContextMenu }: { path: string; onContextMenu?: (event: React.MouseEvent, node: unknown) => void }) => (
+    <div
+      data-testid="file-tree"
+      onContextMenu={(event) => onContextMenu?.(event, {
+        name: 'notes.md',
+        path: 'C:\\Users\\test\\repo\\notes.md',
+        is_dir: false,
+        extension: 'md',
+      })}
+    >
+      {path}
+    </div>
+  ),
 }));
 
 describe('ExplorerPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useSettingsStore.setState({
+      externalEditor: 'system',
+      externalEditorCustomExecutable: '',
+    });
   });
 
   it('uses compact sidebar title typography', () => {
@@ -41,6 +59,58 @@ describe('ExplorerPanel', () => {
         path: 'C:\\Users\\test\\.wardian',
       });
     });
+  });
+
+  it('opens a right-clicked file in the configured external editor', async () => {
+    useSettingsStore.setState({
+      externalEditor: 'vscode',
+      externalEditorCustomExecutable: '',
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    const tree = await screen.findByTestId('file-tree');
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open in External App' }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_external_editor', {
+        path: 'C:\\Users\\test\\repo\\notes.md',
+        editor: {
+          external_editor: 'vscode',
+          external_editor_custom_executable: null,
+        },
+      });
+    });
+  });
+
+  it('shows a visible error when the configured external editor cannot open', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    useSettingsStore.setState({
+      externalEditor: 'vscode',
+      externalEditorCustomExecutable: '',
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      if (command === 'open_in_external_editor') throw new Error('program not found');
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    const tree = await screen.findByTestId('file-tree');
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open in External App' }));
+
+    expect(await screen.findByText(/External app open failed for VS Code/i)).toBeInTheDocument();
+    expect(screen.getByText(/program not found/i)).toBeInTheDocument();
+    consoleError.mockRestore();
   });
 
   it('re-resolves the explorer root when the selected agent worktree assignment changes', async () => {

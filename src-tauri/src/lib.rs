@@ -401,6 +401,7 @@ pub fn run() {
             commands::fs::get_directory_tree,
             commands::fs::delete_file,
             commands::fs::reveal_in_explorer,
+            commands::fs::open_in_external_editor,
             commands::fs::read_file_preview,
             commands::git::git_status,
             commands::git::git_current_branch,
