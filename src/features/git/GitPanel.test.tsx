@@ -149,6 +149,112 @@ describe("GitPanel", () => {
     expect(screen.getByText("Initial commit")).toBeInTheDocument();
   });
 
+  it("renders VS Code-like graph rows with refs and selected commit details", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_status") {
+        return {
+          branch: "feature/graph",
+          upstream: "origin/feature/graph",
+          ahead: 2,
+          behind: 1,
+          files: [],
+        };
+      }
+      if (command === "git_log") {
+        return [
+          {
+            hash: "1234567890abcdef1234567890abcdef12345678",
+            parents: ["abcdef1234567890abcdef1234567890abcdef12"],
+            refs: ["HEAD -> refs/heads/feature/graph", "refs/remotes/origin/feature/graph"],
+            message: "Polish source control graph",
+            author: "Tester",
+            author_email: "tester@example.com",
+            date: "2026-05-23T08:00:00-04:00",
+          },
+          {
+            hash: "abcdef1234567890abcdef1234567890abcdef12",
+            parents: [],
+            refs: ["refs/heads/main"],
+            message: "Initial commit",
+            author: "Maintainer",
+            author_email: "maintainer@example.com",
+            date: "2026-05-22T08:00:00-04:00",
+          },
+        ];
+      }
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByRole("heading", { name: "Graph" })).toBeInTheDocument();
+    expect(screen.getByText("feature/graph")).toBeInTheDocument();
+    expect(screen.getByText("origin/feature/graph")).toBeInTheDocument();
+    expect(screen.getByText("Tester")).toBeInTheDocument();
+    expect(screen.getByText("1234567")).toBeInTheDocument();
+    expect(screen.getByLabelText("Refs for 1234567")).toHaveTextContent("origin/feature/graph");
+
+    fireEvent.click(screen.getByText("Polish source control graph"));
+
+    expect(screen.getByText("Commit Details")).toBeInTheDocument();
+    expect(screen.getByText("tester@example.com")).toBeInTheDocument();
+    expect(screen.getByText("abcdef1")).toBeInTheDocument();
+  });
+
+  it("labels push as publish branch when the selected branch has no upstream", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_status") return { branch: "feature/local", upstream: null, ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByTitle("Publish Branch")).toBeInTheDocument();
+  });
+
+  it("surfaces push failures instead of only logging them", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_status") return { branch: "main", upstream: "origin/main", ahead: 1, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      if (command === "git_push") throw new Error("remote rejected push");
+      return null;
+    });
+
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByTitle("Push"));
+
+    expect(await screen.findByText("remote rejected push")).toBeInTheDocument();
+  });
+
+  it("refreshes graph history after a successful push", async () => {
+    let gitLogCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_status") return { branch: "main", upstream: "origin/main", ahead: 1, behind: 0, files: [] };
+      if (command === "git_push") return "pushed";
+      if (command === "git_log") {
+        gitLogCalls += 1;
+        return [];
+      }
+      return null;
+    });
+
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByTitle("Push"));
+
+    await waitFor(() => expect(gitLogCalls).toBeGreaterThanOrEqual(2));
+  });
+
   it("keeps file status visible when commit history cannot be loaded", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo";

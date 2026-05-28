@@ -9,6 +9,7 @@ const root = process.cwd();
 const explicitBaseUrl = process.env.WARDIAN_DOCS_SCREENSHOT_URL;
 const screenshotPort = Number.parseInt(process.env.WARDIAN_DOCS_SCREENSHOT_PORT ?? "1420", 10);
 const baseUrl = explicitBaseUrl ?? `http://127.0.0.1:${screenshotPort}`;
+const screenshotOnly = process.env.WARDIAN_DOCS_SCREENSHOT_ONLY ?? "";
 const screenshotHome = path.join(root, ".tmp", "wardian-docs-screenshots");
 const dismissedOnboardingHintIds = ["spawn-agent-first-run:v1"];
 const defaultSidebarContentWidth = 240;
@@ -125,6 +126,7 @@ const directoryTree = {
 
 const gitStatus = {
   branch: "docs/task-oriented-feature-guides",
+  upstream: "origin/docs/task-oriented-feature-guides",
   ahead: 1,
   behind: 0,
   files: [
@@ -137,15 +139,24 @@ const gitStatus = {
 const gitHistory = [
   {
     hash: "8f6d1c9b4a7e2d01",
+    parents: ["61a4d2c9a017bb52"],
+    refs: [
+      "HEAD -> refs/heads/docs/task-oriented-feature-guides",
+      "refs/remotes/origin/docs/task-oriented-feature-guides",
+    ],
     message: "docs: add screenshot documentation plan",
     author: "Wardian",
-    date: "2026-05-12 10:22:00 -0400",
+    author_email: "docs@example.test",
+    date: "2026-05-12T10:22:00-04:00",
   },
   {
     hash: "61a4d2c9a017bb52",
+    parents: [],
+    refs: ["refs/heads/main", "refs/remotes/origin/main"],
     message: "fix: stabilize source control loading state",
     author: "Wardian",
-    date: "2026-05-12 09:41:00 -0400",
+    author_email: "docs@example.test",
+    date: "2026-05-12T09:41:00-04:00",
   },
 ];
 
@@ -602,6 +613,20 @@ async function main() {
     await stabilizeVisuals(page);
     await page.waitForTimeout(1_500);
 
+    if (screenshotOnly === "source-control") {
+      await setSidebarContentWidth(page, defaultSidebarContentWidth);
+      await page.locator("#agent-card-docs-codex").click();
+      await page.locator('[data-testid="sidebar-tab-git"]').click();
+      await page.getByText("docs/task-oriented-feature-guides", { exact: true }).waitFor({ timeout: 10_000 });
+      const graphRow = page.getByRole("button", { name: /docs: add screenshot documentation plan/ }).first();
+      await graphRow.scrollIntoViewIfNeeded();
+      await graphRow.click();
+      await page.getByText("Commit Details").waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(700);
+      await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
+      return;
+    }
+
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
     await capture(page, "grid/app-shell.png");
     await capture(page, "grid/active-agent-state.png", page.locator("main"));
@@ -652,7 +677,11 @@ async function main() {
     await capture(page, "explorer/workspace-tree.png", page.locator('[data-testid="explorer-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-git"]').click();
-    await page.getByText("docs/task-oriented-feature-guides").waitFor({ timeout: 10_000 });
+    await page.getByText("docs/task-oriented-feature-guides", { exact: true }).waitFor({ timeout: 10_000 });
+    const graphRow = page.getByRole("button", { name: /docs: add screenshot documentation plan/ }).first();
+    await graphRow.scrollIntoViewIfNeeded();
+    await graphRow.click();
+    await page.getByText("Commit Details").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
 

@@ -2,7 +2,7 @@
 
 Wardian's Source Control tab lets you work with Git directly from the sidebar for the currently selected agent workspace.
 
-![Source Control panel showing branch state, commit box, staged changes, unstaged changes, and history](../assets/screenshots/source-control/status-panel.png)
+![Source Control panel showing branch state, commit box, staged changes, unstaged changes, and the commit graph details](../assets/screenshots/source-control/status-panel.png)
 
 ## Scope and Context
 
@@ -15,10 +15,12 @@ Wardian's Source Control tab lets you work with Git directly from the sidebar fo
 At the top, Wardian shows:
 
 - current branch name
+- tracked upstream branch, when configured
 - ahead/behind indicators
-- pull and push actions
+- pull and push or publish actions
 
 This is a quick sync layer for checking divergence and moving changes without leaving the app.
+When the current branch has no upstream, the upload action is labeled **Publish Branch** and publishes to `origin` when available, or the first configured remote otherwise.
 
 ## File Sections
 
@@ -49,9 +51,15 @@ The commit action is enabled only when:
 - there is a commit message, and
 - at least one file is staged
 
-## History
+## Graph
 
-The History section shows recent commits for the selected workspace with message and short hash.
+The Graph section shows recent commits for the selected workspace with a VS Code-like history row:
+
+- branch and remote reference badges
+- message, author, timestamp, and short hash
+- selected commit details with full author email, parent hashes, and copy-hash action
+
+Click a commit row to inspect its details without leaving Source Control.
 
 ## Worktree Mode
 
@@ -78,7 +86,7 @@ wardian agent worktree disable <agent-name-or-id>
 - Git operations are executed with non-interactive credential prompts disabled to avoid blocking UI flows.
 - Provider resume is workspace-path-bound. Worktree moves use a fresh provider session, not `--resume` from the new path.
 - Removing a worktree assignment does not delete the physical worktree immediately; the provider may still have files or cwd handles open during the transition.
-- If pull/push fails, check local credentials and remote permissions in your terminal environment.
+- If pull, push, or publish fails, Wardian shows the Git error in the panel. Check local credentials and remote permissions in your terminal environment.
 
 ## Related References
 

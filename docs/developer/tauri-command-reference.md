@@ -149,16 +149,16 @@ tests. It is not registered in release builds.
 
 ## Git (`commands/git.rs`)
 
-- `git_status`
+- `git_status`: returns branch, upstream, ahead/behind counts, and file status entries.
 - `git_current_branch`
-- `git_log`
+- `git_log`: returns decorated commit graph rows with parent hashes, refs, author metadata, and ISO dates.
 - `git_diff_file`
 - `git_stage`
 - `git_unstage`
 - `git_discard_changes`
 - `git_commit`
 - `git_pull`
-- `git_push`
+- `git_push`: pushes tracked branches and publishes untracked local branches with `--set-upstream`.
 - `git_create_worktree`
 - `git_remove_worktree`
 - `git_watch`

@@ -1,13 +1,41 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Check, GitBranch, X } from "lucide-react";
+import { Check, CloudUpload, Copy, GitBranch, RefreshCw, X } from "lucide-react";
 import { AgentConfig, AgentWorktreeSummary, GitStatusResult, GitLogEntry } from "../../types";
 import { GitFileList } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
 import { useConfirm } from "../../components/ConfirmDialog";
 
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
+
+const shortHash = (hash: string) => hash.slice(0, 7);
+
+const displayGitRef = (ref: string) =>
+  ref
+    .replace(/^HEAD -> refs\/heads\//, "")
+    .replace(/^refs\/heads\//, "")
+    .replace(/^refs\/remotes\//, "")
+    .replace(/^tag: refs\/tags\//, "")
+    .replace(/^refs\/tags\//, "")
+    .trim();
+
+const isCurrentBranchRef = (ref: string, branch: string) =>
+  ref === `HEAD -> refs/heads/${branch}` || ref === `refs/heads/${branch}`;
+
+const isRemoteRef = (ref: string) => ref.startsWith("refs/remotes/");
+
+const formatHistoryDate = (date: string) => {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return date;
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
+};
 
 interface GitPanelProps {
   selectedAgentIds: Set<string>;
@@ -32,6 +60,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [diffFilePath, setDiffFilePath] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [worktreeLoading, setWorktreeLoading] = useState(false);
   const [availableWorktrees, setAvailableWorktrees] = useState<AgentWorktreeSummary[]>([]);
   const [currentWorktreeName, setCurrentWorktreeName] = useState<ActiveWorktreeName | null>(null);
@@ -49,6 +78,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   // Commit history
   const [history, setHistory] = useState<GitLogEntry[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [selectedHistoryHash, setSelectedHistoryHash] = useState<string | null>(null);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
@@ -113,6 +143,8 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setStatus(null);
       setHistory([]);
       setHistoryError(null);
+      setSelectedHistoryHash(null);
+      setSyncError(null);
       setError(null);
       setRootPath(null);
 
@@ -132,6 +164,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     };
     fetchPath();
   }, [selectedAgentId, selectedWorkspaceRevision]);
+
+  useEffect(() => {
+    setSelectedHistoryHash((hash) => (hash && history.some((entry) => entry.hash === hash) ? hash : null));
+  }, [history]);
 
   // Fetch git status
   const refreshStatus = useCallback(async () => {
@@ -410,11 +446,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const handlePull = async () => {
     if (!rootPath) return;
     setSyncing(true);
+    setSyncError(null);
     try {
       await invoke<string>("git_pull", { cwd: rootPath });
-      await refreshStatus();
+      await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (err) {
-      console.error("Pull failed:", err);
+      setSyncError(formatError(err));
     } finally {
       setSyncing(false);
     }
@@ -423,11 +460,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const handlePush = async () => {
     if (!rootPath) return;
     setSyncing(true);
+    setSyncError(null);
     try {
       await invoke<string>("git_push", { cwd: rootPath });
-      await refreshStatus();
+      await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (err) {
-      console.error("Push failed:", err);
+      setSyncError(formatError(err));
     } finally {
       setSyncing(false);
     }
@@ -490,46 +528,62 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const unstagedTracked = status.files.filter((f) => !f.is_staged && f.status !== "?");
   const untrackedFiles = status.files.filter((f) => !f.is_staged && f.status === "?");
   const hasStagedFiles = stagedFiles.length > 0;
+  const hasUpstream = Boolean(status.upstream);
+  const pushTitle = hasUpstream ? "Push" : "Publish Branch";
+  const selectedHistory = selectedHistoryHash
+    ? history.find((entry) => entry.hash === selectedHistoryHash) ?? null
+    : null;
 
   return (
     <div className="flex flex-col h-full w-full relative">
       <h2 className="text-sm font-bold text-primary tracking-tight mb-2">Source Control</h2>
 
       {/* Branch bar */}
-      <div className="flex items-center gap-2 py-1.5 mb-3 border-b border-wardian-border/30">
+      <div className="flex flex-wrap items-center gap-2 py-1.5 border-b border-wardian-border/30">
         <svg className="w-4 h-4 text-[var(--color-wardian-accent)] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <circle cx="7" cy="5" r="2" style={{fill:'none'}} /><circle cx="7" cy="19" r="2" style={{fill:'none'}} /><circle cx="17" cy="12" r="2" style={{fill:'none'}} />
           <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
         </svg>
-        <span className="text-xs font-semibold text-primary truncate">{status.branch}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-primary">{status.branch}</span>
         {status.ahead > 0 && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_80%)] text-[var(--color-wardian-success)] font-mono">↑{status.ahead}</span>
+          <span className="shrink-0 rounded bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_80%)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-wardian-success)]">↑{status.ahead}</span>
         )}
         {status.behind > 0 && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] text-[var(--color-wardian-warning)] font-mono">↓{status.behind}</span>
+          <span className="shrink-0 rounded bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-wardian-warning)]">↓{status.behind}</span>
         )}
-        <div className="flex-1" />
-        <button
-          onClick={handlePull}
-          disabled={syncing}
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-          title="Pull"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-        </button>
-        <button
-          onClick={handlePush}
-          disabled={syncing}
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-          title="Push"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-          </svg>
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={handlePull}
+            disabled={syncing}
+            className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+            title="Pull"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </button>
+          <button
+            onClick={handlePush}
+            disabled={syncing}
+            className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+            title={pushTitle}
+          >
+            <CloudUpload className="h-4 w-4" />
+          </button>
+        </div>
+        {status.upstream && (
+          <span
+            className="ml-6 min-w-0 basis-[calc(100%-1.5rem)] truncate rounded border border-wardian-border px-1.5 py-0.5 text-[10px] text-[var(--color-wardian-text-muted)]"
+            title={status.upstream}
+          >
+            upstream {status.upstream}
+          </span>
+        )}
       </div>
+      {syncError && (
+        <div className="mb-3 mt-2 rounded border border-[color-mix(in_srgb,var(--color-wardian-error),transparent_55%)] bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_90%)] px-2 py-1.5 text-[11px] text-[var(--color-wardian-error)]">
+          {syncError}
+        </div>
+      )}
+      {!syncError && <div className="mb-3" />}
 
       {/* Worktree action row */}
       <div className="mb-3">
@@ -789,7 +843,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           </div>
         )}
 
-        {/* Commit History */}
+        {/* Source Control Graph */}
         {(history.length > 0 || historyError) && (
           <section className="mt-1 border-t border-wardian-border/30 pt-2">
             <button
@@ -799,29 +853,116 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${historyOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
               </svg>
-              <span className="text-[11px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">History</span>
+              <h3 className="text-[11px] font-bold text-[var(--color-wardian-text-muted)] tracking-wide">Graph</h3>
               <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
                 {historyError ? "!" : history.length}
               </span>
             </button>
             {historyOpen && (
-              <div className="flex flex-col">
+              <div className="flex flex-col gap-2">
                 {historyError ? (
                   <div className="px-1 py-2 text-[11px] text-[var(--color-wardian-text-muted)]">
                     History unavailable
                   </div>
                 ) : (
-                  history.map((entry, i) => (
-                    <div key={entry.hash} className="flex items-center gap-2 py-[3px] px-1 hover:bg-wardian-card-bg-muted rounded group cursor-default">
-                      <div className="relative flex flex-col items-center shrink-0" style={{ width: 12 }}>
-                        {i > 0 && <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
-                        <div className={`w-2 h-2 rounded-full border shrink-0 z-10 ${i === 0 ? 'bg-[var(--color-wardian-accent)] border-[var(--color-wardian-accent)]' : 'bg-transparent border-[var(--color-wardian-text-muted)]'}`} />
-                        {i < history.length - 1 && <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
-                      </div>
-                      <span className="text-[11px] text-primary truncate flex-1 leading-snug">{entry.message}</span>
-                      <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">{entry.hash.slice(0, 7)}</span>
+                  <>
+                    <div className="flex flex-col">
+                      {history.map((entry, i) => {
+                        const isSelected = selectedHistoryHash === entry.hash;
+                        const refs = entry.refs ?? [];
+                        const visibleRefs = refs.map(displayGitRef).filter(Boolean);
+
+                        return (
+                          <button
+                            key={entry.hash}
+                            type="button"
+                            onClick={() => setSelectedHistoryHash(entry.hash)}
+                            className={`group grid w-full grid-cols-[18px_minmax(0,1fr)] items-start gap-2 overflow-hidden rounded px-1.5 py-1.5 text-left transition-colors ${
+                              isSelected
+                                ? "bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)]"
+                                : "hover:bg-wardian-card-bg-muted"
+                            }`}
+                          >
+                            <div className="relative flex h-full min-h-[36px] items-center justify-center self-stretch">
+                              {i > 0 && <div className="absolute top-0 h-1/2 w-px bg-wardian-border/60" />}
+                              <div
+                                className={`z-10 h-2.5 w-2.5 rounded-full border ${
+                                  i === 0 || isSelected
+                                    ? "border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)]"
+                                    : "border-[var(--color-wardian-text-muted)] bg-[var(--color-wardian-bg)]"
+                                }`}
+                              />
+                              {i < history.length - 1 && <div className="absolute bottom-0 h-1/2 w-px bg-wardian-border/60" />}
+                            </div>
+                            <div className="min-w-0 overflow-hidden">
+                              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
+                                <span className="min-w-0 truncate text-[11px] font-semibold leading-snug text-primary">{entry.message}</span>
+                                <span className="shrink-0 font-mono text-[10px] text-[var(--color-wardian-text-muted)]">{shortHash(entry.hash)}</span>
+                              </div>
+                              {visibleRefs.length > 0 && (
+                                <div
+                                  className="mt-1 flex min-w-0 max-w-full flex-wrap gap-1 overflow-hidden"
+                                  aria-label={`Refs for ${shortHash(entry.hash)}`}
+                                >
+                                  {visibleRefs.slice(0, 3).map((ref, index) => {
+                                    const sourceRef = refs[index] ?? ref;
+                                    const current = isCurrentBranchRef(sourceRef, status.branch);
+                                    const remote = isRemoteRef(sourceRef);
+
+                                    return (
+                                      <span
+                                        key={`${entry.hash}-${sourceRef}`}
+                                        className={`min-w-0 max-w-full truncate rounded border px-1 py-[1px] text-[9px] font-medium ${
+                                          current
+                                            ? "border-[color-mix(in_srgb,var(--color-wardian-accent),transparent_45%)] text-[var(--color-wardian-accent)]"
+                                            : remote
+                                              ? "border-[color-mix(in_srgb,var(--color-wardian-processing),transparent_55%)] text-[var(--color-wardian-processing)]"
+                                              : "border-wardian-border text-[var(--color-wardian-text-muted)]"
+                                        }`}
+                                        title={sourceRef}
+                                      >
+                                        {current ? `HEAD ${ref}` : ref}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-[var(--color-wardian-text-muted)]">
+                                <span className="truncate">{entry.author}</span>
+                                <span className="shrink-0">{formatHistoryDate(entry.date)}</span>
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
-                  ))
+
+                    {selectedHistory && (
+                      <aside className="rounded border border-wardian-border bg-[var(--color-wardian-card-bg)] p-2">
+                        <div className="mb-1.5 flex items-center gap-2">
+                          <h4 className="text-[11px] font-bold text-primary">Commit Details</h4>
+                          <button
+                            type="button"
+                            onClick={() => navigator.clipboard?.writeText(selectedHistory.hash).catch(() => {})}
+                            className="ml-auto rounded p-0.5 text-[var(--color-wardian-text-muted)] transition-colors hover:bg-wardian-card-bg-muted hover:text-primary"
+                            title="Copy commit hash"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="space-y-1 text-[10px] text-[var(--color-wardian-text-muted)]">
+                          <div className="text-[11px] font-semibold text-primary">{selectedHistory.message}</div>
+                          <div className="font-mono">{shortHash(selectedHistory.hash)}</div>
+                          <div>{selectedHistory.author}</div>
+                          {selectedHistory.author_email && <div>{selectedHistory.author_email}</div>}
+                          <div>{formatHistoryDate(selectedHistory.date)}</div>
+                          {(selectedHistory.parents ?? []).length > 0 && (
+                            <div className="font-mono">parents {(selectedHistory.parents ?? []).map(shortHash).join(", ")}</div>
+                          )}
+                        </div>
+                      </aside>
+                    )}
+                  </>
                 )}
               </div>
             )}

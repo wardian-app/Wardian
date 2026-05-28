@@ -181,6 +181,7 @@ export interface GitFileEntry {
 
 export interface GitStatusResult {
     branch: string;
+    upstream: string | null;
     files: GitFileEntry[];
     ahead: number;
     behind: number;
@@ -188,8 +189,11 @@ export interface GitStatusResult {
 
 export interface GitLogEntry {
     hash: string;
+    parents: string[];
+    refs: string[];
     message: string;
     author: string;
+    author_email: string;
     date: string;
 }
 
