@@ -100,6 +100,31 @@ describe("GitPanel", () => {
     expect(screen.queryByText("Loading git status...")).not.toBeInTheDocument();
   });
 
+  it("does not poll git status after the initial status load fails", async () => {
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    let statusCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/not-a-repo";
+      if (command === "git_status") {
+        statusCalls += 1;
+        throw new Error("fatal: not a git repository (or any of the parent directories): .git");
+      }
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    try {
+      renderGitPanel();
+
+      expect(await screen.findByText("Not a Git Repository")).toBeInTheDocument();
+      expect(statusCalls).toBe(1);
+      expect(setIntervalSpy).not.toHaveBeenCalledWith(expect.any(Function), 3000);
+      expect(mockInvoke).not.toHaveBeenCalledWith("git_watch", { cwd: "C:/not-a-repo" });
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
   it("shows a fallback error instead of loading forever when git status returns an empty error", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo";

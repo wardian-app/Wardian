@@ -138,14 +138,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   // Fetch git status
   const refreshStatus = useCallback(async () => {
-    if (!rootPath) return;
+    if (!rootPath) return false;
     try {
       const result = await invoke<GitStatusResult>("git_status", { cwd: rootPath });
       setStatus(result);
       setError(null);
+      return true;
     } catch (err) {
       setStatus(null);
       setError(formatError(err));
+      return false;
     }
   }, [rootPath]);
 
@@ -166,13 +168,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   useEffect(() => {
     if (!rootPath) return;
 
-    refreshStatus();
-    refreshHistory();
-    const pollId = window.setInterval(() => {
-      void refreshStatus();
-    }, GIT_STATUS_POLL_INTERVAL_MS);
-
-    invoke("git_watch", { cwd: rootPath }).catch(() => {});
+    let disposed = false;
+    let pollId: number | null = null;
+    let isWatching = false;
 
     const unlistenPromise = listen<string>("git-changed", (event) => {
       if (event.payload === rootPath) {
@@ -181,9 +179,28 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       }
     });
 
+    void (async () => {
+      const statusLoaded = await refreshStatus();
+      if (disposed || !statusLoaded) return;
+
+      await refreshHistory();
+      if (disposed) return;
+
+      pollId = window.setInterval(() => {
+        void refreshStatus();
+      }, GIT_STATUS_POLL_INTERVAL_MS);
+      isWatching = true;
+      invoke("git_watch", { cwd: rootPath }).catch(() => {});
+    })();
+
     return () => {
-      window.clearInterval(pollId);
-      invoke("git_unwatch", { cwd: rootPath }).catch(() => {});
+      disposed = true;
+      if (pollId !== null) {
+        window.clearInterval(pollId);
+      }
+      if (isWatching) {
+        invoke("git_unwatch", { cwd: rootPath }).catch(() => {});
+      }
       unlistenPromise.then((fn) => fn());
     };
   }, [rootPath, refreshStatus, refreshHistory]);
