@@ -17,6 +17,14 @@ fn run_git(cwd: &str, args: &[&str]) -> Result<String, String> {
     run_git_with_candidates(cwd, args, &git_command_candidates())
 }
 
+fn run_git_allowing_status(
+    cwd: &str,
+    args: &[&str],
+    allowed_statuses: &[i32],
+) -> Result<String, String> {
+    run_git_allowing_status_with_candidates(cwd, args, allowed_statuses, &git_command_candidates())
+}
+
 fn git_command_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![PathBuf::from("git")];
 
@@ -52,6 +60,15 @@ fn run_git_with_candidates(
     args: &[&str],
     candidates: &[PathBuf],
 ) -> Result<String, String> {
+    run_git_allowing_status_with_candidates(cwd, args, &[0], candidates)
+}
+
+fn run_git_allowing_status_with_candidates(
+    cwd: &str,
+    args: &[&str],
+    allowed_statuses: &[i32],
+    candidates: &[PathBuf],
+) -> Result<String, String> {
     let mut last_not_found = None;
 
     for candidate in candidates {
@@ -64,11 +81,15 @@ fn run_git_with_candidates(
             Err(error) => return Err(format!("Failed to execute git: {}", error)),
         };
 
-        if !output.status.success() {
+        let status_code = output.status.code();
+        let status_allowed = status_code
+            .map(|code| allowed_statuses.contains(&code))
+            .unwrap_or(false);
+        if !status_allowed {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(git_failure_message(
-                output.status.code(),
+                status_code,
                 stdout.as_ref(),
                 stderr.as_ref(),
             ));
@@ -127,9 +148,23 @@ fn parse_porcelain_path(raw_path: &str) -> String {
     raw_path.to_string()
 }
 
+fn parse_tracking_name(tracking: &str) -> Option<String> {
+    let name = tracking
+        .split_once(" [")
+        .map(|(value, _)| value)
+        .unwrap_or(tracking)
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 /// Parse `git status --porcelain=v1 -b` output into a GitStatusResult.
 fn parse_porcelain_status(raw: &str) -> GitStatusResult {
     let mut branch = String::new();
+    let mut upstream = None;
     let mut ahead: u32 = 0;
     let mut behind: u32 = 0;
     let mut files = Vec::new();
@@ -142,6 +177,7 @@ fn parse_porcelain_status(raw: &str) -> GitStatusResult {
                 None => (rest, ""),
             };
             branch = branch_part.to_string();
+            upstream = parse_tracking_name(tracking);
 
             if let Some(bracket_start) = tracking.find('[') {
                 if let Some(bracket_end) = tracking.find(']') {
@@ -193,6 +229,8 @@ fn parse_porcelain_status(raw: &str) -> GitStatusResult {
 
     GitStatusResult {
         branch,
+        has_upstream: upstream.is_some(),
+        upstream,
         files,
         ahead,
         behind,
@@ -245,6 +283,14 @@ pub async fn git_log(cwd: String, count: u32) -> Result<Vec<GitLogEntry>, String
 
 #[tauri::command]
 pub async fn git_diff_file(cwd: String, path: String, staged: bool) -> Result<String, String> {
+    if !staged && is_untracked_path(&cwd, &path)? {
+        return run_git_allowing_status(
+            &cwd,
+            &["diff", "--no-color", "--no-index", "--", "/dev/null", &path],
+            &[0, 1],
+        );
+    }
+
     let mut args = vec!["diff", "--no-color"];
     if staged {
         args.push("--cached");
@@ -331,7 +377,38 @@ pub async fn git_pull(cwd: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn git_push(cwd: String) -> Result<String, String> {
-    run_git(&cwd, &["push"])
+    if run_git(
+        &cwd,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .is_ok()
+    {
+        return run_git(&cwd, &["push"]);
+    }
+
+    let branch = run_git(&cwd, &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("Cannot publish detached HEAD.".to_string());
+    }
+
+    run_git(&cwd, &["push", "--set-upstream", "origin", branch])
+}
+
+fn is_untracked_path(cwd: &str, path: &str) -> Result<bool, String> {
+    let raw = run_git(
+        cwd,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            path,
+        ],
+    )?;
+    Ok(raw
+        .lines()
+        .any(|line| line.starts_with("?? ") && parse_porcelain_path(&line[3..]) == path))
 }
 
 #[tauri::command]
@@ -612,12 +689,26 @@ mod tests {
         let raw = "## feature-branch\nMM both.rs\n";
         let result = parse_porcelain_status(raw);
         assert_eq!(result.branch, "feature-branch");
+        assert!(!result.has_upstream);
+        assert_eq!(result.upstream, None);
         assert_eq!(result.ahead, 0);
         assert_eq!(result.behind, 0);
         // MM = staged M + unstaged M
         assert_eq!(result.files.len(), 2);
         assert!(result.files[0].is_staged);
         assert!(!result.files[1].is_staged);
+    }
+
+    #[test]
+    fn parse_status_tracks_upstream_metadata() {
+        let raw = "## feature...origin/feature [ahead 2, behind 1]\n";
+        let result = parse_porcelain_status(raw);
+
+        assert_eq!(result.branch, "feature");
+        assert!(result.has_upstream);
+        assert_eq!(result.upstream.as_deref(), Some("origin/feature"));
+        assert_eq!(result.ahead, 2);
+        assert_eq!(result.behind, 1);
     }
 
     #[test]
@@ -756,6 +847,60 @@ mod tests {
             git_failure_message(Some(1), "", ""),
             "git exited with status 1"
         );
+    }
+
+    #[tokio::test]
+    async fn git_push_publishes_branch_without_upstream() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote.git");
+        let repo = temp.path().join("repo");
+
+        run_git(
+            temp.path().to_str().unwrap(),
+            &["init", "--bare", "remote.git"],
+        )
+        .unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let cwd = repo.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        std::fs::write(repo.join("README.md"), "initial\n").unwrap();
+        run_git(cwd, &["add", "README.md"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+        run_git(cwd, &["branch", "-M", "main"]).unwrap();
+        run_git(cwd, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        run_git(cwd, &["push", "-u", "origin", "main"]).unwrap();
+        run_git(cwd, &["switch", "-c", "feature/unpublished"]).unwrap();
+        std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        run_git(cwd, &["add", "feature.txt"]).unwrap();
+        run_git(cwd, &["commit", "-m", "feature"]).unwrap();
+
+        git_push(cwd.to_string()).await.unwrap();
+
+        let upstream = run_git(
+            cwd,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .unwrap();
+        assert_eq!(upstream.trim(), "origin/feature/unpublished");
+    }
+
+    #[tokio::test]
+    async fn git_diff_file_shows_untracked_file_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_str().unwrap();
+
+        run_git(cwd, &["init"]).unwrap();
+        std::fs::write(temp.path().join("new.txt"), "first line\nsecond line\n").unwrap();
+
+        let diff = git_diff_file(cwd.to_string(), "new.txt".to_string(), false)
+            .await
+            .unwrap();
+
+        assert!(diff.contains("+++ b/new.txt"), "{diff}");
+        assert!(diff.contains("+first line"), "{diff}");
+        assert!(diff.contains("+second line"), "{diff}");
     }
 
     #[test]
