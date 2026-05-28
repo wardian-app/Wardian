@@ -3044,9 +3044,10 @@ mod tests {
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_wardian_agent_worktree_root, lock_agent_lifecycle, mark_agent_paused_off,
-        normalize_clone_folder_override, normalize_spawn_folder, normalize_workspace_record_path,
-        persisted_resume_session_for_provider, prepare_agent_for_clear, prepare_clear_config,
-        prepare_restored_config_for_spawn, prepare_resume_config,
+        normalize_clone_folder_override, normalize_discovered_git_worktree_path,
+        normalize_spawn_folder, normalize_workspace_record_path, persisted_resume_session_for_provider,
+        prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
+        prepare_resume_config,
         prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
         reserve_spawn_session_name, resolve_agent_worktree_branch_name,
@@ -4314,7 +4315,33 @@ mod tests {
 
         let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
 
-        assert_eq!(discovered.len(), 1);
+        let raw_worktree_list =
+            crate::commands::git::run_git(cwd, &["worktree", "list", "--porcelain"])
+                .unwrap_or_else(|error| format!("<git worktree list failed: {error}>"));
+        let listed_worktrees = crate::commands::git::list_git_worktrees(&repo)
+            .map(|worktrees| {
+                worktrees
+                    .into_iter()
+                    .map(|worktree| {
+                        let normalized = normalize_discovered_git_worktree_path(&worktree.path);
+                        format!(
+                            "path={:?}, normalized={normalized:?}, under_root={}",
+                            worktree.path,
+                            is_under_wardian_agent_worktree_root(&wardian_home, &normalized)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|error| vec![format!("<list_git_worktrees failed: {error}>")]);
+
+        assert_eq!(
+            discovered.len(),
+            1,
+            "repo={}, wardian_home={}, worktree={}, raw_worktree_list={raw_worktree_list:?}, listed_worktrees={listed_worktrees:#?}",
+            normalize_workspace_record_path(&repo),
+            normalize_workspace_record_path(&wardian_home),
+            normalize_workspace_record_path(&worktree)
+        );
         assert_eq!(
             discovered[0].source_folder,
             normalize_workspace_record_path(&repo)
