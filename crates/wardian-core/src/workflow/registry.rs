@@ -1,4 +1,4 @@
-use crate::field_type::{FieldDef, FieldType};
+use crate::workflow::field_type::{FieldDef, FieldType};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 

@@ -1,7 +1,7 @@
 use wardian_engine::driver::Engine;
 use wardian_engine::executor::MockExecutor;
 use wardian_engine::state::RunStatus;
-use wardian_workflow::parse_str;
+use wardian_core::workflow::parse_str;
 
 const LINEAR: &str = r#"---
 schema: 2

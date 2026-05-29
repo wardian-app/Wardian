@@ -19,7 +19,7 @@ pub enum EngineError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("workflow error: {0}")]
-    Workflow(#[from] wardian_workflow::WorkflowError),
+    Workflow(#[from] wardian_core::workflow::WorkflowError),
     #[error("run is not awaiting approval at node `{0}`")]
     NotAwaitingApproval(String),
     #[error("unresolved interpolation: {0}")]

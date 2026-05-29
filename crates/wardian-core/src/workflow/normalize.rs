@@ -1,4 +1,4 @@
-use crate::blueprint::Blueprint;
+use crate::workflow::blueprint::Blueprint;
 
 /// Put a blueprint into canonical form so equivalent graphs serialize
 /// identically: nodes sorted by id, edges sorted by (from, from_port, to,
@@ -13,7 +13,7 @@ pub fn normalize(blueprint: &mut Blueprint) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blueprint::{Blueprint, Edge, Node};
+    use crate::workflow::blueprint::{Blueprint, Edge, Node};
 
     fn node(id: &str, ty: &str) -> Node {
         Node {

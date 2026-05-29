@@ -7,7 +7,7 @@ use crate::state::{NodeStatus, RunState, RunStatus};
 use crate::store::{append_event, read_checkpoint, read_events, write_checkpoint};
 use crate::{EngineError, StepError};
 use std::path::Path;
-use wardian_workflow::{Blueprint, Node};
+use wardian_core::workflow::{Blueprint, Node};
 
 /// The async engine: drives a run by repeatedly consulting the pure core,
 /// executing side-effecting nodes through a `StepExecutor`, and persisting each

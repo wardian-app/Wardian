@@ -3,6 +3,7 @@ pub mod db;
 pub mod identity;
 pub mod models;
 pub mod paths;
+pub mod workflow;
 
 #[cfg(test)]
 mod tests {

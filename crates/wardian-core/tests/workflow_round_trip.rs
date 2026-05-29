@@ -1,4 +1,4 @@
-use wardian_workflow::{normalize, parse_str, to_string, validate};
+use wardian_core::workflow::{normalize, parse_str, to_string, validate};
 
 const PR_REVIEW: &str = include_str!("fixtures/pr-review.md");
 

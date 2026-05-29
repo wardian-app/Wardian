@@ -236,7 +236,7 @@ mod tests {
     use crate::event::EventKind;
     use crate::graph::Graph;
     use crate::state::{NodeStatus, RunState, RunStatus};
-    use wardian_workflow::{Blueprint, Edge, Node};
+    use wardian_core::workflow::{Blueprint, Edge, Node};
 
     fn node(id: &str, ty: &str) -> Node {
         let mut fields = serde_json::Map::new();

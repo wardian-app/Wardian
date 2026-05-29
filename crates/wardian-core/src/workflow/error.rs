@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Errors returned by the workflow library's IO and (de)serialization paths.
 /// Semantic problems with an otherwise-parseable blueprint are reported as
-/// [`crate::validate::Diagnostic`]s, not as `WorkflowError`.
+/// [`crate::workflow::validate::Diagnostic`]s, not as `WorkflowError`.
 #[derive(Debug, Error)]
 pub enum WorkflowError {
     #[error("io error: {0}")]

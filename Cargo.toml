@@ -4,7 +4,6 @@ members = [
   "src-tauri",
   "crates/wardian-core",
   "crates/wardian-cli",
-  "crates/wardian-workflow",
   "crates/wardian-engine",
 ]
 

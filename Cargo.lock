@@ -5687,7 +5687,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "wardian-core",
- "wardian-workflow",
 ]
 
 [[package]]
@@ -5700,6 +5699,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_norway",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
@@ -5717,19 +5717,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
- "wardian-workflow",
-]
-
-[[package]]
-name = "wardian-workflow"
-version = "0.3.6"
-dependencies = [
- "once_cell",
- "serde",
- "serde_json",
- "serde_norway",
- "tempfile",
- "thiserror 2.0.18",
+ "wardian-core",
 ]
 
 [[package]]

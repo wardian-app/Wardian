@@ -1,4 +1,4 @@
-use crate::blueprint::Blueprint;
+use crate::workflow::blueprint::Blueprint;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -22,9 +22,9 @@ impl BlueprintDiff {
 /// Compute the node-level diff from `before` to `after`. Output vectors are
 /// sorted for deterministic results.
 pub fn diff(before: &Blueprint, after: &Blueprint) -> BlueprintDiff {
-    let before_map: BTreeMap<&str, &crate::blueprint::Node> =
+    let before_map: BTreeMap<&str, &crate::workflow::blueprint::Node> =
         before.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let after_map: BTreeMap<&str, &crate::blueprint::Node> =
+    let after_map: BTreeMap<&str, &crate::workflow::blueprint::Node> =
         after.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
     let mut d = BlueprintDiff::default();
@@ -49,7 +49,7 @@ pub fn diff(before: &Blueprint, after: &Blueprint) -> BlueprintDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blueprint::{Blueprint, Node};
+    use crate::workflow::blueprint::{Blueprint, Node};
 
     fn node(id: &str) -> Node {
         Node {

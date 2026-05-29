@@ -1,5 +1,5 @@
-use crate::field_type::FieldType;
-use crate::registry::{node_types, NodeKind};
+use crate::workflow::field_type::FieldType;
+use crate::workflow::registry::{node_types, NodeKind};
 use std::fmt::Write as _;
 
 /// Render the node-type reference as markdown, generated from the registry so
@@ -77,7 +77,7 @@ mod tests {
     fn doc_has_a_section_per_node_type() {
         let md = reference_doc();
         assert!(md.starts_with("# Workflow Node Reference"));
-        for def in crate::registry::node_types() {
+        for def in crate::workflow::registry::node_types() {
             assert!(
                 md.contains(&format!("## {}", def.label)),
                 "missing {}",
