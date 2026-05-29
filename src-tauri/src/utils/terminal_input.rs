@@ -16,10 +16,8 @@ pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<V
     }
 
     let profile = crate::utils::delivery_profile::delivery_profile(provider_name);
-    Ok(vec![
-        normalized.into_bytes(),
-        profile.submit_key.bytes().to_vec(),
-    ])
+    let plan = crate::utils::delivery_transaction::plan_terminal_payload(&profile, &normalized);
+    Ok(vec![plan.payload_bytes, plan.submit_key])
 }
 
 pub async fn submit_prompt_chunks_via_sender(
@@ -178,9 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_submit_chunks_keep_codex_multiline_literal() {
-        let chunks = provider_submit_chunks("codex", "hello\nworld").expect("chunks");
+    fn provider_submit_chunks_reports_codex_bracketed_paste_payload() {
+        let chunks = provider_submit_chunks("codex", "hello").expect("chunks");
 
-        assert_eq!(chunks, vec![b"hello\nworld".to_vec(), b"\r".to_vec()]);
+        assert_eq!(
+            chunks,
+            vec![b"\x1b[200~hello\x1b[201~".to_vec(), b"\r".to_vec()]
+        );
     }
 }

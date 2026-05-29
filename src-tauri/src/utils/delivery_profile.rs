@@ -35,10 +35,10 @@ pub fn delivery_profile(provider: &str) -> DeliveryProfile {
         "codex" => DeliveryProfile {
             provider: normalized,
             submit_key: SubmitKey::CarriageReturn,
-            submit_delay_ms: 150,
+            submit_delay_ms: 0,
             bracketed_paste: BracketedPasteProfile {
                 enabled: true,
-                min_bytes: 2048,
+                min_bytes: 1,
             },
             input_ready_markers: &["›", "Use /skills"],
             busy_markers: &["esc to interrupt", "Working"],
@@ -106,14 +106,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_profile_uses_short_submit_delay_and_return_key() {
+    fn codex_profile_uses_immediate_bracketed_paste_and_return_key() {
         let profile = delivery_profile("codex");
 
         assert_eq!(profile.provider, "codex");
         assert_eq!(profile.submit_key, SubmitKey::CarriageReturn);
-        assert!(profile.submit_delay_ms >= 150);
-        assert!(profile.submit_delay_ms < 1000);
+        assert_eq!(profile.submit_delay_ms, 0);
         assert!(profile.bracketed_paste.enabled);
+        assert_eq!(profile.bracketed_paste.min_bytes, 1);
     }
 
     #[test]

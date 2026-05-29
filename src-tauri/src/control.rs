@@ -1,3 +1,4 @@
+use crate::manager;
 use crate::state::{AppState, MailboxMessageDraft};
 use std::{
     fmt,
@@ -20,6 +21,7 @@ use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
 const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
 const STRUCTURED_ASK_REQUESTS_DIR: &str = "requests";
+const CODEX_PAYLOAD_ECHO_TIMEOUT_MS: u64 = 750;
 
 #[cfg(windows)]
 pub(crate) type ControlEndpointClaim = tokio::net::windows::named_pipe::NamedPipeServer;
@@ -848,13 +850,28 @@ async fn deliver_message_to_target(
                     let profile = crate::utils::delivery_profile::delivery_profile(&info.provider);
                     let delivery_lock = state.delivery_lock_for(&info.uuid).await;
                     let _delivery_guard = delivery_lock.lock().await;
+                    let payload_cursor =
+                        codex_payload_echo_cursor(state, &info.provider, &info.uuid).await;
                     let result = match wait_for_terminal_ready_for_control_send(state, &info).await
                     {
                         Ok(()) => {
-                            crate::utils::terminal_input::submit_prompt_with_outcome_via_sender(
+                            let wait_uuid = info.uuid.clone();
+                            let wait_provider = info.provider.clone();
+                            let wait_prompt = outbound_message.clone();
+                            crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
                                 &tx,
                                 &outbound_message,
                                 &info.provider,
+                                || async move {
+                                    wait_for_codex_payload_echo_before_submit(
+                                        state,
+                                        &wait_provider,
+                                        &wait_uuid,
+                                        payload_cursor.as_deref(),
+                                        &wait_prompt,
+                                    )
+                                    .await;
+                                },
                             )
                             .await
                             .map_err(|error| error.to_string())
@@ -1281,6 +1298,90 @@ async fn wait_for_terminal_output(
     ))
 }
 
+async fn codex_payload_echo_cursor(
+    state: &AppState,
+    provider: &str,
+    session_id: &str,
+) -> Option<String> {
+    if provider != "codex" {
+        return None;
+    }
+
+    let watch_state = {
+        let agents = state.agents.lock().await;
+        agents.get(session_id)?.watch_state.clone()
+    };
+    watch_state.lock().ok().map(|guard| guard.latest_cursor())
+}
+
+async fn wait_for_codex_payload_echo_before_submit(
+    state: &AppState,
+    provider: &str,
+    session_id: &str,
+    since_cursor: Option<&str>,
+    prompt: &str,
+) {
+    if provider != "codex" {
+        return;
+    }
+
+    let Some(since_cursor) = since_cursor else {
+        return;
+    };
+
+    if let Err(error) =
+        wait_for_codex_prompt_echo_since(
+            state,
+            session_id,
+            since_cursor,
+            prompt,
+            CODEX_PAYLOAD_ECHO_TIMEOUT_MS,
+        )
+        .await
+    {
+        manager::log_debug(&format!(
+            "[Wardian] [{session_id}] Codex prompt echo wait before submit did not complete: {error}"
+        ));
+    }
+}
+
+async fn wait_for_codex_prompt_echo_since(
+    state: &AppState,
+    session_id: &str,
+    since_cursor: &str,
+    prompt: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
+        let watch_state = {
+            let agents = state.agents.lock().await;
+            agents
+                .get(session_id)
+                .ok_or_else(|| format!("Agent {} not found or is off", session_id))?
+                .watch_state
+                .clone()
+        };
+        let output = watch_state
+            .lock()
+            .map_err(|_| format!("Agent {} watch state lock poisoned", session_id))?
+            .snapshot_since(Some(since_cursor), Some(16 * 1024))
+            .map(|snapshot| snapshot.output.text)
+            .map_err(|error| format!("watch state error: {}", error.code()))?;
+
+        if codex_output_has_prompt_echo(&output, prompt) {
+            return Ok(());
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    Err(format!(
+        "Timed out waiting for {} Codex prompt echo before submit",
+        session_id
+    ))
+}
+
 fn codex_output_has_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
     let mut trailing_metadata_lines = 0usize;
@@ -1298,6 +1399,28 @@ fn codex_output_has_ready_prompt(output: &str) -> bool {
         return false;
     }
     false
+}
+
+fn codex_output_has_prompt_echo(output: &str, prompt: &str) -> bool {
+    let Some(token) = codex_prompt_echo_token(prompt) else {
+        return false;
+    };
+    normalize_codex_prompt_echo_text(output).contains(&token)
+}
+
+fn codex_prompt_echo_token(prompt: &str) -> Option<String> {
+    let first_line = prompt.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let prefix: String = first_line.chars().take(96).collect();
+    let token = normalize_codex_prompt_echo_text(&prefix);
+    (!token.is_empty()).then_some(token)
+}
+
+fn normalize_codex_prompt_echo_text(text: &str) -> String {
+    strip_ansi_controls(text)
+        .replace('\r', "\n")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn codex_ready_prompt_trailing_metadata_line(line: &str) -> bool {
@@ -2566,6 +2689,7 @@ async fn drain_next_mailbox_message_for_idle_agent(
         .get(session_id)
         .cloned();
     let profile = crate::utils::delivery_profile::delivery_profile(&info.provider);
+    let payload_cursor = codex_payload_echo_cursor(state, &info.provider, session_id).await;
     let detail = match sender {
         Some(tx) => {
             let result = match wait_for_terminal_ready_for_control_send(state, &info).await {
@@ -2585,6 +2709,9 @@ async fn drain_next_mailbox_message_for_idle_agent(
                         profile: Some(profile.provider.clone()),
                         error: None,
                     };
+                    let wait_provider = info.provider.clone();
+                    let wait_uuid = session_id.to_string();
+                    let wait_prompt = record.body.clone();
                     crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
                         &tx,
                         &record.body,
@@ -2593,6 +2720,14 @@ async fn drain_next_mailbox_message_for_idle_agent(
                             let submit_started = submit_started.clone();
                             async move {
                                 record_delivery_attempt(state, &submit_started).await;
+                                wait_for_codex_payload_echo_before_submit(
+                                    state,
+                                    &wait_provider,
+                                    &wait_uuid,
+                                    payload_cursor.as_deref(),
+                                    &wait_prompt,
+                                )
+                                .await;
                             }
                         },
                     )
@@ -2983,6 +3118,13 @@ mod tests {
         );
     }
 
+    fn expected_terminal_chunks(provider: &str, prompt: &str) -> Vec<Vec<u8>> {
+        let chunks =
+            crate::utils::terminal_input::provider_submit_chunks(provider, prompt).unwrap();
+        assert_eq!(chunks.len(), 2);
+        chunks
+    }
+
     fn sample_workflow(id: &str, name: &str, nodes: Vec<WorkflowNode>) -> WorkflowDefinition {
         WorkflowDefinition {
             id: id.to_string(),
@@ -3024,7 +3166,7 @@ mod tests {
         let chunks =
             crate::utils::terminal_input::provider_submit_chunks("codex", "hello\nworld").unwrap();
 
-        assert_eq!(chunks[0], b"hello\nworld".to_vec());
+        assert_eq!(chunks[0], b"\x1b[200~hello\nworld\x1b[201~".to_vec());
         assert_eq!(chunks[1], b"\r".to_vec());
     }
 
@@ -3078,6 +3220,22 @@ mod tests {
         ));
         assert!(!codex_output_has_ready_prompt(
             "\r\n› Previous prompt\r\n  gpt-5.5 high · Context 100% left · D:\\Development\\Wardian• Working...\r\n"
+        ));
+    }
+
+    #[test]
+    fn codex_prompt_echo_detects_payload_visible_after_send() {
+        assert!(codex_output_has_prompt_echo(
+            "\r\n› From Test: Ping. Reply with exactly: pong\r\n\r\n  Wardian request id: ask_123\r\n",
+            "From Test: Ping. Reply with exactly: pong\n\nWardian request id: ask_123"
+        ));
+    }
+
+    #[test]
+    fn codex_prompt_echo_rejects_output_without_current_payload() {
+        assert!(!codex_output_has_prompt_echo(
+            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · ~\r\n",
+            "From Test: Ping. Reply with exactly: pong\n\nWardian request id: ask_123"
         ));
     }
 
@@ -3528,8 +3686,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        let expected = expected_terminal_chunks("codex", "hello");
+        assert_eq!(rx.recv().await.unwrap(), expected[0]);
+        assert_eq!(rx.recv().await.unwrap(), expected[1]);
         {
             let agents = state.agents.lock().await;
             let agent = agents.get("agent-1").unwrap();
@@ -3740,8 +3899,9 @@ mod tests {
             .unwrap()
             .expect("drained message");
 
-        assert_eq!(rx.recv().await.unwrap(), b"queued work".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        let expected = expected_terminal_chunks("codex", "queued work");
+        assert_eq!(rx.recv().await.unwrap(), expected[0]);
+        assert_eq!(rx.recv().await.unwrap(), expected[1]);
         assert_eq!(drained.runtime_state, "mailbox_drain");
         assert_eq!(drained.delivery_state, "submit_sent_unverified");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
@@ -3866,8 +4026,9 @@ mod tests {
             .unwrap()
             .expect("drained message");
 
-        assert_eq!(rx.recv().await.unwrap(), b"queued work".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        let expected = expected_terminal_chunks("codex", "queued work");
+        assert_eq!(rx.recv().await.unwrap(), expected[0]);
+        assert_eq!(rx.recv().await.unwrap(), expected[1]);
         assert_eq!(drained.runtime_state, "mailbox_drain");
         assert_eq!(drained.delivery_state, "submit_sent_unverified");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
@@ -4160,8 +4321,9 @@ mod tests {
 
         assert_eq!(drained.delivery_state, "submit_sent_unverified");
         assert!(blocked.is_none());
-        assert_eq!(rx.try_recv().unwrap(), b"first queued work".to_vec());
-        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
+        let expected = expected_terminal_chunks("codex", "first queued work");
+        assert_eq!(rx.try_recv().unwrap(), expected[0]);
+        assert_eq!(rx.try_recv().unwrap(), expected[1]);
         assert!(rx.try_recv().is_err());
         let input_state = state
             .interactions
@@ -4413,7 +4575,8 @@ mod tests {
             payload = rx.recv() => payload.expect("payload"),
             attempt = &mut drain => panic!("drain completed before payload was observed: {attempt:?}"),
         };
-        assert_eq!(payload, b"queued work".to_vec());
+        let expected = expected_terminal_chunks("codex", "queued work");
+        assert_eq!(payload, expected[0]);
         drop(rx);
 
         let attempt = drain.await.unwrap().expect("drain attempt");

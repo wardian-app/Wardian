@@ -67,7 +67,8 @@ pub fn bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
 }
 
 pub fn plan_terminal_payload(profile: &DeliveryProfile, prompt: &str) -> TerminalPayloadPlan {
-    let use_bracketed_paste = profile.bracketed_paste.enabled
+    let use_bracketed_paste = !prompt.is_empty()
+        && profile.bracketed_paste.enabled
         && (prompt.contains('\n') || prompt.len() >= profile.bracketed_paste.min_bytes);
     let payload_kind = if use_bracketed_paste {
         PayloadKind::BracketedPaste
@@ -160,14 +161,24 @@ mod tests {
     }
 
     #[test]
-    fn plan_uses_literal_for_short_single_line() {
+    fn plan_uses_bracketed_paste_for_short_codex_input() {
         let profile = delivery_profile("codex");
         let plan = plan_terminal_payload(&profile, "hello");
 
-        assert_eq!(plan.payload_kind, PayloadKind::Literal);
-        assert_eq!(plan.payload_bytes, b"hello".to_vec());
+        assert_eq!(plan.payload_kind, PayloadKind::BracketedPaste);
+        assert_eq!(plan.payload_bytes, b"\x1b[200~hello\x1b[201~".to_vec());
         assert_eq!(plan.submit_key, b"\r".to_vec());
         assert_eq!(plan.submit_delay_ms, profile.submit_delay_ms);
+    }
+
+    #[test]
+    fn plan_keeps_empty_prompt_empty_when_bracketed_paste_threshold_is_zero() {
+        let mut profile = delivery_profile("codex");
+        profile.bracketed_paste.min_bytes = 0;
+        let plan = plan_terminal_payload(&profile, "");
+
+        assert_eq!(plan.payload_kind, PayloadKind::Literal);
+        assert!(plan.payload_bytes.is_empty());
     }
 
     #[test]
@@ -238,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_transaction_marks_submit_key_failure_as_unsafe_to_retry() {
-        let profile = zero_delay_profile("codex");
+        let profile = zero_delay_profile("antigravity");
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
 
         let submit =
