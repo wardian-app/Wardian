@@ -4,6 +4,20 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.8](https://github.com/wardian-app/Wardian/compare/v0.3.7...v0.3.8) (2026-05-29)
+
+
+### Features
+
+* **builder:** Workflow Builder v2 — edit mode (sub-project 3a) ([#437](https://github.com/wardian-app/Wardian/issues/437)) ([2cbb0e7](https://github.com/wardian-app/Wardian/commit/2cbb0e7c0fcc7a37f6135d34d3018a9a0cc615f5))
+
+
+### Bug Fixes
+
+* **agent:** ignore stale status after clear ([#440](https://github.com/wardian-app/Wardian/issues/440)) ([0ab36b6](https://github.com/wardian-app/Wardian/commit/0ab36b626302492d7e7cffce1b8bf26891d86c11))
+* **ci:** publish frontend Codecov coverage ([#433](https://github.com/wardian-app/Wardian/issues/433)) ([94e9be1](https://github.com/wardian-app/Wardian/commit/94e9be18aac7456d1098c40033e64a5159b4d5b6))
+* **updater:** let Windows helper escape supervisor job ([#442](https://github.com/wardian-app/Wardian/issues/442)) ([259c7b3](https://github.com/wardian-app/Wardian/commit/259c7b3ed01c11685768de080c3490daa77c67f7))
+
 ## [0.3.7](https://github.com/wardian-app/Wardian/compare/v0.3.6...v0.3.7) (2026-05-29)
 
 

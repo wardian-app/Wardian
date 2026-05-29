@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.3.7"
+version = "0.3.8"
 description = "Local command center for multi-agent CLI workflows — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
