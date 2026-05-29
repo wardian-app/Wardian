@@ -1,0 +1,35 @@
+import { render, screen } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
+import { NodeInspector } from './NodeInspector';
+import type { RunEvent, RunState } from './runTypes';
+
+const state: RunState = {
+  run_id: 'run-1',
+  blueprint_id: 'wf',
+  status: 'failed',
+  nodes: { a: 'failed' },
+  failure: 'boom',
+};
+
+const events: RunEvent[] = [
+  { seq: 0, ts: 't0', kind: 'run_started', blueprint_id: 'wf', schema: 2, trigger: {} },
+  { seq: 1, ts: 't1', kind: 'node_completed', node: 'a', output: { ok: true } },
+  { seq: 2, ts: 't2', kind: 'node_failed', node: 'a', error: 'boom' },
+];
+
+describe('NodeInspector', () => {
+  it('shows an empty state without a selected node', () => {
+    render(<NodeInspector selectedNodeId={null} state={state} currentStatuses={{}} events={events} />);
+
+    expect(screen.getByText('Select a node to inspect it.')).toBeInTheDocument();
+  });
+
+  it('shows status, output, and failure for the selected node', () => {
+    render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
+
+    expect(screen.getByText('a')).toBeInTheDocument();
+    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(screen.getByText(/"ok": true/)).toBeInTheDocument();
+    expect(screen.getByText('boom')).toBeInTheDocument();
+  });
+});
