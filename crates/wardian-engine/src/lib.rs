@@ -12,4 +12,11 @@ pub mod interpolate;
 pub mod state;
 pub mod store;
 
+pub use driver::Engine;
 pub use error::{EngineError, Result, StepError};
+pub use event::{Event, EventKind};
+pub use executor::{
+    AgentTaskRequest, ChosenPort, DecisionRequest, MockExecutor, NotifyRequest, ScriptRequest,
+    ShellRequest, StateRequest, StepExecutor, StepOutput,
+};
+pub use state::{NodeStatus, RunState, RunStatus};
