@@ -73,6 +73,21 @@ pub enum WorkflowCommand {
     },
     /// Validate a blueprint `.md` file and report diagnostics.
     Validate { path: String },
+    /// Write the node-type JSON schema artifact for the builder.
+    GenSchema {
+        #[arg(long, default_value = "src/features/workflows/nodeRegistry.schema.json")]
+        out: String,
+        /// Exit non-zero if the file on disk differs (CI drift guard).
+        #[arg(long)]
+        check: bool,
+    },
+    /// Write the generated node-type reference doc.
+    GenDocs {
+        #[arg(long, default_value = "docs/workflows/node-reference-v2.md")]
+        out: String,
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

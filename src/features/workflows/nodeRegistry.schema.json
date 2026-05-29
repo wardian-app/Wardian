@@ -1,0 +1,444 @@
+{
+  "schema": 2,
+  "node_types": [
+    {
+      "id": "task",
+      "kind": "agent",
+      "category": "Agent",
+      "label": "Task",
+      "icon": "robot",
+      "description": "Delegate work to an agent; returns structured output.",
+      "fields": [
+        {
+          "id": "agent",
+          "kind": "agent_ref",
+          "label": "Agent",
+          "required": true,
+          "multiple": false,
+          "help": "Agent or role to run this task."
+        },
+        {
+          "id": "prompt",
+          "kind": "prompt",
+          "label": "Prompt",
+          "required": true,
+          "multiple": false
+        },
+        {
+          "id": "output_schema",
+          "kind": "json_schema",
+          "label": "Output schema",
+          "required": false,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "decision",
+      "kind": "agent",
+      "category": "Agent",
+      "label": "Decision",
+      "icon": "git-branch",
+      "description": "Agent chooses one of the declared outgoing branches.",
+      "fields": [
+        {
+          "id": "agent",
+          "kind": "agent_ref",
+          "label": "Agent",
+          "required": true,
+          "multiple": false
+        },
+        {
+          "id": "prompt",
+          "kind": "prompt",
+          "label": "Prompt",
+          "required": true,
+          "multiple": false
+        },
+        {
+          "id": "choices",
+          "kind": "branch_port",
+          "label": "Choices",
+          "required": true,
+          "multiple": true,
+          "help": "Named branches the agent may choose between."
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [],
+      "outputs_from_field": "choices",
+      "version": 1
+    },
+    {
+      "id": "branch",
+      "kind": "engine",
+      "category": "Control",
+      "label": "Branch",
+      "icon": "git-fork",
+      "description": "Deterministic condition on run state.",
+      "fields": [
+        {
+          "id": "condition",
+          "kind": "text",
+          "label": "Condition",
+          "required": true,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "on_true",
+          "label": "True"
+        },
+        {
+          "id": "on_false",
+          "label": "False"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "loop",
+      "kind": "engine",
+      "category": "Control",
+      "label": "Loop",
+      "icon": "repeat",
+      "description": "Container: repeats its body subgraph until a bound is hit.",
+      "fields": [
+        {
+          "id": "max_iterations",
+          "kind": "number",
+          "label": "Max iterations",
+          "required": false,
+          "multiple": false
+        },
+        {
+          "id": "until",
+          "kind": "text",
+          "label": "Until condition",
+          "required": false,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "body",
+          "label": "Body"
+        },
+        {
+          "id": "done",
+          "label": "Done"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "join",
+      "kind": "engine",
+      "category": "Control",
+      "label": "Join",
+      "icon": "merge",
+      "description": "Synchronization barrier; waits for all inbound edges.",
+      "fields": [],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "shell",
+      "kind": "engine",
+      "category": "Action",
+      "label": "Shell",
+      "icon": "terminal",
+      "description": "Run a shell command.",
+      "fields": [
+        {
+          "id": "command",
+          "kind": "long_text",
+          "label": "Command",
+          "required": true,
+          "multiple": false
+        },
+        {
+          "id": "cwd",
+          "kind": "path",
+          "label": "Working directory",
+          "required": false,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "script",
+      "kind": "engine",
+      "category": "Action",
+      "label": "Script",
+      "icon": "file-code",
+      "description": "Run a local script through a selected runtime.",
+      "fields": [
+        {
+          "id": "runtime",
+          "kind": "enum",
+          "options": [
+            "python",
+            "node",
+            "sh"
+          ],
+          "label": "Runtime",
+          "required": true,
+          "multiple": false
+        },
+        {
+          "id": "path",
+          "kind": "path",
+          "label": "Script path",
+          "required": true,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "state",
+      "kind": "engine",
+      "category": "State",
+      "label": "State",
+      "icon": "database",
+      "description": "Read or write run or shared storage.",
+      "fields": [
+        {
+          "id": "op",
+          "kind": "enum",
+          "options": [
+            "get",
+            "set",
+            "delete"
+          ],
+          "label": "Operation",
+          "required": true,
+          "multiple": false
+        },
+        {
+          "id": "entries",
+          "kind": "kv_map",
+          "label": "Entries",
+          "required": false,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "notify",
+      "kind": "engine",
+      "category": "State",
+      "label": "Notify",
+      "icon": "bell",
+      "description": "Send an operator-facing notification.",
+      "fields": [
+        {
+          "id": "message",
+          "kind": "prompt",
+          "label": "Message",
+          "required": true,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "sub_workflow",
+      "kind": "engine",
+      "category": "Action",
+      "label": "Sub-workflow",
+      "icon": "workflow",
+      "description": "Call another workflow blueprint.",
+      "fields": [
+        {
+          "id": "workflow",
+          "kind": "workflow_ref",
+          "label": "Workflow",
+          "required": true,
+          "multiple": false
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "manual_trigger",
+      "kind": "trigger",
+      "category": "Trigger",
+      "label": "Manual Trigger",
+      "icon": "play",
+      "description": "Start the workflow on demand.",
+      "fields": [
+        {
+          "id": "input_schema",
+          "kind": "json_schema",
+          "label": "Input schema",
+          "required": false,
+          "multiple": false
+        }
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "scheduled_trigger",
+      "kind": "trigger",
+      "category": "Trigger",
+      "label": "Scheduled Trigger",
+      "icon": "clock",
+      "description": "Start the workflow on a schedule.",
+      "fields": [
+        {
+          "id": "cron",
+          "kind": "cron",
+          "label": "Schedule",
+          "required": true,
+          "multiple": false
+        }
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "id": "file_watcher",
+      "kind": "trigger",
+      "category": "Trigger",
+      "label": "File Watcher",
+      "icon": "eye",
+      "description": "Start the workflow on matching file events.",
+      "fields": [
+        {
+          "id": "path",
+          "kind": "path",
+          "label": "Watch path",
+          "required": true,
+          "multiple": false
+        }
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    }
+  ]
+}
