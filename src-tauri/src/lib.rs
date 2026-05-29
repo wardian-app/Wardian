@@ -6,7 +6,7 @@ pub mod remote;
 pub mod state;
 pub mod utils;
 pub mod workflow_engine;
-mod workflow_v2;
+pub mod workflow_v2;
 pub use wardian_core::models;
 
 // Tauri's Windows resource contains the Common Controls v6 manifest required by
