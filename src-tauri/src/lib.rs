@@ -5,8 +5,8 @@ pub mod providers;
 pub mod remote;
 pub mod state;
 pub mod utils;
-mod workflow_v2;
 pub mod workflow_engine;
+mod workflow_v2;
 pub use wardian_core::models;
 
 // Tauri's Windows resource contains the Common Controls v6 manifest required by
@@ -452,6 +452,10 @@ pub fn run() {
             commands::workflow::workflow_list_blueprints,
             commands::workflow::workflow_list_runs,
             commands::workflow::workflow_read_run,
+            commands::workflow::workflow_run_v2,
+            commands::workflow::workflow_resume_v2,
+            commands::workflow::workflow_approve_v2,
+            commands::workflow::workflow_cancel_v2,
             commands::library::get_library_tree,
             commands::library::save_library_item,
             commands::library::update_library_metadata,
