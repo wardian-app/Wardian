@@ -81,6 +81,35 @@ pub enum WorkflowCommand {
     Validate {
         path: String,
     },
+    /// Execute a v2 blueprint headlessly and write a durable run.
+    Exec {
+        path: String,
+        /// Execution backend. Only `mock` is available until the real executor lands.
+        #[arg(long, default_value = "mock")]
+        executor: String,
+    },
+    /// List v2 runs under <home>/logs/workflows.
+    Runs,
+    /// Show one v2 run's state + event trace.
+    RunShow {
+        blueprint_id: String,
+        run_id: String,
+    },
+    /// Replay a v2 run's event log into its final state (no execution).
+    Replay {
+        blueprint_id: String,
+        run_id: String,
+    },
+    /// Parse a blueprint `.md` and print the structured graph.
+    Parse {
+        path: String,
+    },
+    /// Normalize a blueprint `.md` (print, or --write back in place).
+    Normalize {
+        path: String,
+        #[arg(long)]
+        write: bool,
+    },
     /// Write the node-type JSON schema artifact for the builder.
     GenSchema {
         #[arg(
@@ -370,6 +399,94 @@ mod tests {
         assert!(matches!(
             args.command,
             WorkflowCommand::Validate { ref path } if path == "wf.md"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_exec_path_with_default_executor() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "exec", "wf.md"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Exec { ref path, ref executor }
+                if path == "wf.md" && executor == "mock"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_exec_executor() {
+        let cli =
+            Cli::try_parse_from(["wardian", "workflow", "exec", "wf.md", "--executor", "real"])
+                .unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Exec { ref path, ref executor }
+                if path == "wf.md" && executor == "real"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_runs() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "runs"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(args.command, WorkflowCommand::Runs));
+    }
+
+    #[test]
+    fn parses_workflow_run_show() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "run-show", "wf", "r1"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::RunShow { ref blueprint_id, ref run_id }
+                if blueprint_id == "wf" && run_id == "r1"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_replay() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "replay", "wf", "r1"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Replay { ref blueprint_id, ref run_id }
+                if blueprint_id == "wf" && run_id == "r1"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_parse() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "parse", "wf.md"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Parse { ref path } if path == "wf.md"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_normalize_write() {
+        let cli =
+            Cli::try_parse_from(["wardian", "workflow", "normalize", "wf.md", "--write"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Normalize { ref path, write: true } if path == "wf.md"
         ));
     }
 

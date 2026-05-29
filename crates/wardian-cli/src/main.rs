@@ -4,7 +4,12 @@ mod errors;
 mod live;
 mod output;
 
-use std::{io::Read as _, time::Duration};
+use std::{
+    fs,
+    io::Read as _,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, Cli, Command,
@@ -383,6 +388,18 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
         }
         WorkflowCommand::NodeTypes { json } => render_workflow_node_types(json),
         WorkflowCommand::Validate { path } => render_workflow_validate(&path),
+        WorkflowCommand::Exec { path, executor } => render_workflow_exec(&path, &executor),
+        WorkflowCommand::Runs => render_workflow_runs(),
+        WorkflowCommand::RunShow {
+            blueprint_id,
+            run_id,
+        } => render_workflow_run_show(&blueprint_id, &run_id),
+        WorkflowCommand::Replay {
+            blueprint_id,
+            run_id,
+        } => render_workflow_replay(&blueprint_id, &run_id),
+        WorkflowCommand::Parse { path } => render_workflow_parse(&path),
+        WorkflowCommand::Normalize { path, write } => render_workflow_normalize(&path, write),
         WorkflowCommand::GenSchema { out, check } => {
             render_workflow_gen(&out, GenKind::Schema, check)
         }
@@ -408,7 +425,7 @@ fn render_workflow_node_types(json: bool) -> Result<String, CliError> {
 }
 
 fn render_workflow_validate(path: &str) -> Result<String, CliError> {
-    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(path))
+    let blueprint = wardian_core::workflow::parse_file(Path::new(path))
         .map_err(|e| CliError::generic(e.to_string()))?;
     let report = wardian_core::workflow::validate(&blueprint);
     let body = serde_json::json!({
@@ -418,6 +435,211 @@ fn render_workflow_validate(path: &str) -> Result<String, CliError> {
     });
     serde_json::to_string_pretty(&body)
         .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn render_workflow_exec(path: &str, executor: &str) -> Result<String, CliError> {
+    if executor != "mock" {
+        return Err(CliError::backend(
+            ExitCode::Generic,
+            "unsupported_executor",
+            "only 'mock' is available until the real executor lands",
+        ));
+    }
+
+    let blueprint = wardian_core::workflow::parse_file(Path::new(path))
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    let report = wardian_core::workflow::validate(&blueprint);
+    if !report.is_valid() {
+        let body = serde_json::json!({
+            "schema": 1,
+            "ok": false,
+            "diagnostics": report.diagnostics,
+        });
+        return serde_json::to_string_pretty(&body)
+            .map(|json| format!("{json}\n"))
+            .map_err(|e| CliError::generic(e.to_string()));
+    }
+
+    let run_id = wardian_core::engine::driver::new_run_id();
+    let run_root = wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id)
+        .ok_or_else(|| CliError::generic("could not resolve workflow run directory"))?;
+    let runtime = build_workflow_runtime()?;
+    let mock = wardian_core::engine::MockExecutor::new();
+    let state = runtime
+        .block_on(wardian_core::engine::Engine::start_with_id(
+            &blueprint,
+            &run_id,
+            serde_json::json!({}),
+            &run_root,
+            &mock,
+        ))
+        .map_err(|e| CliError::generic(e.to_string()))?;
+
+    let body = serde_json::json!({
+        "schema": 1,
+        "ok": true,
+        "run_id": run_id,
+        "blueprint_id": blueprint.id,
+        "status": state.status,
+        "run_dir": run_root,
+        "executor": "mock",
+    });
+    serde_json::to_string_pretty(&body)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn render_workflow_runs() -> Result<String, CliError> {
+    let mut runs = Vec::new();
+    let Some(runs_root) = wardian_core::paths::workflow_runs_dir() else {
+        return render_json(serde_json::json!({ "schema": 1, "runs": runs }));
+    };
+    if !runs_root.exists() {
+        return render_json(serde_json::json!({ "schema": 1, "runs": runs }));
+    }
+
+    for blueprint_entry in fs::read_dir(&runs_root).map_err(|e| CliError::generic(e.to_string()))? {
+        let blueprint_entry = blueprint_entry.map_err(|e| CliError::generic(e.to_string()))?;
+        let blueprint_path = blueprint_entry.path();
+        if !blueprint_path.is_dir() {
+            continue;
+        }
+        for run_entry in
+            fs::read_dir(&blueprint_path).map_err(|e| CliError::generic(e.to_string()))?
+        {
+            let run_entry = run_entry.map_err(|e| CliError::generic(e.to_string()))?;
+            let run_path = run_entry.path();
+            if !run_path.is_dir() {
+                continue;
+            }
+            if let Ok(Some(state)) = wardian_core::engine::store::read_checkpoint(&run_path) {
+                runs.push(serde_json::json!({
+                    "run_id": state.run_id,
+                    "blueprint_id": state.blueprint_id,
+                    "status": state.status,
+                    "node_count": state.nodes.len(),
+                    "failure": state.failure,
+                    "path": run_path,
+                }));
+            }
+        }
+    }
+
+    render_json(serde_json::json!({
+        "schema": 1,
+        "runs": runs,
+    }))
+}
+
+fn render_workflow_run_show(blueprint_id: &str, run_id: &str) -> Result<String, CliError> {
+    let run_root = workflow_run_root(blueprint_id, run_id)?;
+    let state = wardian_core::engine::store::read_checkpoint(&run_root)
+        .map_err(|e| CliError::generic(e.to_string()))?
+        .ok_or_else(|| CliError::generic(format!("state.json not found for run {run_id}")))?;
+    let events = wardian_core::engine::store::read_events(&run_root)
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    render_json(serde_json::json!({
+        "schema": 1,
+        "state": state,
+        "events": events,
+    }))
+}
+
+fn render_workflow_replay(blueprint_id: &str, run_id: &str) -> Result<String, CliError> {
+    let blueprint = find_library_blueprint(blueprint_id)?.ok_or_else(|| {
+        CliError::generic(format!(
+            "blueprint {blueprint_id} not found in library/workflows"
+        ))
+    })?;
+    let run_root = workflow_run_root(blueprint_id, run_id)?;
+    let state = wardian_core::engine::Engine::replay(&blueprint, &run_root)
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    render_json(serde_json::json!({
+        "schema": 1,
+        "state": state,
+    }))
+}
+
+fn render_workflow_parse(path: &str) -> Result<String, CliError> {
+    let blueprint = wardian_core::workflow::parse_file(Path::new(path))
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    render_json(serde_json::json!({
+        "schema": 1,
+        "blueprint": blueprint,
+    }))
+}
+
+fn render_workflow_normalize(path: &str, write: bool) -> Result<String, CliError> {
+    let mut blueprint = wardian_core::workflow::parse_file(Path::new(path))
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    wardian_core::workflow::normalize(&mut blueprint);
+    let normalized = wardian_core::workflow::to_string(&blueprint)
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    if write {
+        fs::write(path, &normalized).map_err(|e| CliError::generic(e.to_string()))?;
+        return render_json(serde_json::json!({
+            "schema": 1,
+            "written": true,
+            "path": path,
+        }));
+    }
+    Ok(normalized)
+}
+
+fn render_json(body: serde_json::Value) -> Result<String, CliError> {
+    serde_json::to_string_pretty(&body)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn workflow_run_root(blueprint_id: &str, run_id: &str) -> Result<PathBuf, CliError> {
+    wardian_core::paths::workflow_run_dir(blueprint_id, run_id)
+        .ok_or_else(|| CliError::generic("could not resolve workflow run directory"))
+}
+
+fn find_library_blueprint(
+    blueprint_id: &str,
+) -> Result<Option<wardian_core::workflow::Blueprint>, CliError> {
+    let Some(home) = wardian_core::paths::wardian_home() else {
+        return Ok(None);
+    };
+    let root = home.join("library").join("workflows");
+    if !root.exists() {
+        return Ok(None);
+    }
+    find_library_blueprint_in_dir(&root, blueprint_id)
+}
+
+fn find_library_blueprint_in_dir(
+    dir: &Path,
+    blueprint_id: &str,
+) -> Result<Option<wardian_core::workflow::Blueprint>, CliError> {
+    for entry in fs::read_dir(dir).map_err(|e| CliError::generic(e.to_string()))? {
+        let entry = entry.map_err(|e| CliError::generic(e.to_string()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(blueprint) = find_library_blueprint_in_dir(&path, blueprint_id)? {
+                return Ok(Some(blueprint));
+            }
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let blueprint = wardian_core::workflow::parse_file(&path)
+            .map_err(|e| CliError::generic(e.to_string()))?;
+        if blueprint.id == blueprint_id {
+            return Ok(Some(blueprint));
+        }
+    }
+    Ok(None)
+}
+
+fn build_workflow_runtime() -> Result<tokio::runtime::Runtime, CliError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .map_err(|e| CliError::generic(e.to_string()))
 }
 
