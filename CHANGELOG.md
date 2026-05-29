@@ -4,6 +4,57 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.7](https://github.com/wardian-app/Wardian/compare/v0.3.6...v0.3.7) (2026-05-29)
+
+
+### Features
+
+* **cli:** add provider-aware queued delivery ([#356](https://github.com/wardian-app/Wardian/issues/356)) ([f4bf0a6](https://github.com/wardian-app/Wardian/commit/f4bf0a677542d36ac1a1c0b8593cd334877cdf5e))
+* **engine:** v2 durable engine + consolidate workflow/engine into wardian-core ([#429](https://github.com/wardian-app/Wardian/issues/429)) ([8be5d7f](https://github.com/wardian-app/Wardian/commit/8be5d7f354cd8028785a4401104da78fe644ed7a))
+* **explorer:** open files in external editor ([#419](https://github.com/wardian-app/Wardian/issues/419)) ([6940bee](https://github.com/wardian-app/Wardian/commit/6940beea3e7eb2a9c062ac628bab4afa71174889))
+* **graph:** add agent relationship graph view ([#348](https://github.com/wardian-app/Wardian/issues/348)) ([4ecc0ba](https://github.com/wardian-app/Wardian/commit/4ecc0bac242d765f864874253f8ba1764d1fc689))
+* **grid:** add chat mode for agent cards ([#345](https://github.com/wardian-app/Wardian/issues/345)) ([34ab3f6](https://github.com/wardian-app/Wardian/commit/34ab3f6875f865fa7864ab1bc7284e592a5d87cc))
+* **grid:** add chat-first card composition mode ([#410](https://github.com/wardian-app/Wardian/issues/410)) ([a8a21d9](https://github.com/wardian-app/Wardian/commit/a8a21d9db3ca7bca35b73127f1d613393d0b56f3))
+* **providers:** add antigravity support ([#327](https://github.com/wardian-app/Wardian/issues/327)) ([38fc7a7](https://github.com/wardian-app/Wardian/commit/38fc7a73b421b80ffa34152e0d62a88f4ba89893))
+* **queue:** add action-needed alerts and filters ([#383](https://github.com/wardian-app/Wardian/issues/383)) ([bb3e43e](https://github.com/wardian-app/Wardian/commit/bb3e43ea1b2661f17b648ef64e898b3157f85154))
+* **release:** add OS package manager manifests ([#326](https://github.com/wardian-app/Wardian/issues/326)) ([376b469](https://github.com/wardian-app/Wardian/commit/376b469d5bff048dd4615e63675fda2fcd8b62ed))
+* **remote:** add interactive terminal attach ([#398](https://github.com/wardian-app/Wardian/issues/398)) ([50050a3](https://github.com/wardian-app/Wardian/commit/50050a3dffd30295f8ead4115dc211cb5552c64f))
+* **remote:** add local-control PWA v1 ([#343](https://github.com/wardian-app/Wardian/issues/343)) ([1bcb50a](https://github.com/wardian-app/Wardian/commit/1bcb50ac55d0be421e7bf6a1790e0f04385d9938))
+* **remote:** default mobile agent detail to terminal ([#370](https://github.com/wardian-app/Wardian/issues/370)) ([35a358a](https://github.com/wardian-app/Wardian/commit/35a358ad73d71b25220be53e492a56ff25f77df3))
+* **remote:** warn when setup is incomplete ([#402](https://github.com/wardian-app/Wardian/issues/402)) ([8b31057](https://github.com/wardian-app/Wardian/commit/8b3105798244503d8ab1a4aacbf17d7bdc05a751))
+* **settings:** add global settings modal and sparse defaults ([#341](https://github.com/wardian-app/Wardian/issues/341)) ([aec4904](https://github.com/wardian-app/Wardian/commit/aec4904fb57585b94bf30a6bc9d2309f7558aea9))
+* **settings:** add titlebar telemetry visibility ([#382](https://github.com/wardian-app/Wardian/issues/382)) ([8ba4f21](https://github.com/wardian-app/Wardian/commit/8ba4f2173e8dfae3cf18061689c92172b4c0a30c))
+* **settings:** configure watchlist spawn position ([#366](https://github.com/wardian-app/Wardian/issues/366)) ([79696a1](https://github.com/wardian-app/Wardian/commit/79696a15efdc97e3eea49e85d1c221ab82d0f790))
+* **terminal:** add conservative mac select-all shortcut ([#404](https://github.com/wardian-app/Wardian/issues/404)) ([e2689f5](https://github.com/wardian-app/Wardian/commit/e2689f59e27f6ee8e030091a75375fbac6297ae0))
+* **watchlist:** collapse team members ([#359](https://github.com/wardian-app/Wardian/issues/359)) ([78420fa](https://github.com/wardian-app/Wardian/commit/78420fa89fb62bec941c142c3cd3f78c825a82ac))
+* **workflow:** wardian-workflow library + node type registry (v2 sub-project 1) ([#426](https://github.com/wardian-app/Wardian/issues/426)) ([63fd078](https://github.com/wardian-app/Wardian/commit/63fd078fa753f74d398eb47d2a9dc7fe3eaec84b))
+
+
+### Bug Fixes
+
+* **ci:** isolate provider hydration test state ([#412](https://github.com/wardian-app/Wardian/issues/412)) ([e91a676](https://github.com/wardian-app/Wardian/commit/e91a6761dddfee588bdf6394c21ecfc9dc446989))
+* **engine:** submit Codex prompts after echo ([#431](https://github.com/wardian-app/Wardian/issues/431)) ([458794b](https://github.com/wardian-app/Wardian/commit/458794b7938b55541f6eadac4a43b9ee0d744a51))
+* **git:** repair sidebar commit and publish flows ([#416](https://github.com/wardian-app/Wardian/issues/416)) ([1fb1792](https://github.com/wardian-app/Wardian/commit/1fb1792fbbb5a3828fe27caf91a8a5c829b925d2))
+* **mailbox:** validate real-provider delivery ([#414](https://github.com/wardian-app/Wardian/issues/414)) ([5ed5ab2](https://github.com/wardian-app/Wardian/commit/5ed5ab2bbeaa736525bb423da9a668b1238dd6d8))
+* **providers:** prevent antigravity watcher from auto-resuming on clear ([#367](https://github.com/wardian-app/Wardian/issues/367)) ([779e438](https://github.com/wardian-app/Wardian/commit/779e4381ef21739cfe195dcf45ff6bac68f6b065))
+* **queue:** use native action-needed alerts ([#422](https://github.com/wardian-app/Wardian/issues/422)) ([cec6b37](https://github.com/wardian-app/Wardian/commit/cec6b37a906922ed15a83317eff61f32d1ee60b2))
+* **runtime:** claim control endpoint outside Tokio context ([#374](https://github.com/wardian-app/Wardian/issues/374)) ([41dcdec](https://github.com/wardian-app/Wardian/commit/41dcdececf56e69f5987d842038e2e759cfa69c0))
+* **runtime:** harden reliability audit failure modes ([#352](https://github.com/wardian-app/Wardian/issues/352)) ([f6a9387](https://github.com/wardian-app/Wardian/commit/f6a93878caa1425ffc994b630e77b46acf535882))
+* **runtime:** isolate debug app home ([#372](https://github.com/wardian-app/Wardian/issues/372)) ([675775a](https://github.com/wardian-app/Wardian/commit/675775a5748820f8ff549f76a0341c3e72d60758))
+* **runtime:** serialize agent lifecycle operations ([#338](https://github.com/wardian-app/Wardian/issues/338)) ([d450c40](https://github.com/wardian-app/Wardian/commit/d450c404d06a5bba88718d22e099fd97edf3ce90))
+* **terminal:** stabilize provider redraw scrollback ([#428](https://github.com/wardian-app/Wardian/issues/428)) ([8338801](https://github.com/wardian-app/Wardian/commit/8338801905f8c495f0702363335fcb2277987a4d))
+* **terminal:** stabilize resize rendering ([#389](https://github.com/wardian-app/Wardian/issues/389)) ([ddefcc6](https://github.com/wardian-app/Wardian/commit/ddefcc65efdc36be89b3a138eb5fb208e771aa47))
+* **terminal:** WebGL leak, clear-time PTY race, codex dedup, cursor style ([#357](https://github.com/wardian-app/Wardian/issues/357)) ([d3023ed](https://github.com/wardian-app/Wardian/commit/d3023ed7dbe762579520665561296e25c02bf5f8))
+* **ui:** capitalize roster provider labels ([#340](https://github.com/wardian-app/Wardian/issues/340)) ([efd2b4a](https://github.com/wardian-app/Wardian/commit/efd2b4a244a238a0b104b021d245b16f797af164))
+* **ui:** compact sidebar titles ([#380](https://github.com/wardian-app/Wardian/issues/380)) ([461a1e9](https://github.com/wardian-app/Wardian/commit/461a1e94e834ec77074115f6e4cd32e296d54fae))
+* **ui:** fit small-screen double grid ([#385](https://github.com/wardian-app/Wardian/issues/385)) ([2435190](https://github.com/wardian-app/Wardian/commit/2435190f63cacebb96c2796e7545c7554e868a65))
+* **worktrees:** sync Wardian worktrees with Git registry ([#417](https://github.com/wardian-app/Wardian/issues/417)) ([f2cca29](https://github.com/wardian-app/Wardian/commit/f2cca298bce487688a818f73653fa79305c079ab))
+
+
+### Documentation
+
+* **remote:** expand Tailscale setup guide ([#388](https://github.com/wardian-app/Wardian/issues/388)) ([d747289](https://github.com/wardian-app/Wardian/commit/d747289890d58e438767253b16235ac51a802293))
+
 ## [0.3.6](https://github.com/tangemicioglu/Wardian/compare/v0.3.5...v0.3.6) (2026-05-19)
 
 
