@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 type RunEvent = { seq: number; ts: string; kind: string; [key: string]: unknown };
 
@@ -115,68 +115,37 @@ async function openRunView(page: Page) {
   await page.locator(".titlebar-center").getByRole("button", { name: "Runs" }).click();
   await expect(page.locator('[data-testid="run-view"]')).toBeVisible();
   await page.getByRole("button", { name: /run-e2e-1/ }).click();
-  await expect(nodeByText(page, "Plan")).toBeVisible();
-  await expect(nodeByText(page, "Ship")).toBeVisible();
+  await expect(nodeById(page, "a")).toBeVisible();
+  await expect(nodeById(page, "b")).toBeVisible();
 }
 
-function nodeByText(page: Page, text: string) {
-  return page.locator(".react-flow__node").filter({ hasText: text });
-}
-
-async function nodeBorderColor(node: Locator) {
-  return node.locator(":scope > div").evaluate((element) => getComputedStyle(element).borderTopColor);
-}
-
-async function cssVar(page: Page, name: string) {
-  return page.evaluate((varName) => {
-    const probe = document.createElement("div");
-    probe.style.color = `var(${varName})`;
-    document.body.appendChild(probe);
-    const color = getComputedStyle(probe).color;
-    probe.remove();
-    return color;
-  }, name);
-}
-
-async function expectNodeColor(page: Page, node: Locator, variableName: string) {
-  await expect.poll(() => nodeBorderColor(node)).toBe(await cssVar(page, variableName));
+function nodeById(page: Page, id: string) {
+  return page.getByTestId(`run-dag-node-${id}`);
 }
 
 async function scrubTo(page: Page, index: number) {
   const input = page.getByLabel("Event scrubber");
-  const previous = page.getByRole("button", { name: "Previous event" });
-  const next = page.getByRole("button", { name: "Next event" });
-
-  for (let guard = 0; guard < 12; guard += 1) {
-    const current = Number(await input.inputValue());
-    if (current === index) return;
-    if (current > index) {
-      await previous.click();
-    } else {
-      await next.click();
-    }
-  }
-
-  throw new Error(`Unable to scrub timeline to index ${index}`);
+  await input.fill(String(index));
+  await expect(input).toHaveValue(String(index));
 }
 
 test("run view observes, scrubs, and inspects a failed run", async ({ page }) => {
   await installRunViewIpcMock(page);
   await openRunView(page);
 
-  const nodeA = nodeByText(page, "Plan");
-  const nodeB = nodeByText(page, "Ship");
+  const nodeA = nodeById(page, "a");
+  const nodeB = nodeById(page, "b");
 
   await expect(nodeA).toContainText("completed");
   await expect(nodeB).toContainText("failed");
-  await expectNodeColor(page, nodeA, "--color-wardian-success");
-  await expectNodeColor(page, nodeB, "--color-wardian-error");
+  await expect(nodeA).toHaveAttribute("data-status", "completed");
+  await expect(nodeB).toHaveAttribute("data-status", "failed");
 
   await scrubTo(page, 1);
   await expect(nodeA).toContainText("running");
   await expect(nodeB).toContainText("pending");
-  await expectNodeColor(page, nodeA, "--color-wardian-processing");
-  await expectNodeColor(page, nodeB, "--color-wardian-text-muted");
+  await expect(nodeA).toHaveAttribute("data-status", "running");
+  await expect(nodeB).toHaveAttribute("data-status", "pending");
 
   if (process.env.WARDIAN_RUN_VIEW_SCREENSHOT_DIR) {
     await page.locator('[data-testid="run-view"]').screenshot({

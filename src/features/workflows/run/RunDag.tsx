@@ -101,6 +101,8 @@ const RunNode = memo(({ data, selected }: NodeProps<Node<RunNodeData>>) => {
   const def = findNodeType(node.type);
   return (
     <div
+      data-status={data.status}
+      data-testid={`run-dag-node-${node.id}`}
       className="w-[260px] rounded-lg border-2 bg-[var(--color-wardian-card)] px-3 py-3 shadow-md transition-all"
       style={{
         borderColor: selected ? 'var(--color-wardian-accent)' : data.statusColor,
@@ -128,6 +130,8 @@ const RunGroupNode = memo(({ data, selected }: NodeProps<Node<RunNodeData>>) => 
   const def = findNodeType(node.type);
   return (
     <div
+      data-status={data.status}
+      data-testid={`run-dag-node-${node.id}`}
       className="h-full min-h-[220px] w-full min-w-[360px] rounded-lg border-2 bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_20%)] px-4 py-3"
       style={{ borderColor: selected ? 'var(--color-wardian-accent)' : data.statusColor }}
     >
