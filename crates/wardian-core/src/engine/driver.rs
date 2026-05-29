@@ -6,8 +6,8 @@ use crate::engine::interpolate::resolve;
 use crate::engine::state::{NodeStatus, RunState, RunStatus};
 use crate::engine::store::{append_event, read_checkpoint, read_events, write_checkpoint};
 use crate::engine::{EngineError, StepError};
-use std::path::Path;
 use crate::workflow::{Blueprint, Node};
+use std::path::Path;
 
 /// The async engine: drives a run by repeatedly consulting the pure core,
 /// executing side-effecting nodes through a `StepExecutor`, and persisting each
