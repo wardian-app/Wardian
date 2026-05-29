@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { EventTimeline } from './EventTimeline';
 import { NodeInspector } from './NodeInspector';
 import { RunDag } from './RunDag';
@@ -26,7 +26,6 @@ export function RunView({ theme }: RunViewProps) {
   }, [loadRuns]);
 
   const statuses = currentNodeStatuses();
-  const visibleEvents = useMemo(() => events.slice(0, scrubIndex + 1), [events, scrubIndex]);
 
   const handleOpen = async (blueprintId: string, runId: string) => {
     await openRun(blueprintId, runId);
@@ -69,7 +68,7 @@ export function RunView({ theme }: RunViewProps) {
           selectedNodeId={selectedNodeId}
           state={state}
           currentStatuses={statuses}
-          events={visibleEvents}
+          events={events}
         />
       </aside>
     </div>
