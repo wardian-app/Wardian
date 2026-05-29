@@ -2,7 +2,7 @@
 
 Wardian uses Tauri's signed updater for in-app desktop updates. The Settings UI checks for stable releases and lets the user explicitly download and install an update. After the user starts installation and the installer completes, Wardian relaunches so the updated app comes back up without a separate manual launch.
 
-On Windows, Wardian uses the Tauri updater for update discovery, download, and signature verification, then hands installation to a detached helper process. The helper waits for the running `Wardian.exe` process to exit before starting the NSIS installer with the updater flags. This avoids racing the installer against a still-running executable while preserving Tauri's signed update verification. The Tauri Rust updater API returns the verified installer as bytes rather than streaming directly to a file, so Wardian rejects installer payloads larger than 512 MiB before writing or launching them.
+On Windows, Wardian uses the Tauri updater for update discovery, download, and signature verification, then hands installation to a detached helper process. The helper is launched outside Wardian's kill-on-close process supervisor job, waits for the running `Wardian.exe` process to exit, and then starts the NSIS installer with the updater flags. This avoids racing the installer against a still-running executable while preserving Tauri's signed update verification. The Tauri Rust updater API returns the verified installer as bytes rather than streaming directly to a file, so Wardian rejects installer payloads larger than 512 MiB before writing or launching them.
 
 ## Bridge Release
 
