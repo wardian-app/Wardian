@@ -285,6 +285,7 @@ pub async fn workflow_resume_v2(
 
 /// Grant or reject an approval gate, resuming the run when granted.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn workflow_approve_v2(
     blueprint_id: String,
     run_id: String,

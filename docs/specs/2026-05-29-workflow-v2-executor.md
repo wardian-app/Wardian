@@ -1,10 +1,12 @@
 # Workflow Engine v2 — Live Executor (sub-project 5a) Design
 
-- **Status:** Proposed
+- **Status:** Implemented (5a)
 - **Date:** 2026-05-29
 - **Part of:** [Workflow Engine v2 epic (#425)]; follows sub-projects 1 (library/registry), 2 (durable engine), 3a (builder), 3b (run view), 4 (CLI).
 
 > **Structure note:** the v2 engine/workflow logic lives as modules in `wardian-core` (`wardian_core::engine`, `wardian_core::workflow`). The live executor lives in `src-tauri` because it owns the agent runtime. Read "executor" as a `src-tauri` impl of the `wardian_core::engine::StepExecutor` trait.
+
+> **Implementation note (5a):** shipped the `src-tauri` live executor, headless/fake runner boundary, output and decision parsing, agent resolution, shell/script/notify/state ops, run/resume/approve/cancel commands, startup interrupted-run logging, and mock-provider end-to-end validation. Deferred scope remains live named-agent routing, visible grouped workers, per-node worktrees, scheduled/event triggers, per-run session continuity, v1 retirement, and UI unification.
 
 ## 1. Problem & goal
 
