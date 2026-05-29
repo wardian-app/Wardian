@@ -29,7 +29,9 @@ describe("release workflow contract", () => {
     expect(releasePleaseWorkflow).toContain("steps.release.outputs.prs_created == 'true'");
     expect(releasePleaseWorkflow).toContain("actions/checkout@v4");
     expect(releasePleaseWorkflow).toContain("fetch-depth: 0");
-    expect(releasePleaseWorkflow).toContain("--label \"autorelease: pending\"");
+    expect(releasePleaseWorkflow).toContain("RELEASE_PLEASE_PRS: ${{ steps.release.outputs.prs }}");
+    expect(releasePleaseWorkflow).toContain("headBranchName");
+    expect(releasePleaseWorkflow).not.toContain("gh pr list");
     expect(releasePleaseWorkflow).toContain("cargo metadata --format-version 1 --no-deps");
     expect(releasePleaseWorkflow).toContain("git add Cargo.lock");
     expect(releasePleaseWorkflow).toContain("chore: sync release Cargo.lock");
