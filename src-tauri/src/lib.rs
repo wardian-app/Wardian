@@ -6,6 +6,7 @@ pub mod remote;
 pub mod state;
 pub mod utils;
 pub mod workflow_engine;
+pub mod workflow_v2;
 pub use wardian_core::models;
 
 // Tauri's Windows resource contains the Common Controls v6 manifest required by
@@ -212,6 +213,17 @@ pub fn run() {
             manager::init_agent_classes(&app_handle);
 
             start_metrics_supervisor(app.handle().clone());
+
+            if let Some(runs_dir) = wardian_core::paths::workflow_runs_dir() {
+                let interrupted = crate::workflow_v2::runs::scan_interrupted_runs(&runs_dir);
+                if !interrupted.is_empty() {
+                    crate::utils::logging::log_debug(&format!(
+                        "[workflow-v2] {} interrupted run(s) on startup: {:?}",
+                        interrupted.len(),
+                        interrupted
+                    ));
+                }
+            }
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
@@ -451,6 +463,10 @@ pub fn run() {
             commands::workflow::workflow_list_blueprints,
             commands::workflow::workflow_list_runs,
             commands::workflow::workflow_read_run,
+            commands::workflow::workflow_run_v2,
+            commands::workflow::workflow_resume_v2,
+            commands::workflow::workflow_approve_v2,
+            commands::workflow::workflow_cancel_v2,
             commands::library::get_library_tree,
             commands::library::save_library_item,
             commands::library::update_library_metadata,

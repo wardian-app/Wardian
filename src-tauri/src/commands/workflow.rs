@@ -1,4 +1,5 @@
 use crate::workflow_engine;
+use crate::workflow_v2::runs;
 use serde_json::Value;
 use tauri::AppHandle;
 use wardian_core::engine::store::{read_checkpoint, read_events};
@@ -158,7 +159,10 @@ pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
         return Ok(out);
     }
 
-    for bp in std::fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+    for bp in std::fs::read_dir(&root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         if !bp.path().is_dir() {
             continue;
         }
@@ -188,14 +192,147 @@ pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
 
 /// Read one run: its RunState checkpoint, full event trace, and optional blueprint.
 #[tauri::command]
-pub fn workflow_read_run(blueprint_id: String, run_id: String) -> Result<serde_json::Value, String> {
-    let dir = wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id)
-        .ok_or("no wardian home")?;
+pub fn workflow_read_run(
+    blueprint_id: String,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    let dir =
+        wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
     let state = read_checkpoint(&dir).map_err(|e| e.to_string())?;
     let events = read_events(&dir).map_err(|e| e.to_string())?;
     let blueprint = resolve_blueprint(&blueprint_id);
 
     Ok(serde_json::json!({ "state": state, "events": events, "blueprint": blueprint }))
+}
+
+/// Launch a v2 blueprint run headlessly. Validates, then drives the engine in a
+/// background task writing logs/workflows/<id>/<run-id>/. Returns the run id.
+#[tauri::command]
+pub async fn workflow_run_v2(
+    path: String,
+    provider: Option<String>,
+    workspace: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?;
+    let report = wardian_core::workflow::validate(&blueprint);
+    if !report.is_valid() {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "diagnostics": report.diagnostics
+        }));
+    }
+
+    let run_id = wardian_core::engine::driver::new_run_id();
+    let run_root =
+        wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id).ok_or("no wardian home")?;
+    let provider = provider.unwrap_or_else(|| "codex".to_string());
+    let workspace = workspace
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| run_root.clone());
+    let blueprint_for_run = blueprint.clone();
+    let run_id_for_run = run_id.clone();
+    let run_root_for_run = run_root.clone();
+
+    tokio::spawn(async move {
+        if let Err(error) = runs::drive_new_run(
+            blueprint_for_run,
+            run_id_for_run,
+            run_root_for_run,
+            workspace,
+            provider,
+        )
+        .await
+        {
+            crate::utils::logging::log_debug(&format!("[workflow-v2] run failed: {error}"));
+        }
+    });
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "run_id": run_id,
+        "blueprint_id": blueprint.id,
+        "run_dir": run_root.to_string_lossy(),
+    }))
+}
+
+/// Resume an interrupted or parked v2 run.
+#[tauri::command]
+pub async fn workflow_resume_v2(
+    blueprint_id: String,
+    run_id: String,
+    blueprint_path: String,
+    provider: Option<String>,
+    workspace: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
+        .map_err(|e| e.to_string())?;
+    let run_root =
+        wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
+    let provider = provider.unwrap_or_else(|| "codex".to_string());
+    let workspace = workspace
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| run_root.clone());
+
+    tokio::spawn(async move {
+        if let Err(error) = runs::drive_resume(blueprint, run_root, workspace, provider).await {
+            crate::utils::logging::log_debug(&format!("[workflow-v2] resume failed: {error}"));
+        }
+    });
+
+    Ok(serde_json::json!({ "ok": true, "run_id": run_id }))
+}
+
+/// Grant or reject an approval gate, resuming the run when granted.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn workflow_approve_v2(
+    blueprint_id: String,
+    run_id: String,
+    blueprint_path: String,
+    node: String,
+    granted: bool,
+    actor: String,
+    note: Option<String>,
+    provider: Option<String>,
+    workspace: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
+        .map_err(|e| e.to_string())?;
+    let run_root =
+        wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
+
+    let result = if granted {
+        let provider = provider.unwrap_or_else(|| "codex".to_string());
+        let workspace = workspace
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| run_root.clone());
+        let exec = runs::live_executor(workspace, provider);
+        wardian_core::engine::Engine::grant_approval(
+            &blueprint, &run_root, &node, &actor, note, &exec,
+        )
+        .await
+    } else {
+        wardian_core::engine::Engine::reject_approval(&blueprint, &run_root, &node, &actor, note)
+            .await
+    };
+
+    result
+        .map(|_| serde_json::json!({ "ok": true }))
+        .map_err(|e| e.to_string())
+}
+
+/// Record a cancel request for a run. Cooperative cancellation of the live loop
+/// is deferred; the marker gives the UI a durable cancellation request.
+#[tauri::command]
+pub fn workflow_cancel_v2(
+    blueprint_id: String,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    let run_root =
+        wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
+    std::fs::write(run_root.join("cancel.marker"), "cancelled").map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 fn resolve_blueprint(id: &str) -> Option<serde_json::Value> {
