@@ -214,6 +214,17 @@ pub fn run() {
 
             start_metrics_supervisor(app.handle().clone());
 
+            if let Some(runs_dir) = wardian_core::paths::workflow_runs_dir() {
+                let interrupted = crate::workflow_v2::runs::scan_interrupted_runs(&runs_dir);
+                if !interrupted.is_empty() {
+                    crate::utils::logging::log_debug(&format!(
+                        "[workflow-v2] {} interrupted run(s) on startup: {:?}",
+                        interrupted.len(),
+                        interrupted
+                    ));
+                }
+            }
+
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
                 #[cfg(windows)]
