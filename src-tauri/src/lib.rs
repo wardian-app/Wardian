@@ -5,6 +5,7 @@ pub mod providers;
 pub mod remote;
 pub mod state;
 pub mod utils;
+mod workflow_v2;
 pub mod workflow_engine;
 pub use wardian_core::models;
 
