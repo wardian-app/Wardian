@@ -115,7 +115,7 @@ pub fn app_process_supervisor_active() -> bool {
 
 #[cfg(windows)]
 fn create_app_process_supervisor() -> Result<AppProcessSupervisor, String> {
-    let job = create_kill_on_close_job("app process supervisor")?;
+    let job = create_app_process_supervisor_job()?;
     job.assign_current_process().map_err(|err| {
         format!(
             "failed to assign Wardian process to supervisor job: {}",
@@ -123,6 +123,25 @@ fn create_app_process_supervisor() -> Result<AppProcessSupervisor, String> {
         )
     })?;
     Ok(AppProcessSupervisor { _job: job })
+}
+
+#[cfg(windows)]
+fn create_app_process_supervisor_job() -> Result<win32job::Job, String> {
+    let info = app_process_supervisor_limit_info();
+    win32job::Job::create_with_limit_info(&info).map_err(|err| {
+        format!(
+            "failed to create app process supervisor job object: {}",
+            err
+        )
+    })
+}
+
+#[cfg(windows)]
+fn app_process_supervisor_limit_info() -> win32job::ExtendedLimitInfo {
+    let mut info = win32job::ExtendedLimitInfo::new();
+    info.limit_kill_on_job_close();
+    info.limit_breakaway_ok();
+    info
 }
 
 #[cfg(windows)]
@@ -359,6 +378,40 @@ mod tests {
         } else {
             assert_eq!(cmd.get_program().to_string_lossy(), "example.cmd");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn app_process_supervisor_allows_explicit_child_breakaway() {
+        use std::{mem, ptr};
+        use winapi::um::jobapi2::QueryInformationJobObject;
+        use winapi::um::winnt::{
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let info = super::app_process_supervisor_limit_info();
+        let job = win32job::Job::create_with_limit_info(&info).expect("job");
+        let mut queried: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.handle() as _,
+                JobObjectExtendedLimitInformation,
+                &mut queried as *mut _ as _,
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ptr::null_mut(),
+            )
+        };
+
+        assert_ne!(ok, 0);
+        assert_eq!(
+            queried.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        );
+        assert_eq!(
+            queried.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        );
     }
 
     #[cfg(windows)]

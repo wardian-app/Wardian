@@ -297,9 +297,6 @@ fn spawn_windows_update_handoff(
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
     let script = windows_update_handoff_script(parent_pid, installer_path);
     std::process::Command::new("powershell.exe")
         .args([
@@ -314,10 +311,18 @@ fn spawn_windows_update_handoff(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .creation_flags(windows_update_handoff_creation_flags())
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn windows_update_handoff_creation_flags() -> u32 {
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+    CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB
 }
 
 #[cfg(test)]
@@ -326,8 +331,9 @@ mod update_eligibility_tests {
         ensure_expected_update_version, ensure_windows_update_installer_size,
         normalize_windows_install_path, powershell_single_quoted, resolve_update_eligibility,
         resolve_windows_install_mismatch_reason, windows_install_registry_paths,
-        windows_update_handoff_script, windows_update_installer_args,
-        WindowsInstallRegistryIdentity, MAX_WINDOWS_UPDATE_INSTALLER_BYTES,
+        windows_update_handoff_creation_flags, windows_update_handoff_script,
+        windows_update_installer_args, WindowsInstallRegistryIdentity,
+        MAX_WINDOWS_UPDATE_INSTALLER_BYTES,
     };
 
     #[test]
@@ -497,6 +503,16 @@ mod update_eligibility_tests {
         assert!(script.contains("Get-Process -Id 42"));
         assert!(script.contains("if (-not $parentExited) { exit 1; }"));
         assert!(script.find("exit 1").unwrap() < script.find("Start-Process").unwrap());
+    }
+
+    #[test]
+    fn windows_update_handoff_breaks_away_from_app_supervisor_job() {
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+        assert_eq!(
+            windows_update_handoff_creation_flags() & CREATE_BREAKAWAY_FROM_JOB,
+            CREATE_BREAKAWAY_FROM_JOB
+        );
     }
 
     #[test]
