@@ -148,47 +148,6 @@ impl Engine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::MockExecutor;
-
-    #[tokio::test]
-    async fn start_with_id_persists_caller_supplied_run_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let blueprint = Blueprint {
-            schema: 2,
-            id: "wf".into(),
-            name: "Workflow".into(),
-            nodes: vec![Node {
-                id: "t".into(),
-                r#type: "manual_trigger".into(),
-                name: None,
-                parent: None,
-                fields: serde_json::Map::new(),
-                position: None,
-            }],
-            edges: vec![],
-            body: String::new(),
-        };
-        let exec = MockExecutor::new();
-
-        let state = Engine::start_with_id(
-            &blueprint,
-            "run-xyz",
-            serde_json::json!({}),
-            dir.path(),
-            &exec,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(state.run_id, "run-xyz");
-        let checkpoint = read_checkpoint(dir.path()).unwrap().unwrap();
-        assert_eq!(checkpoint.run_id, "run-xyz");
-    }
-}
-
 pub fn new_run_id() -> String {
     format!(
         "{}-{}",
@@ -490,5 +449,46 @@ async fn run_side_effect(
         other => Err(StepError::new(format!(
             "no executor for node type `{other}`"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::MockExecutor;
+
+    #[tokio::test]
+    async fn start_with_id_persists_caller_supplied_run_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint = Blueprint {
+            schema: 2,
+            id: "wf".into(),
+            name: "Workflow".into(),
+            nodes: vec![Node {
+                id: "t".into(),
+                r#type: "manual_trigger".into(),
+                name: None,
+                parent: None,
+                fields: serde_json::Map::new(),
+                position: None,
+            }],
+            edges: vec![],
+            body: String::new(),
+        };
+        let exec = MockExecutor::new();
+
+        let state = Engine::start_with_id(
+            &blueprint,
+            "run-xyz",
+            serde_json::json!({}),
+            dir.path(),
+            &exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.run_id, "run-xyz");
+        let checkpoint = read_checkpoint(dir.path()).unwrap().unwrap();
+        assert_eq!(checkpoint.run_id, "run-xyz");
     }
 }
