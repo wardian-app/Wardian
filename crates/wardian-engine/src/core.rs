@@ -71,8 +71,20 @@ pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::Result<()> {
         EventKind::LoopIteration { node, iteration } => {
             s.loop_iter.insert(node.clone(), *iteration);
         }
-        // Loop + approval kinds handled in Tasks 8/9.
-        _ => {}
+        EventKind::AwaitingApproval { node } => {
+            s.set_node_status(node, NodeStatus::Running);
+            s.status = RunStatus::AwaitingApproval;
+        }
+        EventKind::ApprovalGranted { node, .. } => {
+            s.status = RunStatus::Running;
+            s.set_node_status(node, NodeStatus::Completed);
+            deliver_from_port(g, s, node, "out");
+        }
+        EventKind::ApprovalRejected { node, .. } => {
+            s.set_node_status(node, NodeStatus::Failed);
+            s.status = RunStatus::Failed;
+            s.failure = Some(format!("{node}: approval rejected"));
+        }
     }
     s.next_seq = ev.seq + 1;
     Ok(())
@@ -208,6 +220,14 @@ pub fn advance_loops(g: &Graph, s: &mut RunState) {
             deliver_from_port(g, s, &lp, "done");
         }
     }
+}
+
+/// True if the node is an approval gate (driver parks instead of executing).
+pub fn is_approval(g: &Graph, node: &str) -> bool {
+    g.blueprint()
+        .find_node(node)
+        .map(|n| n.r#type == "approval")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -401,5 +421,91 @@ mod tests {
         advance_loops(&g, &mut s);
         assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
         assert!(step(&g, &s).contains(&"ship".to_string())); // done port delivered
+    }
+
+    #[test]
+    fn awaiting_approval_parks_and_grant_routes_out() {
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                node("gate", "approval"),
+                node("ship", "task"),
+            ],
+            vec![edge("t", "out", "gate"), edge("gate", "out", "ship")],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        assert!(step(&g, &s).contains(&"gate".to_string()));
+        // park
+        let seq = s.next_seq;
+        apply(
+            &g,
+            &mut s,
+            &crate::event::Event::new(
+                seq,
+                EventKind::AwaitingApproval {
+                    node: "gate".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(s.status, RunStatus::AwaitingApproval);
+        assert!(step(&g, &s).is_empty()); // parked: nothing runnable
+        // grant -> running again, gate completed, ship runnable
+        let seq = s.next_seq;
+        apply(
+            &g,
+            &mut s,
+            &crate::event::Event::new(
+                seq,
+                EventKind::ApprovalGranted {
+                    node: "gate".into(),
+                    actor: "tan".into(),
+                    note: None,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(s.status, RunStatus::Running);
+        assert!(step(&g, &s).contains(&"ship".to_string()));
+    }
+
+    #[test]
+    fn reject_fails_the_run() {
+        let blueprint = bp(
+            vec![node("t", "manual_trigger"), node("gate", "approval")],
+            vec![edge("t", "out", "gate")],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        let seq = s.next_seq;
+        apply(
+            &g,
+            &mut s,
+            &crate::event::Event::new(
+                seq,
+                EventKind::AwaitingApproval {
+                    node: "gate".into(),
+                },
+            ),
+        )
+        .unwrap();
+        let seq = s.next_seq;
+        apply(
+            &g,
+            &mut s,
+            &crate::event::Event::new(
+                seq,
+                EventKind::ApprovalRejected {
+                    node: "gate".into(),
+                    actor: "tan".into(),
+                    note: Some("no".into()),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(s.status, RunStatus::Failed);
     }
 }
