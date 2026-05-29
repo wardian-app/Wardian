@@ -74,3 +74,36 @@ async fn parks_on_approval_then_resumes_on_grant() {
     assert_eq!(done.status, RunStatus::Completed);
     assert!(exec.calls().contains(&"task:ship".to_string()));
 }
+
+#[tokio::test]
+async fn replay_reconstructs_the_same_terminal_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let bp = parse_str(LINEAR).unwrap();
+    let exec = MockExecutor::new().with_task_output("plan", serde_json::json!({"ok": true}));
+    let live = Engine::start(&bp, serde_json::json!({"goal": "ship"}), dir.path(), &exec)
+        .await
+        .unwrap();
+
+    let replayed = Engine::replay(&bp, dir.path()).unwrap();
+    assert_eq!(replayed.status, live.status);
+    assert_eq!(replayed.nodes, live.nodes);
+    assert_eq!(replayed.node_output("plan"), live.node_output("plan"));
+}
+
+#[tokio::test]
+async fn resume_from_checkpoint_finishes_a_parked_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let bp = parse_str(GATED).unwrap();
+    let exec = MockExecutor::new();
+    // Park, then simulate a process restart: resume() on the parked run is a no-op
+    // (still awaiting), and grant drives it to completion using only on-disk state.
+    Engine::start(&bp, serde_json::json!({}), dir.path(), &exec)
+        .await
+        .unwrap();
+    let still_parked = Engine::resume(&bp, dir.path(), &exec).await.unwrap();
+    assert_eq!(still_parked.status, RunStatus::AwaitingApproval);
+    let done = Engine::grant_approval(&bp, dir.path(), "gate", "tan", None, &exec)
+        .await
+        .unwrap();
+    assert_eq!(done.status, RunStatus::Completed);
+}
