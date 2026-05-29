@@ -162,8 +162,10 @@ fn build_registry() -> Vec<NodeTypeDef> {
             label: "Approval".into(),
             icon: "shield-check".into(),
             description: "Human-in-the-loop gate; parks the run until a person approves.".into(),
-            fields: vec![FieldDef::new("prompt", FieldType::Prompt, "Approval prompt")
-                .help("What the approver is signing off on.")],
+            fields: vec![
+                FieldDef::new("prompt", FieldType::Prompt, "Approval prompt")
+                    .help("What the approver is signing off on."),
+            ],
             inputs: default_in(),
             outputs: default_out(),
             outputs_from_field: None,

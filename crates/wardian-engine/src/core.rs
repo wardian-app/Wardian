@@ -242,7 +242,10 @@ mod tests {
         let mut fields = serde_json::Map::new();
         if ty == "task" {
             fields.insert("agent".into(), serde_json::json!("role:x"));
-            fields.insert("prompt".into(), serde_json::json!("do {{trigger.output.id}}"));
+            fields.insert(
+                "prompt".into(),
+                serde_json::json!("do {{trigger.output.id}}"),
+            );
         }
         if ty == "branch" {
             fields.insert("condition".into(), serde_json::json!("nodes.a.output.ok"));
@@ -411,12 +414,12 @@ mod tests {
         enter_loop(&g, &mut s, "lp");
         assert_eq!(s.loop_iter["lp"], 0);
         assert!(step(&g, &s).contains(&"b".to_string())); // body entry runnable
-        // iteration 0 body completes
+                                                          // iteration 0 body completes
         complete(&g, &mut s, "b", serde_json::json!({}));
         advance_loops(&g, &mut s);
         assert_eq!(s.loop_iter["lp"], 1); // continued to iteration 1
         assert_eq!(s.status_or_pending("b"), NodeStatus::Pending); // body reset
-        // iteration 1 body completes -> reaches max (2), so done
+                                                                   // iteration 1 body completes -> reaches max (2), so done
         complete(&g, &mut s, "b", serde_json::json!({}));
         advance_loops(&g, &mut s);
         assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
@@ -452,7 +455,7 @@ mod tests {
         .unwrap();
         assert_eq!(s.status, RunStatus::AwaitingApproval);
         assert!(step(&g, &s).is_empty()); // parked: nothing runnable
-        // grant -> running again, gate completed, ship runnable
+                                          // grant -> running again, gate completed, ship runnable
         let seq = s.next_seq;
         apply(
             &g,

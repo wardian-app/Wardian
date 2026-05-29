@@ -75,11 +75,7 @@ mod tests {
         .unwrap();
         append_event(
             root,
-            &Event::at(
-                1,
-                "t1".into(),
-                EventKind::NodeStarted { node: "a".into() },
-            ),
+            &Event::at(1, "t1".into(), EventKind::NodeStarted { node: "a".into() }),
         )
         .unwrap();
         let events = read_events(root).unwrap();

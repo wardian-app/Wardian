@@ -8,7 +8,9 @@ pub fn resolve(template: &str, registry: &serde_json::Value) -> Result<String, S
     while let Some(start) = rest.find("{{") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        let end = after.find("}}").ok_or_else(|| "unterminated {{".to_string())?;
+        let end = after
+            .find("}}")
+            .ok_or_else(|| "unterminated {{".to_string())?;
         let path = after[..end].trim();
         out.push_str(&lookup(path, registry).ok_or_else(|| path.to_string())?);
         rest = &after[end + 2..];

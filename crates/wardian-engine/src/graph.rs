@@ -105,7 +105,11 @@ mod tests {
                 n("lp", "loop", None),
                 n("b", "task", Some("lp")),
             ],
-            edges: vec![e("t", "out", "a"), e("a", "out", "lp"), e("lp", "body", "b")],
+            edges: vec![
+                e("t", "out", "a"),
+                e("a", "out", "lp"),
+                e("lp", "body", "b"),
+            ],
             body: String::new(),
         }
     }

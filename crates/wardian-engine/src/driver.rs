@@ -428,6 +428,8 @@ async fn run_side_effect(
             })
             .await?
             .0),
-        other => Err(StepError::new(format!("no executor for node type `{other}`"))),
+        other => Err(StepError::new(format!(
+            "no executor for node type `{other}`"
+        ))),
     }
 }
