@@ -50,6 +50,8 @@ function minimalWardianState(root, runId, provider, name, lines) {
           rows: 19,
           cssCellWidth: 10,
           cssCellHeight: 20,
+          lines,
+          allLines: lines,
         },
       },
       layout: {
@@ -366,16 +368,23 @@ test("auditRenderingEvidence can use an expected response marker for submitted p
     "Print exactly 50 lines, one per line, numbered WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050. Do not print any other text.";
   manifest.expected_response_text = "WARDIAN_SCROLL_050";
   const markerLines = ["WARDIAN_SCROLL_049", "WARDIAN_SCROLL_050"];
+  const allMarkerLines = Array.from(
+    { length: 50 },
+    (_, index) => `WARDIAN_SCROLL_${String(index + 1).padStart(3, "0")}`,
+  );
   for (const state of manifest.providers[0].states) {
     state.capture.debug.lines = markerLines;
-    state.capture.debug.allLines = ["WARDIAN_SCROLL_001", "WARDIAN_SCROLL_050"];
+    state.capture.debug.allLines = allMarkerLines;
+    state.capture.debug.renderer.lines = markerLines;
+    state.capture.debug.renderer.allLines = allMarkerLines;
     state.metrics = {
       stability: { stable: true },
       timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
     };
   }
   const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", markerLines);
-  resumed.capture.debug.allLines = ["WARDIAN_SCROLL_001", "WARDIAN_SCROLL_050"];
+  resumed.capture.debug.allLines = allMarkerLines;
+  resumed.capture.debug.renderer.allLines = allMarkerLines;
   resumed.metrics = {
     stability: { stable: true },
     timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
@@ -483,6 +492,93 @@ test("auditRenderingEvidence rejects repeated numbered response rows in parser h
 
   assert.equal(audit.ok, false);
   assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+});
+
+test("auditRenderingEvidence rejects repeated plain numeric response rows in parser history", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.input_text = "Print exactly 50 lines of numbers, one per line, from 1 through 50. Output no other text.";
+  manifest.expected_response_text = "50";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["49", "50"];
+    state.capture.debug.allLines = ["1", "2", "1", "2", "50"];
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", ["50"]);
+  resumed.capture.debug.allLines = ["50"];
+  resumed.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states.push(resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+});
+
+test("auditRenderingEvidence rejects missing plain numeric response rows in parser history", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const numericLines = Array.from({ length: 50 }, (_, index) => String(index + 1)).filter((line) => line !== "1");
+  manifest.input_submitted = true;
+  manifest.input_text = "Print exactly 50 lines of numbers, one per line, from 1 through 50. Output no other text.";
+  manifest.expected_response_text = "50";
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["49", "50"];
+    state.capture.debug.allLines = numericLines;
+    state.metrics = {
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", ["50"]);
+  resumed.capture.debug.allLines = ["50"];
+  resumed.metrics = {
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states.push(resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, false);
+  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are complete: resized/);
 });
 
 test("auditRenderingEvidence does not count the submitted prompt as a duplicated numbered response row", () => {
@@ -1249,6 +1345,7 @@ test("real-provider Wardian capture exposes provider model env knobs", () => {
   assert.match(testSource, /WARDIAN_E2E_RENDERING_CODEX_MODEL/);
   assert.match(testSource, /WARDIAN_E2E_RENDERING_CLAUDE_MODEL/);
   assert.match(testSource, /WARDIAN_E2E_RENDERING_OPENCODE_MODEL/);
+  assert.match(testSource, /DEFAULT_CLAUDE_RENDERING_MODEL = "haiku"/);
   assert.match(testSource, /DEFAULT_OPENCODE_RENDERING_MODEL = "opencode\/deepseek-v4-flash-free"/);
   assert.match(testSource, /modelForProvider\(provider\)/);
   assert.match(testSource, /config\.model = model/);
@@ -1338,9 +1435,12 @@ test("real-provider Wardian capture submits typed provider input before history 
   assert.match(testSource, /input_submitted/);
   assert.match(testSource, /waitForSubmittedProviderTurn/);
   assert.match(testSource, /waitForTerminalTextAbsence/);
+  assert.match(testSource, /waitForProviderResponseTextAbsence/);
   assert.match(testSource, /providerResponseTextFromCapture/);
   assert.match(testSource, /dismissProviderStartupModal/);
   assert.match(testSource, /Update Available/);
+  assert.match(testSource, /Update available!/);
+  assert.match(testSource, /ArrowDown Enter/);
   assert.match(testSource, /startup_modal/);
   assert.match(testSource, /session_persistence: "resume"/);
   assert.match(testSource, /expectAuditText: auditInputText\.trim\(\)\.length > 0/);
@@ -1353,9 +1453,9 @@ test("real-provider Wardian capture defaults to a scrollback-producing provider 
   );
 
   assert.match(testSource, /DEFAULT_SCROLLBACK_PROMPT/);
-  assert.match(testSource, /Print exactly 50 lines/);
-  assert.match(testSource, /WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050/);
-  assert.match(testSource, /WARDIAN_SCROLL_050/);
+  assert.match(testSource, /Print exactly 50 lines of numbers/);
+  assert.match(testSource, /from 1 through 50/);
+  assert.match(testSource, /DEFAULT_SCROLLBACK_RESPONSE_MARKER = "50"/);
   assert.match(testSource, /DEFAULT_SCROLLBACK_RESPONSE_MARKER/);
   assert.match(testSource, /WARDIAN_E2E_RENDERING_INPUT_TEXT === undefined/);
   assert.match(testSource, /\[Pasted Content/);

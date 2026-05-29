@@ -14,8 +14,10 @@ import {
   shouldHomeCursorBeforeTransientResize,
   type TerminalOutputState,
 } from "./terminalCapabilities";
+import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
+import type { AgentConfig } from "../../types";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -90,11 +92,45 @@ type TerminalOptionTarget = {
   options: {
     scrollOnUserInput?: boolean;
     scrollOnEraseInDisplay?: boolean;
+    windowsPty?: { backend?: "conpty" | "winpty"; buildNumber?: number };
   };
 };
 
 function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: string) {
   term.options.scrollOnEraseInDisplay = provider === "codex";
+}
+
+function providerFromAgentConfig(agent: AgentConfig | undefined) {
+  return typeof agent?.provider === "string" && agent.provider.trim().length > 0
+    ? agent.provider
+    : undefined;
+}
+
+async function resolveTerminalProvider(sessionId: string, provider?: string) {
+  if (provider && provider.trim().length > 0) {
+    return provider;
+  }
+
+  try {
+    const agents = await invoke<AgentConfig[]>("list_agents");
+    if (!Array.isArray(agents)) {
+      return undefined;
+    }
+    return providerFromAgentConfig(agents.find((agent) => agent.session_id === sessionId));
+  } catch {
+    return undefined;
+  }
+}
+
+function setSessionProvider(entry: TerminalSessionEntry, provider?: string) {
+  if (!provider) {
+    return;
+  }
+  entry.provider = provider;
+  applyProviderTerminalOptions(entry.parser, provider);
+  if (entry.renderer) {
+    applyProviderTerminalOptions(entry.renderer.term, provider);
+  }
 }
 
 type TerminalDebugEnv = {
@@ -135,7 +171,13 @@ declare global {
           cssCellHeight: number | null;
           deviceCellWidth: number | null;
           deviceCellHeight: number | null;
+          supportsViewportRedrawInPlace: boolean;
+          lines: string[];
+          allLines: string[];
         } | null;
+        provider: string | null;
+        usesViewportRedraws: boolean;
+        supportsViewportRedrawInPlace: boolean;
         lines: string[];
         allLines: string[];
         recentWritePreviews: string[];
@@ -203,6 +245,23 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         const allLines = Array.from({ length: allLineCount }, (_, index) => getLine(index));
         const renderer = entry.renderer;
         const rendererTerm = renderer?.term;
+        const rendererBuffer = rendererTerm?.buffer?.active;
+        const rendererGetLine =
+          typeof rendererBuffer?.getLine === "function"
+            ? (index: number) => rendererBuffer.getLine(index)?.translateToString(true) || ""
+            : (_index: number) => "";
+        const rendererLineCount = rendererTerm?.rows ?? 0;
+        const rendererLines = rendererBuffer
+          ? Array.from({ length: rendererLineCount }, (_, index) =>
+              rendererGetLine(index + (rendererBuffer.viewportY ?? 0)),
+            )
+          : [];
+        const rendererAllLineCount = rendererBuffer && rendererTerm
+          ? Math.min(rendererBuffer.length ?? rendererLineCount, TERMINAL_SCROLLBACK_LINES + rendererTerm.rows)
+          : 0;
+        const rendererAllLines = rendererBuffer
+          ? Array.from({ length: rendererAllLineCount }, (_, index) => rendererGetLine(index))
+          : [];
         const renderDimensions = (rendererTerm as unknown as {
           _core?: {
             _renderService?: {
@@ -238,8 +297,14 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
                 cssCellHeight: nullableNumber(renderDimensions?.css?.cell?.height),
                 deviceCellWidth: nullableNumber(renderDimensions?.device?.cell?.width),
                 deviceCellHeight: nullableNumber(renderDimensions?.device?.cell?.height),
+                supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(rendererTerm),
+                lines: rendererLines,
+                allLines: rendererAllLines,
               }
             : null,
+          provider: entry.provider ?? null,
+          usesViewportRedraws: providerUsesViewportRedraws(entry.provider),
+          supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(term),
           lines,
           allLines,
         recentWritePreviews: [...entry.recentWritePreviews],
@@ -284,6 +349,358 @@ function readParserKnownLineSet(entry: TerminalSessionEntry) {
       buffer.getLine(index)?.translateToString(true).replace(/\s+/g, " ").trim() || "",
     ).filter(Boolean),
   );
+}
+
+type XtermInternalBuffer = {
+  x?: number;
+  y?: number;
+  ybase: number;
+  ydisp: number;
+  lines: {
+    get?: (index: number) => { clone?: () => unknown; translateToString?: (trimRight?: boolean) => string } | undefined;
+    set?: (index: number, value: unknown) => void;
+    splice?: (start: number, deleteCount: number, ...items: unknown[]) => void;
+  };
+};
+
+function getInternalActiveBuffer(term: Terminal | HeadlessTerminal): XtermInternalBuffer | null {
+  const core = (term as unknown as {
+    _core?: {
+      _bufferService?: { buffer?: XtermInternalBuffer; _buffer?: XtermInternalBuffer };
+      bufferService?: { buffer?: XtermInternalBuffer; _buffer?: XtermInternalBuffer };
+    };
+  })._core;
+  return core?._bufferService?.buffer ??
+    core?._bufferService?._buffer ??
+    core?.bufferService?.buffer ??
+    core?.bufferService?._buffer ??
+    null;
+}
+
+function supportsViewportRedrawInPlace(term: Terminal | HeadlessTerminal) {
+  const buffer = getInternalActiveBuffer(term);
+  return Boolean(buffer?.lines.get && buffer.lines.set);
+}
+
+function syncBrowserTerminalScrollState(term: Terminal | HeadlessTerminal) {
+  (term as unknown as {
+    _core?: { _viewport?: { queueSync?: (ydisp?: number) => void } };
+  })._core?._viewport?.queueSync?.(term.buffer.active.viewportY ?? undefined);
+}
+
+function writeTerminalControl(term: Terminal | HeadlessTerminal, data: string) {
+  return new Promise<void>((resolve) => term.write(data, () => resolve()));
+}
+
+function overlapLineKey(line: { translateToString?: (trimRight?: boolean) => string } | undefined) {
+  const normalized = String(line?.translateToString?.(true) ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const numbered = normalized.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+  if (numbered) {
+    return `number:${Number.parseInt(numbered[1], 10)}`;
+  }
+
+  if (/^[\s─━═╭╮╰╯│┃┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬\-_=]+$/.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function trimOverlappingScrollbackBeforeViewport(term: Terminal | HeadlessTerminal) {
+  const buffer = getInternalActiveBuffer(term);
+  if (!buffer?.lines.get || !buffer.lines.splice || buffer.ybase <= 0) {
+    return 0;
+  }
+
+  const maxOverlap = Math.min(term.rows, buffer.ybase, 120);
+  const keyAt = (index: number) => overlapLineKey(buffer.lines.get?.(index));
+  const matchingRun = (historyStart: number, screenStart: number, limit: number) => {
+    let matchedRows = 0;
+    let meaningfulRows = 0;
+    let numberedRows = 0;
+    for (let row = 0; row < limit; row += 1) {
+      const historyKey = keyAt(historyStart + row);
+      const screenKey = keyAt(buffer.ybase + screenStart + row);
+      if (!historyKey && !screenKey) {
+        matchedRows += 1;
+        continue;
+      }
+      if (!historyKey || historyKey !== screenKey) {
+        break;
+      }
+      matchedRows += 1;
+      meaningfulRows += 1;
+      if (screenKey.startsWith("number:")) {
+        numberedRows += 1;
+      }
+    }
+    return { matchedRows, meaningfulRows, numberedRows };
+  };
+
+  for (let overlap = maxOverlap; overlap >= 2; overlap -= 1) {
+    const run = matchingRun(buffer.ybase - overlap, 0, overlap);
+    if (run.matchedRows !== overlap || run.meaningfulRows < 2 || run.numberedRows === 0) {
+      continue;
+    }
+
+    buffer.lines.splice(buffer.ybase - overlap, overlap);
+    buffer.ybase = Math.max(0, buffer.ybase - overlap);
+    buffer.ydisp = Math.max(0, buffer.ydisp - overlap);
+    return overlap;
+  }
+
+  const searchStart = Math.max(0, buffer.ybase - term.rows * 3);
+  for (let historyStart = buffer.ybase - 1; historyStart >= searchStart; historyStart -= 1) {
+    const maxRun = Math.min(term.rows, buffer.ybase - historyStart);
+    const run = matchingRun(historyStart, 0, maxRun);
+    if (run.meaningfulRows < 2 || run.numberedRows === 0) {
+      continue;
+    }
+
+    const deleteCount = buffer.ybase - historyStart;
+    buffer.lines.splice(historyStart, deleteCount);
+    buffer.ybase = Math.max(0, buffer.ybase - deleteCount);
+    buffer.ydisp = Math.max(0, buffer.ydisp - deleteCount);
+    return deleteCount;
+  }
+
+  return 0;
+}
+
+async function applyViewportRedrawInPlace(
+  term: Terminal | HeadlessTerminal,
+  data: string,
+  options?: { preserveExistingViewport?: boolean },
+) {
+  const buffer = getInternalActiveBuffer(term);
+  if (!buffer?.lines.get || !buffer.lines.set) {
+    return false;
+  }
+
+  const scratch = new HeadlessTerminal({
+    cols: term.cols,
+    rows: term.rows,
+    scrollback: 0,
+    allowProposedApi: true,
+    scrollOnEraseInDisplay: false,
+    windowsPty: (term.options as TerminalOptionTarget["options"]).windowsPty,
+  });
+
+  try {
+    const scratchBuffer = getInternalActiveBuffer(scratch);
+    if (!scratchBuffer?.lines.set) {
+      return false;
+    }
+
+    if (options?.preserveExistingViewport !== false) {
+      for (let row = 0; row < term.rows; row += 1) {
+        const sourceLine = buffer.lines.get(buffer.ybase + row);
+        const clonedLine = sourceLine?.clone?.();
+        if (clonedLine) {
+          scratchBuffer.lines.set(row, clonedLine);
+        }
+      }
+    }
+
+    await writeTerminalControl(scratch, data);
+
+    const renderedScratchBuffer = getInternalActiveBuffer(scratch);
+    if (!renderedScratchBuffer?.lines.get) {
+      return false;
+    }
+
+    for (let row = 0; row < term.rows; row += 1) {
+      const sourceLine = renderedScratchBuffer.lines.get(renderedScratchBuffer.ybase + row);
+      const clonedLine = sourceLine?.clone?.();
+      if (clonedLine) {
+        buffer.lines.set(buffer.ybase + row, clonedLine);
+      }
+    }
+    buffer.x = renderedScratchBuffer.x;
+    buffer.y = renderedScratchBuffer.y;
+    trimOverlappingScrollbackBeforeViewport(term);
+    syncBrowserTerminalScrollState(term);
+    return true;
+  } finally {
+    scratch.dispose();
+  }
+}
+
+const SYNTHETIC_SCROLLBACK_PREFIX = "\u001b[999;1H";
+
+function splitSyntheticScrollbackPrefix(data: string) {
+  if (!data.startsWith(SYNTHETIC_SCROLLBACK_PREFIX)) {
+    return { scrollbackData: "", viewportData: data };
+  }
+
+  const viewportStart = data.indexOf("\u001b", SYNTHETIC_SCROLLBACK_PREFIX.length);
+  if (viewportStart <= SYNTHETIC_SCROLLBACK_PREFIX.length) {
+    return { scrollbackData: "", viewportData: data };
+  }
+
+  return {
+    scrollbackData: data.slice(0, viewportStart),
+    viewportData: data.slice(viewportStart),
+  };
+}
+
+const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b[PX^_].*?(?:\u001b\\|\u0007)|\u001b[@-_]/g;
+
+function normalizePotentialHistoryLine(line: string) {
+  return line.replace(/\s+/g, " ").trim();
+}
+
+function historyLineKey(line: string) {
+  const normalized = normalizePotentialHistoryLine(line);
+  const numbered = normalized.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+  return numbered ? `number:${Number.parseInt(numbered[1], 10)}` : normalized;
+}
+
+function isLikelyProviderChromeLine(line: string) {
+  const normalized = normalizePotentialHistoryLine(line);
+  if (!normalized) {
+    return true;
+  }
+  if (/^[\s─━═╭╮╰╯│┃┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬\-_=]+$/.test(normalized)) {
+    return true;
+  }
+  if (/^(?:›|>|❯|>_|\$)\s*/.test(normalized)) {
+    return true;
+  }
+  if (/^(?:model|directory|permissions):\b/i.test(normalized)) {
+    return true;
+  }
+  if (/\b(?:context|tokens?|thinking|interrupt|permissions|approval|ctrl\+c|shift\+tab|feedback)\b/i.test(normalized)) {
+    return true;
+  }
+  if (/^(?:tip:|update available|run npm install|see full release notes|openai codex|\[.*\])\b/i.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function syntheticScrollbackRowsForViewportRedraw(data: string, knownLines?: Set<string>) {
+  const seen = new Set<string>();
+  const rows = data
+    .replace(ANSI_SEQUENCE, "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\r/g, "").trimEnd())
+    .filter((line) => {
+      const normalized = normalizePotentialHistoryLine(line);
+      if (isLikelyProviderChromeLine(normalized)) {
+        return false;
+      }
+      const key = historyLineKey(normalized);
+      if (seen.has(key) || knownLines?.has(normalized) || knownLines?.has(key) || knownLines?.has(line)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .map((line) => {
+      const numbered = normalizePotentialHistoryLine(line).match(
+        /^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i,
+      );
+      return numbered ? `  ${Number.parseInt(numbered[1], 10)}` : line.trim();
+    });
+
+  return rows.length > 0 ? rows : null;
+}
+
+function appendSyntheticScrollbackRows(scrollbackData: string, rows: string[] | null) {
+  if (!rows?.length) {
+    return scrollbackData;
+  }
+  const renderedRows = `${rows.join("\r\n")}\r\n`;
+  return scrollbackData
+    ? `${scrollbackData}${renderedRows}`
+    : `${SYNTHETIC_SCROLLBACK_PREFIX}${renderedRows}`;
+}
+
+function providerUsesViewportRedraws(provider: string | undefined) {
+  return provider === "codex" || provider === "claude" || provider === "gemini";
+}
+
+const TOP_LEFT_CURSOR_REPOSITION = /\u001b\[(?:|1|;|1;|;1|1;1)[Hf]/;
+
+function isProviderViewportRedraw(provider: string | undefined, data: string) {
+  return providerUsesViewportRedraws(provider) && (
+    TOP_LEFT_CURSOR_REPOSITION.test(data) ||
+    data.includes("\u001b[2J")
+  );
+}
+
+function wheelEventRows(
+  event: { deltaMode: number; deltaY: number },
+  term: Terminal,
+) {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * Math.max(term.rows - 1, 1);
+  }
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY;
+  }
+
+  const dimensions = (term as unknown as {
+    _core?: { _renderService?: { dimensions?: { css?: { cell?: { height?: number } } } } };
+  })._core?._renderService?.dimensions;
+  const lineHeight = dimensions?.css?.cell?.height ?? Number(term.options.fontSize ?? 14) * 1.2;
+  return event.deltaY / Math.max(lineHeight, 1);
+}
+
+function scrollTerminalFromWheel(
+  term: Terminal,
+  provider: string | undefined,
+  event: {
+    deltaMode: number;
+    deltaY: number;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  },
+  rowRemainder: { current: number },
+) {
+  if (provider === "opencode") {
+    return false;
+  }
+
+  const buffer = term.buffer.active;
+  if ((buffer.baseY ?? 0) <= 0) {
+    return false;
+  }
+
+  const rowDelta = wheelEventRows(event, term) + rowRemainder.current;
+  const scrollRows = rowDelta > 0 ? Math.floor(rowDelta) : Math.ceil(rowDelta);
+  if (scrollRows === 0) {
+    rowRemainder.current = rowDelta;
+    return false;
+  }
+
+  rowRemainder.current = rowDelta - scrollRows;
+  const beforeViewportY = buffer.viewportY ?? 0;
+  term.scrollLines(scrollRows);
+  const afterViewportY = term.buffer.active.viewportY ?? 0;
+  if (afterViewportY === beforeViewportY) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  term.refresh(0, Math.max(term.rows - 1, 0));
+  return true;
+}
+
+function syncParserViewportToRenderer(entry: TerminalSessionEntry) {
+  const rendererViewportY = entry.renderer?.term.buffer.active.viewportY;
+  if (typeof rendererViewportY !== "number") {
+    return;
+  }
+  (entry.parser as unknown as { scrollToLine?: (line: number) => void }).scrollToLine?.(rendererViewportY);
 }
 
 function queueTerminalCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
@@ -414,7 +831,7 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
   }
 }
 
-// Pull a terminal back onto the GPU when the user focuses or maximizes it,
+// Pull a terminal back onto the GPU when the grid first mounts or maximizes it,
 // evicting the least-recently-active WebGL terminal if the pool is full.
 function promoteSessionToWebgl(sessionId: string) {
   const renderer = terminalSessionMap.get(sessionId)?.renderer;
@@ -426,6 +843,13 @@ function promoteSessionToWebgl(sessionId: string) {
     return;
   }
   loadWebglForRenderer(renderer, sessionId);
+}
+
+function touchSessionWebglIfActive(sessionId: string) {
+  const renderer = terminalSessionMap.get(sessionId)?.renderer;
+  if (renderer?.webglAddon) {
+    touchWebglPool(sessionId);
+  }
 }
 
 function cancelRendererDisposal(entry: TerminalSessionEntry) {
@@ -638,6 +1062,40 @@ async function drainPty(sessionId: string) {
           entry.recentNormalizedWritePreviews.splice(0, entry.recentNormalizedWritePreviews.length - 12);
         }
         useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
+        const knownLines = entry.existingKnownLines;
+        let { scrollbackData, viewportData } = splitSyntheticScrollbackPrefix(batchedWrite);
+        const renderer = entry.renderer;
+        if (
+          isProviderViewportRedraw(entry.provider, viewportData) &&
+          supportsViewportRedrawInPlace(entry.parser) &&
+          (!renderer || supportsViewportRedrawInPlace(renderer.term))
+        ) {
+          scrollbackData = appendSyntheticScrollbackRows(
+            scrollbackData,
+            syntheticScrollbackRowsForViewportRedraw(viewportData, knownLines),
+          );
+          if (scrollbackData) {
+            await writeTerminalControl(entry.parser, scrollbackData);
+            if (renderer) {
+              await writeTerminalControl(renderer.term, scrollbackData);
+            }
+          }
+
+          await applyViewportRedrawInPlace(entry.parser, viewportData, {
+            preserveExistingViewport: false,
+          });
+          if (renderer) {
+            await applyViewportRedrawInPlace(renderer.term, viewportData, {
+              preserveExistingViewport: false,
+            });
+            renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+            if (!entry.disposed && rendererWasAtBottom) {
+              renderer.term.scrollToBottom();
+            }
+          }
+          entry.existingKnownLines = undefined;
+          continue;
+        }
         entry.existingKnownLines = undefined;
         entry.parser.write(batchedWrite);
         if (entry.renderer) {
@@ -668,21 +1126,18 @@ async function drainPty(sessionId: string) {
 
 async function getOrCreateTerminalSession(sessionId: string, provider?: string) {
   const existing = terminalSessionMap.get(sessionId);
+  const resolvedProvider = await resolveTerminalProvider(sessionId, provider ?? existing?.provider);
   if (existing) {
-    existing.provider = provider;
-    applyProviderTerminalOptions(existing.parser, provider);
-    if (existing.renderer) {
-      applyProviderTerminalOptions(existing.renderer.term, provider);
-    }
+    setSessionProvider(existing, resolvedProvider);
     return existing;
   }
 
   const parser = new HeadlessTerminal({
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
-    scrollOnEraseInDisplay: provider === "codex",
+    scrollOnEraseInDisplay: resolvedProvider === "codex",
   });
-  applyProviderTerminalOptions(parser, provider);
+  applyProviderTerminalOptions(parser, resolvedProvider);
   const parserSerializeAddon = new SerializeAddon();
   parser.loadAddon(parserSerializeAddon);
 
@@ -696,7 +1151,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     opencodeFocusReported: false,
     outputReadyUnlisten: null,
     terminalClearedUnlisten: null,
-    provider,
+    provider: resolvedProvider,
     currentTheme: DARK_TERM_THEME,
     renderer: null,
     rendererDisposeTimer: null,
@@ -804,6 +1259,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     term.options.scrollOnUserInput = false;
     applyProviderTerminalOptions(term, entry.provider);
   }
+  installConservativeTerminalShortcuts(term);
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -819,6 +1275,16 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   host.className = "w-full h-full";
   host.style.width = "100%";
   host.style.height = "100%";
+  const wheelRowRemainder = { current: 0 };
+  host.addEventListener(
+    "wheel",
+    (event) => {
+      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder)) {
+        syncParserViewportToRenderer(entry);
+      }
+    },
+    { passive: false },
+  );
 
   const renderer: TerminalRendererEntry = {
     resizeTimeout: null,
@@ -947,6 +1413,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
+  const wheelRowRemainderRef = useRef(0);
   const [initError, setInitError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
@@ -990,12 +1457,27 @@ export const AgentTerminal = memo(function AgentTerminal({
   }, []);
 
   const handleFocusCapture = useCallback(() => {
-    // Focusing a terminal pulls it onto the GPU (evicting the LRU WebGL
-    // terminal if the pool is full), so the one you're working in is always
-    // hardware-accelerated even when the grid holds more than the cap.
-    promoteSessionToWebgl(sessionId);
+    // Focus should not swap renderers; changing DOM/WebGL backends changes text
+    // rasterization and makes the terminal appear to reflow.
+    touchSessionWebglIfActive(sessionId);
     onTerminalFocus?.();
   }, [sessionId, onTerminalFocus]);
+
+  const handleWheel = useCallback((event: {
+    deltaMode: number;
+    deltaY: number;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  }) => {
+    const entry = terminalSessionMap.get(sessionId);
+    const term = entry?.renderer?.term;
+    if (!entry || !term) {
+      return;
+    }
+    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef)) {
+      syncParserViewportToRenderer(entry);
+    }
+  }, [sessionId]);
 
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
@@ -1014,11 +1496,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         }
 
         entry = session;
-        session.provider = provider;
-        applyProviderTerminalOptions(session.parser, provider);
-        if (session.renderer) {
-          applyProviderTerminalOptions(session.renderer.term, provider);
-        }
+        setSessionProvider(session, provider);
         session.titleHandlerRef.current = onTitleChangeRef.current;
         session.currentTheme = termTheme;
 
@@ -1160,6 +1638,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         data-testid="agent-terminal-host"
         tabIndex={-1}
         onFocusCapture={handleFocusCapture}
+        onWheel={handleWheel}
         onClick={focusTerminal}
         className={`w-full h-full overflow-hidden ${
           provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
@@ -1168,3 +1647,12 @@ export const AgentTerminal = memo(function AgentTerminal({
     </div>
   );
 });
+
+export const __terminalTesting = {
+  applyViewportRedrawInPlace,
+  appendSyntheticScrollbackRows,
+  isProviderViewportRedraw,
+  splitSyntheticScrollbackPrefix,
+  syntheticScrollbackRowsForViewportRedraw,
+  trimOverlappingScrollbackBeforeViewport,
+};
