@@ -192,9 +192,8 @@ fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
     if let Ok(mut title) = agent.terminal_title.lock() {
         title.clear();
     }
-    if let Ok(mut status) = agent.current_status.lock() {
-        *status = "Processing...".to_string();
-    }
+    agent.current_status =
+        std::sync::Arc::new(std::sync::Mutex::new("Processing...".to_string()));
     if let Ok(mut count) = agent.query_count.lock() {
         *count = 0;
     }
@@ -5199,6 +5198,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         active.stdin_tx = Some(tx);
         active.process_id = Some(12345);
+        let runtime_status = active.current_status.clone();
         active.output_buffer.lock().unwrap().push_str("old output");
         *active.terminal_title.lock().unwrap() = "Old Title".to_string();
         *active.current_status.lock().unwrap() = "Idle".to_string();
@@ -5231,6 +5231,10 @@ mod tests {
         );
         assert_eq!(active.process_id, None);
         assert!(active.stdin_tx.is_none());
+        assert!(
+            !Arc::ptr_eq(&runtime_status, &active.current_status),
+            "clear must detach stale runtime status writers before replacement spawn"
+        );
         assert_eq!(active.output_buffer.lock().unwrap().as_str(), "");
         assert_eq!(active.terminal_title.lock().unwrap().as_str(), "");
         assert_eq!(

@@ -168,17 +168,29 @@ pub(crate) fn set_agent_status(
             let observed_at =
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-            // Phase 2: Persist status change to SQLite
-            let _ = wardian_core::db::update_agent_status(session_id, next_status, None);
-
             let status_app = app.clone();
             let status_session_id = session_id.to_string();
             let status = next_status.to_string();
+            let current_status = current_status.clone();
             let status_sequence = app
                 .state::<AppState>()
                 .next_status_observation_sequence(session_id);
             tauri::async_runtime::spawn(async move {
                 let state = status_app.state::<AppState>();
+                if !status_arc_belongs_to_current_agent(&state, &status_session_id, &current_status)
+                    .await
+                {
+                    log_debug(&format!(
+                        "[Wardian] Ignoring stale status '{}' for replaced session {}",
+                        status, status_session_id
+                    ));
+                    return;
+                }
+
+                // Phase 2: Persist status change to SQLite after confirming the
+                // reporting runtime still owns the active agent slot.
+                let _ = wardian_core::db::update_agent_status(&status_session_id, &status, None);
+
                 record_provider_input_from_status_state(
                     &state,
                     &status_session_id,
@@ -217,6 +229,17 @@ pub(crate) fn set_agent_status(
             });
         }
     }
+}
+
+async fn status_arc_belongs_to_current_agent(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) -> bool {
+    let agents = state.agents.lock().await;
+    agents
+        .get(session_id)
+        .is_some_and(|agent| std::sync::Arc::ptr_eq(&agent.current_status, current_status))
 }
 
 async fn record_provider_input_from_status_state(
@@ -1065,6 +1088,38 @@ mod tests {
             "Action Needed"
         );
         assert_eq!(*agent.query_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_status_arc_is_not_current_after_agent_replacement() {
+        let state = AppState::new();
+        let old_agent = test_active_agent("Idle");
+        let old_status = old_agent.current_status.clone();
+        {
+            let mut config = old_agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+        }
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), old_agent);
+
+        let new_agent = test_active_agent("Idle");
+        {
+            let mut config = new_agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+        }
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), new_agent);
+
+        assert!(
+            !status_arc_belongs_to_current_agent(&state, "agent-1", &old_status).await,
+            "late status events from a cleared runtime must not update the replacement agent"
+        );
     }
 
     #[tokio::test]
