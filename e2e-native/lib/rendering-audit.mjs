@@ -85,6 +85,28 @@ function parserHistoryText(state) {
   return (state?.capture?.debug?.allLines ?? []).join("\n");
 }
 
+function rendererHistoryText(state) {
+  return (state?.capture?.debug?.renderer?.allLines ?? []).join("\n");
+}
+
+function rendererBackedState(state) {
+  const renderer = state?.capture?.debug?.renderer;
+  if (!renderer) {
+    return null;
+  }
+  return {
+    ...state,
+    capture: {
+      ...state.capture,
+      debug: {
+        ...state.capture?.debug,
+        lines: renderer.lines ?? [],
+        allLines: renderer.allLines ?? [],
+      },
+    },
+  };
+}
+
 function normalizedContentLine(line) {
   return String(line ?? "").replace(/\s+/g, " ").trim();
 }
@@ -93,7 +115,12 @@ function isDecorativeLine(line) {
   return /^[\s─━═╭╮╰╯│┃┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬\-_=]+$/.test(line);
 }
 
-function duplicatedTerminalContent(state, inputText) {
+function expectedInputRepeatCount(manifest) {
+  const parsed = Number.parseInt(String(manifest?.input_repeat_count ?? "1"), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function duplicatedTerminalContent(state, inputText, allowedInputOccurrences = 1) {
   const lines = state?.capture?.debug?.allLines ?? state?.capture?.debug?.lines ?? [];
   const normalized = lines
     .map(normalizedContentLine)
@@ -124,10 +151,13 @@ function duplicatedTerminalContent(state, inputText) {
       anchor,
       normalized.filter((line) => line.includes(anchor)).length,
     ])
-    .filter(([, count]) => count > 1);
+    .filter(([, count]) => count > allowedInputOccurrences);
 
   return {
-    ok: duplicateLines.length === 0 && inputOccurrences <= 1 && duplicateInputAnchors.length === 0,
+    ok:
+      duplicateLines.length === 0 &&
+      inputOccurrences <= allowedInputOccurrences &&
+      duplicateInputAnchors.length === 0,
     duplicateLines,
     inputOccurrences,
     duplicateInputAnchors,
@@ -207,15 +237,40 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function repeatedNumberedResponseRows(state, auditText, inputText = "") {
+function repeatedNumberedResponseRows(state, auditText, inputText = "", allowedOccurrences = 1) {
   const markerMatch = String(auditText ?? "").match(/^(.+?_)\d{3}$/);
-  if (!markerMatch) {
-    return { ok: true, repeated: [] };
-  }
-
   const sourceLines = state?.capture?.debug?.allLines?.length
     ? state.capture.debug.allLines
     : state?.capture?.debug?.lines ?? [];
+  if (!markerMatch) {
+    const expectedLastNumber = Number.parseInt(String(auditText ?? "").trim(), 10);
+    const promptAsksForNumberedRows =
+      Number.isFinite(expectedLastNumber) &&
+      expectedLastNumber > 1 &&
+      new RegExp(`\\b1\\s+(?:through|to|-)\\s+${expectedLastNumber}\\b`, "i").test(inputText);
+    if (!promptAsksForNumberedRows) {
+      return { ok: true, repeated: [] };
+    }
+
+    const counts = new Map();
+    for (const line of sourceLines) {
+      const normalizedLine = normalizedContentLine(line);
+      const match = normalizedLine.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+      if (!match) {
+        continue;
+      }
+      const value = Number.parseInt(match[1], 10);
+      if (value >= 1 && value <= expectedLastNumber) {
+        counts.set(String(value), (counts.get(String(value)) ?? 0) + 1);
+      }
+    }
+
+    const repeated = [...counts.entries()]
+      .filter(([, count]) => count > allowedOccurrences)
+      .map(([marker, count]) => `${marker} x${count}`);
+    return { ok: repeated.length === 0, repeated };
+  }
+
   const markerPattern = new RegExp(`\\b${escapeRegExp(markerMatch[1])}\\d{3}\\b`, "g");
   const promptMarkerCredits = new Map();
   for (const match of String(inputText ?? "").matchAll(markerPattern)) {
@@ -245,9 +300,69 @@ function repeatedNumberedResponseRows(state, auditText, inputText = "") {
   }
   const repeated = [...counts.entries()]
     .map(([marker, count]) => [marker, count - (promptMarkerCredits.get(marker) ?? 0)])
-    .filter(([, count]) => count > 1)
+    .filter(([, count]) => count > allowedOccurrences)
     .map(([marker, count]) => `${marker} x${count}`);
   return { ok: repeated.length === 0, repeated };
+}
+
+function expectedNumberedResponseRows(auditText, inputText = "") {
+  const markerMatch = String(auditText ?? "").match(/^(.+?_)(\d{3})$/);
+  if (markerMatch) {
+    const lastNumber = Number.parseInt(markerMatch[2], 10);
+    if (!Number.isFinite(lastNumber) || lastNumber < 1) {
+      return null;
+    }
+    return {
+      type: "prefixed",
+      lastNumber,
+      values: Array.from(
+        { length: lastNumber },
+        (_, index) => `${markerMatch[1]}${String(index + 1).padStart(3, "0")}`,
+      ),
+    };
+  }
+
+  const expectedLastNumber = Number.parseInt(String(auditText ?? "").trim(), 10);
+  const promptAsksForNumberedRows =
+    Number.isFinite(expectedLastNumber) &&
+    expectedLastNumber > 1 &&
+    new RegExp(`\\b1\\s+(?:through|to|-)\\s+${expectedLastNumber}\\b`, "i").test(inputText);
+  if (!promptAsksForNumberedRows) {
+    return null;
+  }
+  return {
+    type: "plain",
+    lastNumber: expectedLastNumber,
+    values: Array.from({ length: expectedLastNumber }, (_, index) => String(index + 1)),
+  };
+}
+
+function completeNumberedResponseRows(state, auditText, inputText = "") {
+  const expected = expectedNumberedResponseRows(auditText, inputText);
+  if (!expected) {
+    return { ok: true, missing: [] };
+  }
+
+  const sourceLines = state?.capture?.debug?.allLines?.length
+    ? state.capture.debug.allLines
+    : state?.capture?.debug?.lines ?? [];
+  const seen = new Set();
+  for (const line of sourceLines) {
+    const normalizedLine = normalizedContentLine(line);
+    if (expected.type === "plain") {
+      const match = normalizedLine.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+      if (match) {
+        seen.add(String(Number.parseInt(match[1], 10)));
+      }
+      continue;
+    }
+    for (const value of normalizedLine.matchAll(new RegExp(`\\b${escapeRegExp(expected.values[0].replace(/001$/, ""))}\\d{3}\\b`, "g"))) {
+      seen.add(value[0]);
+    }
+  }
+
+  const missing = expected.values.filter((value) => !seen.has(value));
+  return { ok: missing.length === 0, missing };
 }
 
 function requiresVisibleTerminalDom(stateName) {
@@ -396,7 +511,12 @@ export function auditRenderingEvidence({
           hasTimestamp(state.metrics?.timestamps?.artifact_written_at),
           `Wardian artifact timestamp recorded: ${stateName}`,
         );
-        const duplicateContent = duplicatedTerminalContent(state, wardianManifest.input_text);
+        const allowedInputOccurrences = expectedInputRepeatCount(wardianManifest);
+        const duplicateContent = duplicatedTerminalContent(
+          state,
+          wardianManifest.input_text,
+          allowedInputOccurrences,
+        );
         providerCheck(
           duplicateContent.ok,
           `Wardian terminal content has no obvious duplicated rows: ${stateName}`,
@@ -405,11 +525,43 @@ export function auditRenderingEvidence({
           state,
           auditText,
           wardianManifest.input_text,
+          allowedInputOccurrences,
         );
         providerCheck(
           duplicateNumberedRows.ok,
           `Wardian numbered response rows are not duplicated: ${stateName}`,
         );
+        const completeNumberedRows = completeNumberedResponseRows(
+          state,
+          auditText,
+          wardianManifest.input_text,
+        );
+        providerCheck(
+          completeNumberedRows.ok,
+          `Wardian numbered response rows are complete: ${stateName}`,
+        );
+        const rendererState = rendererBackedState(state);
+        if (rendererState) {
+          const duplicateRendererNumberedRows = repeatedNumberedResponseRows(
+            rendererState,
+            auditText,
+            wardianManifest.input_text,
+            allowedInputOccurrences,
+          );
+          providerCheck(
+            duplicateRendererNumberedRows.ok,
+            `Wardian renderer numbered response rows are not duplicated: ${stateName}`,
+          );
+          const completeRendererNumberedRows = completeNumberedResponseRows(
+            rendererState,
+            auditText,
+            wardianManifest.input_text,
+          );
+          providerCheck(
+            completeRendererNumberedRows.ok,
+            `Wardian renderer numbered response rows are complete: ${stateName}`,
+          );
+        }
         if (requiresVisibleTerminalDom(stateName)) {
           providerCheck(
             screenRectMatchesXtermGrid(state),
@@ -429,6 +581,13 @@ export function auditRenderingEvidence({
             providerCheck(
               terminalTextIncludes(`${stateText(state)}\n${historyText}`, auditText),
               `Wardian resized state parser history includes audit marker: ${stateName}`,
+            );
+          }
+          const rendererHistory = rendererHistoryText(state);
+          if (rendererHistory.trim().length > 0) {
+            providerCheck(
+              terminalTextIncludes(`${stateText(state)}\n${rendererHistory}`, auditText),
+              `Wardian resized state renderer history includes audit marker: ${stateName}`,
             );
           }
           if (state.metrics?.resize?.expect_cols_change === true) {

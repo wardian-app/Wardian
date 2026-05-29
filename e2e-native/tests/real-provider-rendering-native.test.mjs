@@ -23,8 +23,8 @@ const runRealRendering = process.env.WARDIAN_E2E_REAL_RENDERING === "1";
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const DEFAULT_SCROLLBACK_PROMPT =
-  "Print exactly 50 lines, one per line, from WARDIAN_SCROLL_001 through WARDIAN_SCROLL_050. Output no other text.";
-const DEFAULT_SCROLLBACK_RESPONSE_MARKER = "WARDIAN_SCROLL_050";
+  "Print exactly 50 lines of numbers, one per line, from 1 through 50. Output no other text.";
+const DEFAULT_SCROLLBACK_RESPONSE_MARKER = "50";
 const auditInputText = process.env.WARDIAN_E2E_RENDERING_INPUT_TEXT ?? DEFAULT_SCROLLBACK_PROMPT;
 const parsedTerminalFontSize = Number.parseFloat(process.env.WARDIAN_E2E_TERMINAL_FONT_SIZE ?? "10");
 const auditTerminalFontSize = Number.isFinite(parsedTerminalFontSize) && parsedTerminalFontSize > 0
@@ -32,9 +32,14 @@ const auditTerminalFontSize = Number.isFinite(parsedTerminalFontSize) && parsedT
   : 10;
 const auditTerminalFontFamily = process.env.WARDIAN_E2E_TERMINAL_FONT_FAMILY ?? "";
 const auditGridStacked = process.env.WARDIAN_E2E_RENDERING_GRID_STACKED === "1";
-const parsedRenderingRowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_ROW_HEIGHT ?? "900", 10);
+const auditTwoColumnLayout = process.env.WARDIAN_E2E_RENDERING_TWO_COLUMN_LAYOUT !== "0";
+const parsedRenderingRowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_ROW_HEIGHT ?? "420", 10);
 const auditRenderingRowHeight =
   Number.isFinite(parsedRenderingRowHeight) && parsedRenderingRowHeight > 0 ? parsedRenderingRowHeight : null;
+const auditInputRepeatCount = Math.max(
+  1,
+  Number.parseInt(process.env.WARDIAN_E2E_RENDERING_INPUT_REPEAT_COUNT ?? "1", 10) || 1,
+);
 const auditWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WINDOW_WIDTH ?? "1280", 10);
 const auditWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WINDOW_HEIGHT ?? "1100", 10);
 const auditResizedWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_RESIZED_WIDTH ?? "980", 10);
@@ -43,6 +48,10 @@ const auditWideWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_W
 const auditWideWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WIDE_HEIGHT ?? "1100", 10);
 const auditStableRowsQuietMs = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_STABLE_ROWS_QUIET_MS ?? "750", 10);
 const auditSettleTimeoutMs = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_SETTLE_TIMEOUT_MS ?? "10000", 10);
+const auditProviderTurnTimeoutMs = Number.parseInt(
+  process.env.WARDIAN_E2E_RENDERING_PROVIDER_TURN_TIMEOUT_MS ?? "180000",
+  10,
+);
 const parsedPostInputWaitMs = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_POST_INPUT_WAIT_MS ?? "0", 10);
 const auditPostInputWaitMs =
   Number.isFinite(parsedPostInputWaitMs) && parsedPostInputWaitMs > 0 ? parsedPostInputWaitMs : 0;
@@ -60,9 +69,11 @@ const auditExpectedResponseText =
     : process.env.WARDIAN_E2E_RENDERING_INPUT_TEXT === undefined
       ? DEFAULT_SCROLLBACK_RESPONSE_MARKER
       : "";
+const DEFAULT_CLAUDE_RENDERING_MODEL = "haiku";
 const DEFAULT_OPENCODE_RENDERING_MODEL = "opencode/deepseek-v4-flash-free";
 const auditCodexModel = process.env.WARDIAN_E2E_RENDERING_CODEX_MODEL?.trim() || "";
-const auditClaudeModel = process.env.WARDIAN_E2E_RENDERING_CLAUDE_MODEL?.trim() || "";
+const auditClaudeModel =
+  process.env.WARDIAN_E2E_RENDERING_CLAUDE_MODEL?.trim() || DEFAULT_CLAUDE_RENDERING_MODEL;
 const auditOpenCodeModel =
   process.env.WARDIAN_E2E_RENDERING_OPENCODE_MODEL?.trim() || DEFAULT_OPENCODE_RENDERING_MODEL;
 const auditRapidResizeSequence = parseWindowSizeSequence(
@@ -225,51 +236,82 @@ function seedOpenCodeRenderingState(wardianHome) {
 }
 
 async function selectGridView(driver) {
-  const gridTab = await driver.wait(
-    until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-    20000,
-  );
-  await driver.wait(until.elementIsVisible(gridTab), 20000);
-  await gridTab.click();
+  try {
+    const gridTab = await driver.wait(
+      until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
+      20000,
+    );
+    await driver.wait(until.elementIsVisible(gridTab), 20000);
+    await gridTab.click();
+  } catch (error) {
+    throw new Error(`Timed out selecting Grid view.\n${JSON.stringify(await readPageDiagnostics(driver), null, 2)}\n${error}`);
+  }
+}
+
+function auditColumnTracks() {
+  return auditGridStacked ? [1] : [0.5, 0.5];
 }
 
 async function forceDarkTheme(driver) {
-  await driver.executeScript((terminalFontSize, terminalFontFamily, gridStacked, rowHeight) => {
-    localStorage.setItem(
-      "wardian-settings",
-      JSON.stringify({
-        state: {
-          theme: "dark",
-          terminalFontSize,
-          terminalFontFamily,
-          autoPatchGemini: false,
-        },
-        version: 0,
-      }),
-    );
-    if (gridStacked || rowHeight) {
+  try {
+    await driver.executeScript((terminalFontSize, terminalFontFamily, gridStacked, rowHeight, columnTracks) => {
       localStorage.setItem(
-        "wardian-layout",
+        "wardian-settings",
         JSON.stringify({
           state: {
-            layout: { column_tracks: [1], row_height: rowHeight || 450 },
-            leftSidebarWidth: 260,
-            rightSidebarWidth: 240,
-            userTerminalOpen: false,
-            userTerminalHeight: 360,
-            gridStacked,
-            previousColumnTracks: [0.5, 0.5],
+            theme: "dark",
+            terminalFontSize,
+            terminalFontFamily,
+            autoPatchGemini: false,
           },
           version: 0,
         }),
       );
-    }
-    location.reload();
-  }, auditTerminalFontSize, auditTerminalFontFamily, auditGridStacked, auditRenderingRowHeight);
-  await waitForAppShell(driver, 20000);
-  await driver.wait(async () => {
-    return await driver.executeScript(() => document.documentElement.getAttribute("data-theme") === "dark");
-  }, 20000);
+      if (gridStacked || rowHeight) {
+        localStorage.setItem(
+          "wardian-layout",
+          JSON.stringify({
+            state: {
+              layout: { column_tracks: columnTracks, row_height: rowHeight || 450 },
+              leftSidebarWidth: 260,
+              rightSidebarWidth: 240,
+              userTerminalOpen: false,
+              userTerminalHeight: 360,
+              gridStacked,
+              previousColumnTracks: gridStacked ? [0.5, 0.5] : null,
+            },
+            version: 0,
+          }),
+        );
+      }
+      location.reload();
+    }, auditTerminalFontSize, auditTerminalFontFamily, auditGridStacked, auditRenderingRowHeight, auditColumnTracks());
+    await waitForAppShell(driver, 20000);
+    await driver.executeScript(() => document.documentElement.setAttribute("data-theme", "dark"));
+  } catch (error) {
+    throw new Error(`Timed out forcing dark theme.\n${JSON.stringify(await readPageDiagnostics(driver), null, 2)}\n${error}`);
+  }
+}
+
+async function readPageDiagnostics(driver) {
+  try {
+    return await driver.executeScript(() => ({
+      currentUrl: window.location.href,
+      title: document.title,
+      bodyText: document.body?.innerText?.slice(0, 3000) ?? "",
+      hasAppShell: Boolean(document.querySelector('[data-testid="app-shell"]')),
+      buttons: Array.from(document.querySelectorAll("button"))
+        .map((button) => button.textContent?.replace(/\s+/g, " ").trim() ?? "")
+        .filter(Boolean)
+        .slice(0, 80),
+      tauriGlobals: {
+        hasTauri: Boolean(window.__TAURI__),
+        hasTauriInternals: Boolean(window.__TAURI_INTERNALS__),
+      },
+    }));
+  } catch (error) {
+    return { error: String(error) };
+  }
 }
 
 async function spawnProviderAgent(driver, provider) {
@@ -312,6 +354,9 @@ async function readTerminalCapture(driver, sessionId) {
     const host = card?.querySelector('[data-testid="agent-terminal-host"]') ?? null;
     const screen = host?.querySelector(".xterm-screen") ?? null;
     const viewport = host?.querySelector(".xterm-viewport") ?? null;
+    const scrollable = host?.querySelector(".xterm-scrollable-element") ?? null;
+    const scrollbar = host?.querySelector(".xterm-scrollable-element > .scrollbar") ?? null;
+    const slider = host?.querySelector(".xterm-scrollable-element > .scrollbar > .slider") ?? null;
     const rows = host?.querySelector(".xterm-rows") ?? null;
     const textarea = host?.querySelector(".xterm-helper-textarea") ?? null;
     const toRect = (element) => {
@@ -352,6 +397,25 @@ async function readTerminalCapture(driver, sessionId) {
               scrollWidth: viewport.scrollWidth,
               clientHeight: viewport.clientHeight,
               clientWidth: viewport.clientWidth,
+            }
+          : null,
+        xtermScrollable: scrollable
+          ? {
+              scrollTop: scrollable.scrollTop,
+              scrollLeft: scrollable.scrollLeft,
+              scrollHeight: scrollable.scrollHeight,
+              scrollWidth: scrollable.scrollWidth,
+              clientHeight: scrollable.clientHeight,
+              clientWidth: scrollable.clientWidth,
+            }
+          : null,
+        scrollbarRect: toRect(scrollbar),
+        sliderRect: toRect(slider),
+        sliderStyle: slider
+          ? {
+              height: getComputedStyle(slider).height,
+              top: getComputedStyle(slider).top,
+              transform: getComputedStyle(slider).transform,
             }
           : null,
         rowRects: rowElements.slice(0, 24).map(toRect),
@@ -515,7 +579,40 @@ async function waitForProviderInputReady(driver, sessionId, provider) {
   if (!readyText) {
     return await waitForReadableTerminal(driver, sessionId);
   }
-  return await waitForTerminalText(driver, sessionId, readyText, 120000);
+  let last = null;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 120000) {
+    last = await readTerminalCapture(driver, sessionId);
+    const terminalText = terminalTextFromCapture(last);
+    if (terminalTextIncludes(terminalText, readyText)) {
+      return last;
+    }
+    await dismissProviderStartupModal(driver, sessionId, provider);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(
+    `Timed out waiting for terminal text ${JSON.stringify(readyText)} for ${sessionId}: ${JSON.stringify(last)}`,
+  );
+}
+
+async function spawnLayoutFillerAgent(driver) {
+  return await invokeTauri(driver, "spawn_agent", {
+    req: {
+      sessionName: `Rendering-layout-filler-${RUN_ID}`,
+      agentClass: "RenderingAudit",
+      folder: workspacePath,
+      resumeSession: null,
+      isOff: false,
+      configOverride: {
+        provider: "mock",
+        provider_config: {
+          type: "mock",
+          scenario: "basic",
+          delay_ms: 10,
+        },
+      },
+    },
+  });
 }
 
 async function waitForTerminalTextOccurrences(driver, sessionId, expectedText, minCount, timeoutMs = 180000) {
@@ -552,26 +649,54 @@ async function waitForTerminalTextAbsence(driver, sessionId, expectedText, timeo
 }
 
 async function dismissProviderStartupModal(driver, sessionId, provider) {
-  if (provider !== "opencode") {
-    return null;
-  }
-
   const capture = await readTerminalCapture(driver, sessionId);
   const terminalText = terminalVisibleAndHistoryTextFromCapture(capture);
-  if (!terminalText.includes("Update Available")) {
-    return null;
+
+  if (provider === "opencode" && terminalText.includes("Update Available")) {
+    const dismissedAt = nowIso();
+    await invokeTauri(driver, "send_input_to_agent", { sessionId, input: "\u001b" });
+    const dismissedCapture = await waitForTerminalTextAbsence(driver, sessionId, "Update Available", 10000);
+    return {
+      provider,
+      modal_text: "Update Available",
+      dismiss_input: "Escape",
+      dismissed_at: dismissedAt,
+      capture_debug: compactDebug(dismissedCapture?.debug),
+    };
   }
 
-  const dismissedAt = nowIso();
-  await invokeTauri(driver, "send_input_to_agent", { sessionId, input: "\u001b" });
-  const dismissedCapture = await waitForTerminalTextAbsence(driver, sessionId, "Update Available", 10000);
-  return {
-    provider,
-    modal_text: "Update Available",
-    dismiss_input: "Escape",
-    dismissed_at: dismissedAt,
-    capture_debug: compactDebug(dismissedCapture?.debug),
-  };
+  if (provider === "codex" && terminalText.includes("Update available!") && terminalText.includes("Skip")) {
+    const dismissedAt = nowIso();
+    await invokeTauri(driver, "send_input_to_agent", { sessionId, input: "\u001b[B\r" });
+    const dismissedCapture = await waitForTerminalText(driver, sessionId, providerReadyText(provider), 30000);
+    return {
+      provider,
+      modal_text: "Update available!",
+      dismiss_input: "ArrowDown Enter",
+      dismissed_at: dismissedAt,
+      capture_debug: compactDebug(dismissedCapture?.debug),
+    };
+  }
+
+  return null;
+}
+
+async function waitForProviderResponseTextAbsence(driver, sessionId, expectedText, timeoutMs = 10000) {
+  if (!expectedText) {
+    return null;
+  }
+  let last = null;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    last = await readTerminalCapture(driver, sessionId);
+    if (!providerResponseTextFromCapture(last).includes(expectedText)) {
+      return last;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `Timed out waiting for stale provider response text ${JSON.stringify(expectedText)} to clear for ${sessionId}: ${JSON.stringify(last)}`,
+  );
 }
 
 async function submitAuditInput(driver, sessionId, provider, text) {
@@ -623,7 +748,7 @@ async function submitAuditInput(driver, sessionId, provider, text) {
   };
 }
 
-async function waitForSubmittedProviderTurn(driver, sessionId) {
+async function waitForSubmittedProviderTurn(driver, sessionId, options = {}) {
   if (!auditSubmitInput || auditInputText.trim().length === 0) {
     return {
       waited_for_turn: false,
@@ -633,6 +758,32 @@ async function waitForSubmittedProviderTurn(driver, sessionId) {
 
   const startedAt = nowIso();
   const startedAtMs = Date.now();
+  const numberedResponseMax = expectedPlainNumberedResponseMax();
+  const minNumberedResponseOccurrences = Math.max(
+    1,
+    Number.parseInt(String(options.minNumberedResponseOccurrences ?? "1"), 10) || 1,
+  );
+  if (numberedResponseMax !== null) {
+    const capture = await waitForScrollableNumberedResponse(
+      driver,
+      sessionId,
+      numberedResponseMax,
+      auditProviderTurnTimeoutMs,
+      minNumberedResponseOccurrences,
+    );
+    return {
+      waited_for_turn: true,
+      expected_response_text: auditExpectedResponseText,
+      expected_numbered_response_rows: numberedResponseMax,
+      min_numbered_response_occurrences: minNumberedResponseOccurrences,
+      required_scrollback: true,
+      started_at: startedAt,
+      completed_at: nowIso(),
+      duration_ms: elapsedMs(startedAtMs),
+      capture_debug: compactDebug(capture.debug),
+    };
+  }
+
   if (auditExpectedResponseText.length > 0) {
     const minOccurrences = 1;
     const capture = await waitForTerminalTextOccurrences(
@@ -668,6 +819,114 @@ async function waitForSubmittedProviderTurn(driver, sessionId) {
     stable: stability.stable,
     capture_debug: compactDebug(stability.capture?.debug),
   };
+}
+
+function expectedPlainNumberedResponseMax() {
+  const max = Number.parseInt(auditExpectedResponseText, 10);
+  if (!Number.isFinite(max) || max < 2) {
+    return null;
+  }
+  return new RegExp(`\\b1\\s+(?:through|to|-)\\s+${max}\\b`, "i").test(auditInputText)
+    ? max
+    : null;
+}
+
+function numberedResponseValues(capture, max) {
+  const lines = [
+    ...(capture?.debug?.renderer?.allLines ?? []),
+    ...(capture?.debug?.allLines ?? []),
+  ];
+  const seen = new Set();
+  for (const line of lines) {
+    const normalized = String(line ?? "").replace(/\s+/g, " ").trim();
+    const match = normalized.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+    if (!match) {
+      continue;
+    }
+    const value = Number.parseInt(match[1], 10);
+    if (value >= 1 && value <= max) {
+      seen.add(value);
+    }
+  }
+  return seen;
+}
+
+function numberedResponseLineValue(line, max) {
+  const normalized = String(line ?? "").replace(/\s+/g, " ").trim();
+  const match = normalized.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+  if (!match) {
+    return null;
+  }
+  const value = Number.parseInt(match[1], 10);
+  return value >= 1 && value <= max ? value : null;
+}
+
+function numberedResponseOccurrenceCounts(capture, max) {
+  const sourceLines = capture?.debug?.renderer?.allLines?.length
+    ? capture.debug.renderer.allLines
+    : capture?.debug?.allLines ?? capture?.debug?.lines ?? [];
+  const counts = new Map();
+  for (const line of sourceLines) {
+    const value = numberedResponseLineValue(line, max);
+    if (value !== null) {
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+function hasCompleteNumberedResponse(capture, max, minOccurrences = 1) {
+  const seen = numberedResponseValues(capture, max);
+  for (let value = 1; value <= max; value += 1) {
+    if (!seen.has(value)) {
+      return false;
+    }
+  }
+  if (minOccurrences <= 1) {
+    return true;
+  }
+  const counts = numberedResponseOccurrenceCounts(capture, max);
+  for (let value = 1; value <= max; value += 1) {
+    if ((counts.get(value) ?? 0) < minOccurrences) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasXtermScrollback(capture) {
+  const renderer = capture?.debug?.renderer;
+  return (renderer?.baseY ?? 0) > 0 || (capture?.debug?.baseY ?? 0) > 0;
+}
+
+async function waitForScrollableNumberedResponse(driver, sessionId, max, timeoutMs, minOccurrences = 1) {
+  let last = null;
+  let lastWheelError = null;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    last = await readTerminalCapture(driver, sessionId);
+    if (hasCompleteNumberedResponse(last, max, minOccurrences) && hasXtermScrollback(last)) {
+      try {
+        await scrollTerminalUserWheelUp(driver, sessionId);
+        await scrollTerminalDebug(driver, sessionId, "bottom");
+        await waitForViewportBottom(driver, sessionId);
+        return await readTerminalCapture(driver, sessionId);
+      } catch (error) {
+        lastWheelError = error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(
+    `Timed out waiting for complete scrollable numbered response 1..${max} for ${sessionId}: ${JSON.stringify({
+      title: last?.title ?? "",
+      cardText: last?.cardText ?? "",
+      debug: compactDebug(last?.debug),
+      viewportScroll: last?.layout?.viewportScroll ?? null,
+      userWheelError: lastWheelError ? String(lastWheelError?.message ?? lastWheelError) : null,
+      minOccurrences,
+    })}`,
+  );
 }
 
 function nowIso() {
@@ -718,6 +977,9 @@ function compactDebug(debug) {
     baseY: debug.baseY ?? null,
     viewportY: debug.viewportY ?? null,
     bufferLength: debug.bufferLength ?? null,
+    provider: debug.provider ?? null,
+    usesViewportRedraws: debug.usesViewportRedraws ?? null,
+    lastHomeRedrawLines: debug.lastHomeRedrawLines ?? null,
     renderer: debug.renderer ?? null,
     ...debugCounts(debug),
   };
@@ -1055,6 +1317,57 @@ async function waitForViewportBottom(driver, sessionId) {
   }, 5000);
 }
 
+async function dispatchTerminalWheel(driver, sessionId, deltaY) {
+  return await driver.executeScript((sid, wheelDeltaY) => {
+    const card = document.getElementById(`agent-card-${sid}`);
+    const host = card?.querySelector('[data-testid="agent-terminal-host"]');
+    const targets = [
+      host?.querySelector(".xterm-screen"),
+      host?.querySelector(".xterm-viewport"),
+      host?.querySelector(".xterm"),
+      host,
+    ].filter(Boolean);
+    for (const target of targets) {
+      target.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+          deltaY: wheelDeltaY,
+          clientX: target.getBoundingClientRect().left + 10,
+          clientY: target.getBoundingClientRect().top + 10,
+        }),
+      );
+    }
+    return {
+      target_count: targets.length,
+      snapshot: window.__wardianTerminalDebug?.snapshot?.(sid) ?? null,
+    };
+  }, sessionId, deltaY);
+}
+
+async function scrollTerminalUserWheelUp(driver, sessionId) {
+  const before = await readTerminalDebugSnapshot(driver, sessionId);
+  const beforeViewportY = before?.renderer?.viewportY ?? before?.viewportY ?? 0;
+  const baseY = before?.renderer?.baseY ?? before?.baseY ?? 0;
+  assert.ok(baseY > 0, `Expected scrollback before user wheel scroll for ${sessionId}: ${JSON.stringify(before)}`);
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await dispatchTerminalWheel(driver, sessionId, -1200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const current = await readTerminalDebugSnapshot(driver, sessionId);
+    const currentViewportY = current?.renderer?.viewportY ?? current?.viewportY ?? 0;
+    if (currentViewportY < beforeViewportY) {
+      return { before, after: current };
+    }
+  }
+
+  const after = await readTerminalDebugSnapshot(driver, sessionId);
+  throw new Error(
+    `Expected user wheel scroll to move renderer viewport for ${sessionId}: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+  );
+}
+
 async function readTerminalDebugSnapshot(driver, sessionId) {
   return await driver.executeScript((sid) => window.__wardianTerminalDebug?.snapshot?.(sid) ?? null, sessionId);
 }
@@ -1075,6 +1388,16 @@ async function addScrollbackEvidence(record, driver, providerDir, sessionId, bas
   if (baseY <= 0) {
     return;
   }
+
+  const userWheel = await scrollTerminalUserWheelUp(driver, sessionId);
+  await addCapturedState(record, driver, providerDir, sessionId, `${baseName}-user-wheel-up`, {
+    user_wheel_scroll: {
+      before_debug: compactDebug(userWheel.before),
+      after_debug: compactDebug(userWheel.after),
+    },
+  });
+  await scrollTerminalDebug(driver, sessionId, "bottom");
+  await waitForViewportBottom(driver, sessionId);
 
   await scrollTerminalDebug(driver, sessionId, "top");
   await waitForViewportLine(driver, sessionId, 0);
@@ -1206,6 +1529,8 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     wardian_terminal_font_size: auditTerminalFontSize,
     wardian_terminal_font_family: auditTerminalFontFamily,
     wardian_grid_stacked: auditGridStacked,
+    wardian_two_column_layout: auditTwoColumnLayout,
+    wardian_column_tracks: auditColumnTracks(),
     wardian_grid_row_height: auditRenderingRowHeight,
     wardian_window: { width: auditWindowWidth, height: auditWindowHeight },
     wardian_resized_window: { width: auditResizedWindowWidth, height: auditResizedWindowHeight },
@@ -1222,6 +1547,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     post_input_wait_ms: auditPostInputWaitMs,
     post_submit_wait_ms: auditPostSubmitWaitMs,
     input_text: auditInputText,
+    input_repeat_count: auditInputRepeatCount,
     input_submitted: auditSubmitInput && auditInputText.trim().length > 0 && auditInputSubmitSequence.length > 0,
     input_submit_sequence: inputSequenceLabel(auditInputSubmitSequence),
     expected_response_text: auditExpectedResponseText || null,
@@ -1229,6 +1555,17 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     limitation:
       "This captures exact Wardian-rendered native WebView screenshots and xterm parser rows. External non-Wardian terminal screenshots must be captured separately for final inside/outside parity sign-off.",
   };
+
+  if (auditTwoColumnLayout && !auditGridStacked) {
+    const filler = await spawnLayoutFillerAgent(driver);
+    manifest.layout_filler_agent = {
+      session_id: filler.session_id,
+      session_name: filler.session_name,
+      provider: filler.provider,
+    };
+    await waitForAgentTerminal(driver, filler.session_id);
+    await waitForReadableTerminal(driver, filler.session_id);
+  }
 
   for (const provider of providers) {
     const providerDir = path.join(evidenceDir, provider);
@@ -1241,14 +1578,19 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     assert.equal(typeof sessionId, "string", `Expected session id for ${provider}`);
     record.session_id = sessionId;
 
-        await waitForAgentTerminal(driver, sessionId);
-        await waitForReadableTerminal(driver, sessionId);
-        await waitForProviderInputReady(driver, sessionId, provider);
-        await waitForTerminalTextAbsence(driver, sessionId, auditExpectedResponseText);
-        if (auditInputText.trim().length > 0) {
-          const inputEvent = await submitAuditInput(driver, sessionId, provider, auditInputText);
-      inputEvent.phase = "initial";
-      inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId);
+    await waitForAgentTerminal(driver, sessionId);
+    await waitForReadableTerminal(driver, sessionId);
+    await waitForProviderInputReady(driver, sessionId, provider);
+    if (auditExpectedResponseText.length >= 3) {
+      await waitForProviderResponseTextAbsence(driver, sessionId, auditExpectedResponseText);
+    }
+    for (let inputIndex = 0; inputIndex < auditInputRepeatCount && auditInputText.trim().length > 0; inputIndex += 1) {
+      await waitForProviderInputReady(driver, sessionId, provider);
+      const inputEvent = await submitAuditInput(driver, sessionId, provider, auditInputText);
+      inputEvent.phase = inputIndex === 0 ? "initial" : `initial-repeat-${inputIndex + 1}`;
+      inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, {
+        minNumberedResponseOccurrences: inputIndex + 1,
+      });
       record.input_events.push(inputEvent);
     }
     if (auditPostInputWaitMs > 0) {

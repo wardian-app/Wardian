@@ -2,22 +2,28 @@ import { render, waitFor, cleanup, act, screen, fireEvent } from "@testing-libra
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
+import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { AgentTerminal, shouldExposeTerminalDebug } from "./AgentTerminal";
+import { AgentTerminal, __terminalTesting, shouldExposeTerminalDebug } from "./AgentTerminal";
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
 const mockTerminal = vi.mocked(Terminal);
+const mockHeadlessTerminal = vi.mocked(HeadlessTerminal);
 const mockSerializeAddon = vi.mocked(SerializeAddon);
 const mockFitAddon = vi.mocked(FitAddon);
 const mockWebglAddon = vi.mocked(WebglAddon);
 
 function getLatestTerminalInstance() {
   return mockTerminal.mock.results[mockTerminal.mock.results.length - 1]?.value as any;
+}
+
+function getLatestHeadlessTerminalInstance() {
+  return mockHeadlessTerminal.mock.results[mockHeadlessTerminal.mock.results.length - 1]?.value as any;
 }
 
 describe("AgentTerminal scrollback", () => {
@@ -98,6 +104,12 @@ describe("AgentTerminal scrollback", () => {
         scrollToLine: vi.fn((line: number) => {
           terminal.buffer.active.viewportY = line;
         }),
+        scrollLines: vi.fn((lines: number) => {
+          terminal.buffer.active.viewportY = Math.max(
+            0,
+            Math.min(terminal.buffer.active.baseY, terminal.buffer.active.viewportY + lines),
+          );
+        }),
         scrollToTop: vi.fn(() => {
           terminal.buffer.active.viewportY = 0;
         }),
@@ -113,6 +125,37 @@ describe("AgentTerminal scrollback", () => {
           }
         }),
         __emitScroll: (position: number) => scrollHandler?.(position),
+      } as any;
+      return terminal;
+    });
+
+    mockHeadlessTerminal.mockImplementation((options?: ConstructorParameters<typeof HeadlessTerminal>[0]) => {
+      const terminal = {
+        open: vi.fn(),
+        write: vi.fn((_data: string, callback?: () => void) => callback?.()),
+        loadAddon: vi.fn(),
+        dispose: vi.fn(),
+        resize: vi.fn(),
+        onData: vi.fn(),
+        onBinary: vi.fn(),
+        onTitleChange: vi.fn(),
+        onResize: vi.fn(),
+        onScroll: vi.fn(),
+        scrollToTop: vi.fn(),
+        scrollToLine: vi.fn((line: number) => {
+          terminal.buffer.active.viewportY = line;
+        }),
+        buffer: {
+          active: {
+            cursorX: 0,
+            cursorY: 0,
+            baseY: 0,
+            viewportY: 0,
+          },
+        },
+        options: { ...(options ?? {}) },
+        cols: options?.cols ?? 80,
+        rows: options?.rows ?? 24,
       } as any;
       return terminal;
     });
@@ -221,7 +264,7 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
-  it("caps live WebGL renderers and promotes the focused terminal onto the GPU", async () => {
+  it("caps live WebGL renderers without promoting a focused terminal onto the GPU", async () => {
     // Render more terminals than the WebGL pool cap (12). The pool must stay at
     // 12 live contexts; the rest fall back to the DOM renderer. Newly mounted
     // terminals evict the least-recently-used, so older sessions left over from
@@ -256,11 +299,180 @@ describe("AgentTerminal scrollback", () => {
       fireEvent.focusIn(domHost);
     });
 
-    // Focusing the DOM terminal promotes it (evicting the LRU) without exceeding the cap.
-    await waitFor(() => {
-      expect(window.__wardianTerminalDebug?.snapshot(domId!)?.renderer?.webglActive).toBe(true);
-    });
+    // Focus must not swap renderers; renderer changes alter terminal text rasterization.
+    expect(window.__wardianTerminalDebug?.snapshot(domId!)?.renderer?.webglActive).toBe(false);
     expect(webglActiveCount()).toBe(12);
+  });
+
+  it("applies cursor-home provider redraws in place after resize", async () => {
+    const createLine = (text: string) => ({
+      clone: () => createLine(text),
+      translateToString: () => text,
+    });
+    const createHeadlessTerm = (options?: ConstructorParameters<typeof HeadlessTerminal>[0]) => {
+      const lines: ReturnType<typeof createLine>[] = [];
+      const internalBuffer = {
+        x: 0,
+        y: 0,
+        ybase: 10,
+        ydisp: 10,
+        lines: {
+          get: (index: number) => lines[index],
+          set: (index: number, value: ReturnType<typeof createLine>) => {
+            lines[index] = value;
+            terminal.buffer.active.length = Math.max(terminal.buffer.active.length, index + 1);
+          },
+        },
+      };
+      const terminal = {
+        cols: options?.cols ?? 80,
+        rows: options?.rows ?? 24,
+        options: { ...(options ?? {}) },
+        buffer: {
+          active: {
+            baseY: internalBuffer.ybase,
+            viewportY: internalBuffer.ydisp,
+            length: 0,
+            getLine: (index: number) => lines[index],
+          },
+        },
+        _core: { _bufferService: { buffer: internalBuffer } },
+        write: vi.fn((data: string, callback?: () => void) => {
+          const rendered = data
+            .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+            .split(/\r?\n/)
+            .map((line) => line.trimEnd());
+          rendered.forEach((line, row) => {
+            if (line.length > 0) {
+              internalBuffer.lines.set(internalBuffer.ybase + row, createLine(line));
+            }
+          });
+          callback?.();
+        }),
+        resize: vi.fn((cols: number, rows: number) => {
+          terminal.cols = cols;
+          terminal.rows = rows;
+        }),
+        dispose: vi.fn(),
+      } as any;
+      return terminal;
+    };
+    mockHeadlessTerminal.mockImplementation(createHeadlessTerm);
+    const term = createHeadlessTerm({ cols: 120, rows: 40 });
+    for (let index = 0; index < 40; index += 1) {
+      term._core._bufferService.buffer.lines.set(10 + index, createLine(` stale ${index + 1}`));
+    }
+    const beforeBaseY = term.buffer.active.baseY;
+
+    const applied = await __terminalTesting.applyViewportRedrawInPlace(
+      term,
+      "\u001b[H" + Array.from({ length: 40 }, (_, index) => ` ${index + 1}\u001b[K`).join("\r\n"),
+      { preserveExistingViewport: false },
+    );
+
+    expect(applied).toBe(true);
+    expect(term.buffer.active.baseY).toBe(beforeBaseY);
+    expect(term.buffer.active.getLine(10)?.translateToString()).toBe(" 1");
+    expect(term.buffer.active.getLine(49)?.translateToString()).toBe(" 40");
+    expect(term.buffer.active.getLine(9)).toBeUndefined();
+  });
+
+  it("treats only top-left cursor addresses as provider viewport redraws", () => {
+    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[1;1H1\r\n2")).toBe(true);
+    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[H1\r\n2")).toBe(true);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(true);
+    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[12;1Hstatus")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("opencode", "\u001b[1;1H1\r\n2")).toBe(false);
+  });
+
+  it("journals new substantive rows from provider redraw frames before applying them in place", () => {
+    const rows = __terminalTesting.syntheticScrollbackRowsForViewportRedraw(
+      "\u001b[H› Print 50 lines\r\n\u001b[38;2;0;0;0m●\u001b[m 1\u001b[K\r\n  2\u001b[K\r\n  3\u001b[K\r\n  gpt-5.5 high · Context 99% left",
+      new Set(["number:2"]),
+    );
+
+    expect(rows).toEqual(["  1", "  3"]);
+    expect(__terminalTesting.appendSyntheticScrollbackRows("", rows)).toBe("\u001b[999;1H  1\r\n  3\r\n");
+  });
+
+  it("moves the viewport boundary over duplicate resize repaint rows", () => {
+    const createLine = (text: string) => ({
+      clone: () => createLine(text),
+      translateToString: () => text,
+    });
+    const lines = [
+      ...Array.from({ length: 50 }, (_, index) => createLine(`  ${index + 1}`)),
+      createLine(""),
+      createLine("✻ Brewed for 1s"),
+      ...Array.from({ length: 19 }, (_, index) => createLine(`  ${index + 32}`)),
+      createLine(""),
+      createLine("✻ Brewed for 1s"),
+    ];
+    const internalBuffer = {
+      ybase: 52,
+      ydisp: 52,
+      lines: {
+        get: (index: number) => lines[index],
+        set: (index: number, value: ReturnType<typeof createLine>) => {
+          lines[index] = value;
+        },
+        splice: (start: number, deleteCount: number) => {
+          lines.splice(start, deleteCount);
+        },
+      },
+    };
+    const term = {
+      rows: 21,
+      buffer: { active: { baseY: 52, viewportY: 52 } },
+      _core: { _bufferService: { buffer: internalBuffer } },
+    } as any;
+
+    const trimmed = __terminalTesting.trimOverlappingScrollbackBeforeViewport(term);
+
+    expect(trimmed).toBe(21);
+    expect(internalBuffer.ybase).toBe(31);
+    expect(internalBuffer.ydisp).toBe(31);
+    expect(lines[31].translateToString()).toBe("  32");
+    expect(lines[49].translateToString()).toBe("  50");
+  });
+
+  it("replaces a duplicated repaint tail even when status rows separate it from the viewport", () => {
+    const createLine = (text: string) => ({
+      clone: () => createLine(text),
+      translateToString: () => text,
+    });
+    const lines = [
+      ...Array.from({ length: 50 }, (_, index) => createLine(`  ${index + 1}`)),
+      createLine("✻ Brewed for 1s"),
+      createLine("❯ "),
+      ...Array.from({ length: 6 }, (_, index) => createLine(`  ${index + 45}`)),
+      createLine("✻ Brewed for 1s"),
+      createLine("❯ "),
+      ...Array.from({ length: 6 }, (_, index) => createLine(`  ${index + 45}`)),
+      createLine("✻ Brewed for 1s"),
+    ];
+    const internalBuffer = {
+      ybase: 60,
+      ydisp: 60,
+      lines: {
+        get: (index: number) => lines[index],
+        splice: (start: number, deleteCount: number) => {
+          lines.splice(start, deleteCount);
+        },
+      },
+    };
+    const term = {
+      rows: 7,
+      buffer: { active: { baseY: 60, viewportY: 60 } },
+      _core: { _bufferService: { buffer: internalBuffer } },
+    } as any;
+
+    const trimmed = __terminalTesting.trimOverlappingScrollbackBeforeViewport(term);
+
+    expect(trimmed).toBe(8);
+    expect(internalBuffer.ybase).toBe(52);
+    expect(lines[52].translateToString()).toBe("  45");
+    expect(lines[57].translateToString()).toBe("  50");
   });
 
   it("opens xterm after its host is attached to the document", async () => {
@@ -457,6 +669,33 @@ describe("AgentTerminal scrollback", () => {
     expect(ruleStart).toBeGreaterThanOrEqual(0);
     expect(viewportRule).toContain("scrollbar-width: none");
     expect(viewportRule).not.toContain("overflow-y: hidden");
+  });
+
+  it("scrolls provider redraw terminals through the user wheel surface", async () => {
+    render(<AgentTerminal sessionId="codex-wheel-scroll" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.baseY = 27;
+    instance.buffer.active.viewportY = 27;
+    instance.scrollLines.mockClear();
+    instance.refresh.mockClear();
+    const parser = getLatestHeadlessTerminalInstance();
+    parser.scrollToLine.mockClear();
+
+    fireEvent.wheel(screen.getByTestId("agent-terminal-host"), {
+      deltaY: -240,
+      deltaMode: 0,
+    });
+
+    expect(instance.scrollLines).toHaveBeenCalledWith(expect.any(Number));
+    expect(instance.scrollLines.mock.calls[0][0]).toBeLessThan(0);
+    expect(instance.buffer.active.viewportY).toBeLessThan(27);
+    expect(parser.scrollToLine).toHaveBeenCalledWith(instance.buffer.active.viewportY);
+    expect(instance.refresh).toHaveBeenCalledWith(0, 23);
   });
 
   it("forwards codex enter as a plain carriage return", async () => {
