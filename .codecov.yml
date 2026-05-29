@@ -15,3 +15,14 @@ comment:
   layout: "reach,diff,flags"
   behavior: default
   require_changes: true
+
+flags:
+  frontend:
+    paths:
+      - src/
+    carryforward: false
+  backend:
+    paths:
+      - src-tauri/
+      - crates/
+    carryforward: false

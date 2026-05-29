@@ -6,9 +6,8 @@
 
 **Local command center for multi-agent CLI workflows** — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian.
 
-[![CI](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
-[![Frontend Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg?flag=frontend&label=frontend%20coverage)](https://codecov.io/gh/wardian-app/Wardian)
-[![Backend Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg?flag=backend&label=backend%20coverage)](https://codecov.io/gh/wardian-app/Wardian)
+[![tests](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg)](https://codecov.io/gh/wardian-app/Wardian)
 [![Release](https://img.shields.io/github/v/release/wardian-app/Wardian?label=release)](https://github.com/wardian-app/Wardian/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/wardian-app/Wardian/total?label=downloads)](https://github.com/wardian-app/Wardian/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555)
