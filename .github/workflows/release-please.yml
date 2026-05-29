@@ -26,17 +26,12 @@ jobs:
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PLEASE_PRS: ${{ steps.release.outputs.prs }}
         run: |
           set -euo pipefail
 
           release_branch="$(
-            gh pr list \
-              --repo "$GITHUB_REPOSITORY" \
-              --state open \
-              --base main \
-              --label "autorelease: pending" \
-              --json headRefName \
-              --jq '.[0].headRefName'
+            node -e 'const prs = JSON.parse(process.env.RELEASE_PLEASE_PRS || "[]"); console.log(prs[0]?.headBranchName ?? "");'
           )"
 
           if [ -z "$release_branch" ] || [ "$release_branch" = "null" ]; then
