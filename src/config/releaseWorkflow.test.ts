@@ -72,8 +72,7 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}");
     expect(releaseWorkflow).toContain("includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}");
     expect(releaseWorkflow).not.toContain("uploadUpdaterJson:");
-    expect(releaseWorkflow).toContain("uploadUpdaterSignatures: false");
-    expect(releaseWorkflow.match(/uploadUpdaterSignatures: false/g)).toHaveLength(3);
+    expect(releaseWorkflow).not.toContain("uploadUpdaterSignatures:");
     expect(releaseWorkflow).toContain("updaterJsonPreferNsis: true");
     expect(releaseWorkflow).toContain("Build (dry run)");
     expect(releaseWorkflow).toContain("ref: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && inputs.release_tag || github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}");
@@ -110,11 +109,20 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("needs.validate-updater-metadata.result == 'success'");
   });
 
+  it("removes loose updater signature assets before release validation and publication", () => {
+    expect(releaseWorkflow).toContain("cleanup-updater-signatures:");
+    expect(releaseWorkflow).toContain("Remove loose updater signature assets");
+    expect(releaseWorkflow).toContain("asset.name.endsWith('.sig')");
+    expect(releaseWorkflow).toContain("deleteReleaseAsset");
+    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, cleanup-updater-signatures]");
+    expect(releaseWorkflow).toContain("needs.cleanup-updater-signatures.result == 'success'");
+  });
+
   it("guards manual updater backfill before publishing", () => {
     expect(releaseWorkflow).toContain("Ensure manual release is draft");
     expect(releaseWorkflow).toContain("manual backfill requires a draft release");
     expect(releaseWorkflow).toContain("release.draft");
-    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, validate-updater-metadata]");
+    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, cleanup-updater-signatures, validate-updater-metadata]");
   });
 
   it("publishes unified installers that carry the staged CLI", () => {

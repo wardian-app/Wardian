@@ -17,10 +17,11 @@ The app does not need separate `.sig` release assets.
 
 ## Decision
 
-The release workflow keeps generating updater signatures and `latest.json`, but
-sets `uploadUpdaterSignatures: false` for Tauri Action. GitHub Releases should
-show user-installable packages, updater bundles referenced by `latest.json`, and
-`latest.json` itself, without loose `.sig` files.
+The release workflow keeps generating updater signatures and `latest.json`, then
+deletes loose `.sig` release assets from the draft release before metadata
+validation and publication. GitHub Releases should show user-installable
+packages, updater bundles referenced by `latest.json`, and `latest.json` itself,
+without loose `.sig` files.
 
 Package-manager metadata continues to use the installer assets and GitHub's
 SHA-256 release asset digests. It must not depend on standalone `.sig` files.

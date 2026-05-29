@@ -392,6 +392,16 @@ describe("SettingsModal", () => {
     expect(checkNow).toHaveBeenCalledTimes(1);
   });
 
+  it("shows restarting state after update installation", () => {
+    mockUseAppUpdate.mockReturnValue(appUpdateState({ status: "installed" }));
+
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    expect(screen.getByText("Update installed. Restarting...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restarting..." })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Restart" })).not.toBeInTheDocument();
+  });
+
   it("opens and copies the settings folder from Advanced", async () => {
     mockWriteText.mockResolvedValue(undefined);
     render(<SettingsModal isOpen onClose={vi.fn()} />);

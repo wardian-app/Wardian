@@ -1,6 +1,8 @@
 # Release Updates
 
-Wardian uses Tauri's signed updater for in-app desktop updates. The Settings UI checks for stable releases and lets the user explicitly download, install, and restart. Wardian does not silently install updates or restart the app.
+Wardian uses Tauri's signed updater for in-app desktop updates. The Settings UI checks for stable releases and lets the user explicitly download and install an update. After the user starts installation and the installer completes, Wardian relaunches so the updated app comes back up without a separate manual launch.
+
+On Windows, Wardian uses the Tauri updater for update discovery, download, and signature verification, then hands installation to a detached helper process. The helper waits for the running `Wardian.exe` process to exit before starting the NSIS installer with the updater flags. This avoids racing the installer against a still-running executable while preserving Tauri's signed update verification. The Tauri Rust updater API returns the verified installer as bytes rather than streaming directly to a file, so Wardian rejects installer payloads larger than 512 MiB before writing or launching them.
 
 ## Bridge Release
 
@@ -45,11 +47,13 @@ Stable builds must not consume prerelease metadata. Hyphenated version tags such
 
 Official stable release builds opt into updater checks with the compile-time marker `WARDIAN_UPDATE_CHANNEL=stable`. Dev builds, local source-built release binaries, dry-run artifacts, and prerelease builds keep the Settings version display but disable update checks and installation controls. In those ineligible builds, Wardian does not register the updater or process restart plugins, so renderer code cannot invoke updater IPC directly. This prevents a locally built app or prerelease from accidentally replacing itself with the public stable installer release.
 
+On Windows, official stable builds also verify that the running `Wardian.exe` lives in the install directory recorded by the Wardian installer registry keys. If the registered install path is missing or points somewhere else, Settings disables in-app updates and asks the user to run the latest installer manually. This prevents the NSIS updater from silently updating a different Wardian copy while the user's shortcut continues launching an older executable.
+
 `WARDIAN_UPDATE_CHANNEL=stable` is a release-build marker, not cryptographic proof that the binary came from the installer. The trust boundary is the protected release workflow, signing key custody, and the published installer/update signatures. Do not distribute locally compiled binaries with this marker.
 
 ## Release Workflow
 
-The release workflow builds platform installers, signs update artifacts, uploads `latest.json`, validates updater metadata, and only then publishes the release. Standalone `.sig` assets are not uploaded to GitHub Releases; Tauri embeds the signature content that the app needs inside `latest.json`.
+The release workflow builds platform installers, signs update artifacts, uploads `latest.json`, removes loose `.sig` release assets, validates updater metadata, and only then publishes the release. Tauri embeds the signature content that the app needs inside `latest.json`.
 
 Local `npm run tauri build` creates an installable bundle without updater artifacts, so it does not require `TAURI_SIGNING_PRIVATE_KEY`. Release builds opt into updater artifact generation by passing `--config src-tauri/tauri.updater.conf.json` to Tauri. That overlay sets `bundle.createUpdaterArtifacts` to `true` only inside release infrastructure.
 
@@ -107,3 +111,32 @@ rg -n "TAURI_SIGNING_PRIVATE_KEY|BEGIN|PRIVATE KEY|\\.env|password" .
 ```
 
 Only documentation references to secret names should appear. Private key material, generated key files, and `.env` files must not be staged.
+
+## Local Update Testing
+
+Do not test updater changes against the public stable latest release unless you intend to exercise the real production channel. Use a local or draft-only updater endpoint that serves a signed `latest.json` and installer artifacts built from a lower test version to a higher test version.
+
+The useful no-public-release test is:
+
+1. Build and install a signed test artifact with an older version and `WARDIAN_UPDATE_CHANNEL=stable`.
+2. Serve a signed `latest.json` that points to a newer local or draft artifact.
+3. Launch the older installed app and use **Settings > Install update**.
+4. Confirm the app exits, the installer runs after the process exits, and the next launch reports the newer version.
+
+Keep test updater artifacts separate from production releases, and use a disposable `WARDIAN_HOME` when testing app state that should not affect your normal Wardian installation.
+
+On Windows, local updater tests should also use a disposable installer identity. Build the test artifacts with a distinct Tauri `productName`, `mainBinaryName`, and bundle publisher, then set matching compile-time registry overrides such as:
+
+```bash
+WARDIAN_UPDATE_REGISTRY_PUBLISHER="wardian-test"
+WARDIAN_UPDATE_REGISTRY_PRODUCT_NAME="Wardian Updater Test"
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_UPDATE_REGISTRY_PUBLISHER = "wardian-test"
+$env:WARDIAN_UPDATE_REGISTRY_PRODUCT_NAME = "Wardian Updater Test"
+```
+
+The test installer identity, registry overrides, and install directory must all be disposable so the local smoke does not read or modify the production Wardian install record.

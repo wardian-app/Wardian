@@ -58,11 +58,21 @@ The General category shows the currently running Wardian version, such as
 
 Wardian checks for updates silently when Settings loads. If no newer stable
 release is available, Settings shows that Wardian is up to date. If a newer
-release is available, use **Download & Install** to fetch and install it from
+release is available, use **Install update** to fetch and install it from
 inside the app.
 
-Wardian does not install updates or restart automatically. After installation
-completes, use **Restart** to relaunch into the updated version.
+Wardian does not install updates before you choose **Install update**. After
+installation completes, Wardian relaunches into the updated version.
+
+![Wardian Settings update row showing the restarting state after an update is installed](../assets/screenshots/settings/updater-restarting-state.png)
+
+On Windows, Wardian may close before the installer window appears. This is
+expected: the updater waits for the running app process to exit before starting
+the installer so the executable can be replaced cleanly.
+
+On Windows, if Settings says the install location cannot be verified, run the
+latest Wardian installer manually once so the updater, registry install path,
+and shortcuts point to the same app copy.
 
 Update checks are available only in official installed release builds. Dev
 builds and local source-built binaries show the running Wardian version, but
