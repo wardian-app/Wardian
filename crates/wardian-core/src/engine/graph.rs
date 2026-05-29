@@ -1,4 +1,4 @@
-use wardian_core::workflow::Blueprint;
+use crate::workflow::Blueprint;
 
 /// Precomputed adjacency over a blueprint's edges, addressed by edge index so
 /// `RunState` can track delivered/skipped edges compactly.
@@ -72,7 +72,7 @@ impl<'a> Graph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wardian_core::workflow::{Blueprint, Edge, Node};
+    use crate::workflow::{Blueprint, Edge, Node};
 
     fn n(id: &str, ty: &str, parent: Option<&str>) -> Node {
         Node {

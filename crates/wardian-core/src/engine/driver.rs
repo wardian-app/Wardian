@@ -1,13 +1,13 @@
-use crate::core::{self, finalize_if_done, is_approval, step};
-use crate::event::{Event, EventKind};
-use crate::executor::*;
-use crate::graph::Graph;
-use crate::interpolate::resolve;
-use crate::state::{NodeStatus, RunState, RunStatus};
-use crate::store::{append_event, read_checkpoint, read_events, write_checkpoint};
-use crate::{EngineError, StepError};
+use crate::engine::core::{self, finalize_if_done, is_approval, step};
+use crate::engine::event::{Event, EventKind};
+use crate::engine::executor::*;
+use crate::engine::graph::Graph;
+use crate::engine::interpolate::resolve;
+use crate::engine::state::{NodeStatus, RunState, RunStatus};
+use crate::engine::store::{append_event, read_checkpoint, read_events, write_checkpoint};
+use crate::engine::{EngineError, StepError};
 use std::path::Path;
-use wardian_core::workflow::{Blueprint, Node};
+use crate::workflow::{Blueprint, Node};
 
 /// The async engine: drives a run by repeatedly consulting the pure core,
 /// executing side-effecting nodes through a `StepExecutor`, and persisting each
@@ -22,7 +22,7 @@ impl Engine {
         trigger: serde_json::Value,
         run_root: &Path,
         exec: &dyn StepExecutor,
-    ) -> crate::Result<RunState> {
+    ) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
         let mut s = RunState::new(new_run_id(), &bp.id);
         emit(
@@ -44,7 +44,7 @@ impl Engine {
         bp: &Blueprint,
         run_root: &Path,
         exec: &dyn StepExecutor,
-    ) -> crate::Result<RunState> {
+    ) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
         let mut s = load_state(&g, run_root)?;
         if s.status == RunStatus::AwaitingApproval {
@@ -71,7 +71,7 @@ impl Engine {
     }
 
     /// Reconstruct `RunState` purely by replaying the event log (no execution).
-    pub fn replay(bp: &Blueprint, run_root: &Path) -> crate::Result<RunState> {
+    pub fn replay(bp: &Blueprint, run_root: &Path) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
         let mut s = RunState::new("replay", &bp.id);
         for ev in read_events(run_root)? {
@@ -88,7 +88,7 @@ impl Engine {
         actor: &str,
         note: Option<String>,
         exec: &dyn StepExecutor,
-    ) -> crate::Result<RunState> {
+    ) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
         let mut s = load_state(&g, run_root)?;
         if s.status != RunStatus::AwaitingApproval {
@@ -115,7 +115,7 @@ impl Engine {
         node: &str,
         actor: &str,
         note: Option<String>,
-    ) -> crate::Result<RunState> {
+    ) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
         let mut s = load_state(&g, run_root)?;
         if s.status != RunStatus::AwaitingApproval {
@@ -143,7 +143,7 @@ fn new_run_id() -> String {
     )
 }
 
-fn load_state(g: &Graph<'_>, run_root: &Path) -> crate::Result<RunState> {
+fn load_state(g: &Graph<'_>, run_root: &Path) -> crate::engine::Result<RunState> {
     if let Some(s) = read_checkpoint(run_root)? {
         return Ok(s);
     }
@@ -156,7 +156,12 @@ fn load_state(g: &Graph<'_>, run_root: &Path) -> crate::Result<RunState> {
 }
 
 /// Emit: stamp seq, fold via `apply`, append to log, checkpoint.
-fn emit(run_root: &Path, g: &Graph<'_>, s: &mut RunState, kind: EventKind) -> crate::Result<()> {
+fn emit(
+    run_root: &Path,
+    g: &Graph<'_>,
+    s: &mut RunState,
+    kind: EventKind,
+) -> crate::engine::Result<()> {
     let ev = Event::new(s.next_seq, kind);
     core::apply(g, s, &ev)?;
     append_event(run_root, &ev)?;
@@ -170,7 +175,7 @@ async fn drive(
     s: &mut RunState,
     run_root: &Path,
     exec: &dyn StepExecutor,
-) -> crate::Result<()> {
+) -> crate::engine::Result<()> {
     loop {
         core::advance_loops(g, s);
         finalize_if_done(g, s);
@@ -202,7 +207,7 @@ async fn dispatch(
     run_root: &Path,
     exec: &dyn StepExecutor,
     node_id: &str,
-) -> crate::Result<()> {
+) -> crate::engine::Result<()> {
     let node = g
         .blueprint()
         .find_node(node_id)
@@ -292,7 +297,7 @@ fn emit_loop_enter(
     g: &Graph<'_>,
     s: &mut RunState,
     loop_id: &str,
-) -> crate::Result<()> {
+) -> crate::engine::Result<()> {
     let ev = Event::new(
         s.next_seq,
         EventKind::LoopIteration {
@@ -307,7 +312,7 @@ fn emit_loop_enter(
     Ok(())
 }
 
-fn eval_branch(s: &RunState, node: &Node) -> crate::Result<String> {
+fn eval_branch(s: &RunState, node: &Node) -> crate::engine::Result<String> {
     // Minimal condition: truthiness of a registry path named in `condition`.
     let cond = node
         .fields

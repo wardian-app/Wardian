@@ -1,6 +1,6 @@
-use crate::event::{Event, EventKind};
-use crate::graph::Graph;
-use crate::state::{NodeStatus, RunState, RunStatus};
+use crate::engine::event::{Event, EventKind};
+use crate::engine::graph::Graph;
+use crate::engine::state::{NodeStatus, RunState, RunStatus};
 
 /// Nodes that are runnable right now: status Pending, and every inbound edge is
 /// resolved (delivered or skipped) with at least one delivered. Trigger/entry
@@ -36,7 +36,7 @@ pub fn step(g: &Graph, s: &RunState) -> Vec<String> {
 
 /// Fold one event into state. Total and deterministic: replaying the log via
 /// `apply` reconstructs `RunState` exactly.
-pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::Result<()> {
+pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::engine::Result<()> {
     match &ev.kind {
         EventKind::RunStarted { trigger, .. } => {
             s.set_trigger(trigger.clone());
@@ -233,10 +233,10 @@ pub fn is_approval(g: &Graph, node: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::EventKind;
-    use crate::graph::Graph;
-    use crate::state::{NodeStatus, RunState, RunStatus};
-    use wardian_core::workflow::{Blueprint, Edge, Node};
+    use crate::engine::event::EventKind;
+    use crate::engine::graph::Graph;
+    use crate::engine::state::{NodeStatus, RunState, RunStatus};
+    use crate::workflow::{Blueprint, Edge, Node};
 
     fn node(id: &str, ty: &str) -> Node {
         let mut fields = serde_json::Map::new();
@@ -286,7 +286,7 @@ mod tests {
         apply(
             g,
             s,
-            &crate::event::Event::new(
+            &crate::engine::event::Event::new(
                 seq,
                 EventKind::NodeCompleted {
                     node: node.into(),
@@ -445,7 +445,7 @@ mod tests {
         apply(
             &g,
             &mut s,
-            &crate::event::Event::new(
+            &crate::engine::event::Event::new(
                 seq,
                 EventKind::AwaitingApproval {
                     node: "gate".into(),
@@ -460,7 +460,7 @@ mod tests {
         apply(
             &g,
             &mut s,
-            &crate::event::Event::new(
+            &crate::engine::event::Event::new(
                 seq,
                 EventKind::ApprovalGranted {
                     node: "gate".into(),
@@ -487,7 +487,7 @@ mod tests {
         apply(
             &g,
             &mut s,
-            &crate::event::Event::new(
+            &crate::engine::event::Event::new(
                 seq,
                 EventKind::AwaitingApproval {
                     node: "gate".into(),
@@ -499,7 +499,7 @@ mod tests {
         apply(
             &g,
             &mut s,
-            &crate::event::Event::new(
+            &crate::engine::event::Event::new(
                 seq,
                 EventKind::ApprovalRejected {
                     node: "gate".into(),

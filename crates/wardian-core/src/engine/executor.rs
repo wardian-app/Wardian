@@ -1,4 +1,4 @@
-use crate::error::StepError;
+use crate::engine::error::StepError;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;

@@ -1,6 +1,6 @@
-use wardian_engine::driver::Engine;
-use wardian_engine::executor::MockExecutor;
-use wardian_engine::state::RunStatus;
+use wardian_core::engine::driver::Engine;
+use wardian_core::engine::executor::MockExecutor;
+use wardian_core::engine::state::RunStatus;
 use wardian_core::workflow::parse_str;
 
 const LINEAR: &str = r#"---
@@ -34,10 +34,10 @@ async fn runs_a_linear_workflow_to_completion() {
     assert!(exec.calls().contains(&"task:plan".to_string()));
     assert!(exec.calls().contains(&"shell:build".to_string()));
     // events were persisted
-    let events = wardian_engine::store::read_events(dir.path()).unwrap();
+    let events = wardian_core::engine::store::read_events(dir.path()).unwrap();
     assert!(events
         .iter()
-        .any(|e| matches!(e.kind, wardian_engine::event::EventKind::RunCompleted)));
+        .any(|e| matches!(e.kind, wardian_core::engine::event::EventKind::RunCompleted)));
 }
 
 const GATED: &str = r#"---

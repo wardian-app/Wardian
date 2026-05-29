@@ -5693,6 +5693,7 @@ dependencies = [
 name = "wardian-core"
 version = "0.3.6"
 dependencies = [
+ "async-trait",
  "chrono",
  "dirs 5.0.1",
  "once_cell",
@@ -5702,22 +5703,8 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "wardian-engine"
-version = "0.3.6"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "uuid",
- "wardian-core",
 ]
 
 [[package]]

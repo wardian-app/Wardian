@@ -1,5 +1,5 @@
-use crate::event::Event;
-use crate::state::RunState;
+use crate::engine::event::Event;
+use crate::engine::state::RunState;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -8,7 +8,7 @@ const EVENTS: &str = "events.jsonl";
 const CHECKPOINT: &str = "state.json";
 
 /// Append one event as a JSON line to `<root>/events.jsonl`.
-pub fn append_event(root: &Path, ev: &Event) -> crate::Result<()> {
+pub fn append_event(root: &Path, ev: &Event) -> crate::engine::Result<()> {
     std::fs::create_dir_all(root)?;
     let mut f = OpenOptions::new()
         .create(true)
@@ -19,7 +19,7 @@ pub fn append_event(root: &Path, ev: &Event) -> crate::Result<()> {
 }
 
 /// Read all events in order from `<root>/events.jsonl` (empty if absent).
-pub fn read_events(root: &Path) -> crate::Result<Vec<Event>> {
+pub fn read_events(root: &Path) -> crate::engine::Result<Vec<Event>> {
     let path = root.join(EVENTS);
     if !path.exists() {
         return Ok(Vec::new());
@@ -36,14 +36,14 @@ pub fn read_events(root: &Path) -> crate::Result<Vec<Event>> {
 }
 
 /// Write the checkpoint snapshot to `<root>/state.json`.
-pub fn write_checkpoint(root: &Path, state: &RunState) -> crate::Result<()> {
+pub fn write_checkpoint(root: &Path, state: &RunState) -> crate::engine::Result<()> {
     std::fs::create_dir_all(root)?;
     std::fs::write(root.join(CHECKPOINT), serde_json::to_string_pretty(state)?)?;
     Ok(())
 }
 
 /// Read the checkpoint, or `None` if absent.
-pub fn read_checkpoint(root: &Path) -> crate::Result<Option<RunState>> {
+pub fn read_checkpoint(root: &Path) -> crate::engine::Result<Option<RunState>> {
     let path = root.join(CHECKPOINT);
     if !path.exists() {
         return Ok(None);
@@ -54,7 +54,7 @@ pub fn read_checkpoint(root: &Path) -> crate::Result<Option<RunState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Event, EventKind};
+    use crate::engine::event::{Event, EventKind};
 
     #[test]
     fn append_then_read_events() {
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn checkpoint_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = crate::state::RunState::new("r", "wf");
+        let mut s = crate::engine::state::RunState::new("r", "wf");
         s.next_seq = 9;
         write_checkpoint(dir.path(), &s).unwrap();
         let back = read_checkpoint(dir.path()).unwrap().unwrap();
