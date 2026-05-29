@@ -2,6 +2,7 @@ use crate::workflow_engine;
 use serde_json::Value;
 use tauri::AppHandle;
 use wardian_core::models::{ScheduledRun, WorkflowDefinition};
+use wardian_core::workflow::{self, Blueprint};
 
 #[tauri::command]
 pub async fn list_workflows() -> Result<Vec<WorkflowDefinition>, String> {
@@ -99,4 +100,65 @@ pub fn delete_scheduled_run(run_id: String) -> Result<(), String> {
 pub fn toggle_scheduled_run(run_id: String) -> Result<(), String> {
     let _ = workflow_engine::toggle_scheduled_run_state(&run_id)?;
     Ok(())
+}
+
+/// Parse + validate a blueprint `.md` at `path`. Returns the structured graph
+/// and any diagnostics (parse errors surface as an Err string).
+#[tauri::command]
+pub fn workflow_parse(path: String) -> Result<serde_json::Value, String> {
+    let blueprint = workflow::parse_file(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+    let report = workflow::validate(&blueprint);
+    Ok(serde_json::json!({ "blueprint": blueprint, "diagnostics": report.diagnostics }))
+}
+
+/// Validate an in-memory blueprint (debounced from the builder on edit).
+#[tauri::command]
+pub fn workflow_validate(blueprint: Blueprint) -> Result<serde_json::Value, String> {
+    let report = workflow::validate(&blueprint);
+    Ok(serde_json::json!({ "ok": report.is_valid(), "diagnostics": report.diagnostics }))
+}
+
+/// Normalize + serialize + write a blueprint to `path`. Refuses to write while
+/// it has validation errors (returns them instead).
+#[tauri::command]
+pub fn workflow_write(path: String, mut blueprint: Blueprint) -> Result<serde_json::Value, String> {
+    workflow::normalize(&mut blueprint);
+    let report = workflow::validate(&blueprint);
+    if !report.is_valid() {
+        return Ok(serde_json::json!({ "written": false, "diagnostics": report.diagnostics }));
+    }
+    let text = workflow::to_string(&blueprint).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "written": true, "diagnostics": [] }))
+}
+
+/// List blueprint `.md` files under `<wardian-home>/library/workflows`.
+#[tauri::command]
+pub fn workflow_list_blueprints() -> Result<Vec<serde_json::Value>, String> {
+    let home = wardian_core::paths::wardian_home().ok_or("no wardian home")?;
+    let dir = home.join("library").join("workflows");
+    let mut out = Vec::new();
+    if dir.exists() {
+        for entry in walk_md(&dir) {
+            if let Ok(bp) = workflow::parse_file(&entry) {
+                out.push(serde_json::json!({ "id": bp.id, "name": bp.name, "path": entry.to_string_lossy() }));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn walk_md(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files.extend(walk_md(&p));
+            } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                files.push(p);
+            }
+        }
+    }
+    files
 }
