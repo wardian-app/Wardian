@@ -1,5 +1,5 @@
 [package]
-name = "wardian-cli"
+name = "wardian-workflow"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,18 +7,12 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[[bin]]
-name = "wardian-cli"
-path = "src/main.rs"
-
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
-tokio = { version = "1.49.0", features = ["io-util", "net", "rt", "time"] }
-wardian-core = { path = "../wardian-core" }
-wardian-workflow = { path = "../wardian-workflow" }
+serde_norway = "0.9"
+thiserror = { workspace = true }
+once_cell = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

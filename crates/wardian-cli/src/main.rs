@@ -381,7 +381,74 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
                 serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true})).unwrap()
             ))
         }
+        WorkflowCommand::NodeTypes { json } => render_workflow_node_types(json),
+        WorkflowCommand::Validate { path } => render_workflow_validate(&path),
+        WorkflowCommand::GenSchema { out, check } => {
+            render_workflow_gen(&out, GenKind::Schema, check)
+        }
+        WorkflowCommand::GenDocs { out, check } => render_workflow_gen(&out, GenKind::Docs, check),
     }
+}
+
+fn render_workflow_node_types(json: bool) -> Result<String, CliError> {
+    if json {
+        return Ok(format!("{}\n", wardian_workflow::ts_schema_json()));
+    }
+    // Human summary: one line per node type.
+    let mut lines = String::from("NODE TYPES\n");
+    for def in wardian_workflow::node_types() {
+        lines.push_str(&format!(
+            "  {:<18} {:<8} {}\n",
+            def.id,
+            format!("{:?}", def.kind).to_lowercase(),
+            def.description
+        ));
+    }
+    Ok(lines)
+}
+
+fn render_workflow_validate(path: &str) -> Result<String, CliError> {
+    let blueprint = wardian_workflow::parse_file(std::path::Path::new(path))
+        .map_err(|e| CliError::generic(e.to_string()))?;
+    let report = wardian_workflow::validate(&blueprint);
+    let body = serde_json::json!({
+        "schema": 1,
+        "ok": report.is_valid(),
+        "diagnostics": report.diagnostics,
+    });
+    serde_json::to_string_pretty(&body)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
+}
+
+#[derive(Clone, Copy)]
+enum GenKind {
+    Schema,
+    Docs,
+}
+
+fn render_workflow_gen(out: &str, kind: GenKind, check: bool) -> Result<String, CliError> {
+    let generated = match kind {
+        GenKind::Schema => format!("{}\n", wardian_workflow::ts_schema_json()),
+        GenKind::Docs => wardian_workflow::reference_doc(),
+    };
+    let path = std::path::Path::new(out);
+    if check {
+        let current = std::fs::read_to_string(path).unwrap_or_default();
+        if current != generated {
+            return Err(CliError::backend(
+                ExitCode::Generic,
+                "drift",
+                format!("{out} is out of date; run the matching gen command and commit"),
+            ));
+        }
+        return Ok(format!("{out} is up to date\n"));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CliError::generic(e.to_string()))?;
+    }
+    std::fs::write(path, &generated).map_err(|e| CliError::generic(e.to_string()))?;
+    Ok(format!("wrote {out}\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +988,55 @@ fn identity_error(error: identity::IdentityError) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_node_types_json_lists_task_type() {
+        let out = render_workflow_node_types(true).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["schema"], 2);
+        assert!(json["node_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == "task"));
+    }
+
+    #[test]
+    fn workflow_validate_reports_unknown_node_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.md");
+        std::fs::write(
+            &path,
+            "---\nschema: 2\nid: bad\nname: Bad\nnodes:\n  - id: x\n    type: frobnicate\nedges: []\n---\n",
+        )
+        .unwrap();
+        let out = render_workflow_validate(path.to_str().unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["ok"], false);
+        assert!(json["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "unknown_node_type"));
+    }
+
+    #[test]
+    fn gen_schema_check_detects_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.json");
+        std::fs::write(&path, "{}").unwrap();
+        let err = render_workflow_gen(&path.to_string_lossy(), GenKind::Schema, true).unwrap_err();
+        assert_eq!(err.code, "drift");
+    }
+
+    #[test]
+    fn gen_schema_writes_file_when_not_checking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.json");
+        let out = render_workflow_gen(&path.to_string_lossy(), GenKind::Schema, false).unwrap();
+        assert!(out.contains("wrote"));
+        assert!(path.exists());
+    }
 
     #[test]
     fn control_error_preserves_backend_not_supported_code() {
