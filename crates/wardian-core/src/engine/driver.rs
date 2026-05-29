@@ -23,8 +23,21 @@ impl Engine {
         run_root: &Path,
         exec: &dyn StepExecutor,
     ) -> crate::engine::Result<RunState> {
+        Self::start_with_id(bp, new_run_id(), trigger, run_root, exec).await
+    }
+
+    /// Start a fresh run with a caller-supplied run id and drive it until it
+    /// completes, fails, or parks on an approval. Returns the resulting
+    /// `RunState`.
+    pub async fn start_with_id(
+        bp: &Blueprint,
+        run_id: impl Into<String>,
+        trigger: serde_json::Value,
+        run_root: &Path,
+        exec: &dyn StepExecutor,
+    ) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
-        let mut s = RunState::new(new_run_id(), &bp.id);
+        let mut s = RunState::new(run_id.into(), &bp.id);
         emit(
             run_root,
             &g,
@@ -135,7 +148,48 @@ impl Engine {
     }
 }
 
-fn new_run_id() -> String {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::MockExecutor;
+
+    #[tokio::test]
+    async fn start_with_id_persists_caller_supplied_run_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint = Blueprint {
+            schema: 2,
+            id: "wf".into(),
+            name: "Workflow".into(),
+            nodes: vec![Node {
+                id: "t".into(),
+                r#type: "manual_trigger".into(),
+                name: None,
+                parent: None,
+                fields: serde_json::Map::new(),
+                position: None,
+            }],
+            edges: vec![],
+            body: String::new(),
+        };
+        let exec = MockExecutor::new();
+
+        let state = Engine::start_with_id(
+            &blueprint,
+            "run-xyz",
+            serde_json::json!({}),
+            dir.path(),
+            &exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.run_id, "run-xyz");
+        let checkpoint = read_checkpoint(dir.path()).unwrap().unwrap();
+        assert_eq!(checkpoint.run_id, "run-xyz");
+    }
+}
+
+pub fn new_run_id() -> String {
     format!(
         "{}-{}",
         chrono::Utc::now().timestamp_millis(),
