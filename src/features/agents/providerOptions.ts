@@ -34,7 +34,7 @@ export function buildProviderOptions(readiness: ProviderReadiness[]): ProviderOp
   return PROVIDER_ORDER.map((provider) => {
     const entry = byProvider.get(provider);
     const available = entry?.available ?? false;
-    const label = entry?.display_name ?? providerDisplayName(provider);
+    const label = providerDisplayName(provider);
     return {
       value: provider,
       label: available ? label : `${label} - not installed`,

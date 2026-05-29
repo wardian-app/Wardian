@@ -75,9 +75,11 @@ Queue alert preferences live in **Settings > Queue** and are per event type:
 - Desktop alert
 - Sound alert
 
-By default, desktop and sound alerts are enabled only for **Action needed**. Passive completions and workflow outcomes stay quiet unless you opt in.
+By default, desktop and sound alerts are enabled only for **Action needed**. Passive completions and workflow outcomes stay quiet unless you opt in. Settings also includes a **Sound volume** slider for Wardian's local queue tone. The default volume is 50%.
 
-Desktop alerts use the operating system notification surface when the WebView has notification permission. Sound alerts play a short local tone. If either capability is blocked by system policy, the Queue still records the item.
+![Wardian Settings Queue panel showing desktop alerts, sound alerts, and the sound volume slider](../assets/screenshots/queue/queue-settings-notification-volume.png)
+
+Desktop alerts use Wardian's native desktop notification plugin when available, with the WebView notification API as a fallback. Sound alerts play a short local Web Audio tone at the configured volume. If either capability is blocked by system policy, the Queue still records the item.
 
 ## Practical Workflow
 
@@ -93,7 +95,7 @@ Desktop alerts use the operating system notification surface when the WebView ha
 - A generic "Completed" summary means Wardian did not capture a provider-specific final answer for that transition.
 - Generic approval-looking text does not create response buttons. Queue only shows buttons when it can read explicit provider choices from canonical provider evidence.
 - Clearing read items removes them from the visible queue for the active Wardian home.
-- Desktop and sound alerts depend on operating system and WebView permissions.
+- Desktop alerts depend on operating system notification permissions, and WebView fallback alerts depend on WebView notification permissions. Sound alerts can still be affected by system audio and browser audio policy.
 - Replayed terminal output and startup hydration should not create new queue cards. If duplicates appear after restart, capture the card evidence ID/source and file a bug.
 
 ## Related Links

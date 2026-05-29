@@ -1487,7 +1487,7 @@ describe("Agent Watchlist Sidebar", () => {
     const alphaCard = alphaTerminal.closest('[data-testid="agent-card"]');
     expect(alphaCard).not.toBeNull();
 
-    fireEvent.click(within(alphaCard as HTMLElement).getAllByRole("button")[0]);
+    fireEvent.click(within(alphaCard as HTMLElement).getByRole("button", { name: "Maximize Alpha" }));
 
     await waitFor(() => {
       expect(screen.getByTestId("terminal-agent-1")).toBeInTheDocument();

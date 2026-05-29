@@ -459,6 +459,7 @@ fn core_worktree_summary(
         source_folder: summary.source_folder,
         worktree_folder: summary.worktree_folder,
         member_agent_ids: summary.member_agent_ids,
+        can_delete: summary.can_delete,
     }
 }
 
@@ -481,11 +482,36 @@ fn worktree_by_folder(
     worktrees: &[AgentWorktreeSummary],
     folder: &str,
 ) -> Option<AgentWorktreeSummary> {
-    let normalized = folder.trim().replace('\\', "/");
+    let normalized = normalize_worktree_lookup_path(folder);
     worktrees
         .iter()
-        .find(|worktree| worktree.worktree_folder == normalized || worktree.id == normalized)
+        .find(|worktree| {
+            normalize_worktree_lookup_path(&worktree.worktree_folder) == normalized
+                || normalize_worktree_lookup_path(&worktree.id) == normalized
+        })
         .cloned()
+}
+
+fn normalize_worktree_lookup_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    let normalized = if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{stripped}")
+    } else if let Some(stripped) = normalized.strip_prefix("//?/") {
+        stripped.to_string()
+    } else {
+        normalized
+    };
+    let normalized = normalized.trim_end_matches('/').to_string();
+
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 async fn handle_agent_worktree_enable(
@@ -1081,7 +1107,22 @@ async fn wait_for_terminal_ready_for_control_send(
     } else if info.provider == "codex" {
         wait_for_terminal_output(state, &info.uuid, 15_000, codex_output_has_ready_prompt).await
     } else if info.provider == "claude" {
-        wait_for_terminal_output(state, &info.uuid, 15_000, claude_output_has_ready_prompt).await
+        if current_agent_status_is_idle(state, &info.uuid).await? {
+            Ok(())
+        } else {
+            wait_for_terminal_output(state, &info.uuid, 15_000, claude_output_has_ready_prompt)
+                .await
+        }
+    } else if info.provider == "gemini" {
+        wait_for_terminal_output(state, &info.uuid, 15_000, gemini_output_has_ready_prompt).await
+    } else if info.provider == "antigravity" {
+        wait_for_terminal_output(
+            state,
+            &info.uuid,
+            15_000,
+            antigravity_output_has_ready_prompt,
+        )
+        .await
     } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
         Err(format!("Agent {} provider input is not ready", info.uuid))
     } else if current_agent_status_is_idle(state, &info.uuid).await? {
@@ -1294,6 +1335,49 @@ fn claude_ready_prompt_trailing_metadata_line(line: &str) -> bool {
         .all(|ch| ch == '─' || ch == '-' || ch.is_whitespace())
 }
 
+fn gemini_output_has_ready_prompt(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    let tail = cleaned
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(12);
+    for line in tail {
+        if line.contains("Type your message or @path/to/file") {
+            return true;
+        }
+    }
+    false
+}
+
+fn antigravity_output_has_ready_prompt(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    let lines = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate().rev().take(16) {
+        if *line != ">" {
+            continue;
+        }
+        let has_ready_footer = lines
+            .iter()
+            .skip(index + 1)
+            .take(4)
+            .any(|line| antigravity_ready_prompt_footer_line(line));
+        if has_ready_footer {
+            return true;
+        }
+    }
+    false
+}
+
+fn antigravity_ready_prompt_footer_line(line: &str) -> bool {
+    line.contains("Press up to edit queued messages") || line.contains("? for shortcuts")
+}
+
 async fn mark_delivered_agents_prompt_started(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -1303,8 +1387,12 @@ async fn mark_delivered_agents_prompt_started(
         return;
     }
 
-    let agents = state.agents.lock().await;
     for session_id in session_ids {
+        state
+            .interactions
+            .start_provider_input_generation(session_id, ProviderInputReadiness::Busy, None)
+            .await;
+        let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(session_id) {
             if crate::manager::mark_agent_prompt_started(agent) {
                 if let Some(app) = app {
@@ -2404,6 +2492,18 @@ pub(crate) fn spawn_mailbox_drain_if_idle(
     });
 }
 
+fn spawn_delayed_mailbox_drain_retry(app: Option<&AppHandle>, session_id: &str) {
+    let Some(app) = app.cloned() else {
+        return;
+    };
+    let session_id = session_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+        let state = app.state::<AppState>();
+        let _ = drain_next_mailbox_message_for_idle_agent(Some(&app), &state, &session_id).await;
+    });
+}
+
 enum MailboxSubmitError {
     RetrySafe(String),
     Terminal(crate::utils::delivery_transaction::TerminalDeliveryError),
@@ -2556,6 +2656,9 @@ async fn drain_next_mailbox_message_for_idle_agent(
                             .to_string()
                     });
                     record_delivery_attempt(state, &detail).await;
+                    if error.retry_safe() {
+                        spawn_delayed_mailbox_drain_retry(app, session_id);
+                    }
                     detail
                 }
             }
@@ -3292,11 +3395,32 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
         }];
 
         let matched = worktree_by_folder(&worktrees, "C:\\repo\\worktrees\\review").unwrap();
 
         assert_eq!(matched.id, "C:/repo/worktrees/review");
+    }
+
+    #[test]
+    fn worktree_by_folder_matches_windows_case_and_trailing_slash_variants() {
+        let worktrees = vec![AgentWorktreeSummary {
+            id: "C:/repo/worktrees/review".to_string(),
+            name: "review".to_string(),
+            source_folder: "C:/repo".to_string(),
+            worktree_folder: "C:/repo/worktrees/review".to_string(),
+            member_agent_ids: vec!["agent-1".to_string()],
+            can_delete: false,
+        }];
+
+        let matched = worktree_by_folder(&worktrees, "c:\\repo\\worktrees\\review\\");
+
+        if cfg!(windows) {
+            assert!(matched.is_some());
+        } else {
+            assert!(matched.is_none());
+        }
     }
 
     #[test]
@@ -3307,6 +3431,7 @@ mod tests {
             source_folder: "C:/repo".to_string(),
             worktree_folder: "C:/repo/worktrees/review".to_string(),
             member_agent_ids: vec!["agent-1".to_string(), "agent-2".to_string()],
+            can_delete: false,
         }];
 
         assert_eq!(
@@ -3753,12 +3878,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             input_state.state,
-            wardian_core::control::ProviderInputReadiness::Ready
+            wardian_core::control::ProviderInputReadiness::Busy
         );
     }
 
     #[tokio::test]
-    async fn mailbox_drain_can_complete_booting_claude_from_prompt_evidence() {
+    async fn mailbox_drain_can_complete_booting_claude_from_idle_status() {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
         {
@@ -3766,10 +3891,6 @@ mod tests {
             let agent = agents.get("agent-1").unwrap();
             agent.config.lock().unwrap().provider = "claude".to_string();
             *agent.current_status.lock().unwrap() = "Idle".to_string();
-            agent.watch_state.lock().unwrap().push_output(
-                "ClaudeCode v2.1.150\r\n❯ Try \"write a test\"\r\n────────────────⏵⏵ dontask on · Haiku 4.5"
-                    .as_bytes(),
-            );
         }
         state
             .interactions
@@ -3823,7 +3944,233 @@ mod tests {
             .unwrap();
         assert_eq!(
             input_state.state,
-            wardian_core::control::ProviderInputReadiness::Ready
+            wardian_core::control::ProviderInputReadiness::Busy
+        );
+    }
+
+    #[test]
+    fn claude_ready_prompt_detector_accepts_visible_prompt_tail() {
+        assert!(claude_output_has_ready_prompt(
+            "ClaudeCode v2.1.150\r\n❯ Try \"write a test\"\r\n────────────────⏵⏵ dontask on · Haiku 4.5"
+        ));
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_can_complete_booting_gemini_from_prompt_evidence() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "GeminiOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "gemini".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            agent.watch_state.lock().unwrap().push_output(
+                "\r\n? for shortcuts\r\n────────────────────────────────────────────────────────\r\n YOLO Ctrl+Y                                      5 context files · 2 MCP servers · 25 skills\r\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\r\n *  Type your message or @path/to/file\r\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\r\n workspace (/directory)              /model                      context                quota\r\n".as_bytes(),
+            );
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "GeminiOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap()
+            .expect("drained message");
+
+        assert_eq!(drained.runtime_state, "mailbox_drain");
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Busy
+        );
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_can_complete_booting_antigravity_from_prompt_evidence() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "AntigravityOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "antigravity".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+            agent.watch_state.lock().unwrap().push_output(
+                "\r\n────────────────────────────────────────────────────────\r\n>\r\n────────────────────────────────────────────────────────\r\n  Press up to edit queued messages                                               Gemini 3.5 Flash (High)\r\n".as_bytes(),
+            );
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "AntigravityOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap()
+            .expect("drained message");
+
+        assert_eq!(drained.runtime_state, "mailbox_drain");
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
+        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Busy
+        );
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_marks_provider_busy_after_one_submitted_message() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Processing".to_string();
+            agent
+                .watch_state
+                .lock()
+                .unwrap()
+                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let first = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "first queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let second = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "second queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first[0].delivery_state, "queued");
+        assert_eq!(second[0].delivery_state, "queued");
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Ready,
+                Some(wardian_core::control::ProviderReadyEvidence::PromptDetected),
+            )
+            .await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap()
+            .expect("first message drains");
+        let blocked = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap();
+
+        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert!(blocked.is_none());
+        assert_eq!(rx.try_recv().unwrap(), b"first queued work".to_vec());
+        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
+        assert!(rx.try_recv().is_err());
+        let input_state = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            input_state.state,
+            wardian_core::control::ProviderInputReadiness::Busy
         );
     }
 

@@ -24,6 +24,46 @@ pub struct RemoteGatewayConfig {
     pub gateway_identity_fingerprint: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteSetupOverallStatus {
+    Disabled,
+    NeedsAction,
+    Ready,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteSetupCheckStatus {
+    Ok,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSetupCheck {
+    pub id: String,
+    pub label: String,
+    pub status: RemoteSetupCheckStatus,
+    pub message: String,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSetupCommandHint {
+    pub label: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSetupCheckResult {
+    pub overall_status: RemoteSetupOverallStatus,
+    pub checks: Vec<RemoteSetupCheck>,
+    pub inferred_origin: Option<String>,
+    pub serve_target: Option<String>,
+    pub setup_command: Option<RemoteSetupCommandHint>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RemoteRuntimeState {
     pub pairing_offers: HashMap<String, PairingOfferRecord>,

@@ -30,9 +30,11 @@ Grid cards can render either:
 - **Terminal**: the provider terminal/TUI, including raw keyboard control, approvals, and raw output.
 - **Chat**: normalized user, assistant, status, tool, approval, and terminal-output events for faster scanning, plus a compact prompt composer for standard text input.
 
-Change this globally in **Settings > Grid > Grid card display**. The setting applies to the entire main Grid view. Card-level overrides are not available yet.
+Change the default globally in **Settings > Grid > Grid card display**. Each card also has a small **Terminal** / **Chat** mode switch in its header for temporary per-agent overrides. Switching from Terminal to Chat focuses that card's composer, and unsent Chat text stays with the agent while you switch modes.
 
 Chat mode sends ordinary text through the same provider submit path used by Wardian's command tools. Use **Enter** to send and **Shift+Enter** for a newline in the composer. When Wardian recognizes an action-required prompt with approval choices, Chat mode renders those choices as buttons that submit the matching response. Switch back to Terminal mode when you need raw TUI controls, provider-specific keybindings, or detailed terminal behavior.
+
+In Terminal mode, Wardian follows conservative terminal shortcut handling. On macOS, **Cmd+A** selects the visible terminal buffer. Windows and Linux control-key combinations, including **Ctrl+A** and **Ctrl+Shift+A**, continue through to the shell or provider TUI by default.
 
 ![Grid chat mode showing normalized agent messages, action-needed output, and prompt composers](../assets/screenshots/grid-chat/chat-composer.png)
 

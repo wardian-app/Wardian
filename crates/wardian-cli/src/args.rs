@@ -62,9 +62,43 @@ pub struct WorkflowArgs {
 #[derive(Debug, Subcommand)]
 pub enum WorkflowCommand {
     List,
-    Show { target: String },
-    Run { target: String },
-    Stop { run_instance_id: String },
+    Show {
+        target: String,
+    },
+    Run {
+        target: String,
+    },
+    Stop {
+        run_instance_id: String,
+    },
+    /// Print the node type registry (the contract agents author against).
+    NodeTypes {
+        /// Emit the machine-readable JSON schema instead of a summary table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a blueprint `.md` file and report diagnostics.
+    Validate {
+        path: String,
+    },
+    /// Write the node-type JSON schema artifact for the builder.
+    GenSchema {
+        #[arg(
+            long,
+            default_value = "src/features/workflows/nodeRegistry.schema.json"
+        )]
+        out: String,
+        /// Exit non-zero if the file on disk differs (CI drift guard).
+        #[arg(long)]
+        check: bool,
+    },
+    /// Write the generated node-type reference doc.
+    GenDocs {
+        #[arg(long, default_value = "docs/workflows/node-reference-v2.md")]
+        out: String,
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +347,30 @@ mod tests {
     fn parses_agent_target_shorthand() {
         let cli = Cli::try_parse_from(["wardian", "agent", "coder-a1"]).unwrap();
         assert!(matches!(cli.command, Command::Agent(_)));
+    }
+
+    #[test]
+    fn parses_workflow_node_types_json() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "node-types", "--json"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::NodeTypes { json: true }
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_validate_path() {
+        let cli = Cli::try_parse_from(["wardian", "workflow", "validate", "wf.md"]).unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Validate { ref path } if path == "wf.md"
+        ));
     }
 
     #[test]

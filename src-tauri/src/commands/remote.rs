@@ -1,7 +1,7 @@
 use crate::remote::models::{
     DeviceRecord, PendingPairingDecision, PendingPairingRequestRecord, RemoteAccessStatus,
     RemoteAuditRecord, RemoteDeviceStore, RemoteGatewayConfig, RemotePendingPairingRequest,
-    REMOTE_AUDIT_SCHEMA_VERSION,
+    RemoteSetupCheckResult, REMOTE_AUDIT_SCHEMA_VERSION,
 };
 use tauri::Manager;
 
@@ -43,6 +43,11 @@ pub fn load_remote_access_status() -> Result<RemoteAccessStatus, String> {
 #[tauri::command]
 pub fn load_remote_gateway_config() -> Result<Option<RemoteGatewayConfig>, String> {
     crate::remote::storage::load_remote_config()
+}
+
+#[tauri::command]
+pub async fn load_remote_setup_check() -> Result<RemoteSetupCheckResult, String> {
+    Ok(crate::remote::setup_check::load_remote_setup_check().await)
 }
 
 #[tauri::command]

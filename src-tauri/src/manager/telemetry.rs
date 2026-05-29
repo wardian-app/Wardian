@@ -191,12 +191,23 @@ struct ProcessSample {
     run_time: u64,
 }
 
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+struct ProcessMarkerSnapshot {
+    pid: u32,
+    process_name: String,
+    command_line: String,
+    environ: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct SystemProcessSnapshot {
     logical_cpu_count: usize,
     children_map: HashMap<u32, Vec<u32>>,
     processes: HashMap<u32, ProcessSample>,
     sys_refresh: std::time::Duration,
+    #[cfg(windows)]
+    session_roots: HashMap<String, Vec<u32>>,
 }
 
 struct TelemetryAgentWorkGuard {
@@ -223,8 +234,45 @@ fn try_begin_agent_telemetry_work(session_id: &str) -> Option<TelemetryAgentWork
     })
 }
 
+#[cfg(windows)]
+fn discover_session_roots_from_process_markers(
+    session_ids: &[String],
+    markers: &[ProcessMarkerSnapshot],
+) -> HashMap<String, Vec<u32>> {
+    let mut roots = session_ids
+        .iter()
+        .map(|session_id| (session_id.clone(), Vec::new()))
+        .collect::<HashMap<_, _>>();
+
+    for marker in markers {
+        for session_id in session_ids {
+            if crate::utils::process::is_wardian_session_environment_candidate(
+                &marker.environ,
+                session_id,
+            ) || crate::utils::process::is_wardian_session_process_candidate(
+                &marker.process_name,
+                &marker.command_line,
+                session_id,
+            ) {
+                roots
+                    .entry(session_id.clone())
+                    .or_default()
+                    .push(marker.pid);
+            }
+        }
+    }
+
+    for pids in roots.values_mut() {
+        pids.sort_unstable();
+        pids.dedup();
+    }
+
+    roots
+}
+
 fn refresh_system_process_snapshot(
     sys_metrics: &tokio::sync::Mutex<sysinfo::System>,
+    #[cfg_attr(not(windows), allow(unused_variables))] session_ids: &[String],
 ) -> Option<SystemProcessSnapshot> {
     let mut sys = match sys_metrics.try_lock() {
         Ok(sys) => sys,
@@ -241,6 +289,8 @@ fn refresh_system_process_snapshot(
     let logical_cpu_count = sys.cpus().len();
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut processes = HashMap::new();
+    #[cfg(windows)]
+    let mut process_markers = Vec::new();
 
     for (pid, process) in sys.processes() {
         let pid = pid.as_u32();
@@ -255,6 +305,24 @@ fn refresh_system_process_snapshot(
                 run_time: process.run_time(),
             },
         );
+        #[cfg(windows)]
+        {
+            process_markers.push(ProcessMarkerSnapshot {
+                pid,
+                process_name: process.name().to_string_lossy().to_string(),
+                command_line: process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                environ: process
+                    .environ()
+                    .iter()
+                    .map(|entry| entry.to_string_lossy().to_string())
+                    .collect::<Vec<_>>(),
+            });
+        }
     }
 
     Some(SystemProcessSnapshot {
@@ -262,6 +330,8 @@ fn refresh_system_process_snapshot(
         children_map,
         processes,
         sys_refresh,
+        #[cfg(windows)]
+        session_roots: discover_session_roots_from_process_markers(session_ids, &process_markers),
     })
 }
 
@@ -593,9 +663,13 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 
     let sys_metrics = state.system_metrics.clone();
     tokio::task::spawn_blocking(move || {
+        let session_ids = snapshots
+            .iter()
+            .map(|snap| snap.session_id.clone())
+            .collect::<Vec<_>>();
         let pass_started = std::time::Instant::now();
         let mut results = Vec::new();
-        let system_snapshot = refresh_system_process_snapshot(&sys_metrics);
+        let system_snapshot = refresh_system_process_snapshot(&sys_metrics, &session_ids);
         let mut slow_agents = Vec::new();
 
         for snap in &snapshots {
@@ -607,10 +681,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 
             if let (Some(system_snapshot), Some(pid)) = (&system_snapshot, snap.process_id) {
                 #[cfg(windows)]
-                let discovered_roots = crate::utils::process::find_wardian_session_process_roots(
-                    &snap.session_id,
-                    Some(pid),
-                );
+                let discovered_roots = system_snapshot
+                    .session_roots
+                    .get(&snap.session_id)
+                    .cloned()
+                    .unwrap_or_default();
                 #[cfg(not(windows))]
                 let discovered_roots = Vec::new();
 
@@ -1108,6 +1183,8 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
         let logical_cpu_count = sys.cpus().len();
 
         let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
+        #[cfg(windows)]
+        let mut process_markers = Vec::new();
         for (pid, process) in sys.processes() {
             if let Some(parent) = process.parent() {
                 children_map
@@ -1115,19 +1192,48 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
                     .or_default()
                     .push(pid.as_u32());
             }
+            #[cfg(windows)]
+            {
+                process_markers.push(ProcessMarkerSnapshot {
+                    pid: pid.as_u32(),
+                    process_name: process.name().to_string_lossy().to_string(),
+                    command_line: process
+                        .cmd()
+                        .iter()
+                        .map(|part| part.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    environ: process
+                        .environ()
+                        .iter()
+                        .map(|entry| entry.to_string_lossy().to_string())
+                        .collect::<Vec<_>>(),
+                });
+            }
         }
 
         let mut excluded_roots: BTreeSet<u32> = BTreeSet::new();
+        #[cfg(windows)]
+        let session_roots = {
+            let session_ids = agent_roots
+                .iter()
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            discover_session_roots_from_process_markers(&session_ids, &process_markers)
+        };
         for (session_id, process_id) in &agent_roots {
             excluded_roots.insert(*process_id);
             #[cfg(not(windows))]
             let _ = session_id;
             #[cfg(windows)]
-            for discovered_pid in crate::utils::process::find_wardian_session_process_roots(
-                session_id,
-                Some(*process_id),
-            ) {
-                excluded_roots.insert(discovered_pid);
+            {
+                for discovered_pid in session_roots
+                    .get(session_id)
+                    .into_iter()
+                    .flat_map(|pids| pids.iter().copied())
+                {
+                    excluded_roots.insert(discovered_pid);
+                }
             }
         }
         let excluded_roots: Vec<u32> = excluded_roots.into_iter().collect();
@@ -1222,6 +1328,45 @@ mod tests {
         let app_pids = super::collect_app_process_pids(1, &[3, 7, 8], &children_map);
 
         assert_eq!(app_pids, BTreeSet::from([1_u32, 2, 6]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discovers_session_roots_for_multiple_agents_from_one_process_marker_snapshot() {
+        let markers = vec![
+            super::ProcessMarkerSnapshot {
+                pid: 10,
+                process_name: "cmd.exe".to_string(),
+                command_line: "cmd.exe /d /c codex.cmd resume session-a --cd D:/repo".to_string(),
+                environ: Vec::new(),
+            },
+            super::ProcessMarkerSnapshot {
+                pid: 11,
+                process_name: "node.exe".to_string(),
+                command_line: "node codex".to_string(),
+                environ: vec!["WARDIAN_SESSION_ID=session-a".to_string()],
+            },
+            super::ProcessMarkerSnapshot {
+                pid: 20,
+                process_name: "node.exe".to_string(),
+                command_line: "node other".to_string(),
+                environ: vec!["WARDIAN_SESSION_ID=session-b".to_string()],
+            },
+            super::ProcessMarkerSnapshot {
+                pid: 30,
+                process_name: "pwsh.exe".to_string(),
+                command_line: "pwsh -NoLogo".to_string(),
+                environ: Vec::new(),
+            },
+        ];
+
+        let roots = super::discover_session_roots_from_process_markers(
+            &["session-a".to_string(), "session-b".to_string()],
+            &markers,
+        );
+
+        assert_eq!(roots["session-a"], vec![10, 11]);
+        assert_eq!(roots["session-b"], vec![20]);
     }
 
     #[test]

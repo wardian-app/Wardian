@@ -49,16 +49,28 @@ pub(crate) fn session_bootstrap_prompt() -> &'static str {
 
 #[cfg(windows)]
 pub(crate) fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
-    for pid in find_wardian_session_process_roots(session_id, Some(std::process::id())) {
-        log_debug(&format!(
-            "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
-            provider, session_id, pid
-        ));
-        if let Err(err) = force_kill_process_tree(pid) {
+    let mut attempted = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let roots = find_wardian_session_process_roots(session_id, Some(std::process::id()));
+        let pending = roots
+            .into_iter()
+            .filter(|pid| attempted.insert(*pid))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            break;
+        }
+
+        for pid in pending {
             log_debug(&format!(
-                "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
-                session_id, pid, err
+                "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
+                provider, session_id, pid
             ));
+            if let Err(err) = force_kill_process_tree(pid) {
+                log_debug(&format!(
+                    "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
+                    session_id, pid, err
+                ));
+            }
         }
     }
 }
@@ -547,7 +559,7 @@ pub(crate) fn interactive_provider_launch(
     provider_args: &[String],
 ) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
     #[cfg(windows)]
-    if provider_name == "opencode" {
+    if matches!(provider_name, "opencode" | "antigravity") {
         let bin_path = std::path::Path::new(bin);
         let is_native_exe = bin_path
             .extension()
@@ -675,6 +687,23 @@ mod tests {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn antigravity_interactive_launch_wraps_windows_cmd_shims() {
+        let launch = interactive_provider_launch(
+            "antigravity",
+            r"C:\Users\test\AppData\Roaming\npm\agy.cmd",
+            &["--prompt-interactive".to_string(), String::new()],
+        )
+        .expect("launch");
+
+        assert!(launch.executable.ends_with("cmd.exe") || launch.executable == "cmd.exe");
+        assert_eq!(launch.args[0], "/d");
+        assert_eq!(launch.args[1], "/c");
+        assert!(launch.args[2].contains("agy.cmd"));
+        assert!(launch.args[2].contains("--prompt-interactive"));
     }
 
     #[test]

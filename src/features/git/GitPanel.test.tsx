@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitPanel } from "./GitPanel";
 import { ConfirmProvider } from "../../components/ConfirmDialog";
@@ -68,6 +68,10 @@ describe("GitPanel", () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("shows an error instead of loading forever when the workspace cannot be resolved", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") throw new Error("Agent not found");
@@ -94,6 +98,31 @@ describe("GitPanel", () => {
     expect(await screen.findByText("Not a Git Repository")).toBeInTheDocument();
     expect(screen.getByText("The agent's workspace is not initialized as a git repository.")).toBeInTheDocument();
     expect(screen.queryByText("Loading git status...")).not.toBeInTheDocument();
+  });
+
+  it("does not poll git status after the initial status load fails", async () => {
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    let statusCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/not-a-repo";
+      if (command === "git_status") {
+        statusCalls += 1;
+        throw new Error("fatal: not a git repository (or any of the parent directories): .git");
+      }
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    try {
+      renderGitPanel();
+
+      expect(await screen.findByText("Not a Git Repository")).toBeInTheDocument();
+      expect(statusCalls).toBe(1);
+      expect(setIntervalSpy).not.toHaveBeenCalledWith(expect.any(Function), 3000);
+      expect(mockInvoke).not.toHaveBeenCalledWith("git_watch", { cwd: "C:/not-a-repo" });
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
   });
 
   it("shows a fallback error instead of loading forever when git status returns an empty error", async () => {
@@ -147,6 +176,163 @@ describe("GitPanel", () => {
     expect(screen.getByText("changed.ts")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();
     expect(screen.getByText("Initial commit")).toBeInTheDocument();
+  });
+
+  it("polls git status so working tree edits appear without a git-changed event", async () => {
+    vi.useFakeTimers();
+    let statusCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        statusCalls += 1;
+        return statusCalls === 1
+          ? {
+              branch: "main",
+              upstream: "origin/main",
+              has_upstream: true,
+              ahead: 0,
+              behind: 0,
+              files: [],
+            }
+          : {
+              branch: "main",
+              upstream: "origin/main",
+              has_upstream: true,
+              ahead: 0,
+              behind: 0,
+              files: [{ path: "src/changed.ts", status: "M", is_staged: false }],
+            };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Working tree clean")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByText("changed.ts")).toBeInTheDocument();
+  });
+
+  it("commits unstaged changes by staging them first", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/changed.ts", status: "M", is_staged: false }],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.change(await screen.findByPlaceholderText("Message (Ctrl+Enter to commit)"), {
+      target: { value: "save changes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /commit/i }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["src/changed.ts"],
+      });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit", {
+        cwd: "C:/repo",
+        message: "save changes",
+      });
+    });
+  });
+
+  it("surfaces commit failures in the panel", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "README.md", status: "M", is_staged: true }],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit") throw new Error("Author identity unknown");
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.change(await screen.findByPlaceholderText("Message (Ctrl+Enter to commit)"), {
+      target: { value: "save changes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /commit/i }));
+
+    expect(await screen.findByText("Author identity unknown")).toBeInTheDocument();
+  });
+
+  it("labels unpublished branch pushes as publish branch", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "feature/unpublished",
+          upstream: null,
+          has_upstream: false,
+          ahead: 0,
+          behind: 0,
+          files: [],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    renderGitPanel();
+
+    expect(await screen.findByTitle("Publish Branch")).toBeInTheDocument();
+  });
+
+  it("surfaces push failures in the panel", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_push") throw new Error("remote rejected");
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByTitle("Push"));
+
+    expect(await screen.findByText("remote rejected")).toBeInTheDocument();
   });
 
   it("keeps file status visible when commit history cannot be loaded", async () => {
@@ -286,6 +472,7 @@ describe("GitPanel", () => {
             source_folder: "C:/repo",
             worktree_folder: "C:/repo-worktree",
             member_agent_ids: ["agent-2"],
+            can_delete: false,
           },
         ];
       }
@@ -309,6 +496,155 @@ describe("GitPanel", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
 
+  it("shows join options when source paths differ only by Windows spelling", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "c:/repo/",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: [],
+            can_delete: true,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel({ agentOverride: { folder: "C:\\repo" } });
+
+    expect(await screen.findByText("Move to repo-worktree")).toBeInTheDocument();
+  });
+
+  it("deletes an unassigned available worktree after confirmation", async () => {
+    const onAgentsUpdated = vi.fn();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: [],
+            can_delete: true,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      if (command === "delete_agent_worktree") return null;
+      return null;
+    });
+
+    render(
+      <ConfirmProvider>
+        <GitPanel
+          selectedAgentIds={new Set(["agent-1"])}
+          agents={[agent]}
+          onAgentsUpdated={onAgentsUpdated}
+          telemetry={telemetry}
+        />
+      </ConfirmProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete repo-worktree worktree" }));
+    fireEvent.click(await screen.findByText("Confirm"));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("delete_agent_worktree", {
+        worktreeFolder: "C:/repo-worktree",
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByText("Move to repo-worktree")).not.toBeInTheDocument();
+    });
+    expect(onAgentsUpdated).toHaveBeenCalled();
+  });
+
+  it("does not show delete controls for worktrees assigned to another agent", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/repo-worktree",
+            name: "repo-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/repo-worktree",
+            member_agent_ids: ["agent-2"],
+            can_delete: false,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to repo-worktree")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete repo-worktree worktree" })).not.toBeInTheDocument();
+  });
+
+  it("does not show delete controls for external unassigned worktrees", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/external-worktree",
+            name: "external-worktree",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/external-worktree",
+            member_agent_ids: [],
+            can_delete: false,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to external-worktree")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete external-worktree worktree" })).not.toBeInTheDocument();
+  });
+
+  it("shows discovered unassigned worktrees as join options", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "list_agent_worktrees") {
+        return [
+          {
+            id: "C:/wardian/agents/agent-1/worktrees/manual-review",
+            name: "manual-review",
+            source_folder: "C:/repo",
+            worktree_folder: "C:/wardian/agents/agent-1/worktrees/manual-review",
+            member_agent_ids: [],
+            can_delete: true,
+          },
+        ];
+      }
+      if (command === "git_status") return { branch: "main", upstream: "origin/main", has_upstream: true, ahead: 0, behind: 0, files: [] };
+      if (command === "git_log") return [];
+      return null;
+    });
+
+    renderGitPanel();
+
+    expect(await screen.findByText("Move to manual-review")).toBeInTheDocument();
+  });
+
   it("repairs a stale worktree assignment by moving the runtime fresh", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo-worktree";
@@ -319,6 +655,7 @@ describe("GitPanel", () => {
           source_folder: "C:/repo",
           worktree_folder: "C:/repo-worktree",
           member_agent_ids: ["agent-1"],
+          can_delete: false,
         },
       ];
       if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };
@@ -358,6 +695,7 @@ describe("GitPanel", () => {
           source_folder: "C:/repo",
           worktree_folder: "C:/repo-worktree",
           member_agent_ids: ["agent-1"],
+          can_delete: false,
         },
       ];
       if (command === "git_status") return { branch: "wardian/repo-agent", ahead: 0, behind: 0, files: [] };

@@ -21,6 +21,8 @@ function resetAppPreferences() {
     gridCardDisplayMode: 'terminal',
     watchlistNewAgentPosition: 'top',
     titlebarTelemetryVisible: true,
+    externalEditor: 'system',
+    externalEditorCustomExecutable: '',
     app_settings_overrides: {},
     app_settings_loaded: false,
   });
@@ -140,6 +142,8 @@ describe('app settings persistence', () => {
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
       titlebar_telemetry_visible: false,
+      external_editor: 'vscode',
+      external_editor_custom_executable: null,
     });
 
     await useSettingsStore.getState().loadAppSettings();
@@ -152,6 +156,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
     expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
+    expect(useSettingsStore.getState().externalEditor).toBe('vscode');
     expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
   });
 
@@ -164,6 +169,8 @@ describe('app settings persistence', () => {
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
       titlebar_telemetry_visible: false,
+      external_editor: 'custom',
+      external_editor_custom_executable: 'C:/Tools/editor.exe',
     });
 
     useSettingsStore.getState().setTheme('light');
@@ -173,6 +180,8 @@ describe('app settings persistence', () => {
     useSettingsStore.getState().setGridCardDisplayMode('chat');
     useSettingsStore.getState().setWatchlistNewAgentPosition('bottom');
     useSettingsStore.getState().setTitlebarTelemetryVisible(false);
+    useSettingsStore.getState().setExternalEditor('custom');
+    useSettingsStore.getState().setExternalEditorCustomExecutable('C:/Tools/editor.exe');
 
     await useSettingsStore.getState().saveAppSettings();
 
@@ -186,6 +195,8 @@ describe('app settings persistence', () => {
           grid_card_display_mode: 'chat',
           watchlist_new_agent_position: 'bottom',
           titlebar_telemetry_visible: false,
+          external_editor: 'custom',
+          external_editor_custom_executable: 'C:/Tools/editor.exe',
         }),
       }),
     });
@@ -194,6 +205,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
     expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
+    expect(useSettingsStore.getState().externalEditor).toBe('custom');
   });
 
   it('keeps migrated local preferences when no backend app settings file exists yet', async () => {

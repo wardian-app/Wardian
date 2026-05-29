@@ -5,14 +5,28 @@ import { FolderOpen } from 'lucide-react';
 import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { AgentConfig, GitStatusResult } from '../../types';
+import { useSettingsStore } from '../../store/useSettingsStore';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
 }
 
+const externalEditorLabel = (editor: string) => {
+  switch (editor) {
+    case 'vscode':
+      return 'VS Code';
+    case 'custom':
+      return 'Custom executable';
+    default:
+      return 'System default app';
+  }
+};
+
 export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, agents }) => {
   const confirm = useConfirm();
+  const externalEditor = useSettingsStore((state) => state.externalEditor);
+  const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [gitStatusMap, setGitStatusMap] = useState<Record<string, string>>({});
   const changedDirectories = useMemo(() => {
@@ -39,6 +53,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [previewTitle, setPreviewTitle] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [externalOpenError, setExternalOpenError] = useState<string | null>(null);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((agent) => agent.session_id === selectedAgentId) ?? null;
@@ -113,6 +128,27 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     setMenuPos(null);
   };
 
+  const handleOpenExternalEditor = async () => {
+    if (activeNode) {
+      try {
+        await invoke('open_in_external_editor', {
+          path: activeNode.path,
+          editor: {
+            external_editor: externalEditor,
+            external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
+          },
+        });
+        setExternalOpenError(null);
+      } catch (err) {
+        console.error("External editor open failed:", err);
+        setExternalOpenError(
+          `External app open failed for ${externalEditorLabel(externalEditor)}: ${String(err)}`,
+        );
+      }
+    }
+    setMenuPos(null);
+  };
+
   const handleOpenRoot = async () => {
     if (!rootPath) return;
     try {
@@ -174,6 +210,15 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
           </button>
         </div>
       )}
+
+      {externalOpenError && (
+        <div
+          role="alert"
+          className="mb-2 rounded-md border border-wardian-error/40 bg-wardian-error/10 px-3 py-2 text-xs leading-relaxed text-wardian-error"
+        >
+          {externalOpenError}
+        </div>
+      )}
       
       <div className="flex-1 overflow-auto w-full relative min-h-0 -mx-3 px-3">
         {rootPath ? (
@@ -207,6 +252,9 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
               Open Preview
             </button>
           )}
+          <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-primary" onClick={handleOpenExternalEditor}>
+            Open in External App
+          </button>
           <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-primary" onClick={handleReveal}>
             Reveal in OS
           </button>

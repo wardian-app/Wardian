@@ -181,6 +181,8 @@ export interface GitFileEntry {
 
 export interface GitStatusResult {
     branch: string;
+    upstream: string | null;
+    has_upstream: boolean;
     files: GitFileEntry[];
     ahead: number;
     behind: number;
@@ -199,6 +201,7 @@ export interface AgentWorktreeSummary {
     source_folder: string;
     worktree_folder: string;
     member_agent_ids: string[];
+    can_delete: boolean;
 }
 
 export * from "./workflow";
@@ -226,6 +229,7 @@ export interface QueuePreferences {
     visible_event_types: Record<QueueEventType, boolean>;
     desktop_notifications: Record<QueueEventType, boolean>;
     sound_notifications: Record<QueueEventType, boolean>;
+    sound_volume: number;
 }
 
 export interface QueueItem {

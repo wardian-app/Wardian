@@ -8,6 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import { FolderOpen, RefreshCcw, X } from "lucide-react";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { DocsLink } from "../../components/DocsLink";
+import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -153,6 +154,7 @@ export function UserTerminalPanel({
       scrollback: 2_000,
       theme: termTheme,
     });
+    installConservativeTerminalShortcuts(term);
     const fitAddon = new FitAddon();
     const unicodeAddon = new Unicode11Addon();
     term.loadAddon(fitAddon);

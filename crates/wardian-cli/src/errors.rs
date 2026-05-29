@@ -10,6 +10,7 @@ pub enum ExitCode {
     DbUnavailable = 4,
     Ambiguous = 5,
     AppNotRunning = 6,
+    ControlEndpointTimeout = 7,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +103,19 @@ impl CliError {
             code: "app_not_running",
             message: "Wardian is not running. Start the app to use this command.".to_string(),
             hint: Some("Launch Wardian, then retry.".to_string()),
+            details: None,
+        }
+    }
+
+    pub fn control_endpoint_timeout(message: impl Into<String>) -> Self {
+        Self {
+            exit_code: ExitCode::ControlEndpointTimeout,
+            code: "control_endpoint_timeout",
+            message: message.into(),
+            hint: Some(
+                "Wardian is running but the control endpoint timed out; the app may be overloaded. Retry shortly or reduce active agent load."
+                    .to_string(),
+            ),
             details: None,
         }
     }

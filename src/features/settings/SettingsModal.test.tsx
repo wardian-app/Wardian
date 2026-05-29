@@ -51,6 +51,8 @@ describe("SettingsModal", () => {
       gridCardDisplayMode: "terminal",
       watchlistNewAgentPosition: "top",
       titlebarTelemetryVisible: true,
+      externalEditor: "system",
+      externalEditorCustomExecutable: "",
       shell_id: "auto",
       custom_executable: "",
       custom_args: "",
@@ -140,10 +142,14 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Queue" }));
     fireEvent.click(screen.getByLabelText("Desktop alert for workflow failures"));
     fireEvent.click(screen.getByLabelText("Sound alert for action needed"));
+    fireEvent.change(screen.getByLabelText("Sound alert volume"), {
+      target: { value: "75" },
+    });
 
     const { preferences } = useQueueStore.getState();
     expect(preferences.desktop_notifications.workflow_failed).toBe(true);
     expect(preferences.sound_notifications.action_needed).toBe(false);
+    expect(preferences.sound_volume).toBe(0.75);
   });
 
   it("filters settings by search text across labels and details", () => {
@@ -293,6 +299,38 @@ describe("SettingsModal", () => {
       });
     });
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe("bottom");
+  });
+
+  it("loads and saves the Explorer external editor preference", async () => {
+    useSettingsStore.setState({
+      externalEditor: "system",
+      externalEditorCustomExecutable: "",
+    });
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Explorer" }));
+
+    const select = screen.getByLabelText("External editor");
+    expect(select).toHaveValue("system");
+    expect(screen.getByRole("option", { name: "VS Code (code command)" })).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("Custom editor executable"), {
+      target: { value: "C:/Tools/editor.exe" },
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            external_editor: "custom",
+            external_editor_custom_executable: "C:/Tools/editor.exe",
+          }),
+        }),
+      });
+    });
+    expect(useSettingsStore.getState().externalEditor).toBe("custom");
   });
 
   it("loads and saves the top bar telemetry preference", async () => {

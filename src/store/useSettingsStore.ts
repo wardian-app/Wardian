@@ -10,6 +10,7 @@ import type {
   CodexRuntimePolicy,
   CodexSandboxMode,
   DefaultProviderSetting,
+  ExternalEditorSetting,
   SettingsDocument,
   ShellOption,
   ShellSettings,
@@ -74,6 +75,7 @@ const CODEX_APPROVAL_POLICIES: CodexApprovalPolicy[] = ['untrusted', 'on-failure
 const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', 'codex', 'gemini', 'antigravity', 'opencode'];
 const GRID_CARD_DISPLAY_MODES: GridCardDisplayMode[] = ['terminal', 'chat'];
 const WATCHLIST_NEW_AGENT_POSITIONS: WatchlistNewAgentPosition[] = ['top', 'bottom'];
+const EXTERNAL_EDITOR_SETTINGS: ExternalEditorSetting[] = ['system', 'vscode', 'custom'];
 
 export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
   sandbox_mode: 'workspace-write',
@@ -123,6 +125,14 @@ export function normalizeWatchlistNewAgentPosition(
     : 'top';
 }
 
+export function normalizeExternalEditorSetting(
+  value: string | null | undefined,
+): ExternalEditorSetting {
+  return EXTERNAL_EDITOR_SETTINGS.includes(value as ExternalEditorSetting)
+    ? value as ExternalEditorSetting
+    : 'system';
+}
+
 interface SettingsState {
   theme: AppThemeSetting;
   autoPatchGemini: boolean;
@@ -131,6 +141,8 @@ interface SettingsState {
   gridCardDisplayMode: GridCardDisplayMode;
   watchlistNewAgentPosition: WatchlistNewAgentPosition;
   titlebarTelemetryVisible: boolean;
+  externalEditor: ExternalEditorSetting;
+  externalEditorCustomExecutable: string;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -150,6 +162,8 @@ interface SettingsState {
   setGridCardDisplayMode: (value: GridCardDisplayMode) => void;
   setWatchlistNewAgentPosition: (value: WatchlistNewAgentPosition) => void;
   setTitlebarTelemetryVisible: (value: boolean) => void;
+  setExternalEditor: (value: ExternalEditorSetting) => void;
+  setExternalEditorCustomExecutable: (value: string) => void;
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
@@ -175,6 +189,8 @@ type PersistedSettingsState = Pick<
   | 'gridCardDisplayMode'
   | 'watchlistNewAgentPosition'
   | 'titlebarTelemetryVisible'
+  | 'externalEditor'
+  | 'externalEditorCustomExecutable'
 >;
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -194,6 +210,8 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   grid_card_display_mode: 'terminal',
   watchlist_new_agent_position: 'top',
   titlebar_telemetry_visible: true,
+  external_editor: 'system',
+  external_editor_custom_executable: null,
 };
 
 const EMPTY_APP_SETTINGS_OVERRIDES: AppSettingsOverrides = {};
@@ -265,6 +283,12 @@ function appOverridesFromSettings(settings: AppSettings): AppSettingsOverrides {
     ...((settings.titlebar_telemetry_visible !== false) !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible
       ? { titlebar_telemetry_visible: settings.titlebar_telemetry_visible !== false }
       : {}),
+    ...(normalizeExternalEditorSetting(settings.external_editor) !== DEFAULT_APP_SETTINGS.external_editor
+      ? { external_editor: normalizeExternalEditorSetting(settings.external_editor) }
+      : {}),
+    ...((settings.external_editor_custom_executable?.trim() ?? '') !== ''
+      ? { external_editor_custom_executable: settings.external_editor_custom_executable?.trim() ?? null }
+      : {}),
   };
 }
 
@@ -277,6 +301,8 @@ function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
     grid_card_display_mode: state.gridCardDisplayMode,
     watchlist_new_agent_position: state.watchlistNewAgentPosition,
     titlebar_telemetry_visible: state.titlebarTelemetryVisible,
+    external_editor: state.externalEditor,
+    external_editor_custom_executable: state.externalEditorCustomExecutable.trim() || null,
   });
 }
 
@@ -331,6 +357,12 @@ function normalizeAppOverrides(overrides: AppSettingsOverrides | undefined): App
     ...(typeof overrides?.titlebar_telemetry_visible === 'boolean'
       ? { titlebar_telemetry_visible: overrides.titlebar_telemetry_visible }
       : {}),
+    ...(overrides?.external_editor
+      ? { external_editor: normalizeExternalEditorSetting(overrides.external_editor) }
+      : {}),
+    ...('external_editor_custom_executable' in (overrides ?? {})
+      ? { external_editor_custom_executable: overrides?.external_editor_custom_executable?.trim() || null }
+      : {}),
   };
 }
 
@@ -365,7 +397,9 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
     state.terminalFontFamily.trim() !== '' ||
     state.gridCardDisplayMode !== DEFAULT_APP_SETTINGS.grid_card_display_mode ||
     state.watchlistNewAgentPosition !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position ||
-    state.titlebarTelemetryVisible !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible
+    state.titlebarTelemetryVisible !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible ||
+    state.externalEditor !== DEFAULT_APP_SETTINGS.external_editor ||
+    state.externalEditorCustomExecutable.trim() !== ''
   );
 }
 
@@ -379,6 +413,8 @@ export const useSettingsStore = create<SettingsState>()(
       gridCardDisplayMode: 'terminal',
       watchlistNewAgentPosition: 'top',
       titlebarTelemetryVisible: true,
+      externalEditor: 'system',
+      externalEditorCustomExecutable: '',
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -432,6 +468,23 @@ export const useSettingsStore = create<SettingsState>()(
         titlebarTelemetryVisible,
         app_settings_overrides: { ...state.app_settings_overrides, titlebar_telemetry_visible: titlebarTelemetryVisible },
       })),
+      setExternalEditor: (externalEditor) => set((state) => {
+        const normalized = normalizeExternalEditorSetting(externalEditor);
+        return {
+          externalEditor: normalized,
+          app_settings_overrides: { ...state.app_settings_overrides, external_editor: normalized },
+        };
+      }),
+      setExternalEditorCustomExecutable: (externalEditorCustomExecutable) => set((state) => {
+        const trimmed = externalEditorCustomExecutable.trim();
+        const { external_editor_custom_executable: _removed, ...rest } = state.app_settings_overrides;
+        return {
+          externalEditorCustomExecutable,
+          app_settings_overrides: trimmed
+            ? { ...state.app_settings_overrides, external_editor_custom_executable: trimmed }
+            : rest,
+        };
+      }),
       setShellId: (shell_id) => set((state) => ({
         shell_id,
         shell_settings_overrides: { ...state.shell_settings_overrides, shell_id },
@@ -516,6 +569,8 @@ export const useSettingsStore = create<SettingsState>()(
             gridCardDisplayMode: normalizeGridCardDisplayMode(settings.grid_card_display_mode),
             watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(settings.watchlist_new_agent_position),
             titlebarTelemetryVisible: settings.titlebar_telemetry_visible !== false,
+            externalEditor: normalizeExternalEditorSetting(settings.external_editor),
+            externalEditorCustomExecutable: settings.external_editor_custom_executable?.trim() ?? '',
             app_settings_overrides: normalizeAppOverrides(overrides),
             app_settings_loaded: true,
           });
@@ -533,6 +588,8 @@ export const useSettingsStore = create<SettingsState>()(
           grid_card_display_mode: normalizeGridCardDisplayMode(get().gridCardDisplayMode),
           watchlist_new_agent_position: normalizeWatchlistNewAgentPosition(get().watchlistNewAgentPosition),
           titlebar_telemetry_visible: get().titlebarTelemetryVisible,
+          external_editor: normalizeExternalEditorSetting(get().externalEditor),
+          external_editor_custom_executable: get().externalEditorCustomExecutable.trim() || null,
         };
         const settings: SettingsDocument<AppSettings, AppSettingsOverrides> = {
           schema_version: 2,
@@ -550,6 +607,8 @@ export const useSettingsStore = create<SettingsState>()(
           gridCardDisplayMode: normalizeGridCardDisplayMode(saved.grid_card_display_mode),
           watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(saved.watchlist_new_agent_position),
           titlebarTelemetryVisible: saved.titlebar_telemetry_visible !== false,
+          externalEditor: normalizeExternalEditorSetting(saved.external_editor),
+          externalEditorCustomExecutable: saved.external_editor_custom_executable?.trim() ?? '',
           app_settings_overrides: normalizeAppOverrides(overrides),
           app_settings_loaded: true,
         });
@@ -646,6 +705,8 @@ export const useSettingsStore = create<SettingsState>()(
           gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode ?? state.grid_card_display_mode),
           watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
           titlebarTelemetryVisible: typeof state.titlebarTelemetryVisible === 'boolean' ? state.titlebarTelemetryVisible : true,
+          externalEditor: normalizeExternalEditorSetting(state.externalEditor),
+          externalEditorCustomExecutable: state.externalEditorCustomExecutable?.trim() ?? '',
         };
       },
       partialize: (state) => ({
@@ -656,6 +717,8 @@ export const useSettingsStore = create<SettingsState>()(
         gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode),
         watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
         titlebarTelemetryVisible: state.titlebarTelemetryVisible,
+        externalEditor: normalizeExternalEditorSetting(state.externalEditor),
+        externalEditorCustomExecutable: state.externalEditorCustomExecutable.trim(),
       }),
     }
   )

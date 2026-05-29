@@ -270,6 +270,11 @@ async function createMockAgent(
   workspacePath,
   { sessionId, sessionName, isOff, mockScenario = null, mockDelayMs = null },
 ) {
+  // Mock agents are only valid for Wardian-owned contracts: shared state,
+  // routing, queueing, watch surfaces, and deterministic terminal plumbing.
+  // Do not use this helper to claim provider-specific behavior for Codex,
+  // Claude, Gemini, OpenCode, or Antigravity. Provider-runtime claims belong in
+  // opt-in real-provider native E2E tests.
   const result = await driver.executeAsyncScript((sessionId, sessionName, folder, isOff, mockScenario, mockDelayMs, done) => {
     const providerConfig =
       mockScenario || mockDelayMs
@@ -993,7 +998,7 @@ test("native CLI send routes processing mock by queue policy", { timeout: 180000
     ]);
     const queuedDelivery = JSON.parse(queuedResult.stdout).delivery[0];
     assert.equal(queuedDelivery.delivery_state, "queued");
-    assert.equal(queuedDelivery.runtime_state, "target_processing");
+    assert.equal(queuedDelivery.runtime_state, "provider_input_not_ready");
     assert.match(queuedDelivery.message_id, /^msg_/);
 
     const liveOnlyAgent = await createMockAgent(session.driver, workspacePath, {

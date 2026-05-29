@@ -10,6 +10,31 @@ export interface RemoteGatewayConfig {
   gateway_identity_fingerprint: string;
 }
 
+export type RemoteSetupOverallStatus = "disabled" | "needs_action" | "ready";
+
+export type RemoteSetupCheckStatus = "ok" | "warning" | "error";
+
+export interface RemoteSetupCheck {
+  id: string;
+  label: string;
+  status: RemoteSetupCheckStatus;
+  message: string;
+  details: string | null;
+}
+
+export interface RemoteSetupCommandHint {
+  label: string;
+  command: string;
+}
+
+export interface RemoteSetupCheckResult {
+  overall_status: RemoteSetupOverallStatus;
+  checks: RemoteSetupCheck[];
+  inferred_origin: string | null;
+  serve_target: string | null;
+  setup_command: RemoteSetupCommandHint | null;
+}
+
 export interface PairingQrPayload {
   gateway_origin: string;
   pairing_offer_id: string;

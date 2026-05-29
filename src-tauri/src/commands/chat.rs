@@ -31,7 +31,15 @@ pub async fn load_agent_chat_transcript_for_state(
         return Err("session_id is required".to_string());
     }
 
-    let (watch_state, provider, resume_session, current_status, last_status_at, log_path) = {
+    let (
+        watch_state,
+        provider,
+        resume_session,
+        current_status,
+        last_status_at,
+        log_path,
+        cleared_provider_sessions,
+    ) = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&session_id)
@@ -42,6 +50,11 @@ pub async fn load_agent_chat_transcript_for_state(
             .map_err(|_| "agent config lock poisoned".to_string())?;
         let provider = config.provider.clone();
         let resume_session = config.resume_session.clone();
+        let cleared_provider_sessions = if provider == "codex" {
+            config.codex_config().cleared_provider_sessions
+        } else {
+            Vec::new()
+        };
         let current_status = agent
             .current_status
             .lock()
@@ -64,6 +77,7 @@ pub async fn load_agent_chat_transcript_for_state(
             current_status,
             last_status_at,
             log_path,
+            cleared_provider_sessions,
         )
     };
 
@@ -73,8 +87,12 @@ pub async fn load_agent_chat_transcript_for_state(
         .snapshot_since(None, None)
         .map_err(|error| format!("watch state error: {} {}", error.code(), error.details()))?;
 
-    let mut provider_events =
-        load_provider_log_chat_events(&session_id, &provider, log_path.as_deref());
+    let mut provider_events = load_provider_log_chat_events(
+        &session_id,
+        &provider,
+        log_path.as_deref(),
+        &cleared_provider_sessions,
+    );
     if provider == "opencode" {
         provider_events.extend(load_opencode_db_chat_events(
             &session_id,
@@ -258,10 +276,14 @@ fn load_provider_log_chat_events(
     session_id: &str,
     provider: &str,
     log_path: Option<&Path>,
+    cleared_provider_sessions: &[String],
 ) -> Vec<AgentChatEvent> {
     let Some(path) = log_path else {
         return Vec::new();
     };
+    if provider_log_path_is_cleared(provider, path, cleared_provider_sessions) {
+        return Vec::new();
+    }
     let Ok(content) = read_provider_log_tail(path) else {
         return Vec::new();
     };
@@ -274,6 +296,24 @@ fn load_provider_log_chat_events(
             event
         })
         .collect()
+}
+
+fn provider_log_path_is_cleared(
+    provider: &str,
+    path: &Path,
+    cleared_provider_sessions: &[String],
+) -> bool {
+    if provider != "codex" || cleared_provider_sessions.is_empty() {
+        return false;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    cleared_provider_sessions.iter().any(|session_id| {
+        let session_id = session_id.trim();
+        !session_id.is_empty() && file_name.contains(session_id)
+    })
 }
 
 fn read_provider_log_tail(path: &Path) -> std::io::Result<String> {
@@ -922,7 +962,7 @@ Do you want to proceed?
         )
         .expect("write log");
 
-        let chat_events = load_provider_log_chat_events("agent-1", "codex", Some(&log_path));
+        let chat_events = load_provider_log_chat_events("agent-1", "codex", Some(&log_path), &[]);
 
         assert_eq!(chat_events.len(), 2);
         assert_eq!(chat_events[0].kind, AgentChatEventKind::Message);
@@ -933,6 +973,29 @@ Do you want to proceed?
             Some("Rendered from the provider log")
         );
         assert_eq!(chat_events[0].metadata["provider_log"], true);
+    }
+
+    #[test]
+    fn skips_codex_provider_log_from_cleared_provider_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cleared_session = "019db2f3-22de-7861-8bc6-1b86db1686db";
+        let log_path = temp
+            .path()
+            .join(format!("rollout-2026-04-20T00-00-00-{cleared_session}.jsonl"));
+        std::fs::write(
+            &log_path,
+            r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"message","role":"assistant","content":"Before clear"}}"#,
+        )
+        .expect("write log");
+
+        let chat_events = load_provider_log_chat_events(
+            "agent-1",
+            "codex",
+            Some(&log_path),
+            &[cleared_session.to_string()],
+        );
+
+        assert!(chat_events.is_empty());
     }
 
     #[test]

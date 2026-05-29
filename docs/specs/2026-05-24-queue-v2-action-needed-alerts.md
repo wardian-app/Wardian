@@ -23,15 +23,16 @@ Queue preferences are stored under the active Wardian home at:
 <wardian-home>/queue/preferences.json
 ```
 
-The document stores three boolean maps keyed by event type:
+The document stores three boolean maps keyed by event type plus a sound volume:
 
 - `visible_event_types`
 - `desktop_notifications`
 - `sound_notifications`
+- `sound_volume`
 
-All event types are visible by default. Desktop and sound alerts default to `true` only for `action_needed`; every passive completion/failure event defaults to `false` for alerts until the user opts in.
+All event types are visible by default. Desktop and sound alerts default to `true` only for `action_needed`; every passive completion/failure event defaults to `false` for alerts until the user opts in. `sound_volume` defaults to `0.5` and is clamped to the `0..1` range when preferences are loaded or changed.
 
-Visibility filters live in the Queue header because they affect the current triage list. Desktop and sound rules live in **Settings > Queue** because they are notification policy rather than per-review workflow controls.
+Visibility filters live in the Queue header because they affect the current triage list. Desktop alert rules, sound alert rules, and sound volume live in **Settings > Queue** because they are notification policy rather than per-review workflow controls.
 
 ## Runtime Behavior
 
@@ -41,7 +42,7 @@ Action-needed cards use the amber warning treatment used elsewhere for action-re
 
 When the app receives a generic `Action Needed` status but has buffered recent provider text for the agent, the queue card uses that buffered text as the action-needed summary and then clears the buffer. This keeps numbered approval choices visible in Queue without reusing the approval prompt later as a completion summary.
 
-Desktop notifications use the browser notification API available in the WebView. Sound alerts use a short Web Audio tone. If either capability is blocked by OS or browser policy, queue item creation still succeeds.
+Desktop notifications use Wardian's native desktop notification plugin when available, with the WebView notification API as a fallback. Sound alerts use a short Web Audio tone at the configured queue sound volume. If either capability is blocked by OS or browser policy, queue item creation still succeeds.
 
 ## Testing
 
@@ -52,4 +53,4 @@ Unit and component tests cover:
 - workflow failure filter classification
 - Queue rendering, header filtering, Settings notification rules, terminal open action, and clickable action choices
 - App status-transition integration from `Processing...` to `Action Needed`
-- notification dispatch defaults for action-needed events
+- notification dispatch defaults, native-notification fallback behavior, and sound volume scaling for action-needed events

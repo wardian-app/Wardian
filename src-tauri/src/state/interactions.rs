@@ -455,23 +455,24 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         wardian_core::db::init_db_at_path(&home.path().join("state.db")).unwrap();
 
+        let session_id = "hydrate-provider-agent-1";
         let state = InteractionState::default();
         let task = state
             .create_task(
                 Some("planner-1".to_string()),
-                "agent-1".to_string(),
+                session_id.to_string(),
                 InteractionBodyRef::Inline {
                     body: "review".to_string(),
                 },
             )
             .await;
         state
-            .complete_task_with_reply(&task.id, Some("agent-1"), ReplyStatus::Blocked, "blocked")
+            .complete_task_with_reply(&task.id, Some(session_id), ReplyStatus::Blocked, "blocked")
             .await
             .unwrap();
         state
             .start_provider_input_generation(
-                "agent-1",
+                session_id,
                 ProviderInputReadiness::Ready,
                 Some(ProviderReadyEvidence::ProviderEvent),
             )
@@ -490,7 +491,7 @@ mod tests {
         );
         assert_eq!(
             hydrated
-                .provider_input_state("agent-1")
+                .provider_input_state(session_id)
                 .await
                 .unwrap()
                 .state,
