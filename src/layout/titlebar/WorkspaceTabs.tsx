@@ -1,7 +1,7 @@
 import React from "react";
 import { useQueueStore } from "../../store/useQueueStore";
 
-export type ViewMode = "grid" | "dashboard" | "library" | "queue" | "workflow-builder" | "workflow-builder-v2" | "graph" | "garden";
+export type ViewMode = "grid" | "dashboard" | "library" | "queue" | "workflow-builder" | "workflow-builder-v2" | "workflow-runs" | "graph" | "garden";
 
 const VIEW_TABS: { label: string; mode: ViewMode }[] = [
   { label: "Grid", mode: "grid" },
@@ -12,6 +12,7 @@ const VIEW_TABS: { label: string; mode: ViewMode }[] = [
   { label: "Library", mode: "library" },
   { label: "Workflows", mode: "workflow-builder" },
   { label: "Blueprints", mode: "workflow-builder-v2" },
+  { label: "Runs", mode: "workflow-runs" },
 ];
 
 interface WorkspaceTabsProps {

@@ -449,6 +449,8 @@ pub fn run() {
             commands::workflow::workflow_validate,
             commands::workflow::workflow_write,
             commands::workflow::workflow_list_blueprints,
+            commands::workflow::workflow_list_runs,
+            commands::workflow::workflow_read_run,
             commands::library::get_library_tree,
             commands::library::save_library_item,
             commands::library::update_library_metadata,

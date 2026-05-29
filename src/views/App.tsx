@@ -39,6 +39,7 @@ import { PlaceholderView } from "./PlaceholderView";
 import { QueueView } from "./QueueView";
 import { WorkflowBuilderView } from "./WorkflowBuilderView";
 import { BuilderView } from "./BuilderView";
+import { RunView } from "../features/workflows/run/RunView";
 import { LibraryView } from "./LibraryView";
 import { useQueueStore } from "../store/useQueueStore";
 import { useWorkflowStore } from "../store/useWorkflowStore";
@@ -307,7 +308,7 @@ function AppBody() {
       if (e.ctrlKey && e.key === "Tab") {
         e.preventDefault();
         setViewMode(prev => {
-          const modes: ViewMode[] = ["grid", "dashboard", "queue", "library", "workflow-builder", "workflow-builder-v2", "graph", "garden"];
+          const modes: ViewMode[] = ["grid", "dashboard", "queue", "library", "workflow-builder", "workflow-builder-v2", "workflow-runs", "graph", "garden"];
           const currentIndex = modes.indexOf(prev);
           const nextIndex = e.shiftKey ? (currentIndex - 1 + modes.length) % modes.length : (currentIndex + 1) % modes.length;
           return modes[nextIndex];
@@ -1170,6 +1171,12 @@ function AppBody() {
             {viewMode === "workflow-builder-v2" && (
               <div className="flex-1 min-h-0 bg-wardian-bg">
                 <BuilderView theme={theme} />
+              </div>
+            )}
+
+            {viewMode === "workflow-runs" && (
+              <div className="flex-1 min-h-0 bg-wardian-bg">
+                <RunView theme={theme} />
               </div>
             )}
 

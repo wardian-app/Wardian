@@ -1,6 +1,7 @@
 use crate::workflow_engine;
 use serde_json::Value;
 use tauri::AppHandle;
+use wardian_core::engine::store::{read_checkpoint, read_events};
 use wardian_core::models::{ScheduledRun, WorkflowDefinition};
 use wardian_core::workflow::{self, Blueprint};
 
@@ -146,6 +147,68 @@ pub fn workflow_list_blueprints() -> Result<Vec<serde_json::Value>, String> {
         }
     }
     Ok(out)
+}
+
+/// List all v2 runs under `<home>/logs/workflows/<id>/<run_id>/`.
+#[tauri::command]
+pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
+    let root = wardian_core::paths::workflow_runs_dir().ok_or("no wardian home")?;
+    let mut out = Vec::new();
+    if !root.exists() {
+        return Ok(out);
+    }
+
+    for bp in std::fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+        if !bp.path().is_dir() {
+            continue;
+        }
+        for run in std::fs::read_dir(bp.path())
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            let dir = run.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Ok(Some(state)) = read_checkpoint(&dir) {
+                out.push(serde_json::json!({
+                    "run_id": state.run_id,
+                    "blueprint_id": state.blueprint_id,
+                    "status": state.status,
+                    "node_count": state.nodes.len(),
+                    "failure": state.failure,
+                    "path": dir.to_string_lossy(),
+                }));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Read one run: its RunState checkpoint, full event trace, and optional blueprint.
+#[tauri::command]
+pub fn workflow_read_run(blueprint_id: String, run_id: String) -> Result<serde_json::Value, String> {
+    let dir = wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id)
+        .ok_or("no wardian home")?;
+    let state = read_checkpoint(&dir).map_err(|e| e.to_string())?;
+    let events = read_events(&dir).map_err(|e| e.to_string())?;
+    let blueprint = resolve_blueprint(&blueprint_id);
+
+    Ok(serde_json::json!({ "state": state, "events": events, "blueprint": blueprint }))
+}
+
+fn resolve_blueprint(id: &str) -> Option<serde_json::Value> {
+    let home = wardian_core::paths::wardian_home()?;
+    let dir = home.join("library").join("workflows");
+    for entry in walk_md(&dir) {
+        if let Ok(bp) = wardian_core::workflow::parse_file(&entry) {
+            if bp.id == id {
+                return serde_json::to_value(bp).ok();
+            }
+        }
+    }
+    None
 }
 
 fn walk_md(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

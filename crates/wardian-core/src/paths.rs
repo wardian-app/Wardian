@@ -114,6 +114,16 @@ pub fn agents_dir() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("agents"))
 }
 
+/// `<wardian-home>/logs/workflows` — root of all v2 run logs.
+pub fn workflow_runs_dir() -> Option<PathBuf> {
+    wardian_home().map(|home| home.join("logs").join("workflows"))
+}
+
+/// `<wardian-home>/logs/workflows/<blueprint_id>/<run_id>` — one run's durable root.
+pub fn workflow_run_dir(blueprint_id: &str, run_id: &str) -> Option<PathBuf> {
+    workflow_runs_dir().map(|dir| dir.join(blueprint_id).join(run_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +149,29 @@ mod tests {
             "wardian"
         };
         assert!(cli_bin_path().unwrap().ends_with(expected));
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn workflow_run_paths_use_home_logs_workflows_layout() {
+        let _guard = crate::tests::env_lock();
+        std::env::set_var("WARDIAN_HOME", "/tmp/wardian-run-view");
+
+        assert_eq!(
+            workflow_runs_dir().unwrap(),
+            PathBuf::from("/tmp/wardian-run-view")
+                .join("logs")
+                .join("workflows")
+        );
+        assert_eq!(
+            workflow_run_dir("wf", "run-1").unwrap(),
+            PathBuf::from("/tmp/wardian-run-view")
+                .join("logs")
+                .join("workflows")
+                .join("wf")
+                .join("run-1")
+        );
+
         std::env::remove_var("WARDIAN_HOME");
     }
 
