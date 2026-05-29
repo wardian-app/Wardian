@@ -27,7 +27,11 @@ mod tests {
         assert_eq!(types.len(), crate::registry::node_types().len());
         let task = types.iter().find(|t| t["id"] == "task").unwrap();
         assert_eq!(task["kind"], "agent");
-        assert!(task["fields"].as_array().unwrap().iter().any(|f| f["id"] == "prompt"));
+        assert!(task["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"] == "prompt"));
     }
 
     #[test]

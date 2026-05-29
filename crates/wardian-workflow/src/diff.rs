@@ -13,7 +13,9 @@ pub struct BlueprintDiff {
 
 impl BlueprintDiff {
     pub fn is_empty(&self) -> bool {
-        self.added_nodes.is_empty() && self.removed_nodes.is_empty() && self.changed_nodes.is_empty()
+        self.added_nodes.is_empty()
+            && self.removed_nodes.is_empty()
+            && self.changed_nodes.is_empty()
     }
 }
 
@@ -50,10 +52,24 @@ mod tests {
     use crate::blueprint::{Blueprint, Node};
 
     fn node(id: &str) -> Node {
-        Node { id: id.into(), r#type: "task".into(), name: None, parent: None, fields: serde_json::Map::new(), position: None }
+        Node {
+            id: id.into(),
+            r#type: "task".into(),
+            name: None,
+            parent: None,
+            fields: serde_json::Map::new(),
+            position: None,
+        }
     }
     fn bp(nodes: Vec<Node>) -> Blueprint {
-        Blueprint { schema: 2, id: "d".into(), name: "D".into(), nodes, edges: vec![], body: String::new() }
+        Blueprint {
+            schema: 2,
+            id: "d".into(),
+            name: "D".into(),
+            nodes,
+            edges: vec![],
+            body: String::new(),
+        }
     }
 
     #[test]

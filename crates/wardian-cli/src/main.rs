@@ -386,9 +386,7 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
         WorkflowCommand::GenSchema { out, check } => {
             render_workflow_gen(&out, GenKind::Schema, check)
         }
-        WorkflowCommand::GenDocs { out, check } => {
-            render_workflow_gen(&out, GenKind::Docs, check)
-        }
+        WorkflowCommand::GenDocs { out, check } => render_workflow_gen(&out, GenKind::Docs, check),
     }
 }
 
@@ -399,7 +397,12 @@ fn render_workflow_node_types(json: bool) -> Result<String, CliError> {
     // Human summary: one line per node type.
     let mut lines = String::from("NODE TYPES\n");
     for def in wardian_workflow::node_types() {
-        lines.push_str(&format!("  {:<18} {:<8} {}\n", def.id, format!("{:?}", def.kind).to_lowercase(), def.description));
+        lines.push_str(&format!(
+            "  {:<18} {:<8} {}\n",
+            def.id,
+            format!("{:?}", def.kind).to_lowercase(),
+            def.description
+        ));
     }
     Ok(lines)
 }
@@ -991,7 +994,11 @@ mod tests {
         let out = render_workflow_node_types(true).unwrap();
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(json["schema"], 2);
-        assert!(json["node_types"].as_array().unwrap().iter().any(|t| t["id"] == "task"));
+        assert!(json["node_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == "task"));
     }
 
     #[test]

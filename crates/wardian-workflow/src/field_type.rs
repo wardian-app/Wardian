@@ -9,8 +9,12 @@ pub enum FieldType {
     Text,
     LongText,
     Prompt,
-    Code { language: String },
-    Enum { options: Vec<String> },
+    Code {
+        language: String,
+    },
+    Enum {
+        options: Vec<String>,
+    },
     Bool,
     Number,
     Duration,

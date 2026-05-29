@@ -251,7 +251,11 @@ fn build_registry() -> Vec<NodeTypeDef> {
             label: "Manual Trigger".into(),
             icon: "play".into(),
             description: "Start the workflow on demand.".into(),
-            fields: vec![FieldDef::new("input_schema", FieldType::JsonSchema, "Input schema")],
+            fields: vec![FieldDef::new(
+                "input_schema",
+                FieldType::JsonSchema,
+                "Input schema",
+            )],
             inputs: vec![],
             outputs: default_out(),
             outputs_from_field: None,

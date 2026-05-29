@@ -24,7 +24,12 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     fn error(code: &'static str, message: impl Into<String>, node: Option<&str>) -> Self {
-        Self { severity: Severity::Error, code, message: message.into(), node: node.map(str::to_string) }
+        Self {
+            severity: Severity::Error,
+            code,
+            message: message.into(),
+            node: node.map(str::to_string),
+        }
     }
 }
 
@@ -36,10 +41,16 @@ pub struct ValidationReport {
 
 impl ValidationReport {
     pub fn is_valid(&self) -> bool {
-        !self.diagnostics.iter().any(|d| d.severity == Severity::Error)
+        !self
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
     }
     pub fn errors(&self) -> Vec<&Diagnostic> {
-        self.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect()
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect()
     }
 }
 
@@ -68,7 +79,10 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
         let Some(def) = find_node_type(&node.r#type) else {
             report.diagnostics.push(Diagnostic::error(
                 "unknown_node_type",
-                format!("unknown node type `{}` (see `wardian workflow node-types`)", node.r#type),
+                format!(
+                    "unknown node type `{}` (see `wardian workflow node-types`)",
+                    node.r#type
+                ),
                 Some(&node.id),
             ));
             continue;
@@ -79,7 +93,10 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
             if field.required && present.is_none() {
                 report.diagnostics.push(Diagnostic::error(
                     "missing_required_field",
-                    format!("node `{}` is missing required field `{}`", node.id, field.id),
+                    format!(
+                        "node `{}` is missing required field `{}`",
+                        node.id, field.id
+                    ),
                     Some(&node.id),
                 ));
             }
@@ -103,7 +120,10 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
             if !parent_is_loop {
                 report.diagnostics.push(Diagnostic::error(
                     "invalid_parent",
-                    format!("node `{}` parent `{}` is not a loop node", node.id, parent_id),
+                    format!(
+                        "node `{}` parent `{}` is not a loop node",
+                        node.id, parent_id
+                    ),
                     Some(&node.id),
                 ));
             }
@@ -115,7 +135,10 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
         if !node_ids.contains(edge.from.as_str()) || !node_ids.contains(edge.to.as_str()) {
             report.diagnostics.push(Diagnostic::error(
                 "dangling_edge",
-                format!("edge `{}` -> `{}` references a missing node", edge.from, edge.to),
+                format!(
+                    "edge `{}` -> `{}` references a missing node",
+                    edge.from, edge.to
+                ),
                 None,
             ));
         }
@@ -138,9 +161,18 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
 /// belong to later sub-projects.
 fn check_value_kind(field_type: &FieldType, value: &serde_json::Value) -> Option<String> {
     match field_type {
-        FieldType::Bool => value.is_boolean().then_some(()).map_or(Some("expected a boolean".into()), |_| None),
-        FieldType::Number => value.is_number().then_some(()).map_or(Some("expected a number".into()), |_| None),
-        FieldType::KvMap => value.is_object().then_some(()).map_or(Some("expected an object".into()), |_| None),
+        FieldType::Bool => value
+            .is_boolean()
+            .then_some(())
+            .map_or(Some("expected a boolean".into()), |_| None),
+        FieldType::Number => value
+            .is_number()
+            .then_some(())
+            .map_or(Some("expected a number".into()), |_| None),
+        FieldType::KvMap => value
+            .is_object()
+            .then_some(())
+            .map_or(Some("expected an object".into()), |_| None),
         FieldType::Enum { options } => match value.as_str() {
             Some(s) if options.iter().any(|o| o == s) => None,
             Some(s) => Some(format!("`{s}` is not one of {options:?}")),
@@ -156,15 +188,22 @@ fn check_value_kind(field_type: &FieldType, value: &serde_json::Value) -> Option
 
 /// Kahn's algorithm over only the edges between *real* nodes.
 fn has_cycle(blueprint: &Blueprint) -> bool {
-    let mut indegree: HashMap<&str, usize> = blueprint.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
+    let mut indegree: HashMap<&str, usize> =
+        blueprint.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in &blueprint.edges {
         if indegree.contains_key(edge.from.as_str()) && indegree.contains_key(edge.to.as_str()) {
-            adj.entry(edge.from.as_str()).or_default().push(edge.to.as_str());
+            adj.entry(edge.from.as_str())
+                .or_default()
+                .push(edge.to.as_str());
             *indegree.get_mut(edge.to.as_str()).unwrap() += 1;
         }
     }
-    let mut queue: Vec<&str> = indegree.iter().filter(|(_, d)| **d == 0).map(|(k, _)| *k).collect();
+    let mut queue: Vec<&str> = indegree
+        .iter()
+        .filter(|(_, d)| **d == 0)
+        .map(|(k, _)| *k)
+        .collect();
     let mut visited = 0usize;
     while let Some(n) = queue.pop() {
         visited += 1;
@@ -190,21 +229,47 @@ mod tests {
         let mut fields = serde_json::Map::new();
         fields.insert("agent".into(), serde_json::json!("role:coder"));
         fields.insert("prompt".into(), serde_json::json!("do it"));
-        Node { id: id.into(), r#type: "task".into(), name: None, parent: None, fields, position: None }
+        Node {
+            id: id.into(),
+            r#type: "task".into(),
+            name: None,
+            parent: None,
+            fields,
+            position: None,
+        }
     }
 
     fn base(nodes: Vec<Node>, edges: Vec<Edge>) -> Blueprint {
-        Blueprint { schema: 2, id: "demo".into(), name: "Demo".into(), nodes, edges, body: String::new() }
+        Blueprint {
+            schema: 2,
+            id: "demo".into(),
+            name: "Demo".into(),
+            nodes,
+            edges,
+            body: String::new(),
+        }
     }
 
     #[test]
     fn valid_blueprint_has_no_errors() {
         let bp = base(
             vec![
-                Node { id: "t".into(), r#type: "manual_trigger".into(), name: None, parent: None, fields: serde_json::Map::new(), position: None },
+                Node {
+                    id: "t".into(),
+                    r#type: "manual_trigger".into(),
+                    name: None,
+                    parent: None,
+                    fields: serde_json::Map::new(),
+                    position: None,
+                },
                 task("plan"),
             ],
-            vec![Edge { from: "t".into(), to: "plan".into(), from_port: "out".into(), to_port: "in".into() }],
+            vec![Edge {
+                from: "t".into(),
+                to: "plan".into(),
+                from_port: "out".into(),
+                to_port: "in".into(),
+            }],
         );
         let report = validate(&bp);
         assert!(report.is_valid(), "unexpected: {:?}", report.errors());
@@ -213,11 +278,21 @@ mod tests {
     #[test]
     fn unknown_node_type_is_an_error() {
         let bp = base(
-            vec![Node { id: "x".into(), r#type: "frobnicate".into(), name: None, parent: None, fields: serde_json::Map::new(), position: None }],
+            vec![Node {
+                id: "x".into(),
+                r#type: "frobnicate".into(),
+                name: None,
+                parent: None,
+                fields: serde_json::Map::new(),
+                position: None,
+            }],
             vec![],
         );
         let report = validate(&bp);
-        assert!(report.errors().iter().any(|d| d.code == "unknown_node_type"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|d| d.code == "unknown_node_type"));
     }
 
     #[test]
@@ -234,7 +309,15 @@ mod tests {
 
     #[test]
     fn edge_to_unknown_node_is_an_error() {
-        let bp = base(vec![task("plan")], vec![Edge { from: "plan".into(), to: "ghost".into(), from_port: "out".into(), to_port: "in".into() }]);
+        let bp = base(
+            vec![task("plan")],
+            vec![Edge {
+                from: "plan".into(),
+                to: "ghost".into(),
+                from_port: "out".into(),
+                to_port: "in".into(),
+            }],
+        );
         let report = validate(&bp);
         assert!(report.errors().iter().any(|d| d.code == "dangling_edge"));
     }
@@ -244,8 +327,18 @@ mod tests {
         let bp = base(
             vec![task("a"), task("b")],
             vec![
-                Edge { from: "a".into(), to: "b".into(), from_port: "out".into(), to_port: "in".into() },
-                Edge { from: "b".into(), to: "a".into(), from_port: "out".into(), to_port: "in".into() },
+                Edge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    from_port: "out".into(),
+                    to_port: "in".into(),
+                },
+                Edge {
+                    from: "b".into(),
+                    to: "a".into(),
+                    from_port: "out".into(),
+                    to_port: "in".into(),
+                },
             ],
         );
         let report = validate(&bp);

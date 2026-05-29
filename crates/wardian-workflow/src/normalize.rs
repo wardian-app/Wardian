@@ -6,8 +6,7 @@ use crate::blueprint::Blueprint;
 pub fn normalize(blueprint: &mut Blueprint) {
     blueprint.nodes.sort_by(|a, b| a.id.cmp(&b.id));
     blueprint.edges.sort_by(|a, b| {
-        (&a.from, &a.from_port, &a.to, &a.to_port)
-            .cmp(&(&b.from, &b.from_port, &b.to, &b.to_port))
+        (&a.from, &a.from_port, &a.to, &a.to_port).cmp(&(&b.from, &b.from_port, &b.to, &b.to_port))
     });
 }
 

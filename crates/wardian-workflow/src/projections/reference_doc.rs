@@ -78,7 +78,11 @@ mod tests {
         let md = reference_doc();
         assert!(md.starts_with("# Workflow Node Reference"));
         for def in crate::registry::node_types() {
-            assert!(md.contains(&format!("## {}", def.label)), "missing {}", def.label);
+            assert!(
+                md.contains(&format!("## {}", def.label)),
+                "missing {}",
+                def.label
+            );
         }
     }
 

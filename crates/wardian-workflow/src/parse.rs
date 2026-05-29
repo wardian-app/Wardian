@@ -18,7 +18,10 @@ pub fn parse_str(text: &str) -> Result<Blueprint> {
     let trimmed = text.strip_prefix('\u{feff}').unwrap_or(text);
     let after_open = trimmed
         .strip_prefix(FENCE)
-        .and_then(|rest| rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n")))
+        .and_then(|rest| {
+            rest.strip_prefix('\n')
+                .or_else(|| rest.strip_prefix("\r\n"))
+        })
         .ok_or(WorkflowError::MissingFrontMatter)?;
 
     let (yaml, body) = split_front_matter(after_open).ok_or(WorkflowError::MissingFrontMatter)?;
