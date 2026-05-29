@@ -603,7 +603,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       return "Checking for updates...";
     }
     if (appUpdate.status === "installed") {
-      return "Update installed. Restart to finish.";
+      return "Update installed. Restarting...";
     }
     return "Current Wardian build and update status.";
   };
@@ -623,8 +623,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                   Install update
                 </button>
               ) : appUpdate.status === "installed" ? (
-                <button type="button" onClick={() => void appUpdate.relaunchApp()} className={buttonClass}>
-                  Restart
+                <button type="button" disabled className={buttonClass}>
+                  Restarting...
                 </button>
               ) : (
                 <button

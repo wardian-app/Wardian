@@ -196,7 +196,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
           includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
-          uploadUpdaterSignatures: false
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -214,7 +213,6 @@ jobs:
           tagName: ${{ inputs.release_tag }}
           releaseDraft: true
           includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}
-          uploadUpdaterSignatures: false
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -226,7 +224,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          uploadUpdaterSignatures: false
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
       - name: Upload dry-run artifacts
@@ -253,10 +250,38 @@ jobs:
             src-tauri/target/*/release/bundle/**/*.deb
           if-no-files-found: warn
 
+  cleanup-updater-signatures:
+    name: Remove loose updater signature assets
+    needs: [create-release, resolve-release, build]
+    if: always() && needs.build.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove loose updater signature assets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releaseId = Number('${{ github.event_name == 'push' && needs.create-release.outputs.release_id || needs.resolve-release.outputs.release_id }}');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
+            const signatureAssets = assets.filter((asset) => asset.name.endsWith('.sig'));
+            for (const asset of signatureAssets) {
+              core.info(`Deleting loose updater signature asset ${asset.name}`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id,
+              });
+            }
+            core.info(`Deleted ${signatureAssets.length} loose updater signature asset(s)`);
+
   validate-updater-metadata:
     name: Validate updater metadata
-    needs: [create-release, resolve-release, build]
-    if: always() && needs.build.result == 'success' && ((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && needs.resolve-release.outputs.is_prerelease == 'false'))
+    needs: [create-release, resolve-release, build, cleanup-updater-signatures]
+    if: always() && needs.build.result == 'success' && needs.cleanup-updater-signatures.result == 'success' && ((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && needs.resolve-release.outputs.is_prerelease == 'false'))
     runs-on: ubuntu-latest
     steps:
       - name: Validate updater metadata
@@ -345,8 +370,8 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [create-release, resolve-release, build, validate-updater-metadata]
-    if: always() && needs.build.result == 'success' && ((github.event_name == 'push' && ((needs.create-release.outputs.is_prerelease == 'false' && needs.validate-updater-metadata.result == 'success') || needs.create-release.outputs.is_prerelease == 'true')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && ((needs.resolve-release.outputs.is_prerelease == 'false' && needs.validate-updater-metadata.result == 'success') || needs.resolve-release.outputs.is_prerelease == 'true')))
+    needs: [create-release, resolve-release, build, cleanup-updater-signatures, validate-updater-metadata]
+    if: always() && needs.build.result == 'success' && needs.cleanup-updater-signatures.result == 'success' && ((github.event_name == 'push' && ((needs.create-release.outputs.is_prerelease == 'false' && needs.validate-updater-metadata.result == 'success') || needs.create-release.outputs.is_prerelease == 'true')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && ((needs.resolve-release.outputs.is_prerelease == 'false' && needs.validate-updater-metadata.result == 'success') || needs.resolve-release.outputs.is_prerelease == 'true')))
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release

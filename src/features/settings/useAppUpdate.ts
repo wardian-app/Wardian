@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import packageJson from '../../../package.json';
@@ -40,11 +41,13 @@ export interface AppUpdateState {
 type TauriUpdate = NonNullable<Awaited<ReturnType<typeof check>>>;
 
 const NON_DESKTOP_UPDATE_REASON = 'Updates are unavailable outside the Wardian desktop runtime.';
+const WINDOWS_UPDATE_DOWNLOAD_EVENT = 'wardian-update-download';
 
 interface UpdateEligibility {
   enabled: boolean;
   channel?: string | null;
   reason?: string | null;
+  windows_handoff?: boolean;
 }
 
 type TauriRuntimeWindow = Window & {
@@ -67,6 +70,7 @@ const errorMessageFrom = (error: unknown) => {
 export const useAppUpdate = (): AppUpdateState => {
   const updateRef = useRef<TauriUpdate | null>(null);
   const updatesEnabledRef = useRef<boolean | null>(null);
+  const windowsUpdateHandoffRef = useRef(false);
   const [currentVersion, setCurrentVersion] = useState('');
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const [status, setStatus] = useState<AppUpdateStatus>('idle');
@@ -87,6 +91,7 @@ export const useAppUpdate = (): AppUpdateState => {
   const loadUpdateEligibility = useCallback(async () => {
     if (!hasTauriRuntime()) {
       updatesEnabledRef.current = false;
+      windowsUpdateHandoffRef.current = false;
       setUpdatesEnabled(false);
       setUpdateChannel(null);
       setUpdateEligibilityReason(NON_DESKTOP_UPDATE_REASON);
@@ -98,6 +103,7 @@ export const useAppUpdate = (): AppUpdateState => {
       const eligibility = await invoke<UpdateEligibility>('get_update_eligibility');
       const enabled = eligibility.enabled;
       updatesEnabledRef.current = enabled;
+      windowsUpdateHandoffRef.current = eligibility.windows_handoff ?? false;
       setUpdatesEnabled(enabled);
       setUpdateChannel(eligibility.channel ?? null);
       setUpdateEligibilityReason(eligibility.reason ?? '');
@@ -110,6 +116,7 @@ export const useAppUpdate = (): AppUpdateState => {
     } catch (error) {
       updateRef.current = null;
       updatesEnabledRef.current = false;
+      windowsUpdateHandoffRef.current = false;
       setUpdatesEnabled(false);
       setUpdateChannel(null);
       setUpdateEligibilityReason('Unable to determine update eligibility.');
@@ -130,6 +137,7 @@ export const useAppUpdate = (): AppUpdateState => {
     if (!hasTauriRuntime()) {
       updateRef.current = null;
       updatesEnabledRef.current = false;
+      windowsUpdateHandoffRef.current = false;
       setUpdatesEnabled(false);
       setAvailableUpdate(null);
       setUpdateEligibilityReason(NON_DESKTOP_UPDATE_REASON);
@@ -197,6 +205,7 @@ export const useAppUpdate = (): AppUpdateState => {
           }
         } else {
           updatesEnabledRef.current = false;
+          windowsUpdateHandoffRef.current = false;
           setUpdatesEnabled(false);
           setUpdateEligibilityReason(NON_DESKTOP_UPDATE_REASON);
           setStatus('disabled');
@@ -245,7 +254,21 @@ export const useAppUpdate = (): AppUpdateState => {
     };
 
     try {
-      await update.downloadAndInstall(handleDownloadEvent);
+      if (windowsUpdateHandoffRef.current) {
+        const unlisten = await listen<DownloadEvent>(WINDOWS_UPDATE_DOWNLOAD_EVENT, (event) => {
+          handleDownloadEvent(event.payload);
+        });
+        try {
+          await invoke('install_update_with_windows_handoff', {
+            expectedVersion: update.version,
+          });
+        } finally {
+          unlisten();
+        }
+      } else {
+        await update.downloadAndInstall(handleDownloadEvent);
+        await relaunch();
+      }
       setStatus('installed');
     } catch (error) {
       setErrorMessage(errorMessageFrom(error));

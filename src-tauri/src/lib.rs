@@ -472,6 +472,7 @@ pub fn run() {
             commands::settings::load_shell_settings,
             commands::settings::get_settings_folder_path,
             commands::settings::get_update_eligibility,
+            commands::settings::install_update_with_windows_handoff,
             commands::settings::list_available_shells,
             commands::settings::load_app_settings,
             commands::settings::save_app_settings,

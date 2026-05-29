@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +18,10 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(),
+}));
+
 vi.mock('@tauri-apps/plugin-updater', () => ({
   check: vi.fn(),
 }));
@@ -27,6 +32,7 @@ vi.mock('@tauri-apps/plugin-process', () => ({
 
 const mockGetVersion = vi.mocked(getVersion);
 const mockInvoke = vi.mocked(invoke);
+const mockListen = vi.mocked(listen);
 const mockCheck = vi.mocked(check);
 const mockRelaunch = vi.mocked(relaunch);
 const mockedRuntimeVersion = '0.3.5';
@@ -85,14 +91,24 @@ const makeUpdate = (overrides: Partial<{
 });
 
 describe('useAppUpdate', () => {
+  let updateEventHandler: ((event: { payload: DownloadEvent }) => void) | null = null;
+  let unlisten: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    updateEventHandler = null;
+    unlisten = vi.fn();
     setTauriRuntime(true);
     mockGetVersion.mockResolvedValue(mockedRuntimeVersion);
     mockInvoke.mockResolvedValue({
       enabled: true,
       channel: 'stable',
       reason: null,
+      windows_handoff: false,
+    });
+    mockListen.mockImplementation(async (_eventName, handler) => {
+      updateEventHandler = handler as (event: { payload: DownloadEvent }) => void;
+      return unlisten;
     });
     mockCheck.mockResolvedValue(null);
     mockRelaunch.mockResolvedValue();
@@ -122,7 +138,7 @@ describe('useAppUpdate', () => {
     expect(screen.getByTestId('status')).toHaveTextContent('available');
   });
 
-  it('updates download progress and marks installation complete', async () => {
+  it('updates download progress and relaunches after installation completes', async () => {
     const user = userEvent.setup();
     const update = makeUpdate({
       downloadAndInstall: async (onEvent) => {
@@ -144,6 +160,50 @@ describe('useAppUpdate', () => {
     expect(screen.getByTestId('content-length')).toHaveTextContent('100');
     expect(screen.getByTestId('percent')).toHaveTextContent('100');
     expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the Windows backend handoff and keeps progress in sync', async () => {
+    const user = userEvent.setup();
+    const update = makeUpdate();
+    mockCheck.mockResolvedValue(update as unknown as Awaited<ReturnType<typeof check>>);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'get_update_eligibility') {
+        return {
+          enabled: true,
+          channel: 'stable',
+          reason: null,
+          windows_handoff: true,
+        };
+      }
+
+      if (command === 'install_update_with_windows_handoff') {
+        updateEventHandler?.({ payload: { event: 'Started', data: { contentLength: 100 } } });
+        updateEventHandler?.({ payload: { event: 'Progress', data: { chunkLength: 25 } } });
+        updateEventHandler?.({ payload: { event: 'Progress', data: { chunkLength: 75 } } });
+        updateEventHandler?.({ payload: { event: 'Finished' } });
+        return null;
+      }
+
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    render(<Probe />);
+    await screen.findByText('available');
+
+    await user.click(screen.getByText('install'));
+
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('installed'));
+    expect(screen.getByTestId('downloaded')).toHaveTextContent('100');
+    expect(screen.getByTestId('content-length')).toHaveTextContent('100');
+    expect(screen.getByTestId('percent')).toHaveTextContent('100');
+    expect(mockListen).toHaveBeenCalledWith('wardian-update-download', expect.any(Function));
+    expect(mockInvoke).toHaveBeenCalledWith('install_update_with_windows_handoff', {
+      expectedVersion: update.version,
+    });
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+    expect(mockRelaunch).not.toHaveBeenCalled();
   });
 
   it('maps explicit update errors into visible state', async () => {
@@ -160,7 +220,7 @@ describe('useAppUpdate', () => {
     expect(screen.getByTestId('error')).toHaveTextContent('network failed');
   });
 
-  it('relaunches only through the explicit restart action', async () => {
+  it('relaunches through the explicit restart action', async () => {
     const user = userEvent.setup();
     render(<Probe />);
 
@@ -205,6 +265,7 @@ describe('useAppUpdate', () => {
       enabled: false,
       channel: null,
       reason: 'Updates are only available in official installed release builds.',
+      windows_handoff: false,
     });
 
     render(<Probe />);

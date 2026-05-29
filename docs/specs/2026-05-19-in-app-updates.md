@@ -8,7 +8,7 @@
 
 Wardian publishes installable desktop bundles through GitHub Releases, but users must currently discover and download newer installers manually. Settings also does not expose the currently running Wardian version, so users cannot quickly confirm what build they are on.
 
-Wardian needs an in-app update system that can check GitHub Releases, verify update artifacts, download the correct platform bundle, and install it without asking users to manually fetch the setup installer from GitHub. The first version should be explicit and user-controlled: Wardian may check silently, but it must not silently install, restart, or exit the app.
+Wardian needs an in-app update system that can check GitHub Releases, verify update artifacts, download the correct platform bundle, and install it without asking users to manually fetch the setup installer from GitHub. The first version should be explicit and user-controlled: Wardian may check silently, but it must not silently install, restart, or exit the app before the user starts installation.
 
 This extends the existing release system. The first updater-capable release is a bridge release: users on older builds must install that release manually once, then future releases can be installed from inside Wardian.
 
@@ -18,7 +18,9 @@ Use Tauri v2's official updater plugin and GitHub Releases static updater metada
 
 ### Product Behavior
 
-Settings shows the running app version at the top, using Tauri's app metadata API. The Updates section checks silently on mount, reports whether a newer version is available, and lets the user explicitly start `Download & Install`. If installation completes and the platform supports relaunch, Settings offers `Restart`. Wardian never installs or restarts without a user action.
+Settings shows the running app version at the top, using Tauri's app metadata API. The Updates section checks silently on mount, reports whether a newer version is available, and lets the user explicitly start `Download & Install`. If installation completes and the platform supports relaunch, Wardian relaunches immediately so the updated app comes back up. Wardian never installs or restarts before the user starts installation.
+
+Windows installation uses a backend handoff instead of the frontend calling the updater plugin's install method directly. The backend still uses Tauri updater discovery, download, and signature verification, but after downloading the verified installer it writes the installer to a temporary updater path, starts a detached helper, and exits. The helper waits for the Wardian process ID to terminate, pauses briefly, then launches the NSIS installer with `/P /R /UPDATE /ARGS`. This keeps the installer from trying to replace `Wardian.exe` while the app process is still shutting down. The handoff verifies that the backend-found update version still matches the version shown in Settings before downloading. Because Tauri's verified Rust updater API returns installer bytes, Wardian also enforces a 512 MiB payload ceiling before writing or launching the installer.
 
 Update checks are enabled only for official stable release artifacts. Dev builds, browser/Vite runs, local source-built release binaries, dry-run artifacts, and prerelease builds still show the current version, but they do not call GitHub updater APIs or expose install controls.
 
@@ -38,9 +40,11 @@ Wardian configures:
 - Tauri process restart permission in `src-tauri/capabilities/default.json`.
 - Windows updater install mode `passive`.
 
-The release workflow signs update artifacts with `TAURI_SIGNING_PRIVATE_KEY` and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, embeds updater signatures in `latest.json`, and publishes `latest.json` only as part of successful release builds. Standalone `.sig` files are not uploaded as GitHub Release assets because the updater consumes inline signatures from `latest.json`, not separate signature URLs. The public key is committed in `tauri.conf.json`; the private key never appears in the repository or documentation beyond secret-name references.
+The release workflow signs update artifacts with `TAURI_SIGNING_PRIVATE_KEY` and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, embeds updater signatures in `latest.json`, deletes loose `.sig` release assets before publication, and publishes `latest.json` only as part of successful release builds. The updater consumes inline signatures from `latest.json`, not separate signature URLs. The public key is committed in `tauri.conf.json`; the private key never appears in the repository or documentation beyond secret-name references.
 
 The app exposes update eligibility through a backend command rather than letting Settings infer it from frontend runtime details. Official stable tag-push and stable manual backfill release builds set `WARDIAN_UPDATE_CHANNEL=stable` at compile time. Prerelease, debug, and unmarked release builds return disabled eligibility, and the backend skips updater/process plugin registration for those builds. This keeps local builds and prereleases from replacing themselves with public stable installer releases and keeps updater IPC unavailable outside official stable builds.
+
+Windows stable builds also compare the running executable directory against the install location recorded by the Wardian installer registry keys. If those paths diverge, Settings must disable in-app updates and direct the user to the manual installer so the registered install path, shortcuts, and updater target are realigned before future in-app updates run.
 
 The compile-time marker is advisory release metadata, not cryptographic provenance. Wardian relies on protected release workflow permissions, updater signature verification, and signing-key custody for trust. If Wardian later needs to prove that a running binary was installed through an official installer, add an installer-written provenance marker or signed release attestation instead of treating `WARDIAN_UPDATE_CHANNEL` as proof.
 
@@ -63,6 +67,8 @@ Tauri update signature verification is required and cannot be disabled. Wardian 
 The first implementation should document key ownership and recovery in developer docs, but should not invent custom cryptography, custom download logic, or custom installer behavior.
 
 The frontend updater calls should live in a focused helper or hook, such as `src/features/settings/useAppUpdate.ts`, so Settings renders state while the helper owns update check, download progress, install, relaunch, and error mapping.
+
+Updater integration tests should not require publishing a production release. A local or draft-only signed updater endpoint can serve an older installed test build a newer signed `latest.json` and installer artifact. That test should verify the complete handoff behavior: download progress reaches the UI, Wardian exits, the helper starts the installer only after the original process exits, and the subsequent launch reports the newer version.
 
 ### File Changes Expected
 

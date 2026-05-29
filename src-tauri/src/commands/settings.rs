@@ -8,11 +8,147 @@ pub struct UpdateEligibility {
     pub enabled: bool,
     pub channel: Option<String>,
     pub reason: Option<String>,
+    pub windows_handoff: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsInstallRegistryIdentity {
+    publisher: String,
+    product_name: String,
+}
+
+const UPDATE_DOWNLOAD_EVENT: &str = "wardian-update-download";
+const MAX_WINDOWS_UPDATE_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+
+const WINDOWS_INSTALL_RECORD_MISSING_REASON: &str = "Wardian could not verify its Windows install location. Reinstall the latest Wardian installer manually before using in-app updates.";
+const WINDOWS_INSTALL_MISMATCH_REASON: &str = "Wardian is not running from the Windows install location registered for updates. Reinstall the latest Wardian installer manually so shortcuts and updater state point to the same copy.";
+
+fn normalize_windows_install_path(path: &str) -> String {
+    let normalized = path
+        .trim()
+        .trim_matches('"')
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+
+    normalized
+        .strip_prefix("//?/UNC/")
+        .map(|path| format!("//{path}"))
+        .or_else(|| normalized.strip_prefix("//?/").map(str::to_string))
+        .unwrap_or(normalized)
+        .to_ascii_lowercase()
+}
+
+fn current_exe_install_dir(current_exe: &str) -> Option<String> {
+    let normalized = normalize_windows_install_path(current_exe);
+    normalized
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .filter(|parent| !parent.is_empty())
+}
+
+fn resolve_windows_install_mismatch_reason(
+    current_exe: &str,
+    registered_install_dirs: &[String],
+) -> Option<String> {
+    let current_dir = current_exe_install_dir(current_exe)?;
+    let registered_dirs = registered_install_dirs
+        .iter()
+        .map(|path| normalize_windows_install_path(path))
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+
+    if registered_dirs.is_empty() {
+        return Some(WINDOWS_INSTALL_RECORD_MISSING_REASON.to_string());
+    }
+
+    if registered_dirs.iter().any(|path| path == &current_dir) {
+        None
+    } else {
+        Some(WINDOWS_INSTALL_MISMATCH_REASON.to_string())
+    }
+}
+
+fn windows_install_registry_paths(identity: &WindowsInstallRegistryIdentity) -> [String; 3] {
+    [
+        format!(
+            "Software\\{}\\{}",
+            identity.publisher, identity.product_name
+        ),
+        format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+            identity.product_name
+        ),
+        format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+            identity.product_name
+        ),
+    ]
+}
+
+fn current_windows_install_registry_identity() -> WindowsInstallRegistryIdentity {
+    WindowsInstallRegistryIdentity {
+        publisher: option_env!("WARDIAN_UPDATE_REGISTRY_PUBLISHER")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("wardian")
+            .to_string(),
+        product_name: option_env!("WARDIAN_UPDATE_REGISTRY_PRODUCT_NAME")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Wardian")
+            .to_string(),
+    }
+}
+
+#[cfg(windows)]
+fn read_registry_string(root: winreg::HKEY, subkey: &str, value: &str) -> Option<String> {
+    use winreg::RegKey;
+
+    RegKey::predef(root)
+        .open_subkey(subkey)
+        .ok()?
+        .get_value::<String, _>(value)
+        .ok()
+}
+
+#[cfg(windows)]
+fn windows_registered_install_dirs() -> Vec<String> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    let [publisher_install_key, user_uninstall_key, machine_uninstall_key] =
+        windows_install_registry_paths(&current_windows_install_registry_identity());
+
+    [
+        read_registry_string(HKEY_CURRENT_USER, &publisher_install_key, ""),
+        read_registry_string(HKEY_CURRENT_USER, &user_uninstall_key, "InstallLocation"),
+        read_registry_string(
+            HKEY_LOCAL_MACHINE,
+            &machine_uninstall_key,
+            "InstallLocation",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(windows)]
+fn current_install_mismatch_reason() -> Option<String> {
+    let current_exe = std::env::current_exe().ok()?;
+    resolve_windows_install_mismatch_reason(
+        &current_exe.to_string_lossy(),
+        &windows_registered_install_dirs(),
+    )
+}
+
+#[cfg(not(windows))]
+fn current_install_mismatch_reason() -> Option<String> {
+    None
 }
 
 pub fn resolve_update_eligibility(
     debug_build: bool,
     update_channel: Option<&str>,
+    install_mismatch_reason: Option<&str>,
 ) -> UpdateEligibility {
     let normalized_channel = update_channel
         .map(str::trim)
@@ -24,6 +160,7 @@ pub fn resolve_update_eligibility(
             enabled: false,
             channel: normalized_channel,
             reason: Some("Updates are unavailable in development builds.".to_string()),
+            windows_handoff: cfg!(windows),
         };
     }
 
@@ -34,6 +171,16 @@ pub fn resolve_update_eligibility(
             reason: Some(
                 "Updates are only available in official installed release builds.".to_string(),
             ),
+            windows_handoff: cfg!(windows),
+        };
+    }
+
+    if let Some(reason) = install_mismatch_reason {
+        return UpdateEligibility {
+            enabled: false,
+            channel: normalized_channel,
+            reason: Some(reason.to_string()),
+            windows_handoff: cfg!(windows),
         };
     }
 
@@ -41,16 +188,151 @@ pub fn resolve_update_eligibility(
         enabled: true,
         channel: normalized_channel,
         reason: None,
+        windows_handoff: cfg!(windows),
     }
+}
+
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn windows_update_installer_args() -> Vec<&'static str> {
+    vec!["/P", "/R", "/UPDATE", "/ARGS"]
+}
+
+fn windows_update_handoff_script(parent_pid: u32, installer_path: &std::path::Path) -> String {
+    let installer = powershell_single_quoted(&installer_path.display().to_string());
+    let installer_args = windows_update_installer_args()
+        .into_iter()
+        .map(powershell_single_quoted)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "$ErrorActionPreference = 'SilentlyContinue';\n\
+         $parentExited = $false;\n\
+         for ($attempt = 0; $attempt -lt 120; $attempt++) {{\n\
+           if (-not (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue)) {{\n\
+             $parentExited = $true;\n\
+             break;\n\
+           }}\n\
+           Start-Sleep -Milliseconds 500;\n\
+         }}\n\
+         if (-not $parentExited) {{ exit 1; }}\n\
+         Start-Sleep -Milliseconds 1500;\n\
+         $installer = {installer};\n\
+         $installerArgs = @({installer_args});\n\
+         Start-Process -FilePath $installer -ArgumentList $installerArgs -WindowStyle Normal;\n",
+    )
+}
+
+fn sanitized_update_version(version: &str) -> String {
+    let sanitized = version
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn windows_update_installer_path(version: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join("wardian-updater").join(format!(
+        "Wardian-{}-setup.exe",
+        sanitized_update_version(version)
+    ))
+}
+
+fn ensure_expected_update_version(
+    expected_version: &str,
+    actual_version: &str,
+) -> Result<(), String> {
+    let expected_version = expected_version.trim();
+    let actual_version = actual_version.trim();
+
+    if expected_version == actual_version {
+        Ok(())
+    } else {
+        Err(format!(
+            "Available update changed from {expected_version} to {actual_version}. Check for updates again."
+        ))
+    }
+}
+
+fn ensure_windows_update_installer_size(byte_len: u64) -> Result<(), String> {
+    if byte_len <= MAX_WINDOWS_UPDATE_INSTALLER_BYTES {
+        Ok(())
+    } else {
+        Err(format!(
+            "Downloaded update installer is larger than the {} byte safety limit.",
+            MAX_WINDOWS_UPDATE_INSTALLER_BYTES
+        ))
+    }
+}
+
+fn write_windows_update_installer(
+    installer_path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let parent = installer_path
+        .parent()
+        .ok_or_else(|| "Could not resolve update installer directory.".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    std::fs::write(installer_path, bytes).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn spawn_windows_update_handoff(
+    parent_pid: u32,
+    installer_path: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let script = windows_update_handoff_script(parent_pid, installer_path);
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod update_eligibility_tests {
-    use super::resolve_update_eligibility;
+    use super::{
+        ensure_expected_update_version, ensure_windows_update_installer_size,
+        normalize_windows_install_path, powershell_single_quoted, resolve_update_eligibility,
+        resolve_windows_install_mismatch_reason, windows_install_registry_paths,
+        windows_update_handoff_script, windows_update_installer_args,
+        WindowsInstallRegistryIdentity, MAX_WINDOWS_UPDATE_INSTALLER_BYTES,
+    };
 
     #[test]
     fn update_eligibility_disables_debug_builds() {
-        let eligibility = resolve_update_eligibility(true, Some("stable"));
+        let eligibility = resolve_update_eligibility(true, Some("stable"), None);
 
         assert!(!eligibility.enabled);
         assert_eq!(eligibility.channel.as_deref(), Some("stable"));
@@ -62,7 +344,7 @@ mod update_eligibility_tests {
 
     #[test]
     fn update_eligibility_disables_unmarked_release_builds() {
-        let eligibility = resolve_update_eligibility(false, None);
+        let eligibility = resolve_update_eligibility(false, None, None);
 
         assert!(!eligibility.enabled);
         assert_eq!(eligibility.channel, None);
@@ -74,11 +356,183 @@ mod update_eligibility_tests {
 
     #[test]
     fn update_eligibility_enables_stable_release_builds() {
-        let eligibility = resolve_update_eligibility(false, Some("stable"));
+        let eligibility = resolve_update_eligibility(false, Some("stable"), None);
 
         assert!(eligibility.enabled);
         assert_eq!(eligibility.channel.as_deref(), Some("stable"));
         assert_eq!(eligibility.reason, None);
+    }
+
+    #[test]
+    fn update_eligibility_disables_stable_builds_with_install_mismatch() {
+        let eligibility = resolve_update_eligibility(
+            false,
+            Some("stable"),
+            Some("Wardian is not running from the registered install location."),
+        );
+
+        assert!(!eligibility.enabled);
+        assert_eq!(eligibility.channel.as_deref(), Some("stable"));
+        assert_eq!(
+            eligibility.reason.as_deref(),
+            Some("Wardian is not running from the registered install location.")
+        );
+    }
+
+    #[test]
+    fn install_mismatch_allows_registered_current_exe_directory() {
+        let reason = resolve_windows_install_mismatch_reason(
+            r"C:\Users\tester\AppData\Local\Wardian\Wardian.exe",
+            &[r#""C:\Users\tester\AppData\Local\Wardian""#.to_string()],
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn install_mismatch_allows_extended_length_current_exe_directory() {
+        let reason = resolve_windows_install_mismatch_reason(
+            r"\\?\C:\Users\tester\AppData\Local\Wardian\Wardian.exe",
+            &[r"C:\Users\tester\AppData\Local\Wardian".to_string()],
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn install_mismatch_allows_extended_length_unc_current_exe_directory() {
+        let normalized =
+            normalize_windows_install_path(r"\\?\UNC\server\share\Wardian\Wardian.exe");
+
+        assert_eq!(normalized, "//server/share/wardian/wardian.exe");
+    }
+
+    #[test]
+    fn install_mismatch_rejects_unregistered_current_exe_directory() {
+        let reason = resolve_windows_install_mismatch_reason(
+            r"C:\Users\tester\Downloads\Wardian\Wardian.exe",
+            &[r"C:\Users\tester\AppData\Local\Wardian".to_string()],
+        );
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("Wardian is not running from the Windows install location registered for updates. Reinstall the latest Wardian installer manually so shortcuts and updater state point to the same copy.")
+        );
+    }
+
+    #[test]
+    fn install_mismatch_rejects_missing_install_record() {
+        let reason = resolve_windows_install_mismatch_reason(
+            r"C:\Users\tester\AppData\Local\Wardian\Wardian.exe",
+            &[],
+        );
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("Wardian could not verify its Windows install location. Reinstall the latest Wardian installer manually before using in-app updates.")
+        );
+    }
+
+    #[test]
+    fn windows_install_registry_paths_default_to_production_identity_shape() {
+        let paths = windows_install_registry_paths(&WindowsInstallRegistryIdentity {
+            publisher: "wardian".to_string(),
+            product_name: "Wardian".to_string(),
+        });
+
+        assert_eq!(
+            paths,
+            [
+                "Software\\wardian\\Wardian".to_string(),
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Wardian".to_string(),
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Wardian".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_install_registry_paths_support_disposable_update_test_identity() {
+        let paths = windows_install_registry_paths(&WindowsInstallRegistryIdentity {
+            publisher: "wardian-test".to_string(),
+            product_name: "Wardian Updater Test".to_string(),
+        });
+
+        assert_eq!(
+            paths,
+            [
+                "Software\\wardian-test\\Wardian Updater Test".to_string(),
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Wardian Updater Test"
+                    .to_string(),
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Wardian Updater Test"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn powershell_single_quoted_escapes_embedded_quotes() {
+        assert_eq!(
+            powershell_single_quoted(r"C:\Temp\Wardian Update's.exe"),
+            r"'C:\Temp\Wardian Update''s.exe'"
+        );
+    }
+
+    #[test]
+    fn windows_update_handoff_script_waits_for_parent_before_starting_installer() {
+        let script =
+            windows_update_handoff_script(42, std::path::Path::new(r"C:\Temp\Wardian Update.exe"));
+
+        assert!(script.contains("Get-Process -Id 42"));
+        assert!(script.contains("Start-Sleep -Milliseconds 1500"));
+        assert!(script.contains(r"$installer = 'C:\Temp\Wardian Update.exe'"));
+        assert!(script.contains("Start-Process -FilePath $installer"));
+    }
+
+    #[test]
+    fn windows_update_handoff_script_aborts_if_parent_is_still_running() {
+        let script =
+            windows_update_handoff_script(42, std::path::Path::new(r"C:\Temp\Wardian Update.exe"));
+
+        assert!(script.contains("$parentExited = $false"));
+        assert!(script.contains("Get-Process -Id 42"));
+        assert!(script.contains("if (-not $parentExited) { exit 1; }"));
+        assert!(script.find("exit 1").unwrap() < script.find("Start-Process").unwrap());
+    }
+
+    #[test]
+    fn windows_update_installer_args_preserve_tauri_updater_contract() {
+        assert_eq!(
+            windows_update_installer_args(),
+            vec!["/P", "/R", "/UPDATE", "/ARGS"]
+        );
+    }
+
+    #[test]
+    fn expected_update_version_rejects_changed_release_metadata() {
+        let result = ensure_expected_update_version("0.3.7", "0.3.8");
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Available update changed from 0.3.7 to 0.3.8. Check for updates again."
+        );
+    }
+
+    #[test]
+    fn expected_update_version_matches_trimmed_release_metadata() {
+        assert_eq!(ensure_expected_update_version(" 0.3.7 ", "0.3.7"), Ok(()));
+    }
+
+    #[test]
+    fn oversized_windows_update_installer_is_rejected() {
+        let result = ensure_windows_update_installer_size(MAX_WINDOWS_UPDATE_INSTALLER_BYTES + 1);
+
+        assert_eq!(
+            result.unwrap_err(),
+            format!(
+                "Downloaded update installer is larger than the {} byte safety limit.",
+                MAX_WINDOWS_UPDATE_INSTALLER_BYTES
+            )
+        );
     }
 }
 
@@ -106,14 +560,108 @@ pub fn get_settings_folder_path() -> Result<String, String> {
 
 #[tauri::command]
 pub fn get_update_eligibility() -> UpdateEligibility {
+    let install_mismatch_reason =
+        if !cfg!(debug_assertions) && option_env!("WARDIAN_UPDATE_CHANNEL") == Some("stable") {
+            current_install_mismatch_reason()
+        } else {
+            None
+        };
     resolve_update_eligibility(
         cfg!(debug_assertions),
         option_env!("WARDIAN_UPDATE_CHANNEL"),
+        install_mismatch_reason.as_deref(),
     )
 }
 
 pub fn update_plugins_enabled_for_current_build() -> bool {
     get_update_eligibility().enabled
+}
+
+#[tauri::command]
+pub async fn install_update_with_windows_handoff(
+    app: tauri::AppHandle,
+    expected_version: String,
+) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (app, expected_version);
+        Err("Windows update handoff is only available on Windows.".to_string())
+    }
+
+    #[cfg(windows)]
+    {
+        install_update_with_windows_handoff_impl(app, expected_version).await
+    }
+}
+
+#[cfg(windows)]
+async fn install_update_with_windows_handoff_impl(
+    app: tauri::AppHandle,
+    expected_version: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    use tauri_plugin_updater::UpdaterExt;
+
+    let eligibility = get_update_eligibility();
+    if !eligibility.enabled {
+        return Err(eligibility
+            .reason
+            .unwrap_or_else(|| "Updates are unavailable for this build.".to_string()));
+    }
+
+    let update = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "No update is available.".to_string())?;
+    ensure_expected_update_version(&expected_version, &update.version)?;
+
+    let progress_app = app.clone();
+    let finish_app = app.clone();
+    let mut started = false;
+    let bytes = update
+        .download(
+            move |chunk_length, content_length| {
+                if !started {
+                    let _ = progress_app.emit(
+                        UPDATE_DOWNLOAD_EVENT,
+                        serde_json::json!({
+                            "event": "Started",
+                            "data": { "contentLength": content_length },
+                        }),
+                    );
+                    started = true;
+                }
+
+                let _ = progress_app.emit(
+                    UPDATE_DOWNLOAD_EVENT,
+                    serde_json::json!({
+                        "event": "Progress",
+                        "data": { "chunkLength": chunk_length },
+                    }),
+                );
+            },
+            move || {
+                let _ = finish_app.emit(
+                    UPDATE_DOWNLOAD_EVENT,
+                    serde_json::json!({
+                        "event": "Finished",
+                    }),
+                );
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    // Tauri's verified Rust updater API returns the full installer as bytes.
+    // Keep a hard ceiling before writing or launching an unexpectedly large asset.
+    ensure_windows_update_installer_size(bytes.len() as u64)?;
+
+    let installer_path = windows_update_installer_path(&update.version);
+    write_windows_update_installer(&installer_path, &bytes)?;
+    spawn_windows_update_handoff(std::process::id(), &installer_path)?;
+    std::process::exit(0);
 }
 
 #[tauri::command]
