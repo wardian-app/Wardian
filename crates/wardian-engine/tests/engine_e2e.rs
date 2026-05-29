@@ -39,3 +39,38 @@ async fn runs_a_linear_workflow_to_completion() {
         .iter()
         .any(|e| matches!(e.kind, wardian_engine::event::EventKind::RunCompleted)));
 }
+
+const GATED: &str = r#"---
+schema: 2
+id: gated
+name: Gated
+nodes:
+  - id: t
+    type: manual_trigger
+  - id: gate
+    type: approval
+    fields: { prompt: "Ship?" }
+  - id: ship
+    type: task
+    fields: { agent: role:x, prompt: "ship it" }
+---
+# Gated
+"#;
+
+#[tokio::test]
+async fn parks_on_approval_then_resumes_on_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let bp = parse_str(GATED).unwrap();
+    let exec = MockExecutor::new();
+    let parked = Engine::start(&bp, serde_json::json!({}), dir.path(), &exec)
+        .await
+        .unwrap();
+    assert_eq!(parked.status, RunStatus::AwaitingApproval);
+    assert!(!exec.calls().contains(&"task:ship".to_string())); // ship didn't run yet
+
+    let done = Engine::grant_approval(&bp, dir.path(), "gate", "tan", None, &exec)
+        .await
+        .unwrap();
+    assert_eq!(done.status, RunStatus::Completed);
+    assert!(exec.calls().contains(&"task:ship".to_string()));
+}
