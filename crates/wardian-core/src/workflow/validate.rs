@@ -1,6 +1,6 @@
-use crate::blueprint::Blueprint;
-use crate::field_type::FieldType;
-use crate::registry::find_node_type;
+use crate::workflow::blueprint::Blueprint;
+use crate::workflow::field_type::FieldType;
+use crate::workflow::registry::find_node_type;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -223,7 +223,7 @@ fn has_cycle(blueprint: &Blueprint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blueprint::{Blueprint, Edge, Node};
+    use crate::workflow::blueprint::{Blueprint, Edge, Node};
 
     fn task(id: &str) -> Node {
         let mut fields = serde_json::Map::new();

@@ -1,5 +1,5 @@
-use crate::blueprint::Blueprint;
-use crate::error::{Result, WorkflowError};
+use crate::workflow::blueprint::Blueprint;
+use crate::workflow::error::{Result, WorkflowError};
 use std::path::Path;
 
 const FENCE: &str = "---";
@@ -76,7 +76,7 @@ pub fn to_string(blueprint: &Blueprint) -> Result<String> {
 mod tests {
     use super::*;
 
-    const MINIMAL: &str = include_str!("../tests/fixtures/minimal.md");
+    const MINIMAL: &str = include_str!("../../tests/fixtures/minimal.md");
 
     #[test]
     fn parses_front_matter_and_body() {
@@ -91,7 +91,10 @@ mod tests {
     #[test]
     fn missing_front_matter_is_an_error() {
         let err = parse_str("no front matter here").unwrap_err();
-        assert!(matches!(err, crate::WorkflowError::MissingFrontMatter));
+        assert!(matches!(
+            err,
+            crate::workflow::WorkflowError::MissingFrontMatter
+        ));
     }
 
     #[test]

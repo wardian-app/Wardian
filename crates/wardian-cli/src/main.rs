@@ -392,11 +392,11 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
 
 fn render_workflow_node_types(json: bool) -> Result<String, CliError> {
     if json {
-        return Ok(format!("{}\n", wardian_workflow::ts_schema_json()));
+        return Ok(format!("{}\n", wardian_core::workflow::ts_schema_json()));
     }
     // Human summary: one line per node type.
     let mut lines = String::from("NODE TYPES\n");
-    for def in wardian_workflow::node_types() {
+    for def in wardian_core::workflow::node_types() {
         lines.push_str(&format!(
             "  {:<18} {:<8} {}\n",
             def.id,
@@ -408,9 +408,9 @@ fn render_workflow_node_types(json: bool) -> Result<String, CliError> {
 }
 
 fn render_workflow_validate(path: &str) -> Result<String, CliError> {
-    let blueprint = wardian_workflow::parse_file(std::path::Path::new(path))
+    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(path))
         .map_err(|e| CliError::generic(e.to_string()))?;
-    let report = wardian_workflow::validate(&blueprint);
+    let report = wardian_core::workflow::validate(&blueprint);
     let body = serde_json::json!({
         "schema": 1,
         "ok": report.is_valid(),
@@ -429,8 +429,8 @@ enum GenKind {
 
 fn render_workflow_gen(out: &str, kind: GenKind, check: bool) -> Result<String, CliError> {
     let generated = match kind {
-        GenKind::Schema => format!("{}\n", wardian_workflow::ts_schema_json()),
-        GenKind::Docs => wardian_workflow::reference_doc(),
+        GenKind::Schema => format!("{}\n", wardian_core::workflow::ts_schema_json()),
+        GenKind::Docs => wardian_core::workflow::reference_doc(),
     };
     let path = std::path::Path::new(out);
     if check {

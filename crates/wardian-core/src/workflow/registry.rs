@@ -1,4 +1,4 @@
-use crate::field_type::{FieldDef, FieldType};
+use crate::workflow::field_type::{FieldDef, FieldType};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +150,22 @@ fn build_registry() -> Vec<NodeTypeDef> {
             icon: "merge".into(),
             description: "Synchronization barrier; waits for all inbound edges.".into(),
             fields: vec![],
+            inputs: default_in(),
+            outputs: default_out(),
+            outputs_from_field: None,
+            version: 1,
+        },
+        NodeTypeDef {
+            id: "approval".into(),
+            kind: NodeKind::Engine,
+            category: "Control".into(),
+            label: "Approval".into(),
+            icon: "shield-check".into(),
+            description: "Human-in-the-loop gate; parks the run until a person approves.".into(),
+            fields: vec![
+                FieldDef::new("prompt", FieldType::Prompt, "Approval prompt")
+                    .help("What the approver is signing off on."),
+            ],
             inputs: default_in(),
             outputs: default_out(),
             outputs_from_field: None,
@@ -342,5 +358,14 @@ mod tests {
         let outs: Vec<&str> = lp.outputs.iter().map(|p| p.id.as_str()).collect();
         assert!(outs.contains(&"body"));
         assert!(outs.contains(&"done"));
+    }
+
+    #[test]
+    fn registry_has_approval_gate() {
+        let a = find_node_type("approval").expect("approval exists");
+        assert_eq!(a.kind, NodeKind::Engine);
+        assert_eq!(a.category, "Control");
+        let outs: Vec<&str> = a.outputs.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(outs, vec!["out"]);
     }
 }

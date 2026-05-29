@@ -185,6 +185,37 @@
       "version": 1
     },
     {
+      "id": "approval",
+      "kind": "engine",
+      "category": "Control",
+      "label": "Approval",
+      "icon": "shield-check",
+      "description": "Human-in-the-loop gate; parks the run until a person approves.",
+      "fields": [
+        {
+          "id": "prompt",
+          "kind": "prompt",
+          "label": "Approval prompt",
+          "required": false,
+          "multiple": false,
+          "help": "What the approver is signing off on."
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
       "id": "shell",
       "kind": "engine",
       "category": "Action",

@@ -1,4 +1,4 @@
-use crate::registry::node_types;
+use crate::workflow::registry::node_types;
 
 /// The registry as a self-describing JSON value the TS builder consumes. The
 /// `NodeTypeDef`/`FieldDef` serde derives carry the shape; this just wraps them
@@ -24,7 +24,7 @@ mod tests {
         let value = ts_schema_value();
         assert_eq!(value["schema"], 2);
         let types = value["node_types"].as_array().unwrap();
-        assert_eq!(types.len(), crate::registry::node_types().len());
+        assert_eq!(types.len(), crate::workflow::registry::node_types().len());
         let task = types.iter().find(|t| t["id"] == "task").unwrap();
         assert_eq!(task["kind"], "agent");
         assert!(task["fields"]

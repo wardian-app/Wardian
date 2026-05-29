@@ -1,8 +1,10 @@
 pub mod control;
 pub mod db;
+pub mod engine;
 pub mod identity;
 pub mod models;
 pub mod paths;
+pub mod workflow;
 
 #[cfg(test)]
 mod tests {

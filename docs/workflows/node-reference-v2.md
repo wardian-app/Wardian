@@ -80,6 +80,21 @@ _No fields._
 
 Outgoing ports: out
 
+## Approval
+
+- **id:** `approval`
+- **kind:** engine
+- **category:** Control
+- **version:** 1
+
+Human-in-the-loop gate; parks the run until a person approves.
+
+### Fields
+
+- `prompt` — Approval prompt [prompt]
+
+Outgoing ports: out
+
 ## Shell
 
 - **id:** `shell`
