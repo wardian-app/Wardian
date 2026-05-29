@@ -1,0 +1,22 @@
+[package]
+name = "wardian-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+wardian-workflow = { path = "../wardian-workflow" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+tokio = { version = "1.49.0", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread"] }

@@ -5,6 +5,7 @@ members = [
   "crates/wardian-core",
   "crates/wardian-cli",
   "crates/wardian-workflow",
+  "crates/wardian-engine",
 ]
 
 [workspace.package]
