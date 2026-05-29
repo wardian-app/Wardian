@@ -5706,6 +5706,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wardian-engine"
+version = "0.3.6"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "wardian-workflow",
+]
+
+[[package]]
 name = "wardian-workflow"
 version = "0.3.6"
 dependencies = [
