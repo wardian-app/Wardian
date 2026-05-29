@@ -68,6 +68,9 @@ pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::Result<()> {
             s.status = RunStatus::Failed;
             s.failure = Some(error.clone());
         }
+        EventKind::LoopIteration { node, iteration } => {
+            s.loop_iter.insert(node.clone(), *iteration);
+        }
         // Loop + approval kinds handled in Tasks 8/9.
         _ => {}
     }
@@ -128,6 +131,82 @@ pub fn finalize_if_done(g: &Graph, s: &mut RunState) {
     let any_runnable = !step(g, s).is_empty();
     if !any_running && !any_runnable {
         s.status = RunStatus::Completed;
+    }
+}
+
+/// Enter a loop node: mark Running, record iteration 0, pulse its `body` port.
+pub fn enter_loop(g: &Graph, s: &mut RunState, loop_id: &str) {
+    s.set_node_status(loop_id, NodeStatus::Running);
+    s.loop_iter.insert(loop_id.to_string(), 0);
+    deliver_from_port(g, s, loop_id, "body");
+}
+
+/// For each Running loop whose body is fully terminal, evaluate its bound and
+/// either start the next iteration or finish (pulse `done`).
+pub fn advance_loops(g: &Graph, s: &mut RunState) {
+    let loop_ids: Vec<String> = g
+        .blueprint()
+        .nodes
+        .iter()
+        .filter(|nd| nd.r#type == "loop" && s.status_or_pending(&nd.id) == NodeStatus::Running)
+        .map(|nd| nd.id.clone())
+        .collect();
+
+    for lp in loop_ids {
+        let body = g.body_nodes(&lp);
+        if body.is_empty() {
+            continue;
+        }
+        let body_terminal = body.iter().all(|b| {
+            matches!(
+                s.status_or_pending(b),
+                NodeStatus::Completed | NodeStatus::Skipped | NodeStatus::Failed
+            )
+        });
+        if !body_terminal {
+            continue;
+        }
+
+        let iter = *s.loop_iter.get(&lp).unwrap_or(&0);
+        let max = g
+            .blueprint()
+            .find_node(&lp)
+            .and_then(|nd| nd.fields.get("max_iterations"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32;
+
+        if iter + 1 < max {
+            // Snapshot this iteration's outputs as `prev`, then reset the body.
+            for b in &body {
+                if let Some(out) = s.node_output(b).cloned() {
+                    s.registry["nodes"][b]["prev"] = out;
+                }
+                s.set_node_status(b, NodeStatus::Pending);
+                s.delivered.remove(b);
+            }
+            // Clear skipped flags on edges internal to / entering the body.
+            let body_set: std::collections::BTreeSet<&str> =
+                body.iter().map(|x| x.as_str()).collect();
+            let internal: Vec<usize> = g
+                .blueprint()
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    body_set.contains(e.to.as_str())
+                        && (body_set.contains(e.from.as_str()) || e.from == lp)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            for i in internal {
+                s.skipped_edges.remove(&i);
+            }
+            s.loop_iter.insert(lp.clone(), iter + 1);
+            deliver_from_port(g, s, &lp, "body");
+        } else {
+            s.set_node_status(&lp, NodeStatus::Completed);
+            deliver_from_port(g, s, &lp, "done");
+        }
     }
 }
 
@@ -259,5 +338,68 @@ mod tests {
         // engine marks completion when nothing is runnable and nothing running/pending-reachable
         finalize_if_done(&g, &mut s);
         assert_eq!(s.status, RunStatus::Completed);
+    }
+
+    fn loop_node(id: &str, max: u32) -> Node {
+        let mut fields = serde_json::Map::new();
+        fields.insert("max_iterations".into(), serde_json::json!(max));
+        Node {
+            id: id.into(),
+            r#type: "loop".into(),
+            name: None,
+            parent: None,
+            fields,
+            position: None,
+        }
+    }
+
+    fn child(id: &str, parent: &str) -> Node {
+        let mut fields = serde_json::Map::new();
+        fields.insert("agent".into(), serde_json::json!("role:x"));
+        fields.insert("prompt".into(), serde_json::json!("work"));
+        Node {
+            id: id.into(),
+            r#type: "task".into(),
+            name: None,
+            parent: Some(parent.into()),
+            fields,
+            position: None,
+        }
+    }
+
+    #[test]
+    fn loop_runs_body_then_done_after_max_iterations() {
+        // t -> lp ; lp--body-->b ; lp--done-->ship
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                loop_node("lp", 2),
+                child("b", "lp"),
+                node("ship", "task"),
+            ],
+            vec![
+                edge("t", "out", "lp"),
+                edge("lp", "body", "b"),
+                edge("lp", "done", "ship"),
+            ],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        // lp is now runnable; enter it.
+        assert!(step(&g, &s).contains(&"lp".to_string()));
+        enter_loop(&g, &mut s, "lp");
+        assert_eq!(s.loop_iter["lp"], 0);
+        assert!(step(&g, &s).contains(&"b".to_string())); // body entry runnable
+        // iteration 0 body completes
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.loop_iter["lp"], 1); // continued to iteration 1
+        assert_eq!(s.status_or_pending("b"), NodeStatus::Pending); // body reset
+        // iteration 1 body completes -> reaches max (2), so done
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
+        assert!(step(&g, &s).contains(&"ship".to_string())); // done port delivered
     }
 }
