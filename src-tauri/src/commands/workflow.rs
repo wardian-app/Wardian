@@ -1,6 +1,7 @@
 use crate::workflow_engine;
 use crate::workflow_v2::runs;
 use serde_json::Value;
+use std::collections::HashMap;
 use tauri::AppHandle;
 use wardian_core::engine::store::{read_checkpoint, read_events};
 use wardian_core::models::{ScheduledRun, WorkflowDefinition};
@@ -212,6 +213,8 @@ pub async fn workflow_run_v2(
     path: String,
     provider: Option<String>,
     workspace: Option<String>,
+    input: Option<Value>,
+    bindings: Option<HashMap<String, String>>,
 ) -> Result<serde_json::Value, String> {
     let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
@@ -230,6 +233,8 @@ pub async fn workflow_run_v2(
     let workspace = workspace
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| run_root.clone());
+    let input = input.unwrap_or_else(|| serde_json::json!({}));
+    let bindings = bindings.unwrap_or_default();
     let blueprint_for_run = blueprint.clone();
     let run_id_for_run = run_id.clone();
     let run_root_for_run = run_root.clone();
@@ -241,6 +246,8 @@ pub async fn workflow_run_v2(
             run_root_for_run,
             workspace,
             provider,
+            input,
+            bindings,
         )
         .await
         {
@@ -264,6 +271,7 @@ pub async fn workflow_resume_v2(
     blueprint_path: String,
     provider: Option<String>,
     workspace: Option<String>,
+    bindings: Option<HashMap<String, String>>,
 ) -> Result<serde_json::Value, String> {
     let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
         .map_err(|e| e.to_string())?;
@@ -273,9 +281,10 @@ pub async fn workflow_resume_v2(
     let workspace = workspace
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| run_root.clone());
+    let bindings = bindings.unwrap_or_default();
 
     tokio::spawn(async move {
-        if let Err(error) = runs::drive_resume(blueprint, run_root, workspace, provider).await {
+        if let Err(error) = runs::drive_resume(blueprint, run_root, workspace, provider, bindings).await {
             crate::utils::logging::log_debug(&format!("[workflow-v2] resume failed: {error}"));
         }
     });
@@ -307,7 +316,7 @@ pub async fn workflow_approve_v2(
         let workspace = workspace
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| run_root.clone());
-        let exec = runs::live_executor(workspace, provider);
+        let exec = runs::live_executor(workspace, provider, HashMap::new());
         wardian_core::engine::Engine::grant_approval(
             &blueprint, &run_root, &node, &actor, note, &exec,
         )

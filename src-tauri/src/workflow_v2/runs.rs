@@ -1,4 +1,5 @@
 use crate::workflow_v2::{runner::HeadlessAgentRunner, LiveStepExecutor};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,8 +33,17 @@ pub fn scan_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
 }
 
 /// Build the live executor for a run in `workspace` with `default_provider`.
-pub fn live_executor(workspace: PathBuf, default_provider: String) -> LiveStepExecutor {
-    LiveStepExecutor::new(Arc::new(HeadlessAgentRunner), workspace, default_provider, HashMap::new())
+pub fn live_executor(
+    workspace: PathBuf,
+    default_provider: String,
+    bindings: HashMap<String, String>,
+) -> LiveStepExecutor {
+    LiveStepExecutor::new(
+        Arc::new(HeadlessAgentRunner),
+        workspace,
+        default_provider,
+        bindings,
+    )
 }
 
 /// Drive a fresh run to completion or pause.
@@ -43,9 +53,11 @@ pub async fn drive_new_run(
     run_root: PathBuf,
     workspace: PathBuf,
     default_provider: String,
+    input: Value,
+    bindings: HashMap<String, String>,
 ) -> Result<(), String> {
-    let exec = live_executor(workspace, default_provider);
-    Engine::start_with_id(&blueprint, run_id, serde_json::json!({}), &run_root, &exec)
+    let exec = live_executor(workspace, default_provider, bindings);
+    Engine::start_with_id(&blueprint, run_id, input, &run_root, &exec)
         .await
         .map(|_| ())
         .map_err(|err| err.to_string())
@@ -57,8 +69,9 @@ pub async fn drive_resume(
     run_root: PathBuf,
     workspace: PathBuf,
     default_provider: String,
+    bindings: HashMap<String, String>,
 ) -> Result<(), String> {
-    let exec = live_executor(workspace, default_provider);
+    let exec = live_executor(workspace, default_provider, bindings);
     Engine::resume(&blueprint, &run_root, &exec)
         .await
         .map(|_| ())
