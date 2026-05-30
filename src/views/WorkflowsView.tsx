@@ -10,13 +10,16 @@ import { NodePalette } from '../features/workflows/builder/NodePalette';
 import { VariableAssistantV2 } from '../features/workflows/builder/VariableAssistantV2';
 import type { Blueprint, BlueprintNode, NodeTypeDef } from '../features/workflows/builder/blueprintTypes';
 import { EventTimeline } from '../features/workflows/run/EventTimeline';
+import { WorkflowMonitor } from '../features/workflows/monitor/WorkflowMonitor';
 import { NodeInspector } from '../features/workflows/run/NodeInspector';
 import { RunDag } from '../features/workflows/run/RunDag';
 import { RunList } from '../features/workflows/run/RunList';
 import type { RunStatusKind } from '../features/workflows/run/runTypes';
 import { useRunStore } from '../features/workflows/run/useRunStore';
 import { useBuilderStore } from '../store/useBuilderStore';
+import { useSchedulesStore } from '../store/useSchedulesStore';
 import { useWorkflowsView } from '../store/useWorkflowsView';
+import type { WorkflowSchedule } from '../types/workflow';
 
 interface WorkflowsViewProps {
   theme: 'dark' | 'light' | 'system';
@@ -29,6 +32,8 @@ const INITIAL_BLUEPRINT: Blueprint = {
   nodes: [],
   edges: [],
 };
+
+const EMPTY_INPUT_PARAMS: RunInputParam[] = [];
 
 export function WorkflowsView({ theme }: WorkflowsViewProps) {
   const mode = useWorkflowsView((state) => state.mode);
@@ -49,9 +54,12 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
   const runBlueprint = useRunStore((state) => state.blueprint);
   const loadRuns = useRunStore((state) => state.loadRuns);
   const openRun = useRunStore((state) => state.openRun);
+  const subscribeSchedules = useSchedulesStore((state) => state.subscribe);
+  const loadSchedules = useSchedulesStore((state) => state.load);
 
   const [launchOpen, setLaunchOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(true);
+  const [editSchedule, setEditSchedule] = useState<WorkflowSchedule | null>(null);
 
   const activeBlueprintId = blueprint?.id ?? runState?.blueprint_id ?? runBlueprint?.id ?? null;
   const filteredRuns = useMemo(
@@ -64,6 +72,15 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
   useEffect(() => {
     void loadRuns();
   }, [loadRuns]);
+
+  useEffect(() => {
+    void loadSchedules();
+    let unlisten: (() => void) | undefined;
+    void subscribeSchedules().then((listener) => {
+      unlisten = listener;
+    });
+    return () => unlisten?.();
+  }, [loadSchedules, subscribeSchedules]);
 
   useEffect(() => {
     if (!blueprint) {
@@ -121,7 +138,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
         <div className="flex min-w-0 items-center gap-3">
           <BlueprintSelector onOpen={(path) => void openBlueprint(path)} onNew={newBlueprint} />
           <div className="flex rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-0.5" aria-label="Workflow mode">
-            {(['edit', 'observe'] as const).map((value) => (
+            {(['edit', 'observe', 'monitor'] as const).map((value) => (
               <button
                 key={value}
                 type="button"
@@ -158,7 +175,19 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
 
       <div className={`grid min-h-0 flex-1 ${drawerOpen ? 'grid-cols-[minmax(0,1fr)_280px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
         <main className="h-full min-h-0 overflow-hidden p-3">
-          {mode === 'edit' ? <WorkflowEditMode theme={theme} /> : <WorkflowObserveMode theme={theme} />}
+          {mode === 'edit' ? (
+            <WorkflowEditMode theme={theme} />
+          ) : mode === 'observe' ? (
+            <WorkflowObserveMode theme={theme} />
+          ) : (
+            <WorkflowMonitor
+              onOpenRun={(blueprintId, runId) => void openRunForObserve(blueprintId, runId)}
+              onEditSchedule={(schedule) => {
+                setEditSchedule(schedule);
+                setLaunchOpen(true);
+              }}
+            />
+          )}
         </main>
         {drawerOpen && (
           <aside className="min-h-0 overflow-y-auto border-l border-wardian-border bg-[var(--color-wardian-card)] p-3">
@@ -184,13 +213,23 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
         )}
       </div>
 
-      {launchOpen && blueprintPath && (
+      {launchOpen && (blueprintPath || editSchedule) && (
         <div className="absolute inset-0 z-20 flex items-start justify-center bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_25%)] p-8">
           <RunLaunchDialog
-            path={blueprintPath}
-            inputParams={inputParams}
+            path={blueprintPath ?? ''}
+            blueprintId={editSchedule?.blueprint_id ?? activeBlueprintId ?? undefined}
+            inputParams={editSchedule && blueprint?.id !== editSchedule.blueprint_id ? EMPTY_INPUT_PARAMS : inputParams}
+            editSchedule={editSchedule ?? undefined}
             onLaunched={(runId) => void handleLaunched(runId)}
-            onCancel={() => setLaunchOpen(false)}
+            onScheduled={() => {
+              setLaunchOpen(false);
+              setEditSchedule(null);
+              void loadSchedules();
+            }}
+            onCancel={() => {
+              setLaunchOpen(false);
+              setEditSchedule(null);
+            }}
           />
         </div>
       )}

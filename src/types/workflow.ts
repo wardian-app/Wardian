@@ -104,6 +104,24 @@ export interface ScheduleDefinition {
   active: boolean;
 }
 
+/** Mirrors the 6b Rust `WorkflowSchedule` DTO (a persisted v2 invoker). */
+export interface WorkflowSchedule {
+  id: string;
+  blueprint_id: string;
+  name: string;
+  provider?: string | null;
+  workspace?: string | null;
+  input: unknown;
+  bindings: Record<string, string>;
+  schedule: ScheduleDefinition;
+  next_run_epoch_ms?: number | null;
+  paused_remaining_ms?: number | null;
+  is_paused: boolean;
+  last_run_status?: string | null;
+  last_run_error?: string | null;
+  last_run_epoch_ms?: number | null;
+}
+
 export interface ScheduledRun {
   id: string;
   workflow_id: string;
