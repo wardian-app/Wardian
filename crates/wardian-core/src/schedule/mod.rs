@@ -3,6 +3,7 @@
 use crate::models::ScheduleDefinition;
 use chrono::{Datelike, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::models::WorkflowSchedule;
 
@@ -248,6 +249,101 @@ pub fn save_schedules(schedules: &[WorkflowSchedule]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What the effect layer must launch for one firing schedule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FireRequest {
+    pub schedule_id: String,
+    pub blueprint_id: String,
+    pub name: String,
+    pub provider: Option<String>,
+    pub workspace: Option<String>,
+    pub input: serde_json::Value,
+    pub bindings: HashMap<String, String>,
+}
+
+fn is_expired(schedule: &WorkflowSchedule, now_ms: u64) -> bool {
+    match schedule.schedule.end_condition.as_str() {
+        "after_occurrences" => schedule
+            .schedule
+            .max_occurrences
+            .is_some_and(|max| schedule.schedule.occurrence_count >= max),
+        "on_date" => schedule.schedule.end_date.as_ref().is_some_and(|date| {
+            let Some(now) =
+                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms as i64)
+            else {
+                return false;
+            };
+            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map(|end| now.with_timezone(&chrono::Local).date_naive() > end)
+                .unwrap_or(false)
+        }),
+        _ => false,
+    }
+}
+
+fn fire_request(schedule: &WorkflowSchedule) -> FireRequest {
+    FireRequest {
+        schedule_id: schedule.id.clone(),
+        blueprint_id: schedule.blueprint_id.clone(),
+        name: schedule.name.clone(),
+        provider: schedule.provider.clone(),
+        workspace: schedule.workspace.clone(),
+        input: schedule.input.clone(),
+        bindings: schedule.bindings.clone(),
+    }
+}
+
+fn advance_after_fire(schedule: &mut WorkflowSchedule, now_ms: u64) -> bool {
+    schedule.schedule.occurrence_count = schedule.schedule.occurrence_count.saturating_add(1);
+    schedule.last_run_status = Some("running".to_string());
+    schedule.last_run_error = None;
+    schedule.last_run_epoch_ms = Some(now_ms);
+
+    if schedule.schedule.schedule_type == "one_time" || is_expired(schedule, now_ms) {
+        return true;
+    }
+
+    schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now_ms);
+    schedule.next_run_epoch_ms.is_none() && schedule.schedule.schedule_type == "specific_dates"
+}
+
+/// Advance one tick. Mutates `schedules` and returns due fire requests.
+pub fn plan_tick(schedules: &mut Vec<WorkflowSchedule>, now_ms: u64) -> Vec<FireRequest> {
+    let mut fire_requests = Vec::new();
+    let mut remove_ids = Vec::new();
+
+    for schedule in schedules.iter_mut() {
+        if !schedule.schedule.active || schedule.is_paused {
+            continue;
+        }
+
+        if is_expired(schedule, now_ms) {
+            remove_ids.push(schedule.id.clone());
+            continue;
+        }
+
+        let Some(next_run) = schedule.next_run_epoch_ms else {
+            schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now_ms);
+            continue;
+        };
+
+        if next_run > now_ms {
+            continue;
+        }
+
+        fire_requests.push(fire_request(schedule));
+        if advance_after_fire(schedule, now_ms) {
+            remove_ids.push(schedule.id.clone());
+        }
+    }
+
+    if !remove_ids.is_empty() {
+        schedules.retain(|schedule| !remove_ids.iter().any(|id| id == &schedule.id));
+    }
+
+    fire_requests
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +371,10 @@ mod tests {
             last_run_error: None,
             last_run_epoch_ms: None,
         }
+    }
+
+    fn s_vec(s: &crate::models::WorkflowSchedule) -> Vec<crate::models::WorkflowSchedule> {
+        vec![s.clone()]
     }
 
     fn interval(mins: u32) -> ScheduleDefinition {
@@ -347,5 +447,58 @@ mod tests {
         std::env::set_var("WARDIAN_HOME", dir.path());
         assert!(load_schedules().is_empty());
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn due_active_schedule_fires_and_advances() {
+        let mut s = sample_schedule("s1");
+        s.next_run_epoch_ms = Some(500);
+        let mut v = s_vec(&s);
+        let fires = plan_tick(&mut v, 1000);
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].blueprint_id, "heartbeat");
+        assert!(v[0].next_run_epoch_ms.is_some_and(|next| next > 1000));
+    }
+
+    #[test]
+    fn paused_schedule_does_not_fire() {
+        let mut s = sample_schedule("s1");
+        s.is_paused = true;
+        s.next_run_epoch_ms = Some(500);
+        let mut v = vec![s];
+        assert!(plan_tick(&mut v, 1000).is_empty());
+    }
+
+    #[test]
+    fn unset_next_run_is_computed_not_fired() {
+        let mut v = vec![sample_schedule("s1")];
+        let fires = plan_tick(&mut v, 1000);
+        assert!(fires.is_empty());
+        assert!(v[0].next_run_epoch_ms.is_some());
+    }
+
+    #[test]
+    fn one_time_is_removed_after_firing() {
+        let mut s = sample_schedule("s1");
+        s.schedule.schedule_type = "one_time".into();
+        s.schedule.interval_minutes = None;
+        s.next_run_epoch_ms = Some(500);
+        let mut v = vec![s];
+        let fires = plan_tick(&mut v, 1000);
+        assert_eq!(fires.len(), 1);
+        assert!(v.is_empty(), "one_time schedule should be removed after firing");
+    }
+
+    #[test]
+    fn after_occurrences_expiry_removes_without_firing() {
+        let mut s = sample_schedule("s1");
+        s.schedule.end_condition = "after_occurrences".into();
+        s.schedule.max_occurrences = Some(2);
+        s.schedule.occurrence_count = 2;
+        s.next_run_epoch_ms = Some(500);
+        let mut v = vec![s];
+        let fires = plan_tick(&mut v, 1000);
+        assert!(fires.is_empty());
+        assert!(v.is_empty());
     }
 }
