@@ -4,6 +4,29 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.3.9](https://github.com/wardian-app/Wardian/compare/v0.3.8...v0.3.9) (2026-05-30)
+
+
+### Features
+
+* **cli:** Workflow Engine v2 thin CLI — exec/runs/replay (sub-project 4) ([#441](https://github.com/wardian-app/Wardian/issues/441)) ([a24dd45](https://github.com/wardian-app/Wardian/commit/a24dd45399c495a5993fa324a9a14c1a2c70619f))
+* **run-view:** Workflow Run View — observe mode (sub-project 3b) ([#438](https://github.com/wardian-app/Wardian/issues/438)) ([cde6a4e](https://github.com/wardian-app/Wardian/commit/cde6a4e88f11fad44192026c3027c102c581a282))
+* **workflow-v2:** add invoker foundation ([#456](https://github.com/wardian-app/Wardian/issues/456)) ([5032e82](https://github.com/wardian-app/Wardian/commit/5032e8250e1de9b1b1d5fe9f8ea987b4756272b3))
+* **workflow-v2:** live executor — drive real agents + run lifecycle (sub-project 5a) ([#448](https://github.com/wardian-app/Wardian/issues/448)) ([b5466df](https://github.com/wardian-app/Wardian/commit/b5466df5e311ec4fe48790d33adb495a637a093c))
+* **workflow-v2:** schedule invoker (sub-project 6b) ([#457](https://github.com/wardian-app/Wardian/issues/457)) ([35e9e21](https://github.com/wardian-app/Wardian/commit/35e9e216ba14550cb6e2f3a2cd2644955506e1fa))
+* **workflows:** unified Workflows view — edit/observe/run, collapse tabs (sub-project 5b) ([#450](https://github.com/wardian-app/Wardian/issues/450)) ([9d4a3fa](https://github.com/wardian-app/Wardian/commit/9d4a3fa952d45efc968d679b74bf272bf0ae28d3))
+
+
+### Bug Fixes
+
+* **ci:** use release please PR output for lock sync ([#445](https://github.com/wardian-app/Wardian/issues/445)) ([09d513a](https://github.com/wardian-app/Wardian/commit/09d513ac9ee508b4934d2d7d8eab22a2382dec75))
+* **cli:** speed up worktree discovery ([#455](https://github.com/wardian-app/Wardian/issues/455)) ([4a8fe80](https://github.com/wardian-app/Wardian/commit/4a8fe8023e9ed682c1266c69a423001dd4b6abb4))
+
+
+### Documentation
+
+* add llms.txt index ([#449](https://github.com/wardian-app/Wardian/issues/449)) ([c262185](https://github.com/wardian-app/Wardian/commit/c262185cc32cfedbcad407c59b68e4f21e27ec21))
+
 ## [0.3.8](https://github.com/wardian-app/Wardian/compare/v0.3.7...v0.3.8) (2026-05-29)
 
 

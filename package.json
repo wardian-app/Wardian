@@ -1,7 +1,7 @@
 {
   "name": "wardian",
   "private": true,
-  "version": "0.3.8",
+  "version": "0.3.9",
   "type": "module",
   "description": "Local command center for multi-agent CLI workflows — see every session, swap skills on the fly, and chain agents into deterministic pipelines.",
   "license": "MIT",
