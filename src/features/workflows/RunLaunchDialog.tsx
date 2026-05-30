@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 import { useSettingsStore } from '../../store/useSettingsStore';
@@ -30,15 +30,22 @@ export function RunLaunchDialog({ path, inputParams = EMPTY_INPUT_PARAMS, onLaun
   const [providerTouched, setProviderTouched] = useState(false);
   const [providerNote, setProviderNote] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState('');
-  const [inputValues, setInputValues] = useState<Record<string, string | boolean>>({});
+  const inputParamKey = useMemo(
+    () => inputParams.map((param) => `${param.name}:${param.type}`).join('|'),
+    [inputParams],
+  );
+  const previousInputParamKey = useRef(inputParamKey);
+  const [inputValues, setInputValues] = useState<Record<string, string | boolean>>(
+    () => initialInputValues(inputParams),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setInputValues(Object.fromEntries(
-      inputParams.map((param) => [param.name, param.type === 'boolean' ? false : '']),
-    ));
-  }, [inputParams]);
+    if (previousInputParamKey.current === inputParamKey) return;
+    previousInputParamKey.current = inputParamKey;
+    setInputValues(initialInputValues(inputParams));
+  }, [inputParamKey, inputParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -162,10 +169,13 @@ export function RunLaunchDialog({ path, inputParams = EMPTY_INPUT_PARAMS, onLaun
                     type="checkbox"
                     className="h-4 w-4 accent-[var(--color-wardian-accent)]"
                     checked={Boolean(inputValues[param.name])}
-                    onChange={(event) => setInputValues((current) => ({
-                      ...current,
-                      [param.name]: event.currentTarget.checked,
-                    }))}
+                    onChange={(event) => {
+                      const checked = event.currentTarget.checked;
+                      setInputValues((current) => ({
+                        ...current,
+                        [param.name]: checked,
+                      }));
+                    }}
                   />
                   {param.name}
                 </label>
@@ -181,10 +191,13 @@ export function RunLaunchDialog({ path, inputParams = EMPTY_INPUT_PARAMS, onLaun
                   type={param.type === 'number' ? 'number' : 'text'}
                   className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
                   value={String(inputValues[param.name] ?? '')}
-                  onChange={(event) => setInputValues((current) => ({
-                    ...current,
-                    [param.name]: event.currentTarget.value,
-                  }))}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setInputValues((current) => ({
+                      ...current,
+                      [param.name]: value,
+                    }));
+                  }}
                 />
               </div>
             );
@@ -220,4 +233,10 @@ function collectInput(inputParams: RunInputParam[], inputValues: Record<string, 
     if (param.type === 'number') return [param.name, Number(value ?? 0)];
     return [param.name, String(value ?? '')];
   }));
+}
+
+function initialInputValues(inputParams: RunInputParam[]) {
+  return Object.fromEntries(
+    inputParams.map((param) => [param.name, param.type === 'boolean' ? false : '']),
+  );
 }
