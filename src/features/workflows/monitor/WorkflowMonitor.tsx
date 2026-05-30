@@ -29,8 +29,12 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
     return () => window.clearInterval(timer);
   }, [load, loadRuns]);
 
-  const activeRuns = useMemo(
-    () => runs.filter((run) => run.status === 'running' || run.status === 'awaiting_approval').slice(0, 20),
+  const monitorRuns = useMemo(
+    () => {
+      const active = runs.filter((run) => run.status === 'running' || run.status === 'awaiting_approval');
+      const recent = runs.filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval');
+      return [...active, ...recent].slice(0, 20);
+    },
     [runs],
   );
 
@@ -52,8 +56,8 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
         />
       </section>
       <section className="min-h-0 overflow-y-auto">
-        <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted">Active runs</h3>
-        <ActiveRunsList runs={activeRuns} onOpen={onOpenRun} />
+        <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted">Active and recent runs</h3>
+        <ActiveRunsList runs={monitorRuns} onOpen={onOpenRun} />
       </section>
     </div>
   );

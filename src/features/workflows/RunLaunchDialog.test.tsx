@@ -13,6 +13,7 @@ vi.mock('../../store/useSettingsStore', () => ({
 }));
 
 import { RunLaunchDialog } from './RunLaunchDialog';
+import type { WorkflowSchedule } from '../../types/workflow';
 
 const providerReadiness = [
   { provider: 'claude', display_name: 'Claude', available: true, executable: 'claude', reason: null },
@@ -101,6 +102,52 @@ describe('RunLaunchDialog', () => {
     expect(invokeMock).toHaveBeenCalledWith(
       'schedule_create_v2',
       expect.objectContaining({ blueprintId: 'wf', name: 'Nightly' }),
+    );
+  });
+
+  it('preserves provider and input when editing an existing schedule', async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'list_provider_readiness') return providerReadiness;
+      if (command === 'schedule_remove_v2') return null;
+      if (command === 'schedule_create_v2') return { id: 's2' };
+      return null;
+    });
+    const editSchedule: WorkflowSchedule = {
+      id: 's1',
+      blueprint_id: 'wf',
+      name: 'Nightly',
+      provider: 'claude',
+      workspace: null,
+      input: { symbol: 'IBM' },
+      bindings: { planner: 'agent-1' },
+      schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+      is_paused: false,
+    };
+
+    render(
+      <RunLaunchDialog
+        path="/x/wf.md"
+        blueprintId="wf"
+        inputParams={[{ name: 'symbol', type: 'string' }]}
+        editSchedule={editSchedule}
+        onLaunched={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText(/provider/i)).toHaveValue('claude'));
+    expect(screen.getByLabelText(/symbol/i)).toHaveValue('IBM');
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('schedule_remove_v2', { id: 's1' }));
+    expect(invokeMock).toHaveBeenCalledWith(
+      'schedule_create_v2',
+      expect.objectContaining({
+        blueprintId: 'wf',
+        provider: 'claude',
+        input: { symbol: 'IBM' },
+        bindings: { planner: 'agent-1' },
+      }),
     );
   });
 });

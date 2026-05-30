@@ -46,6 +46,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
+  onOpenWorkflowBuilder,
 }) => {
   return (
     <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
@@ -101,7 +102,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             onClassesUpdated={onClassesUpdated}
           />
         )}
-        {activeTab === "workflows" && <WorkflowsGlancePane />}
+        {activeTab === "workflows" && <WorkflowsGlancePane onOpenWorkflowBuilder={onOpenWorkflowBuilder} />}
 
       </div>
       {!leftCollapsed && (
@@ -116,7 +117,11 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   );
 };
 
-const WorkflowsGlancePane: React.FC = () => {
+interface WorkflowsGlancePaneProps {
+  onOpenWorkflowBuilder: () => void;
+}
+
+const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflowBuilder }) => {
   const schedules = useSchedulesStore((state) => state.schedules);
   const loadSchedules = useSchedulesStore((state) => state.load);
   const runs = useRunStore((state) => state.runs);
@@ -136,9 +141,13 @@ const WorkflowsGlancePane: React.FC = () => {
       schedules={schedules}
       activeRuns={activeRuns}
       onOpenRun={(blueprintId, runId) => {
+        onOpenWorkflowBuilder();
         void openRun(blueprintId, runId).then(() => observeRun(runId));
       }}
-      onOpenMonitor={() => setMode('monitor')}
+      onOpenMonitor={() => {
+        onOpenWorkflowBuilder();
+        setMode('monitor');
+      }}
     />
   );
 };

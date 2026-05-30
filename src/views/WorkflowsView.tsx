@@ -33,6 +33,8 @@ const INITIAL_BLUEPRINT: Blueprint = {
   edges: [],
 };
 
+const EMPTY_INPUT_PARAMS: RunInputParam[] = [];
+
 export function WorkflowsView({ theme }: WorkflowsViewProps) {
   const mode = useWorkflowsView((state) => state.mode);
   const blueprintPath = useWorkflowsView((state) => state.blueprintPath);
@@ -216,7 +218,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           <RunLaunchDialog
             path={blueprintPath ?? ''}
             blueprintId={editSchedule?.blueprint_id ?? activeBlueprintId ?? undefined}
-            inputParams={inputParams}
+            inputParams={editSchedule && blueprint?.id !== editSchedule.blueprint_id ? EMPTY_INPUT_PARAMS : inputParams}
             editSchedule={editSchedule ?? undefined}
             onLaunched={(runId) => void handleLaunched(runId)}
             onScheduled={() => {

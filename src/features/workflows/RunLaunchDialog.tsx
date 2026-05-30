@@ -40,19 +40,19 @@ export function RunLaunchDialog({
 }: RunLaunchDialogProps) {
   const defaultProvider = useSettingsStore((state) => state.default_provider);
   const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
-  const [provider, setProvider] = useState<UserFacingProviderName>(() => (
-    isUserFacingProviderName(editSchedule?.provider) ? editSchedule.provider : 'claude'
-  ));
-  const [providerTouched, setProviderTouched] = useState(false);
+  const editProvider = isUserFacingProviderName(editSchedule?.provider) ? editSchedule.provider : null;
+  const [provider, setProvider] = useState<UserFacingProviderName>(editProvider ?? 'claude');
+  const [providerTouched, setProviderTouched] = useState(Boolean(editProvider));
   const [providerNote, setProviderNote] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState(editSchedule?.workspace ?? '');
   const inputParamKey = useMemo(
     () => inputParams.map((param) => `${param.name}:${param.type}`).join('|'),
     [inputParams],
   );
-  const previousInputParamKey = useRef(inputParamKey);
+  const inputValuesKey = `${inputParamKey}|${editSchedule?.id ?? ''}`;
+  const previousInputParamKey = useRef(inputValuesKey);
   const [inputValues, setInputValues] = useState<Record<string, string | boolean>>(
-    () => initialInputValues(inputParams),
+    () => initialInputValues(inputParams, editSchedule?.input),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,10 +63,10 @@ export function RunLaunchDialog({
   );
 
   useEffect(() => {
-    if (previousInputParamKey.current === inputParamKey) return;
-    previousInputParamKey.current = inputParamKey;
-    setInputValues(initialInputValues(inputParams));
-  }, [inputParamKey, inputParams]);
+    if (previousInputParamKey.current === inputValuesKey) return;
+    previousInputParamKey.current = inputValuesKey;
+    setInputValues(initialInputValues(inputParams, editSchedule?.input));
+  }, [editSchedule?.input, inputParams, inputValuesKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -331,8 +331,20 @@ function collectInput(inputParams: RunInputParam[], inputValues: Record<string, 
   }));
 }
 
-function initialInputValues(inputParams: RunInputParam[]) {
+function initialInputValues(inputParams: RunInputParam[], initialInput?: unknown) {
+  const initialInputRecord = isRecord(initialInput) ? initialInput : {};
   return Object.fromEntries(
-    inputParams.map((param) => [param.name, param.type === 'boolean' ? false : '']),
+    inputParams.map((param) => {
+      if (Object.prototype.hasOwnProperty.call(initialInputRecord, param.name)) {
+        const value = initialInputRecord[param.name];
+        if (param.type === 'boolean') return [param.name, Boolean(value)];
+        return [param.name, String(value ?? '')];
+      }
+      return [param.name, param.type === 'boolean' ? false : ''];
+    }),
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
