@@ -1517,13 +1517,42 @@ mod tests {
             }
             observed.push((event.kind, event.paths));
         }
+        drain_fs_events(rx);
+    }
+
+    fn drain_fs_events(rx: &mpsc::Receiver<notify::Event>) {
         while rx.try_recv().is_ok() {}
     }
 
-    fn wait_for_any_fs_event(rx: &mpsc::Receiver<notify::Event>, label: &str) {
-        rx.recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|_| panic!("timed out waiting for filesystem event: {}", label));
-        while rx.try_recv().is_ok() {}
+    fn wait_for_fs_remove_event(rx: &mpsc::Receiver<notify::Event>, label: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed = Vec::new();
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                panic!(
+                    "timed out waiting for filesystem remove event: {}; observed events: {:#?}",
+                    label, observed
+                );
+            };
+            let event = rx.recv_timeout(remaining).unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for filesystem remove event: {}; observed events: {:#?}",
+                    label, observed
+                )
+            });
+            if matches!(event.kind, notify::event::EventKind::Remove(_)) {
+                break;
+            }
+            observed.push((event.kind, event.paths));
+        }
+        drain_fs_events(rx);
+    }
+
+    fn wait_for_test_watcher_ready(rx: &mpsc::Receiver<notify::Event>, watched_dir: &Path) {
+        let sentinel = watched_dir.join(".wardian-watch-ready");
+        fs::write(&sentinel, "ready").expect("write watch sentinel");
+        wait_for_fs_event(rx, "watch sentinel create", &sentinel);
+        drain_fs_events(rx);
     }
 
     #[test]
@@ -1531,6 +1560,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let skills_dir = temp.path().join("library").join("skills");
         fs::create_dir_all(&skills_dir).expect("skills dir");
+        let existing_skill_dir = skills_dir.join("planner-existing");
+        let existing_skill_file = existing_skill_dir.join("SKILL.md");
+        fs::create_dir_all(&existing_skill_dir).expect("existing skill dir");
+        fs::write(&existing_skill_file, "one").expect("existing skill file");
 
         let targets = discover_skill_watch_targets(&skills_dir).expect("watch targets");
         let (tx, rx) = mpsc::channel::<notify::Event>();
@@ -1545,23 +1578,25 @@ mod tests {
             notify::Watcher::watch(&mut watcher, &target, notify::RecursiveMode::Recursive)
                 .expect("watch target");
         }
+        wait_for_test_watcher_ready(&rx, &skills_dir);
 
-        let skill_dir = skills_dir.join("planner");
-        let skill_file = skill_dir.join("SKILL.md");
-        fs::create_dir_all(&skill_dir).expect("create skill dir");
-        fs::write(&skill_file, "one").expect("write skill");
-        wait_for_fs_event(&rx, "skill create", &skill_dir);
+        let created_skill_dir = skills_dir.join("planner-created");
+        fs::create_dir_all(&created_skill_dir).expect("create skill dir");
+        wait_for_fs_event(&rx, "skill dir create", &created_skill_dir);
 
         let mut file = fs::OpenOptions::new()
             .append(true)
-            .open(&skill_file)
+            .open(&existing_skill_file)
             .expect("open skill for modify");
         file.write_all(b"\ntwo").expect("modify skill");
         file.sync_all().expect("sync skill modify");
-        wait_for_fs_event(&rx, "skill modify", &skill_file);
+        wait_for_fs_event(&rx, "skill modify", &existing_skill_file);
 
-        fs::remove_dir_all(&skill_dir).expect("remove skill");
-        wait_for_any_fs_event(&rx, "skill remove");
+        fs::remove_file(&existing_skill_file).expect("remove skill file");
+        wait_for_fs_remove_event(&rx, "skill file remove");
+
+        fs::remove_dir(&existing_skill_dir).expect("remove skill dir");
+        wait_for_fs_remove_event(&rx, "skill dir remove");
     }
 
     #[test]
@@ -1590,6 +1625,7 @@ mod tests {
             notify::Watcher::watch(&mut watcher, &target, notify::RecursiveMode::Recursive)
                 .expect("watch target");
         }
+        wait_for_test_watcher_ready(&rx, &external_skill);
 
         let external_skill_file = external_skill.join("SKILL.md");
         let mut file = fs::OpenOptions::new()
