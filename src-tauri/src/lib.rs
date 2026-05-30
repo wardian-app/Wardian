@@ -234,6 +234,7 @@ pub fn run() {
                     eprintln!("Failed to reconcile headless agents: {}", e);
                 }
                 workflow_engine::init_triggers(app_handle.clone()).await;
+                crate::workflow_v2::schedule::start_v2_scheduler(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
                     let state_path = app_dir.join("settings/state.json");
