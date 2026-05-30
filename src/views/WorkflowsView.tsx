@@ -156,7 +156,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
       </div>
 
       <div className={`grid min-h-0 flex-1 ${drawerOpen ? 'grid-cols-[minmax(0,1fr)_280px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
-        <main className="min-h-0 p-3">
+        <main className="h-full min-h-0 overflow-hidden p-3">
           {mode === 'edit' ? <WorkflowEditMode theme={theme} /> : <WorkflowObserveMode theme={theme} />}
         </main>
         {drawerOpen && (
@@ -242,7 +242,7 @@ function WorkflowEditMode({ theme }: WorkflowsViewProps) {
   return (
     <div data-testid="workflows-edit-mode" className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
       <BuilderToolbar />
-      <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)_320px]">
+      <div className="grid h-full min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)_320px]">
         <aside className="min-h-0 overflow-y-auto border-r border-wardian-border bg-[var(--color-wardian-card)] p-3">
           <NodePalette onAdd={addNode} />
         </aside>
