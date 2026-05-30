@@ -234,6 +234,7 @@ pub fn run() {
                     eprintln!("Failed to reconcile headless agents: {}", e);
                 }
                 workflow_engine::init_triggers(app_handle.clone()).await;
+                crate::workflow_v2::schedule::start_v2_scheduler(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
                     let state_path = app_dir.join("settings/state.json");
@@ -467,6 +468,12 @@ pub fn run() {
             commands::workflow::workflow_resume_v2,
             commands::workflow::workflow_approve_v2,
             commands::workflow::workflow_cancel_v2,
+            commands::workflow::schedule_create_v2,
+            commands::workflow::schedule_list_v2,
+            commands::workflow::schedule_pause_v2,
+            commands::workflow::schedule_resume_v2,
+            commands::workflow::schedule_remove_v2,
+            commands::workflow::schedule_run_now_v2,
             commands::library::get_library_tree,
             commands::library::save_library_item,
             commands::library::update_library_metadata,

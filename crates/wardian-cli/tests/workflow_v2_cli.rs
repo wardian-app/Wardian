@@ -113,3 +113,56 @@ fn workflow_v2_exec_runs_show_replay_round_trip() {
     let replayed = workflow_command(&home, &["workflow", "replay", "demo", run_id]);
     assert_eq!(replayed["state"]["status"], shown["state"]["status"]);
 }
+
+#[test]
+fn workflow_schedule_add_list_pause_resume_run_now_remove_round_trip() {
+    let home = TempDir::new().unwrap();
+
+    let add = workflow_command(
+        &home,
+        &[
+            "workflow",
+            "schedule",
+            "add",
+            "--blueprint",
+            "heartbeat",
+            "--name",
+            "HB",
+            "--every",
+            "60",
+            "--input",
+            "{\"symbol\":\"SPY\"}",
+            "--bind",
+            "analyst=mock",
+        ],
+    );
+    assert_eq!(add["ok"], true);
+    assert_eq!(add["schedule"]["blueprint_id"], "heartbeat");
+    assert_eq!(add["schedule"]["input"]["symbol"], "SPY");
+    assert_eq!(add["schedule"]["bindings"]["analyst"], "mock");
+    let id = add["schedule"]["id"].as_str().unwrap();
+
+    let list = workflow_command(&home, &["workflow", "schedule", "list"]);
+    assert_eq!(list["schedules"].as_array().unwrap().len(), 1);
+
+    let pause = workflow_command(&home, &["workflow", "schedule", "pause", id]);
+    assert_eq!(pause["ok"], true);
+    let paused = workflow_command(&home, &["workflow", "schedule", "list"]);
+    assert_eq!(paused["schedules"][0]["is_paused"], true);
+    assert!(paused["schedules"][0]["next_run_epoch_ms"].is_null());
+
+    let resume = workflow_command(&home, &["workflow", "schedule", "resume", id]);
+    assert_eq!(resume["ok"], true);
+    let resumed = workflow_command(&home, &["workflow", "schedule", "list"]);
+    assert_eq!(resumed["schedules"][0]["is_paused"], false);
+    assert!(resumed["schedules"][0]["next_run_epoch_ms"].is_number());
+
+    let run_now = workflow_command(&home, &["workflow", "schedule", "run-now", id]);
+    assert_eq!(run_now["ok"], true);
+
+    let remove = workflow_command(&home, &["workflow", "schedule", "remove", id]);
+    assert_eq!(remove["ok"], true);
+    assert_eq!(remove["removed"], 1);
+    let empty = workflow_command(&home, &["workflow", "schedule", "list"]);
+    assert!(empty["schedules"].as_array().unwrap().is_empty());
+}

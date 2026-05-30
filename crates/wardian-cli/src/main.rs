@@ -9,13 +9,13 @@ use std::{
     fs,
     io::Read as _,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, Cli, Command,
     QueuePolicyArg, ReplyArgs, ReplyStatusArg, SendArgs, TeamArgs, TeamCommand, WatchlistArgs,
-    WatchlistCommand, WorkflowArgs, WorkflowCommand,
+    WatchlistCommand, WorkflowArgs, WorkflowCommand, WorkflowScheduleCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
@@ -410,6 +410,7 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
             render_workflow_gen(&out, GenKind::Schema, check)
         }
         WorkflowCommand::GenDocs { out, check } => render_workflow_gen(&out, GenKind::Docs, check),
+        WorkflowCommand::Schedule(command) => render_workflow_schedule(command),
     }
 }
 
@@ -630,6 +631,145 @@ fn render_workflow_normalize(path: &str, write: bool) -> Result<String, CliError
         }));
     }
     Ok(normalized)
+}
+
+fn render_workflow_schedule(command: WorkflowScheduleCommand) -> Result<String, CliError> {
+    use WorkflowScheduleCommand as C;
+    use wardian_core::schedule::{compute_next_run, load_schedules, save_schedules};
+
+    match command {
+        C::List => render_json(serde_json::json!({
+            "schema": 1,
+            "schedules": load_schedules(),
+        })),
+        C::Add {
+            blueprint,
+            name,
+            every,
+            daily,
+            weekly,
+            at,
+            provider,
+            input,
+            bind,
+        } => {
+            let schedule = build_schedule_definition(every, daily, weekly, at)?;
+            let input = parse_workflow_exec_input(input.as_deref())?;
+            let bindings = parse_workflow_bindings(&bind)?;
+            let now = current_epoch_ms();
+            let record = wardian_core::models::WorkflowSchedule {
+                id: wardian_core::engine::driver::new_run_id(),
+                blueprint_id: blueprint,
+                name,
+                provider,
+                workspace: None,
+                input,
+                bindings,
+                next_run_epoch_ms: compute_next_run(&schedule, now),
+                paused_remaining_ms: None,
+                is_paused: false,
+                last_run_status: None,
+                last_run_error: None,
+                last_run_epoch_ms: None,
+                schedule,
+            };
+            let mut all = load_schedules();
+            all.push(record.clone());
+            save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+            render_json(serde_json::json!({
+                "schema": 1,
+                "ok": true,
+                "schedule": record,
+            }))
+        }
+        C::Pause { id } => mutate_schedule(&id, |schedule| {
+            let now = current_epoch_ms();
+            schedule.is_paused = true;
+            schedule.paused_remaining_ms = schedule
+                .next_run_epoch_ms
+                .map(|next_run| next_run.saturating_sub(now));
+            schedule.next_run_epoch_ms = None;
+        }),
+        C::Resume { id } => mutate_schedule(&id, |schedule| {
+            let now = current_epoch_ms();
+            schedule.is_paused = false;
+            schedule.next_run_epoch_ms = match schedule.paused_remaining_ms.take() {
+                Some(remaining) => Some(now.saturating_add(remaining)),
+                None => compute_next_run(&schedule.schedule, now),
+            };
+        }),
+        C::RunNow { id } => mutate_schedule(&id, |schedule| {
+            schedule.is_paused = false;
+            schedule.next_run_epoch_ms = Some(current_epoch_ms());
+        }),
+        C::Remove { id } => {
+            let mut all = load_schedules();
+            let before = all.len();
+            all.retain(|schedule| schedule.id != id);
+            save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+            render_json(serde_json::json!({
+                "schema": 1,
+                "ok": true,
+                "removed": before - all.len(),
+            }))
+        }
+    }
+}
+
+fn mutate_schedule(
+    id: &str,
+    mutate: impl FnOnce(&mut wardian_core::models::WorkflowSchedule),
+) -> Result<String, CliError> {
+    use wardian_core::schedule::{load_schedules, save_schedules};
+    let mut all = load_schedules();
+    let found = all.iter_mut().find(|schedule| schedule.id == id);
+    let ok = found.is_some();
+    if let Some(schedule) = found {
+        mutate(schedule);
+    }
+    save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+    render_json(serde_json::json!({ "schema": 1, "ok": ok }))
+}
+
+fn build_schedule_definition(
+    every: Option<u32>,
+    daily: Option<String>,
+    weekly: Option<String>,
+    at: Option<String>,
+) -> Result<wardian_core::models::ScheduleDefinition, CliError> {
+    let mut definition = wardian_core::models::ScheduleDefinition {
+        active: true,
+        ..Default::default()
+    };
+    if let Some(minutes) = every {
+        definition.schedule_type = "interval".into();
+        definition.interval_minutes = Some(minutes);
+    } else if let Some(time) = daily {
+        definition.schedule_type = "daily".into();
+        definition.time_of_day = Some(time);
+    } else if let Some(spec) = weekly {
+        let (days, time) = spec.split_once('@').ok_or_else(|| {
+            CliError::generic("--weekly expects Days@HH:MM, e.g. Mon,Fri@09:30")
+        })?;
+        definition.schedule_type = "weekly".into();
+        definition.days_of_week = Some(days.split(',').map(|day| day.trim().to_string()).collect());
+        definition.time_of_day = Some(time.to_string());
+    } else if let Some(when) = at {
+        definition.schedule_type = "one_time".into();
+        definition.run_at = Some(when);
+    } else {
+        return Err(CliError::generic(
+            "specify one of --every / --daily / --weekly / --at",
+        ));
+    }
+    Ok(definition)
+}
+
+fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn render_json(body: serde_json::Value) -> Result<String, CliError> {

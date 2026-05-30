@@ -34,6 +34,8 @@ pub struct AppState {
     pub workflow_runs: Mutex<HashMap<String, Vec<tauri::async_runtime::JoinHandle<()>>>>,
     pub triggers_paused: std::sync::atomic::AtomicBool,
     pub scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub v2_scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub v2_schedules_paused: std::sync::atomic::AtomicBool,
     // Active git repo watchers keyed by workspace path
     pub git_watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     // Active library watchers keyed by library type, shared by mounted UI consumers
@@ -117,6 +119,8 @@ impl Default for AppState {
             workflow_runs: Mutex::new(HashMap::new()),
             triggers_paused: std::sync::atomic::AtomicBool::new(false),
             scheduler_handle: Mutex::new(None),
+            v2_scheduler_handle: Mutex::new(None),
+            v2_schedules_paused: std::sync::atomic::AtomicBool::new(false),
             git_watchers: Mutex::new(HashMap::new()),
             library_watchers: Mutex::new(HashMap::new()),
             user_terminal: Mutex::new(None),
@@ -140,6 +144,9 @@ mod tests {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
         assert!(state.terminal_attach.snapshot("missing-agent").is_none());
+        assert!(!state
+            .v2_schedules_paused
+            .load(std::sync::atomic::Ordering::SeqCst));
         drop(state);
     }
 

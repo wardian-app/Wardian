@@ -3,6 +3,7 @@ pub mod output;
 pub mod resolve;
 pub mod runner;
 pub mod runs;
+pub mod schedule;
 
 use runner::{AgentRunSpec, AgentRunner};
 use std::collections::HashMap;
