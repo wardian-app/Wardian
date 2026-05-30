@@ -4,6 +4,7 @@ pub mod engine;
 pub mod identity;
 pub mod models;
 pub mod paths;
+pub mod schedule;
 pub mod workflow;
 
 #[cfg(test)]
