@@ -1,0 +1,65 @@
+# Wardian Docs
+
+Wardian is a local command center for multi-agent CLI workflows: run provider-backed agents, monitor live terminal sessions, manage reusable skills and prompts, and chain agents into deterministic workflows.
+
+This file is an agent-readable index for the public Wardian documentation. Use the linked pages as the canonical docs source.
+
+## Getting Started
+
+- https://docs.wardian.org/guide/getting-started - Install Wardian, complete first-run setup, verify a provider, spawn the first agent, and inspect the first Queue result.
+- https://docs.wardian.org/guide/ui-overview - Learn the title bar, navigation rail, agent roster, workspace areas, and common app surfaces.
+- https://docs.wardian.org/guide/first-run-troubleshooting - Recover from launch, provider detection, terminal startup, Queue, and CLI setup problems.
+
+## Core Workspace
+
+- https://docs.wardian.org/guide/grid - Use the main agent grid, terminal cards, focused chat mode, and per-agent controls.
+- https://docs.wardian.org/guide/dashboard - Compare live agent health, runtime status, and summary controls.
+- https://docs.wardian.org/guide/watchlists - Group, select, sort, and monitor agents in the roster.
+- https://docs.wardian.org/guide/queue - Review completed agent and workflow results, action-needed items, and notification behavior.
+- https://docs.wardian.org/guide/source-control - Stage, diff, commit, sync, and manage agent worktrees.
+- https://docs.wardian.org/guide/explorer - Browse an agent workspace or Wardian home from the app.
+- https://docs.wardian.org/guide/remote-control - Pair and use the Wardian remote PWA over HTTPS.
+
+## Reuse and Agent Direction
+
+- https://docs.wardian.org/guide/library - Manage reusable prompts, skills, and library item assignment.
+- https://docs.wardian.org/guide/command-panel - Send one-off broadcasts or starred prompts to selected agents.
+- https://docs.wardian.org/guide/class-management - Define agent class blueprints used by spawn and clone flows.
+
+## Workflow Automation
+
+- https://docs.wardian.org/guide/workflows - Build and run visual automations from the Wardian app.
+- https://docs.wardian.org/workflows/ - Start with the workflow mental model, launch behavior, runtime state, and engine loop.
+- https://docs.wardian.org/workflows/building-workflows - Use the workflow canvas, block library, node settings, and variable assistant.
+- https://docs.wardian.org/workflows/node-reference - Reference workflow node types and user-visible behavior.
+- https://docs.wardian.org/workflows/triggers - Understand manual runs, scheduled triggers, and live listeners.
+- https://docs.wardian.org/workflows/agent-assignment - Map workflow roles to direct agents, fresh clones, or reusable assignment modes.
+- https://docs.wardian.org/workflows/troubleshooting - Diagnose common workflow authoring and runtime failures.
+
+## CLI and Agent Communication
+
+- https://docs.wardian.org/guide/cli - Use the Wardian CLI for agent inspection, live control, inter-agent messages, worktree assignment, and workflow commands.
+- https://docs.wardian.org/developer/ipc-events - Understand frontend/backend event contracts and runtime telemetry surfaces.
+- https://docs.wardian.org/developer/tauri-command-reference - Reference Tauri command boundaries used by the UI and native runtime.
+
+## Providers and Runtime
+
+- https://docs.wardian.org/guide/provider-readiness - Verify provider CLIs, authentication, shell PATH, and runtime prerequisites.
+- https://docs.wardian.org/providers - Compare supported providers and user-facing runtime expectations.
+- https://docs.wardian.org/developer/provider-runtimes - Implement or debug provider-specific spawn, resume, and transcript behavior.
+- https://docs.wardian.org/developer/pty-lifecycle - Understand PTY ownership, resize, output buffering, and terminal lifecycle rules.
+
+## Developer Internals
+
+- https://docs.wardian.org/developer/architecture - Read the high-level architecture for frontend, backend, state, and runtime boundaries.
+- https://docs.wardian.org/developer/setup - Set up a development checkout and local verification environment.
+- https://docs.wardian.org/developer/state-management - Understand persisted state, runtime state, and frontend state ownership.
+- https://docs.wardian.org/developer/workflow-engine - Debug or extend deterministic workflow execution.
+- https://docs.wardian.org/developer/native-e2e - Pick the native E2E layer for PTY, invoke, provider, and filesystem behavior.
+- https://docs.wardian.org/developer/docs-maintenance - Maintain public docs, screenshots, and this agent-readable index.
+
+## Project Context
+
+- https://docs.wardian.org/features - Review the public feature overview.
+- https://docs.wardian.org/os-support - Check platform support and OS-specific notes.
+- https://github.com/wardian-app/Wardian - Inspect source, issues, pull requests, and repository-internal specs.
