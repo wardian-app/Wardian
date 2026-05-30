@@ -5,6 +5,7 @@ mod live;
 mod output;
 
 use std::{
+    collections::HashMap,
     fs,
     io::Read as _,
     path::{Path, PathBuf},
@@ -388,7 +389,12 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
         }
         WorkflowCommand::NodeTypes { json } => render_workflow_node_types(json),
         WorkflowCommand::Validate { path } => render_workflow_validate(&path),
-        WorkflowCommand::Exec { path, executor } => render_workflow_exec(&path, &executor),
+        WorkflowCommand::Exec {
+            path,
+            executor,
+            input,
+            bind,
+        } => render_workflow_exec(&path, &executor, input.as_deref(), &bind),
         WorkflowCommand::Runs => render_workflow_runs(),
         WorkflowCommand::RunShow {
             blueprint_id,
@@ -438,7 +444,12 @@ fn render_workflow_validate(path: &str) -> Result<String, CliError> {
         .map_err(|e| CliError::generic(e.to_string()))
 }
 
-fn render_workflow_exec(path: &str, executor: &str) -> Result<String, CliError> {
+fn render_workflow_exec(
+    path: &str,
+    executor: &str,
+    input: Option<&str>,
+    bind: &[String],
+) -> Result<String, CliError> {
     if executor != "mock" {
         return Err(CliError::backend(
             ExitCode::Generic,
@@ -446,6 +457,8 @@ fn render_workflow_exec(path: &str, executor: &str) -> Result<String, CliError> 
             "only 'mock' is available until the real executor lands",
         ));
     }
+    let input = parse_workflow_exec_input(input)?;
+    let _bindings = parse_workflow_bindings(bind)?;
 
     let blueprint = wardian_core::workflow::parse_file(Path::new(path))
         .map_err(|e| CliError::generic(e.to_string()))?;
@@ -470,7 +483,7 @@ fn render_workflow_exec(path: &str, executor: &str) -> Result<String, CliError> 
         .block_on(wardian_core::engine::Engine::start_with_id(
             &blueprint,
             &run_id,
-            serde_json::json!({}),
+            input,
             &run_root,
             &mock,
         ))
@@ -488,6 +501,38 @@ fn render_workflow_exec(path: &str, executor: &str) -> Result<String, CliError> 
     serde_json::to_string_pretty(&body)
         .map(|json| format!("{json}\n"))
         .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn parse_workflow_exec_input(input: Option<&str>) -> Result<serde_json::Value, CliError> {
+    let Some(raw) = input else {
+        return Ok(serde_json::json!({}));
+    };
+    let value = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|error| CliError::generic(format!("invalid --input JSON: {error}")))?;
+    if !value.is_object() {
+        return Err(CliError::generic("--input must be a JSON object"));
+    }
+    Ok(value)
+}
+
+fn parse_workflow_bindings(bind: &[String]) -> Result<HashMap<String, String>, CliError> {
+    let mut bindings = HashMap::new();
+    for entry in bind {
+        let Some((name, provider)) = entry.split_once('=') else {
+            return Err(CliError::generic(format!(
+                "invalid --bind `{entry}`; expected name=provider"
+            )));
+        };
+        let name = name.trim();
+        let provider = provider.trim();
+        if name.is_empty() || provider.is_empty() {
+            return Err(CliError::generic(format!(
+                "invalid --bind `{entry}`; expected non-empty name=provider"
+            )));
+        }
+        bindings.insert(name.to_string(), provider.to_string());
+    }
+    Ok(bindings)
 }
 
 fn render_workflow_runs() -> Result<String, CliError> {
