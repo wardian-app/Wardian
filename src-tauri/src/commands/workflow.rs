@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tauri::AppHandle;
 use wardian_core::engine::store::{read_checkpoint, read_events};
-use wardian_core::models::{ScheduledRun, WorkflowDefinition};
+use wardian_core::models::{ScheduledRun, WorkflowDefinition, WorkflowSchedule};
+use wardian_core::schedule::{compute_next_run, load_schedules, save_schedules};
 use wardian_core::workflow::{self, Blueprint};
 
 #[tauri::command]
@@ -342,6 +343,114 @@ pub fn workflow_cancel_v2(
         wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
     std::fs::write(run_root.join("cancel.marker"), "cancelled").map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": true }))
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis() as u64
+}
+
+fn emit_schedules_updated(app: &AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit("v2-schedules-updated", ());
+}
+
+/// Create a v2 schedule. `schedule` is the cadence definition; runtime fields are seeded.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn schedule_create_v2(
+    app: AppHandle,
+    blueprint_id: String,
+    name: String,
+    schedule: wardian_core::models::ScheduleDefinition,
+    provider: Option<String>,
+    workspace: Option<String>,
+    input: Option<Value>,
+    bindings: Option<HashMap<String, String>>,
+) -> Result<WorkflowSchedule, String> {
+    let mut schedules = load_schedules();
+    let now = now_ms();
+    let record = WorkflowSchedule {
+        id: wardian_core::engine::driver::new_run_id(),
+        blueprint_id,
+        name,
+        provider,
+        workspace,
+        input: input.unwrap_or_else(|| serde_json::json!({})),
+        bindings: bindings.unwrap_or_default(),
+        schedule,
+        next_run_epoch_ms: None,
+        paused_remaining_ms: None,
+        is_paused: false,
+        last_run_status: None,
+        last_run_error: None,
+        last_run_epoch_ms: None,
+    };
+    let mut record = record;
+    record.next_run_epoch_ms = compute_next_run(&record.schedule, now);
+    schedules.push(record.clone());
+    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    emit_schedules_updated(&app);
+    Ok(record)
+}
+
+#[tauri::command]
+pub async fn schedule_list_v2() -> Result<Vec<WorkflowSchedule>, String> {
+    Ok(load_schedules())
+}
+
+#[tauri::command]
+pub async fn schedule_pause_v2(app: AppHandle, id: String) -> Result<(), String> {
+    let mut schedules = load_schedules();
+    let now = now_ms();
+    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
+        schedule.is_paused = true;
+        schedule.paused_remaining_ms = schedule
+            .next_run_epoch_ms
+            .map(|next_run| next_run.saturating_sub(now));
+        schedule.next_run_epoch_ms = None;
+    }
+    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    emit_schedules_updated(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn schedule_resume_v2(app: AppHandle, id: String) -> Result<(), String> {
+    let mut schedules = load_schedules();
+    let now = now_ms();
+    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
+        schedule.is_paused = false;
+        schedule.next_run_epoch_ms = match schedule.paused_remaining_ms.take() {
+            Some(remaining) => Some(now.saturating_add(remaining)),
+            None => compute_next_run(&schedule.schedule, now),
+        };
+    }
+    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    emit_schedules_updated(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn schedule_remove_v2(app: AppHandle, id: String) -> Result<(), String> {
+    let mut schedules = load_schedules();
+    schedules.retain(|schedule| schedule.id != id);
+    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    emit_schedules_updated(&app);
+    Ok(())
+}
+
+/// Fire ASAP: set next_run to now so the scheduler's next tick launches it live.
+#[tauri::command]
+pub async fn schedule_run_now_v2(app: AppHandle, id: String) -> Result<(), String> {
+    let mut schedules = load_schedules();
+    let now = now_ms();
+    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
+        schedule.is_paused = false;
+        schedule.next_run_epoch_ms = Some(now);
+    }
+    save_schedules(&schedules).map_err(|error| error.to_string())?;
+    emit_schedules_updated(&app);
+    Ok(())
 }
 
 fn resolve_blueprint(id: &str) -> Option<serde_json::Value> {
