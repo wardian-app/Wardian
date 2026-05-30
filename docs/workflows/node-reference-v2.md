@@ -180,41 +180,11 @@ Outgoing ports: out
 - **category:** Trigger
 - **version:** 1
 
-Start the workflow on demand.
+Entry point. Runs on demand or when an invoker fires it.
 
 ### Fields
 
 - `input_schema` — Input schema [jsonschema]
-
-Outgoing ports: out
-
-## Scheduled Trigger
-
-- **id:** `scheduled_trigger`
-- **kind:** trigger
-- **category:** Trigger
-- **version:** 1
-
-Start the workflow on a schedule.
-
-### Fields
-
-- `cron` — Schedule [cron (required)]
-
-Outgoing ports: out
-
-## File Watcher
-
-- **id:** `file_watcher`
-- **kind:** trigger
-- **category:** Trigger
-- **version:** 1
-
-Start the workflow on matching file events.
-
-### Fields
-
-- `path` — Watch path [path (required)]
 
 Outgoing ports: out
 
