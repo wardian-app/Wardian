@@ -27,6 +27,7 @@
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
+    "docs:check-llms": "node scripts/verify-llms-txt.mjs",
     "docs:preview": "vitepress preview docs",
     "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
     "docs:demo-gif": "node scripts/capture-readme-demo.mjs",
