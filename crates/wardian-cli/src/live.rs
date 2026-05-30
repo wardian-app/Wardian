@@ -15,6 +15,7 @@ use wardian_core::identity::AgentIdentity;
 use wardian_core::models::WorkflowDefinition;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
+const CONTROL_GIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct AgentWatchRequest<'a> {
@@ -783,7 +784,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::WorkflowStop
         | ControlOperation::SendMessage
         | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
-        ControlOperation::AgentWorktreeList => CONTROL_TIMEOUT,
+        ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,
         ControlOperation::Ask { requested, .. } => watch_timeout_for(*requested),
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
     }
@@ -1091,11 +1092,11 @@ mod tests {
     }
 
     #[test]
-    fn worktree_list_keeps_short_control_timeout() {
-        assert_eq!(
-            operation_timeout(&ControlOperation::AgentWorktreeList),
-            CONTROL_TIMEOUT
-        );
+    fn worktree_list_uses_git_discovery_timeout() {
+        let timeout = operation_timeout(&ControlOperation::AgentWorktreeList);
+
+        assert!(timeout > CONTROL_TIMEOUT);
+        assert!(timeout < CONTROL_MUTATION_TIMEOUT);
     }
 
     #[test]

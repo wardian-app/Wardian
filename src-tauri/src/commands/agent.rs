@@ -1317,6 +1317,8 @@ struct DiscoveredGitWorktree {
     worktree_folder: String,
 }
 
+const GIT_WORKTREE_DISCOVERY_CONCURRENCY: usize = 8;
+
 fn is_under_wardian_agent_worktree_root(wardian_home: &std::path::Path, path: &str) -> bool {
     let normalized_home =
         normalize_path_for_prefix_compare(&normalize_existing_workspace_record_path(wardian_home));
@@ -1427,26 +1429,62 @@ fn discover_git_worktrees_for_configs(
     let sources = configs
         .iter()
         .filter_map(source_folder_for_config)
-        .collect::<BTreeSet<_>>();
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
 
+    discover_git_worktrees_for_sources_with(sources, crate::commands::git::list_git_worktrees)
+}
+
+fn discover_git_worktrees_for_sources_with<F>(
+    sources: Vec<String>,
+    list_worktrees: F,
+) -> Vec<DiscoveredGitWorktree>
+where
+    F: Fn(&std::path::Path) -> Result<Vec<crate::commands::git::GitWorktreeInfo>, String> + Sync,
+{
     let mut discovered = BTreeMap::<String, DiscoveredGitWorktree>::new();
-    for source in sources {
-        let source_path = std::path::Path::new(&source);
-        let Ok(worktrees) = crate::commands::git::list_git_worktrees(source_path) else {
-            continue;
-        };
+    for chunk in sources.chunks(GIT_WORKTREE_DISCOVERY_CONCURRENCY) {
+        let entries = std::thread::scope(|scope| {
+            let handles = chunk
+                .iter()
+                .map(|source| {
+                    let source = source.clone();
+                    let list_worktrees = &list_worktrees;
+                    scope.spawn(move || {
+                        let source_path = std::path::Path::new(&source);
+                        let Ok(worktrees) = list_worktrees(source_path) else {
+                            return Vec::new();
+                        };
 
-        for worktree in worktrees {
-            let normalized = normalize_discovered_git_worktree_path(&worktree.path);
-            if workspace_paths_match(&source, &normalized) {
-                continue;
-            }
+                        worktrees
+                            .into_iter()
+                            .filter_map(|worktree| {
+                                let normalized =
+                                    normalize_discovered_git_worktree_path(&worktree.path);
+                                if workspace_paths_match(&source, &normalized) {
+                                    return None;
+                                }
+                                Some(DiscoveredGitWorktree {
+                                    source_folder: source.clone(),
+                                    worktree_folder: normalized,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
+
+        for entry in entries {
             discovered
-                .entry(normalized.clone())
-                .or_insert_with(|| DiscoveredGitWorktree {
-                    source_folder: source.clone(),
-                    worktree_folder: normalized,
-                });
+                .entry(entry.worktree_folder.clone())
+                .or_insert(entry);
         }
     }
 
@@ -3149,10 +3187,12 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
-        disable_worktree_config, discover_git_worktrees_for_configs, enable_worktree_config,
+        disable_worktree_config, discover_git_worktrees_for_configs,
+        discover_git_worktrees_for_sources_with, enable_worktree_config,
         ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
+        GIT_WORKTREE_DISCOVERY_CONCURRENCY,
         is_under_wardian_agent_worktree_root, lock_agent_lifecycle, mark_agent_paused_off,
         normalize_clone_folder_override, normalize_discovered_git_worktree_path,
         normalize_existing_workspace_record_path, normalize_spawn_folder,
@@ -4495,6 +4535,41 @@ mod tests {
             &entry.worktree_folder,
             &normalize_workspace_record_path(&repo)
         )));
+    }
+
+    #[test]
+    fn discover_git_worktrees_for_sources_runs_git_discovery_concurrently() {
+        let sources = (0..(GIT_WORKTREE_DISCOVERY_CONCURRENCY * 2 + 1))
+            .map(|index| format!("C:/repo-{index}"))
+            .collect::<Vec<_>>();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let discovered = discover_git_worktrees_for_sources_with(sources, {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            move |source: &std::path::Path| {
+                let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                max_active.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![crate::commands::git::GitWorktreeInfo {
+                    path: source.join("review"),
+                    branch: None,
+                }])
+            }
+        });
+
+        assert_eq!(discovered.len(), GIT_WORKTREE_DISCOVERY_CONCURRENCY * 2 + 1);
+        assert!(
+            max_active.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "worktree discovery should not run one git process at a time"
+        );
+        assert!(
+            max_active.load(std::sync::atomic::Ordering::SeqCst)
+                <= GIT_WORKTREE_DISCOVERY_CONCURRENCY,
+            "worktree discovery must not spawn unbounded git processes"
+        );
     }
 
     #[test]
