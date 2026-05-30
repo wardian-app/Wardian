@@ -1,4 +1,5 @@
 use crate::workflow_v2::{runner::HeadlessAgentRunner, LiveStepExecutor};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wardian_core::engine::store::read_checkpoint;
@@ -32,7 +33,7 @@ pub fn scan_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
 
 /// Build the live executor for a run in `workspace` with `default_provider`.
 pub fn live_executor(workspace: PathBuf, default_provider: String) -> LiveStepExecutor {
-    LiveStepExecutor::new(Arc::new(HeadlessAgentRunner), workspace, default_provider)
+    LiveStepExecutor::new(Arc::new(HeadlessAgentRunner), workspace, default_provider, HashMap::new())
 }
 
 /// Drive a fresh run to completion or pause.

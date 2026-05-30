@@ -5,6 +5,7 @@ pub mod runner;
 pub mod runs;
 
 use runner::{AgentRunSpec, AgentRunner};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -20,14 +21,21 @@ pub struct LiveStepExecutor {
     runner: Arc<dyn AgentRunner>,
     workspace: PathBuf,
     default_provider: String,
+    bindings: HashMap<String, String>,
 }
 
 impl LiveStepExecutor {
-    pub fn new(runner: Arc<dyn AgentRunner>, workspace: PathBuf, default_provider: String) -> Self {
+    pub fn new(
+        runner: Arc<dyn AgentRunner>,
+        workspace: PathBuf,
+        default_provider: String,
+        bindings: HashMap<String, String>,
+    ) -> Self {
         Self {
             runner,
             workspace,
             default_provider,
+            bindings,
         }
     }
 
@@ -37,7 +45,7 @@ impl LiveStepExecutor {
         agent_ref: &str,
         prompt: String,
     ) -> Result<String, StepError> {
-        let resolved = resolve::resolve_agent(agent_ref, &self.workspace, &self.default_provider);
+        let resolved = resolve::resolve_agent(agent_ref, &self.workspace, &self.default_provider, &self.bindings);
         if !resolved.is_ephemeral {
             crate::utils::logging::log_debug(&format!(
                 "[workflow-v2] node {node}: live-agent routing not yet supported; running '{agent_ref}' headless"
@@ -175,6 +183,7 @@ mod tests {
             Arc::new(runner),
             std::path::PathBuf::from("."),
             "mock".into(),
+            HashMap::new(),
         )
     }
 
