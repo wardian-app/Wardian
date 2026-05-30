@@ -402,63 +402,13 @@
       "category": "Trigger",
       "label": "Manual Trigger",
       "icon": "play",
-      "description": "Start the workflow on demand.",
+      "description": "Entry point. Runs on demand or when an invoker fires it.",
       "fields": [
         {
           "id": "input_schema",
           "kind": "json_schema",
           "label": "Input schema",
           "required": false,
-          "multiple": false
-        }
-      ],
-      "inputs": [],
-      "outputs": [
-        {
-          "id": "out",
-          "label": "Out"
-        }
-      ],
-      "version": 1
-    },
-    {
-      "id": "scheduled_trigger",
-      "kind": "trigger",
-      "category": "Trigger",
-      "label": "Scheduled Trigger",
-      "icon": "clock",
-      "description": "Start the workflow on a schedule.",
-      "fields": [
-        {
-          "id": "cron",
-          "kind": "cron",
-          "label": "Schedule",
-          "required": true,
-          "multiple": false
-        }
-      ],
-      "inputs": [],
-      "outputs": [
-        {
-          "id": "out",
-          "label": "Out"
-        }
-      ],
-      "version": 1
-    },
-    {
-      "id": "file_watcher",
-      "kind": "trigger",
-      "category": "Trigger",
-      "label": "File Watcher",
-      "icon": "eye",
-      "description": "Start the workflow on matching file events.",
-      "fields": [
-        {
-          "id": "path",
-          "kind": "path",
-          "label": "Watch path",
-          "required": true,
           "multiple": false
         }
       ],

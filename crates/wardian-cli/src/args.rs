@@ -87,6 +87,12 @@ pub enum WorkflowCommand {
         /// Execution backend. Only `mock` is available until the real executor lands.
         #[arg(long, default_value = "mock")]
         executor: String,
+        /// JSON object of run input (entry input_schema values).
+        #[arg(long)]
+        input: Option<String>,
+        /// Role/class -> provider binding, repeatable: --bind role=provider
+        #[arg(long)]
+        bind: Vec<String>,
     },
     /// List v2 runs under <home>/logs/workflows.
     Runs,
@@ -410,7 +416,7 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            WorkflowCommand::Exec { ref path, ref executor }
+            WorkflowCommand::Exec { ref path, ref executor, .. }
                 if path == "wf.md" && executor == "mock"
         ));
     }
@@ -425,8 +431,31 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            WorkflowCommand::Exec { ref path, ref executor }
+            WorkflowCommand::Exec { ref path, ref executor, .. }
                 if path == "wf.md" && executor == "real"
+        ));
+    }
+
+    #[test]
+    fn parses_workflow_exec_with_input_and_bind() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "workflow",
+            "exec",
+            "wf.md",
+            "--input",
+            "{\"x\":1}",
+            "--bind",
+            "role=claude",
+        ])
+        .unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Exec { ref input, ref bind, .. }
+                if input.as_deref() == Some("{\"x\":1}") && bind == &vec!["role=claude".to_string()]
         ));
     }
 

@@ -1,24 +1,32 @@
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use wardian_core::engine::{driver::new_run_id, Engine, RunStatus};
+use wardian_core::engine::{
+    driver::new_run_id,
+    event::EventKind,
+    store::{read_checkpoint, read_events},
+    RunStatus,
+};
 
-const DEMO_BLUEPRINT: &str = r#"---
+const INVOKER_BLUEPRINT: &str = r#"---
 schema: 2
-id: demo
-name: Demo
+id: invoker
+name: Invoker
 nodes:
   - id: trigger-1
     type: manual_trigger
-  - id: plan
+    fields:
+      input_schema: '{"type":"object","properties":{"symbol":{"type":"string"}}}'
+  - id: analyze
     type: task
     fields:
-      agent: role:Coder
-      prompt: Return a tiny plan
+      agent: role:analyst
+      prompt: Analyze {{trigger.output.symbol}}
 edges:
   - from: trigger-1
-    to: plan
+    to: analyze
 ---
 
-# Demo
+# Invoker
 "#;
 
 struct EnvGuard {
@@ -84,39 +92,42 @@ fn mock_script_path() -> std::path::PathBuf {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn mock_provider_drives_workflow_v2_run_to_completion() {
+async fn input_interpolates_and_role_binding_selects_provider() {
     let home = tempfile::tempdir().unwrap();
     let workflows_dir = home.path().join("library").join("workflows");
     std::fs::create_dir_all(&workflows_dir).unwrap();
-    let demo_path = workflows_dir.join("demo.md");
-    std::fs::write(&demo_path, DEMO_BLUEPRINT).unwrap();
+    let blueprint_path = workflows_dir.join("invoker.md");
+    std::fs::write(&blueprint_path, INVOKER_BLUEPRINT).unwrap();
 
     let _env = EnvGuard::set(home.path(), &mock_script_path());
 
-    let blueprint = wardian_core::workflow::parse_file(&demo_path).unwrap();
+    let blueprint = wardian_core::workflow::parse_file(&blueprint_path).unwrap();
     let report = wardian_core::workflow::validate(&blueprint);
     assert!(report.is_valid(), "diagnostics: {:?}", report.diagnostics);
 
     let run_id = new_run_id();
     let run_root = wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id).unwrap();
-    let exec = wardian_app_lib::workflow_v2::runs::live_executor(
+    wardian_app_lib::workflow_v2::runs::drive_new_run(
+        blueprint,
+        run_id,
+        run_root.clone(),
         home.path().to_path_buf(),
-        "mock".into(),
-        std::collections::HashMap::new(),
-    );
-
-    let state = Engine::start_with_id(
-        &blueprint,
-        run_id.clone(),
-        serde_json::json!({}),
-        &run_root,
-        &exec,
+        "codex".into(),
+        serde_json::json!({ "symbol": "SPY" }),
+        HashMap::from([("analyst".to_string(), "mock".to_string())]),
     )
     .await
     .unwrap();
 
+    let state = read_checkpoint(&run_root).unwrap().unwrap();
     assert_eq!(state.status, RunStatus::Completed);
-    assert!(run_root.join("events.jsonl").is_file());
-    assert!(run_root.join("state.json").is_file());
-    assert!(state.node_output("plan").is_some());
+    assert!(state.node_output("analyze").is_some());
+    assert_eq!(state.registry["trigger"]["output"]["symbol"], "SPY");
+
+    let events = read_events(&run_root).unwrap();
+    let started = events.iter().find_map(|event| match &event.kind {
+        EventKind::RunStarted { trigger, .. } => Some(trigger),
+        _ => None,
+    });
+    assert_eq!(started, Some(&serde_json::json!({ "symbol": "SPY" })));
 }

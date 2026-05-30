@@ -51,4 +51,26 @@ describe('RunLaunchDialog', () => {
       expect.objectContaining({ path: '/x/wf.md', provider: 'codex' }),
     );
   });
+
+  it('renders params from the entry input schema and passes them as input', async () => {
+    render(
+      <RunLaunchDialog
+        path="/x/wf.md"
+        inputParams={[{ name: 'symbol', type: 'string' }]}
+        onLaunched={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/provider/i)).toHaveValue('codex');
+    });
+    fireEvent.change(screen.getByLabelText(/symbol/i), { target: { value: 'SPY' } });
+    fireEvent.click(screen.getByRole('button', { name: /^run$/i }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      'workflow_run_v2',
+      expect.objectContaining({ path: '/x/wf.md', input: { symbol: 'SPY' } }),
+    ));
+  });
 });

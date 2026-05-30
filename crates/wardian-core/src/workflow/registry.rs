@@ -266,38 +266,12 @@ fn build_registry() -> Vec<NodeTypeDef> {
             category: "Trigger".into(),
             label: "Manual Trigger".into(),
             icon: "play".into(),
-            description: "Start the workflow on demand.".into(),
+            description: "Entry point. Runs on demand or when an invoker fires it.".into(),
             fields: vec![FieldDef::new(
                 "input_schema",
                 FieldType::JsonSchema,
                 "Input schema",
             )],
-            inputs: vec![],
-            outputs: default_out(),
-            outputs_from_field: None,
-            version: 1,
-        },
-        NodeTypeDef {
-            id: "scheduled_trigger".into(),
-            kind: NodeKind::Trigger,
-            category: "Trigger".into(),
-            label: "Scheduled Trigger".into(),
-            icon: "clock".into(),
-            description: "Start the workflow on a schedule.".into(),
-            fields: vec![FieldDef::new("cron", FieldType::Cron, "Schedule").required()],
-            inputs: vec![],
-            outputs: default_out(),
-            outputs_from_field: None,
-            version: 1,
-        },
-        NodeTypeDef {
-            id: "file_watcher".into(),
-            kind: NodeKind::Trigger,
-            category: "Trigger".into(),
-            label: "File Watcher".into(),
-            icon: "eye".into(),
-            description: "Start the workflow on matching file events.".into(),
-            fields: vec![FieldDef::new("path", FieldType::Path, "Watch path").required()],
             inputs: vec![],
             outputs: default_out(),
             outputs_from_field: None,
@@ -325,11 +299,11 @@ mod tests {
             "notify",
             "sub_workflow",
             "manual_trigger",
-            "scheduled_trigger",
-            "file_watcher",
         ] {
             assert!(ids.contains(&expected), "missing node type: {expected}");
         }
+        assert!(!ids.contains(&"scheduled_trigger"), "scheduled_trigger should be removed (scheduling is an invoker, not a node)");
+        assert!(!ids.contains(&"file_watcher"), "file_watcher should be removed (file-watch is an invoker, not a node)");
     }
 
     #[test]
