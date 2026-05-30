@@ -134,6 +134,53 @@ pub enum WorkflowCommand {
         #[arg(long)]
         check: bool,
     },
+    /// Manage v2 schedules (schedules.json). UI lives in the app; these edit the file.
+    #[command(subcommand)]
+    Schedule(WorkflowScheduleCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowScheduleCommand {
+    /// Add a schedule for a blueprint id (resolves to library/workflows/<id>.md).
+    Add {
+        #[arg(long)]
+        blueprint: String,
+        #[arg(long)]
+        name: String,
+        /// Interval cadence in minutes.
+        #[arg(long, conflicts_with_all = ["daily", "weekly", "at"])]
+        every: Option<u32>,
+        /// Daily at HH:MM local time.
+        #[arg(long, conflicts_with_all = ["every", "weekly", "at"])]
+        daily: Option<String>,
+        /// Weekly comma-separated days and time, e.g. Mon,Wed,Fri@09:30.
+        #[arg(long, conflicts_with_all = ["every", "daily", "at"])]
+        weekly: Option<String>,
+        /// One-time run at RFC3339 / YYYY-MM-DDTHH:MM local time.
+        #[arg(long, conflicts_with_all = ["every", "daily", "weekly"])]
+        at: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        /// JSON object of run input.
+        #[arg(long)]
+        input: Option<String>,
+        /// Role/class -> provider binding, repeatable: --bind role=provider.
+        #[arg(long)]
+        bind: Vec<String>,
+    },
+    List,
+    Pause {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
+    RunNow {
+        id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +513,30 @@ mod tests {
             panic!("expected Workflow")
         };
         assert!(matches!(args.command, WorkflowCommand::Runs));
+    }
+
+    #[test]
+    fn parses_schedule_add() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "workflow",
+            "schedule",
+            "add",
+            "--blueprint",
+            "heartbeat",
+            "--name",
+            "HB",
+            "--every",
+            "60",
+        ])
+        .unwrap();
+        let Command::Workflow(args) = cli.command else {
+            panic!("expected Workflow")
+        };
+        assert!(matches!(
+            args.command,
+            WorkflowCommand::Schedule(WorkflowScheduleCommand::Add { .. })
+        ));
     }
 
     #[test]
