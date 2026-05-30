@@ -1,0 +1,203 @@
+import { expect, test, type Page } from "@playwright/test";
+
+type BlueprintNode = {
+  id: string;
+  type: string;
+  name?: string;
+  fields: Record<string, unknown>;
+  position?: { x: number; y: number };
+};
+
+const blueprint = {
+  schema: 2,
+  id: "wf",
+  name: "WF",
+  nodes: [
+    { id: "trigger", type: "manual_trigger", name: "Trigger", fields: {}, position: { x: 0, y: 80 } },
+    { id: "plan", type: "task", name: "Plan", fields: { agent: "role:planner", prompt: "Plan" }, position: { x: 320, y: 80 } },
+    { id: "ship", type: "task", name: "Ship", fields: { agent: "role:builder", prompt: "Ship" }, position: { x: 640, y: 80 } },
+  ],
+  edges: [
+    { from: "trigger", to: "plan", from_port: "out", to_port: "in" },
+    { from: "plan", to: "ship", from_port: "out", to_port: "in" },
+  ],
+};
+
+const events = [
+  { seq: 0, ts: "t0", kind: "run_started", blueprint_id: "wf", schema: 2, trigger: {} },
+  { seq: 1, ts: "t1", kind: "node_started", node: "plan" },
+  { seq: 2, ts: "t2", kind: "node_completed", node: "plan", output: { ok: true } },
+  { seq: 3, ts: "t3", kind: "node_started", node: "ship" },
+  { seq: 4, ts: "t4", kind: "node_completed", node: "ship", output: { ok: true } },
+  { seq: 5, ts: "t5", kind: "run_completed" },
+];
+
+async function installWorkflowsV2IpcMock(page: Page) {
+  await page.addInitScript(({ blueprintFixture, eventFixture }) => {
+    let callbackId = 1;
+    const callbacks = new Map<number, unknown>();
+    const tauriWindow = window as Window & {
+      __workflowsV2Invokes?: Array<{ command: string; args?: Record<string, unknown> }>;
+      __TAURI_INTERNALS__?: Record<string, unknown>;
+      __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
+    };
+
+    tauriWindow.__workflowsV2Invokes = [];
+    tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => undefined,
+    };
+
+    tauriWindow.__TAURI_INTERNALS__ = {
+      metadata: {
+        currentWindow: { label: "main" },
+        currentWebview: { label: "main" },
+      },
+      transformCallback: (callback: unknown) => {
+        const id = callbackId++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback: (id: number) => {
+        callbacks.delete(id);
+      },
+      convertFileSrc: (filePath: string) => filePath,
+      invoke: async (command: string, args?: Record<string, unknown>) => {
+        tauriWindow.__workflowsV2Invokes?.push({ command, args });
+
+        if (command === "list_agents") return [];
+        if (command === "list_agent_classes") return [];
+        if (command === "list_provider_readiness") {
+          return [
+            { provider: "claude", display_name: "Claude", available: true, executable: "claude", reason: null },
+            { provider: "codex", display_name: "Codex", available: true, executable: "codex", reason: null },
+            { provider: "gemini", display_name: "Gemini", available: true, executable: "gemini", reason: null },
+            { provider: "antigravity", display_name: "Antigravity", available: true, executable: "agy", reason: null },
+            { provider: "opencode", display_name: "OpenCode", available: true, executable: "opencode", reason: null },
+          ];
+        }
+        if (command === "load_watchlists") return [];
+        if (command === "load_watchlist_prefs") return null;
+        if (command === "load_agent_interactions") return {};
+        if (command === "load_queue_items") return [];
+        if (command === "load_queue_preferences") return {};
+        if (command === "load_onboarding_hints") return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
+        if (command === "dismiss_onboarding_hint") return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
+        if (command === "list_workflows") return [];
+        if (command === "list_scheduled_runs") return [];
+        if (command === "load_workflow_library") return { folders: [], rootWorkflowIds: [] };
+        if (command === "get_library_tree") return { type: "Folder", path: "", name: "Root", children: [] };
+        if (command === "list_deployed_skills") return [];
+        if (command === "load_app_settings") return null;
+        if (command === "load_shell_settings") {
+          return {
+            shell_id: "auto",
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: "resume",
+            default_provider: "codex",
+          };
+        }
+        if (command === "list_available_shells") return [];
+        if (command === "plugin:event|listen") return callbackId++;
+        if (command === "plugin:event|unlisten") return null;
+        if (command === "sync_provider_theme_settings") return null;
+
+        if (command === "workflow_list_blueprints") {
+          return [{ id: "wf", name: "WF", path: "/x/wf.md" }];
+        }
+        if (command === "workflow_parse") {
+          return { blueprint: blueprintFixture, diagnostics: [] };
+        }
+        if (command === "workflow_validate") {
+          return { ok: true, diagnostics: [] };
+        }
+        if (command === "workflow_run_v2") {
+          return { ok: true, run_id: "run-1", blueprint_id: "wf", run_dir: "/runs/run-1" };
+        }
+        if (command === "workflow_list_runs") {
+          return [{
+            run_id: "run-1",
+            blueprint_id: "wf",
+            status: "completed",
+            node_count: 3,
+            failure: null,
+            path: "/x/wf.md",
+          }];
+        }
+        if (command === "workflow_read_run") {
+          return {
+            state: {
+              run_id: "run-1",
+              blueprint_id: "wf",
+              status: "completed",
+              nodes: { plan: "completed", ship: "completed" },
+              registry: { nodes: { plan: { output: { ok: true } }, ship: { output: { ok: true } } }, trigger: { output: {} } },
+              loop_iter: {},
+              delivered: {},
+              skipped_edges: [],
+              next_seq: 6,
+              failure: null,
+            },
+            events: eventFixture,
+            blueprint: blueprintFixture,
+          };
+        }
+
+        return null;
+      },
+    };
+  }, { blueprintFixture: blueprint, eventFixture: events });
+}
+
+function nodeById(page: Page, id: string) {
+  return page.getByTestId(`run-dag-node-${id}`);
+}
+
+function builderNodeById(page: Page, id: string) {
+  return page.getByTestId(`rf__node-${id}`);
+}
+
+test("unified Workflows view edits, launches, observes, and returns to edit", async ({ page }) => {
+  await installWorkflowsV2IpcMock(page);
+  await page.setViewportSize({ width: 1700, height: 980 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+  const titlebar = page.locator(".titlebar-center");
+  await expect(titlebar.getByRole("button", { name: "Workflows" })).toHaveCount(1);
+  await expect(titlebar.getByRole("button", { name: "Blueprints" })).toHaveCount(0);
+  await expect(titlebar.getByRole("button", { name: "Runs" })).toHaveCount(0);
+
+  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await page.evaluate(async () => {
+    const { useSettingsStore } = await import("/src/store/useSettingsStore.ts");
+    useSettingsStore.setState({ default_provider: "codex" });
+  });
+  await expect(page.getByTestId("workflows-view")).toBeVisible();
+  await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
+
+  const blueprintSelect = page.getByTestId("blueprint-selector").getByRole("combobox");
+  await blueprintSelect.selectOption("/x/wf.md");
+  await expect(blueprintSelect).toHaveValue("/x/wf.md");
+  await expect(builderNodeById(page, "plan")).toHaveCount(1);
+  await expect(builderNodeById(page, "ship")).toHaveCount(1);
+
+  await page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByLabel(/provider/i)).toHaveValue("codex");
+  await page.getByRole("dialog").getByRole("button", { name: /^Run$/ }).click();
+
+  await expect(page.getByTestId("workflows-observe-mode")).toBeVisible();
+  await expect(page.getByRole("button", { name: /run-1/ })).toBeVisible();
+  await expect(nodeById(page, "plan")).toHaveAttribute("data-status", "completed");
+  await expect(nodeById(page, "ship")).toHaveAttribute("data-status", "completed");
+
+  await page.getByTestId("workflows-view").getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
+  await expect(builderNodeById(page, "plan")).toHaveCount(1);
+  await expect(builderNodeById(page, "ship")).toHaveCount(1);
+
+  const invokes = await page.evaluate(() => window.__workflowsV2Invokes);
+  expect(invokes?.some((call) => call.command === "workflow_run_v2")).toBe(true);
+  expect(invokes?.some((call) => call.command === "workflow_read_run")).toBe(true);
+});
