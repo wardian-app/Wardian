@@ -1,6 +1,6 @@
 # Workflow Engine v2 — Trigger / Invoker Foundation (sub-project 6a) Design
 
-- **Status:** Proposed
+- **Status:** Implemented (6a)
 - **Date:** 2026-05-30
 - **Part of:** [Workflow Engine v2 epic (#425)]; v1-parity track. Foundation for 6b (schedule invoker), 6c (monitoring sidebar), 6d (v1 deletion). Builds on 5a (`workflow_run_v2`) + 5b (Run dialog).
 
