@@ -113,6 +113,39 @@ pub struct ScheduledRun {
     pub last_run_completed_epoch_ms: Option<u64>,
 }
 
+/// A persisted v2 invoker: a blueprint + invocation context (input/bindings/provider)
+/// that fires on a `ScheduleDefinition` cadence. The v2 analog of `ScheduledRun`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WorkflowSchedule {
+    pub id: String,
+    /// Resolves to `<home>/library/workflows/<blueprint_id>.md`.
+    pub blueprint_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Entry input params (6a `input_schema` values), passed as the run trigger.
+    #[serde(default)]
+    pub input: serde_json::Value,
+    /// role/class -> target provider (6a bindings).
+    #[serde(default)]
+    pub bindings: std::collections::HashMap<String, String>,
+    pub schedule: ScheduleDefinition,
+    #[serde(default)]
+    pub next_run_epoch_ms: Option<u64>,
+    #[serde(default)]
+    pub paused_remaining_ms: Option<u64>,
+    #[serde(default)]
+    pub is_paused: bool,
+    #[serde(default)]
+    pub last_run_status: Option<String>,
+    #[serde(default)]
+    pub last_run_error: Option<String>,
+    #[serde(default)]
+    pub last_run_epoch_ms: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkflowTelemetryEvent {
     pub workflow_id: String,
@@ -120,4 +153,28 @@ pub struct WorkflowTelemetryEvent {
     pub status: String,
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod schedule_dto_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_schedule_round_trips_with_defaults() {
+        let json = r#"{
+            "id": "s1",
+            "blueprint_id": "heartbeat",
+            "name": "Heartbeat",
+            "schedule": { "schedule_type": "interval", "interval_minutes": 60, "active": true }
+        }"#;
+        let s: WorkflowSchedule = serde_json::from_str(json).unwrap();
+        assert_eq!(s.blueprint_id, "heartbeat");
+        assert!(s.provider.is_none());
+        assert!(s.input.is_null() || s.input.is_object());
+        assert!(s.bindings.is_empty());
+        assert!(!s.is_paused);
+        let back = serde_json::to_string(&s).unwrap();
+        let s2: WorkflowSchedule = serde_json::from_str(&back).unwrap();
+        assert_eq!(s2.id, "s1");
+    }
 }
