@@ -27,21 +27,27 @@ Use it when a repeated multi-step agent process needs a saved visual flow instea
 
 ## Main Areas
 
-- **Top action bar**: select, save, reset, duplicate, delete, or run the active workflow
-- **Canvas**: place and connect nodes
-- **Block Library**: add new blocks to the workflow
-- **Node Settings drawer**: edit the selected node
-- **Variable Assistant**: inspect upstream values and interpolation paths
+- **Edit**: build the graph, add nodes, wire edges, edit node settings, and inspect upstream values.
+- **Observe**: inspect a selected run's graph state, event timeline, node outputs, and approval controls.
+- **Monitor**: manage scheduled workflow invokers and open active or recent runs.
+- **Left workflow rail**: glance at active runs and upcoming schedules, then open Monitor when you need full controls.
 
 ## Running From This View
 
-The **Run Workflow** button saves the current canvas first, then launches based on the workflow's trigger:
+The **Run** button opens a launch dialog for the current blueprint. Use **Run now** for an immediate run, or switch to **Schedule** to create a persisted schedule with the same provider, workspace, and input parameters.
 
-- manual workflows run immediately
-- scheduled workflows create scheduled task instances
-- file-watcher or webhook-style workflows activate as live listeners
+Manual input parameters appear in the dialog when the blueprint's entry trigger defines an input schema.
 
-If the workflow needs agent assignment or manual input parameters, Wardian opens the run modal before launching.
+## Monitoring Schedules
+
+Monitor shows every saved schedule with inline controls:
+
+- **Pause** or **Resume** changes whether the schedule fires on its cadence.
+- **Run now** launches the scheduled invoker immediately.
+- **Edit** reopens the schedule form.
+- **Remove** deletes the schedule without deleting the blueprint.
+
+Monitor also lists active and recent runs so you can jump directly into Observe.
 
 ## Important Limits
 
