@@ -124,6 +124,21 @@ pub fn workflow_run_dir(blueprint_id: &str, run_id: &str) -> Option<PathBuf> {
     workflow_runs_dir().map(|dir| dir.join(blueprint_id).join(run_id))
 }
 
+/// `<wardian-home>/library/workflows` — where v2 blueprints live.
+pub fn library_workflows_dir() -> Option<PathBuf> {
+    wardian_home().map(|home| home.join("library").join("workflows"))
+}
+
+/// `<wardian-home>/library/workflows/<blueprint_id>.md`.
+pub fn blueprint_path(blueprint_id: &str) -> Option<PathBuf> {
+    library_workflows_dir().map(|dir| dir.join(format!("{blueprint_id}.md")))
+}
+
+/// `<wardian-home>/library/schedules.json` — the v2 schedule index.
+pub fn schedules_path() -> Option<PathBuf> {
+    wardian_home().map(|home| home.join("library").join("schedules.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

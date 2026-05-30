@@ -2,6 +2,9 @@
 
 use crate::models::ScheduleDefinition;
 use chrono::{Datelike, TimeZone};
+use serde::{Deserialize, Serialize};
+
+use crate::models::WorkflowSchedule;
 
 /// Next future fire time in epoch-ms for `schedule`, or `None` if the schedule
 /// can never fire again. Missed slots are skipped.
@@ -197,10 +200,82 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct ScheduleFile {
+    #[serde(default = "default_schema")]
+    schema: u8,
+    #[serde(default)]
+    schedules: Vec<WorkflowSchedule>,
+}
+
+fn default_schema() -> u8 {
+    1
+}
+
+/// Read all schedules. Missing or malformed file -> empty (logged to stderr), never panics.
+pub fn load_schedules() -> Vec<WorkflowSchedule> {
+    let Some(path) = crate::paths::schedules_path() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<ScheduleFile>(&content) {
+        Ok(file) => file.schedules,
+        Err(err) => {
+            eprintln!("[wardian-core] malformed schedules.json: {err}");
+            Vec::new()
+        }
+    }
+}
+
+/// Write all schedules atomically (temp file + rename) so a crash mid-write cannot truncate.
+pub fn save_schedules(schedules: &[WorkflowSchedule]) -> std::io::Result<()> {
+    let path = crate::paths::schedules_path()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no wardian home"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = ScheduleFile {
+        schema: 1,
+        schedules: schedules.to_vec(),
+    };
+    let body = serde_json::to_string_pretty(&file)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::ScheduleDefinition;
+
+    fn sample_schedule(id: &str) -> crate::models::WorkflowSchedule {
+        crate::models::WorkflowSchedule {
+            id: id.into(),
+            blueprint_id: "heartbeat".into(),
+            name: "Heartbeat".into(),
+            provider: None,
+            workspace: None,
+            input: serde_json::json!({}),
+            bindings: std::collections::HashMap::new(),
+            schedule: ScheduleDefinition {
+                schedule_type: "interval".into(),
+                interval_minutes: Some(60),
+                active: true,
+                ..Default::default()
+            },
+            next_run_epoch_ms: None,
+            paused_remaining_ms: None,
+            is_paused: false,
+            last_run_status: None,
+            last_run_error: None,
+            last_run_epoch_ms: None,
+        }
+    }
 
     fn interval(mins: u32) -> ScheduleDefinition {
         ScheduleDefinition {
@@ -250,5 +325,27 @@ mod tests {
         let next = compute_next_run(&schedule, now_ms);
         assert!(next.is_some());
         assert!(next.unwrap() > now_ms);
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        let scheds = vec![sample_schedule("s1")];
+        save_schedules(&scheds).unwrap();
+        let loaded = load_schedules();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "s1");
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn load_missing_file_is_empty() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        assert!(load_schedules().is_empty());
+        std::env::remove_var("WARDIAN_HOME");
     }
 }
