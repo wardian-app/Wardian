@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type WorkflowsMode = 'edit' | 'observe';
+export type WorkflowsMode = 'edit' | 'observe' | 'monitor';
 
 interface WorkflowsViewState {
   mode: WorkflowsMode;
