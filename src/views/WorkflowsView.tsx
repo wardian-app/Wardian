@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BlueprintSelector } from '../features/workflows/BlueprintSelector';
 import { RunControls, type RunControlStatus } from '../features/workflows/RunControls';
-import { RunLaunchDialog } from '../features/workflows/RunLaunchDialog';
+import { RunLaunchDialog, type RunInputParam } from '../features/workflows/RunLaunchDialog';
 import { BuilderCanvas } from '../features/workflows/builder/BuilderCanvas';
 import { BuilderToolbar } from '../features/workflows/builder/BuilderToolbar';
 import { DiagnosticsPanel } from '../features/workflows/builder/DiagnosticsPanel';
@@ -58,6 +58,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
     () => (activeBlueprintId ? runs.filter((run) => run.blueprint_id === activeBlueprintId) : runs),
     [activeBlueprintId, runs],
   );
+  const inputParams = useMemo(() => inputParamsFromBlueprint(blueprint), [blueprint]);
   const runDisabled = !blueprintPath || hasErrors();
 
   useEffect(() => {
@@ -185,7 +186,12 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
 
       {launchOpen && blueprintPath && (
         <div className="absolute inset-0 z-20 flex items-start justify-center bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_25%)] p-8">
-          <RunLaunchDialog path={blueprintPath} onLaunched={(runId) => void handleLaunched(runId)} onCancel={() => setLaunchOpen(false)} />
+          <RunLaunchDialog
+            path={blueprintPath}
+            inputParams={inputParams}
+            onLaunched={(runId) => void handleLaunched(runId)}
+            onCancel={() => setLaunchOpen(false)}
+          />
         </div>
       )}
     </div>
@@ -365,4 +371,60 @@ function defaultFields(def: NodeTypeDef) {
       .filter((field) => field.default !== undefined)
       .map((field) => [field.id, field.default]),
   );
+}
+
+function inputParamsFromBlueprint(blueprint: Blueprint | null): RunInputParam[] {
+  const entry = blueprint?.nodes.find((node) => node.type === 'manual_trigger');
+  if (!entry) return [];
+  return inputParamsFromSchema(entry.fields.input_schema);
+}
+
+function inputParamsFromSchema(inputSchema: unknown): RunInputParam[] {
+  const schema = normalizeInputSchema(inputSchema);
+  if (!isRecord(schema)) return [];
+
+  if (isRecord(schema.properties)) {
+    return Object.entries(schema.properties)
+      .map(([name, value]) => paramFromSchemaEntry(name, value))
+      .filter((param): param is RunInputParam => Boolean(param));
+  }
+
+  return Object.entries(schema)
+    .filter(([name]) => name !== 'type' && name !== 'required' && name !== 'properties')
+    .map(([name, value]) => paramFromSchemaEntry(name, value))
+    .filter((param): param is RunInputParam => Boolean(param));
+}
+
+function normalizeInputSchema(inputSchema: unknown): unknown {
+  if (!inputSchema) return null;
+  if (typeof inputSchema !== 'string') return inputSchema;
+  const trimmed = inputSchema.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function paramFromSchemaEntry(name: string, value: unknown): RunInputParam | null {
+  const rawType = typeof value === 'string'
+    ? value
+    : isRecord(value) && typeof value.type === 'string'
+      ? value.type
+      : 'string';
+  const type = normalizeParamType(rawType);
+  if (!type) return null;
+  return { name, type };
+}
+
+function normalizeParamType(type: string): RunInputParam['type'] | null {
+  if (type === 'string') return 'string';
+  if (type === 'number' || type === 'integer') return 'number';
+  if (type === 'boolean' || type === 'bool') return 'boolean';
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

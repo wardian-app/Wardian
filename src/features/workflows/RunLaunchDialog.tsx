@@ -9,21 +9,36 @@ import {
   resolveEffectiveProvider,
 } from '../agents/providerOptions';
 
+export interface RunInputParam {
+  name: string;
+  type: 'string' | 'number' | 'boolean';
+}
+
+const EMPTY_INPUT_PARAMS: RunInputParam[] = [];
+
 interface RunLaunchDialogProps {
   path: string;
+  inputParams?: RunInputParam[];
   onLaunched: (runId: string) => void;
   onCancel: () => void;
 }
 
-export function RunLaunchDialog({ path, onLaunched, onCancel }: RunLaunchDialogProps) {
+export function RunLaunchDialog({ path, inputParams = EMPTY_INPUT_PARAMS, onLaunched, onCancel }: RunLaunchDialogProps) {
   const defaultProvider = useSettingsStore((state) => state.default_provider);
   const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
   const [provider, setProvider] = useState<UserFacingProviderName>('claude');
   const [providerTouched, setProviderTouched] = useState(false);
   const [providerNote, setProviderNote] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState('');
+  const [inputValues, setInputValues] = useState<Record<string, string | boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setInputValues(Object.fromEntries(
+      inputParams.map((param) => [param.name, param.type === 'boolean' ? false : '']),
+    ));
+  }, [inputParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,10 +94,12 @@ export function RunLaunchDialog({ path, onLaunched, onCancel }: RunLaunchDialogP
     setBusy(true);
     setError(null);
     try {
+      const input = collectInput(inputParams, inputValues);
       const res = await invoke<{ ok: boolean; run_id?: string; diagnostics?: unknown[] }>('workflow_run_v2', {
         path,
         provider,
         ...(workspace ? { workspace } : {}),
+        ...(inputParams.length > 0 ? { input } : {}),
       });
 
       if (res.ok && res.run_id) {
@@ -133,6 +150,47 @@ export function RunLaunchDialog({ path, onLaunched, onCancel }: RunLaunchDialogP
         onChange={(event) => setWorkspace(event.currentTarget.value)}
         placeholder="Defaults to the run directory"
       />
+      {inputParams.length > 0 && (
+        <div className="mb-3 grid gap-2 border-t border-wardian-border pt-3">
+          {inputParams.map((param) => {
+            const id = `run-param-${param.name}`;
+            if (param.type === 'boolean') {
+              return (
+                <label key={param.name} className="flex items-center gap-2 text-xs text-muted" htmlFor={id}>
+                  <input
+                    id={id}
+                    type="checkbox"
+                    className="h-4 w-4 accent-[var(--color-wardian-accent)]"
+                    checked={Boolean(inputValues[param.name])}
+                    onChange={(event) => setInputValues((current) => ({
+                      ...current,
+                      [param.name]: event.currentTarget.checked,
+                    }))}
+                  />
+                  {param.name}
+                </label>
+              );
+            }
+            return (
+              <div key={param.name}>
+                <label className="mb-1 block text-xs text-muted" htmlFor={id}>
+                  {param.name}
+                </label>
+                <input
+                  id={id}
+                  type={param.type === 'number' ? 'number' : 'text'}
+                  className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
+                  value={String(inputValues[param.name] ?? '')}
+                  onChange={(event) => setInputValues((current) => ({
+                    ...current,
+                    [param.name]: event.currentTarget.value,
+                  }))}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
       {error && <div className="mb-2 text-xs text-wardian-error">{error}</div>}
       <div className="flex justify-end gap-2">
         <button
@@ -153,4 +211,13 @@ export function RunLaunchDialog({ path, onLaunched, onCancel }: RunLaunchDialogP
       </div>
     </div>
   );
+}
+
+function collectInput(inputParams: RunInputParam[], inputValues: Record<string, string | boolean>) {
+  return Object.fromEntries(inputParams.map((param) => {
+    const value = inputValues[param.name];
+    if (param.type === 'boolean') return [param.name, Boolean(value)];
+    if (param.type === 'number') return [param.name, Number(value ?? 0)];
+    return [param.name, String(value ?? '')];
+  }));
 }
