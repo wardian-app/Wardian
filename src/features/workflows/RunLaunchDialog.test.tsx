@@ -73,4 +73,34 @@ describe('RunLaunchDialog', () => {
       expect.objectContaining({ path: '/x/wf.md', input: { symbol: 'SPY' } }),
     ));
   });
+
+  it('schedules via schedule_create_v2 when toggled to Schedule', async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'list_provider_readiness') return providerReadiness;
+      if (command === 'schedule_create_v2') return { id: 's1' };
+      return null;
+    });
+    const onScheduled = vi.fn();
+
+    render(
+      <RunLaunchDialog
+        path="/x/wf.md"
+        blueprintId="wf"
+        onLaunched={() => {}}
+        onCancel={() => {}}
+        onScheduled={onScheduled}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText(/provider/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('radio', { name: /schedule/i }));
+    fireEvent.change(screen.getByLabelText(/schedule name/i), { target: { value: 'Nightly' } });
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }));
+
+    await waitFor(() => expect(onScheduled).toHaveBeenCalled());
+    expect(invokeMock).toHaveBeenCalledWith(
+      'schedule_create_v2',
+      expect.objectContaining({ blueprintId: 'wf', name: 'Nightly' }),
+    );
+  });
 });
