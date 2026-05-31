@@ -363,6 +363,9 @@ pub async fn spawn_agent(
     apply_terminal_identity_env(&mut cmd);
     super::apply_managed_cli_path_to_pty(&mut cmd);
     cmd.env("WARDIAN_SESSION_ID", &config.session_id);
+    for (key, value) in super::worktree_build_env(&config) {
+        cmd.env(key, value);
+    }
 
     // Enable CLAUDE.md discovery from --add-dir directories so that
     // class/common/agent instruction files are loaded natively.
