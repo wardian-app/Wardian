@@ -86,7 +86,9 @@ function BuilderCanvasInner({ blueprint, diagnostics, selectedNodeId, onSelectNo
   }, [blueprint.id, blueprint.name, blueprint.schema, setBlueprint]);
 
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
-    commitGraph(applyNodeChanges(changes, graph.nodes), graph.edges);
+    const blueprintChanges = changes.filter((change) => change.type !== 'dimensions' && change.type !== 'select');
+    if (blueprintChanges.length === 0) return;
+    commitGraph(applyNodeChanges(blueprintChanges, graph.nodes), graph.edges);
   }, [commitGraph, graph.edges, graph.nodes]);
 
   const handleEdgesChange = useCallback((changes: EdgeChange[]) => {

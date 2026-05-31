@@ -261,6 +261,11 @@ test("workflow builder renders persisted loop workflow nodes on a visible canvas
   ));
   expect(nodeBoxes.every((box) => box.width > 0 && box.height > 0)).toBe(true);
 
+  const nodeVisibility = await page.locator(".react-flow__node").evaluateAll((nodes) => (
+    nodes.map((node) => getComputedStyle(node).visibility)
+  ));
+  expect(nodeVisibility.every((visibility) => visibility === "visible")).toBe(true);
+
   const visibleNodeBoxes = await page.locator(".react-flow__node").evaluateAll((nodes) => (
     nodes.map((node) => {
       const rect = node.getBoundingClientRect();
