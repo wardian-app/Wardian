@@ -2,10 +2,13 @@
 //! through the 6a run path with the live executor.
 
 use crate::workflow_v2::runs;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::schedule::{load_schedules, plan_tick, save_schedules, FireRequest};
+use wardian_core::workflow::Blueprint;
 
 const TICK_SECS: u64 = 5;
 
@@ -17,42 +20,68 @@ fn resolve_provider(req: &FireRequest) -> String {
     })
 }
 
-fn fire_request(_app: &AppHandle, req: &FireRequest) {
-    let Some(path) = wardian_core::paths::blueprint_path(&req.blueprint_id) else {
-        crate::utils::logging::log_debug("[workflow-v2] scheduler: no wardian home");
-        return;
-    };
-    let blueprint = match wardian_core::workflow::parse_file(&path) {
-        Ok(blueprint) => blueprint,
-        Err(err) => {
-            mark_error(&req.schedule_id, &format!("parse failed: {err}"));
-            return;
-        }
-    };
-    let run_id = wardian_core::engine::driver::new_run_id();
-    let Some(run_root) = wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id) else {
-        mark_error(&req.schedule_id, "could not resolve run directory");
-        return;
-    };
+/// Everything needed to launch one scheduled run, resolved from a `FireRequest`.
+pub struct ResolvedFire {
+    pub blueprint: Blueprint,
+    pub run_id: String,
+    pub run_root: PathBuf,
+    pub provider: String,
+    pub workspace: PathBuf,
+    pub input: serde_json::Value,
+    pub bindings: HashMap<String, String>,
+}
 
+/// Resolve a `FireRequest` into launch parameters without touching Tauri state.
+pub fn resolve_fire(req: &FireRequest) -> Result<ResolvedFire, String> {
+    let path = wardian_core::paths::blueprint_path(&req.blueprint_id)
+        .ok_or_else(|| "no wardian home".to_string())?;
+    let blueprint =
+        wardian_core::workflow::parse_file(&path).map_err(|err| format!("parse failed: {err}"))?;
+    let run_id = wardian_core::engine::driver::new_run_id();
+    let run_root = wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id)
+        .ok_or_else(|| "could not resolve run directory".to_string())?;
     let provider = resolve_provider(req);
     let workspace = req
         .workspace
         .clone()
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_else(|| run_root.clone());
-    let input = req.input.clone();
-    let bindings = req.bindings.clone();
+    Ok(ResolvedFire {
+        blueprint,
+        run_id,
+        run_root,
+        provider,
+        workspace,
+        input: req.input.clone(),
+        bindings: req.bindings.clone(),
+    })
+}
+
+fn fire_request(_app: &AppHandle, req: &FireRequest) {
+    let resolved = match resolve_fire(req) {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            mark_error(&req.schedule_id, &message);
+            return;
+        }
+    };
 
     crate::utils::logging::log_debug(&format!(
         "[workflow-v2] scheduler firing '{}' -> blueprint {} run {}",
-        req.name, blueprint.id, run_id
+        req.name, resolved.blueprint.id, resolved.run_id
     ));
 
     tokio::spawn(async move {
-        if let Err(error) =
-            runs::drive_new_run(blueprint, run_id, run_root, workspace, provider, input, bindings)
-                .await
+        if let Err(error) = runs::drive_new_run(
+            resolved.blueprint,
+            resolved.run_id,
+            resolved.run_root,
+            resolved.workspace,
+            resolved.provider,
+            resolved.input,
+            resolved.bindings,
+        )
+        .await
         {
             crate::utils::logging::log_debug(&format!(
                 "[workflow-v2] scheduled run failed: {error}"
@@ -63,7 +92,10 @@ fn fire_request(_app: &AppHandle, req: &FireRequest) {
 
 fn mark_error(schedule_id: &str, message: &str) {
     let mut schedules = load_schedules();
-    if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == schedule_id) {
+    if let Some(schedule) = schedules
+        .iter_mut()
+        .find(|schedule| schedule.id == schedule_id)
+    {
         schedule.last_run_status = Some("failed".to_string());
         schedule.last_run_error = Some(message.to_string());
     }
@@ -84,8 +116,7 @@ fn persist_runtime(
         {
             fresh_schedule.next_run_epoch_ms = processed_schedule.next_run_epoch_ms;
             fresh_schedule.paused_remaining_ms = processed_schedule.paused_remaining_ms;
-            fresh_schedule.schedule.occurrence_count =
-                processed_schedule.schedule.occurrence_count;
+            fresh_schedule.schedule.occurrence_count = processed_schedule.schedule.occurrence_count;
             fresh_schedule.last_run_status = processed_schedule.last_run_status.clone();
             fresh_schedule.last_run_error = processed_schedule.last_run_error.clone();
             fresh_schedule.last_run_epoch_ms = processed_schedule.last_run_epoch_ms;
@@ -117,12 +148,16 @@ pub async fn start_v2_scheduler(app: AppHandle) {
                 continue;
             }
 
-            let before: std::collections::HashSet<String> =
-                schedules.iter().map(|schedule| schedule.id.clone()).collect();
+            let before: std::collections::HashSet<String> = schedules
+                .iter()
+                .map(|schedule| schedule.id.clone())
+                .collect();
             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
             let fires = plan_tick(&mut schedules, now_ms);
-            let after: std::collections::HashSet<String> =
-                schedules.iter().map(|schedule| schedule.id.clone()).collect();
+            let after: std::collections::HashSet<String> = schedules
+                .iter()
+                .map(|schedule| schedule.id.clone())
+                .collect();
             let removed: std::collections::HashSet<String> =
                 before.difference(&after).cloned().collect();
 
