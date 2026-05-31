@@ -63,15 +63,17 @@ Source Control also exposes worktree actions:
 - available shared worktrees can be joined from the same action area
 - removing worktree returns the agent to main workspace behavior
 
-When enabled, Wardian creates a named worktree under `<wardian-home>/agents/<session-id>/worktrees/`, creates a matching `wardian/<worktree-name>` branch, shares supported build caches with the source checkout, and moves the agent runtime to that path with a fresh provider session. Joining an existing shared worktree assigns the same worktree path to another agent and also starts that agent fresh in the shared path.
+When enabled, Wardian creates a named worktree beside the source checkout under `<source-checkout>.wt/<worktree-name>`, creates a matching `wardian/<worktree-name>` branch, shares supported build caches with the source checkout, and moves the agent runtime to that path with a fresh provider session. For example, a source checkout at `<absolute-workspace-path>/Wardian` creates Wardian-managed worktrees under `<absolute-workspace-path>/Wardian.wt/`. Joining an existing shared worktree assigns the same worktree path to another agent and also starts that agent fresh in the shared path.
+
+For Rust workspaces, Wardian sets `CARGO_TARGET_DIR` for provider runtimes in worktree mode so builds reuse the source checkout's `target` directory even when the repository has a tracked `.cargo/config.toml`. Wardian still writes a generated Cargo config only when a worktree does not already contain one. Node `node_modules` and Python `.venv` caches continue to be linked back to the source checkout when those caches exist.
 
 Wardian-created worktrees are real Git worktrees. They are created through `git worktree add`, so they appear in `git worktree list` for the source checkout.
 
-Wardian also discovers Git worktrees that already belong to a known source workspace, even when they were created outside Wardian. Discovered worktrees with no assigned agent appear as joinable shared worktrees. Unassigned worktrees under `<wardian-home>/agents/<session-id>/worktrees/` can also be deleted from the same list; Wardian asks for confirmation, removes Wardian-generated cache redirects, and then runs a non-force `git worktree remove`, so dirty or otherwise unsafe removals fail with Git's error.
+Wardian also discovers Git worktrees that already belong to a known source workspace, even when they were created outside Wardian. Discovered worktrees with no assigned agent appear as joinable shared worktrees. Unassigned worktrees under `<source-checkout>.wt/` can also be deleted from the same list; legacy Wardian worktrees under `<wardian-home>/agents/<session-id>/worktrees/` remain recognized and deletable. Wardian asks for confirmation, removes Wardian-generated cache redirects, and then runs a non-force `git worktree remove`, so dirty or otherwise unsafe removals fail with Git's error.
 
 If a target worktree folder already exists but Git does not recognize it as a worktree for the source checkout, Wardian refuses to assign it. Create it with `git worktree add` or remove the folder and let Wardian create it.
 
-Removing a Wardian assignment does not delete the physical worktree. Wardian's delete action is separate and only applies to unassigned Git-registered worktrees under Wardian's agent worktree root. External worktrees remain joinable but use manual Git deletion, for example `git worktree remove <absolute-worktree-path>`, after no agent is using that path.
+Removing a Wardian assignment does not delete the physical worktree. Wardian's delete action is separate and only applies to unassigned Git-registered worktrees under Wardian-managed worktree roots. External worktrees remain joinable but use manual Git deletion, for example `git worktree remove <absolute-worktree-path>`, after no agent is using that path.
 
 The same agent worktree controls are available from the CLI when the desktop app is running for the same `WARDIAN_HOME`:
 
