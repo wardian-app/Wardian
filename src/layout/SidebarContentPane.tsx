@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { SidebarTab } from "./SidebarIconRail";
 import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
@@ -7,9 +7,12 @@ import { ConfigureAgentPanel } from "../features/agents/ConfigureAgentPanel";
 import { SpawnAgentPanel } from "../features/agents/SpawnAgentPanel";
 import { ClassManagerPanel } from "../features/agents/ClassManagerPanel";
 import { CommandPanel } from "../features/commands/CommandPanel";
-import { WorkflowSidebar } from "../features/workflows/WorkflowSidebar";
+import { WorkflowMonitorGlance } from "../features/workflows/monitor/WorkflowMonitorGlance";
 import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
 import { GitPanel } from "../features/git/GitPanel";
+import { useRunStore } from "../features/workflows/run/useRunStore";
+import { useSchedulesStore } from "../store/useSchedulesStore";
+import { useWorkflowsView } from "../store/useWorkflowsView";
 import type { WorkflowDefinition } from "../types/workflow";
 import type { WorkflowLaunchKind } from "../features/workflows/workflowLaunch";
 
@@ -44,7 +47,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   setBroadcastMessage,
   onBroadcast,
   onOpenWorkflowBuilder,
-  onOpenWorkflowRunModalInMain,
 }) => {
   return (
     <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
@@ -100,12 +102,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             onClassesUpdated={onClassesUpdated}
           />
         )}
-        {activeTab === "workflows" && (
-          <WorkflowSidebar
-            onOpenWorkflowBuilder={onOpenWorkflowBuilder}
-            onOpenRunModalInMain={onOpenWorkflowRunModalInMain}
-          />
-        )}
+        {activeTab === "workflows" && <WorkflowsGlancePane onOpenWorkflowBuilder={onOpenWorkflowBuilder} />}
 
       </div>
       {!leftCollapsed && (
@@ -117,5 +114,40 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
         />
       )}
     </aside>
+  );
+};
+
+interface WorkflowsGlancePaneProps {
+  onOpenWorkflowBuilder: () => void;
+}
+
+const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflowBuilder }) => {
+  const schedules = useSchedulesStore((state) => state.schedules);
+  const loadSchedules = useSchedulesStore((state) => state.load);
+  const runs = useRunStore((state) => state.runs);
+  const openRun = useRunStore((state) => state.openRun);
+  const observeRun = useWorkflowsView((state) => state.observeRun);
+  const setMode = useWorkflowsView((state) => state.setMode);
+  const activeRuns = runs.filter((run) => run.status === 'running' || run.status === 'awaiting_approval');
+
+  useEffect(() => {
+    if (schedules.length === 0) {
+      void loadSchedules();
+    }
+  }, [loadSchedules, schedules.length]);
+
+  return (
+    <WorkflowMonitorGlance
+      schedules={schedules}
+      activeRuns={activeRuns}
+      onOpenRun={(blueprintId, runId) => {
+        onOpenWorkflowBuilder();
+        void openRun(blueprintId, runId).then(() => observeRun(runId));
+      }}
+      onOpenMonitor={() => {
+        onOpenWorkflowBuilder();
+        setMode('monitor');
+      }}
+    />
   );
 };
