@@ -40,20 +40,11 @@ import { QueueView } from "./QueueView";
 import { WorkflowsView } from "./WorkflowsView";
 import { LibraryView } from "./LibraryView";
 import { useQueueStore } from "../store/useQueueStore";
-import { useWorkflowStore } from "../store/useWorkflowStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
-import { RunPayloadModal } from "../features/workflows/RunPayloadModal";
 import { CustomCloneModal } from "../features/agents/CustomCloneModal";
-import {
-  buildScheduledRunFromWorkflow,
-  normalizeWorkflowForLaunch,
-  setWorkflowTriggerStatus,
-  type WorkflowLaunchKind,
-} from "../features/workflows/workflowLaunch";
-import type { WorkflowDefinition } from "../types/workflow";
 
 declare global {
   interface Window {
@@ -167,21 +158,10 @@ function AppBody() {
   const fetchAgentsRequestRef = React.useRef(0);
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
-  const handleWorkflowTelemetry = useWorkflowStore(s => s.handleTelemetry);
-  const handleWorkflowProgress = useWorkflowStore(s => s.handleProgress);
-  const handleWorkflowStatusUpdate = useWorkflowStore(s => s.handleStatusUpdate);
-  const fetchWorkflows = useWorkflowStore(s => s.fetchWorkflows);
-  const loadScheduledRuns = useWorkflowStore(s => s.loadScheduledRuns);
-  const loadWorkflow = useWorkflowStore(s => s.loadWorkflow);
-  const saveWorkflow = useWorkflowStore(s => s.saveWorkflow);
-  const runWorkflowById = useWorkflowStore(s => s.runWorkflowById);
-  const createScheduledRun = useWorkflowStore(s => s.createScheduledRun);
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
   const addActionNeeded = useQueueStore((s) => s.addActionNeeded);
-  const trackWorkflowNodeOutput = useQueueStore((s) => s.trackWorkflowNodeOutput);
-  const addWorkflowCompletion = useQueueStore((s) => s.addWorkflowCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
   const loadQueuePreferences = useQueueStore((s) => s.loadPreferences);
 
@@ -262,46 +242,6 @@ function AppBody() {
   }, [addActionNeeded]);
 
   useEffect(() => {
-    const unlistenWorkflow = listen<any>("workflow-telemetry", (event) => {
-      handleWorkflowTelemetry(event.payload);
-      trackWorkflowNodeOutput(event.payload);
-    });
-    const unlistenProgress = listen<any>("workflow-progress", (event) => {
-      handleWorkflowProgress(event.payload);
-    });
-    const unlistenWorkflowStatus = listen<any>("workflow-status-updated", (event) => {
-      const status = event.payload?.status as string | undefined;
-      if (status === "completed" || status === "failed") {
-        const { activeRuns, availableWorkflows } = useWorkflowStore.getState();
-        const instanceId = event.payload.run_instance_id || event.payload.workflow_id;
-        const run = activeRuns.find((r) => r.run_instance_id === instanceId);
-        const workflowName =
-          run?.workflow_name ??
-          availableWorkflows.find((w) => w.id === event.payload.workflow_id)?.name;
-        addWorkflowCompletion(
-          event.payload as { workflow_id: string; run_instance_id?: string; status: "completed" | "failed"; error?: string },
-          workflowName,
-        );
-      }
-      handleWorkflowStatusUpdate(event.payload);
-      if (status === "running" || status === "completed" || status === "failed") {
-        loadScheduledRuns();
-      }
-    });
-    
-    const unlistenScheduledRuns = listen("scheduled-runs-updated", () => {
-      loadScheduledRuns();
-    });
-    
-    return () => { 
-      unlistenWorkflow.then(fn => fn()); 
-      unlistenProgress.then(fn => fn());
-      unlistenWorkflowStatus.then(fn => fn());
-      unlistenScheduledRuns.then(fn => fn());
-    };
-  }, [addWorkflowCompletion, handleWorkflowTelemetry, handleWorkflowProgress, handleWorkflowStatusUpdate, loadScheduledRuns, trackWorkflowNodeOutput]);
-
-  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key === "Tab") {
         e.preventDefault();
@@ -342,10 +282,6 @@ function AppBody() {
   const [activeListId, setActiveListId] = useState<string>("all");
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
-  const [sidebarPendingWorkflowLaunch, setSidebarPendingWorkflowLaunch] = useState<{
-    workflow: WorkflowDefinition;
-    kind: WorkflowLaunchKind;
-  } | null>(null);
   const hasAutoPatched = useRef(false);
 
   useEffect(() => {
@@ -556,16 +492,6 @@ function AppBody() {
   const wasDraggingRef = useRef(false);
 
   const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
-  const setWorkflowAgents = useWorkflowStore(s => s.setAgents);
-  const setWorkflowClasses = useWorkflowStore(s => s.setAgentClasses);
-
-  useEffect(() => {
-    setWorkflowAgents(agents);
-  }, [agents, setWorkflowAgents]);
-
-  useEffect(() => {
-    setWorkflowClasses(agentClasses);
-  }, [agentClasses, setWorkflowClasses]);
 
   const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
@@ -769,8 +695,6 @@ function AppBody() {
   useEffect(() => {
     fetchAgents();
     fetchAgentClasses();
-    fetchWorkflows();
-    loadScheduledRuns();
     loadQueueItems();
     loadQueuePreferences();
     fetchLibraryTree("prompts");
@@ -792,7 +716,7 @@ function AppBody() {
       unlistenUpdate.then(fn => fn());
       unlistenWatchlists.then(fn => fn());
     };
-  }, [appendAgentEvent, fetchLibraryTree, fetchWorkflows, loadQueueItems, loadQueuePreferences, loadScheduledRuns, loadWatchlistState]);
+  }, [appendAgentEvent, fetchLibraryTree, loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
@@ -919,58 +843,6 @@ function AppBody() {
       setBroadcastMessage("");
     } catch (e) { console.error(e); }
   }
-
-  const openWorkflowRunModalInMain = useCallback((workflow: WorkflowDefinition, kind: WorkflowLaunchKind) => {
-    loadWorkflow(workflow);
-    setActiveTab("workflows");
-    setViewMode("workflows");
-    setSidebarPendingWorkflowLaunch({ workflow, kind });
-  }, [loadWorkflow]);
-
-  const executeSidebarWorkflowLaunch = useCallback(async (
-    workflow: WorkflowDefinition,
-    kind: WorkflowLaunchKind,
-    payload?: Record<string, any>,
-  ) => {
-    const mergedRoleMappings = payload?.role_mappings && typeof payload.role_mappings === 'object'
-      ? { ...(workflow.role_mappings || {}), ...payload.role_mappings }
-      : workflow.role_mappings || {};
-
-    const configuredWorkflow = normalizeWorkflowForLaunch({
-      ...workflow,
-      role_mappings: mergedRoleMappings,
-    });
-
-    if (kind === 'scheduled') {
-      let workflowForSchedule = configuredWorkflow;
-      if (payload?.schedule) {
-        workflowForSchedule = {
-          ...configuredWorkflow,
-          nodes: configuredWorkflow.nodes.map(n => {
-            if (n.type === 'trigger' && n.name === 'Scheduled Trigger') {
-              return { ...n, config: { ...n.config, schedule: { ...n.config?.schedule, ...payload.schedule } } };
-            }
-            return n;
-          }),
-        };
-        await saveWorkflow(workflowForSchedule);
-      }
-
-      const scheduledRun = buildScheduledRunFromWorkflow(workflowForSchedule);
-      if (scheduledRun) {
-        await createScheduledRun(scheduledRun);
-      }
-      return;
-    }
-
-    if (kind === 'listener') {
-      await saveWorkflow(setWorkflowTriggerStatus(configuredWorkflow, 'active'));
-      await fetchWorkflows();
-      return;
-    }
-
-    await runWorkflowById(configuredWorkflow.id, payload);
-  }, [createScheduledRun, fetchWorkflows, runWorkflowById, saveWorkflow]);
 
   const onPause = async (id: string) => {
     try {
@@ -1148,11 +1020,10 @@ function AppBody() {
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
-          onOpenWorkflowBuilder={() => {
+          onOpenWorkflowsView={() => {
             setActiveTab("workflows");
             setViewMode("workflows");
           }}
-          onOpenWorkflowRunModalInMain={openWorkflowRunModalInMain}
         />
 
         <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
@@ -1293,22 +1164,6 @@ function AppBody() {
               />
             )}
           </div>
-          {sidebarPendingWorkflowLaunch && (
-            <RunPayloadModal
-              workflow={sidebarPendingWorkflowLaunch.workflow}
-              isOpen={true}
-              agents={agents.map(a => ({ session_id: a.session_id, session_name: a.session_name }))}
-              onRun={async (payload) => {
-                await executeSidebarWorkflowLaunch(
-                  sidebarPendingWorkflowLaunch.workflow,
-                  sidebarPendingWorkflowLaunch.kind,
-                  payload,
-                );
-                setSidebarPendingWorkflowLaunch(null);
-              }}
-              onCancel={() => setSidebarPendingWorkflowLaunch(null)}
-            />
-          )}
           <CustomCloneModal
             sourceSessionId={customCloneSourceId ?? ""}
             agentClasses={agentClasses}

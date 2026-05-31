@@ -648,14 +648,12 @@ describe("Agent List Management", () => {
     expect(mockInvoke).toHaveBeenCalledWith("list_agent_classes");
   });
 
-  it("preloads workflows and library data on mount", async () => {
+  it("preloads library data on mount", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("list_workflows");
-      expect(mockInvoke).toHaveBeenCalledWith("list_scheduled_runs");
       expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "prompts" });
       expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "skills" });
     });
