@@ -1,6 +1,4 @@
-use crate::remote::models::{
-    RemoteAgentActionRequest, RemoteAgentSummary, RemoteTerminalSnapshot, RemoteWorkflowSummary,
-};
+use crate::remote::models::{RemoteAgentActionRequest, RemoteAgentSummary, RemoteTerminalSnapshot};
 use crate::state::AppState;
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
@@ -153,43 +151,13 @@ pub async fn run_remote_agent_action(
     }
 }
 
-pub fn remote_workflow_summaries() -> Result<Vec<RemoteWorkflowSummary>, String> {
-    Ok(crate::workflow_engine::list_workflows()?
-        .into_iter()
-        .map(|workflow| RemoteWorkflowSummary {
-            id: workflow.id,
-            name: workflow.name,
-            node_count: workflow.nodes.len(),
-        })
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{ActiveAgent, AgentWatchState, AppState};
     use std::sync::{Arc, Mutex};
     use wardian_core::control::WatchTranscriptMessage;
-    use wardian_core::models::{AgentConfig, WorkflowDefinition, WorkflowNode, WorkflowSettings};
-
-    struct WardianHomeGuard(Option<std::ffi::OsString>);
-
-    impl WardianHomeGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let previous = std::env::var_os("WARDIAN_HOME");
-            unsafe { std::env::set_var("WARDIAN_HOME", path) };
-            Self(previous)
-        }
-    }
-
-    impl Drop for WardianHomeGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("WARDIAN_HOME", value) },
-                None => unsafe { std::env::remove_var("WARDIAN_HOME") },
-            }
-        }
-    }
+    use wardian_core::models::AgentConfig;
 
     fn test_agent(
         session_id: &str,
@@ -421,55 +389,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remote_workflow_summaries_maps_existing_workflows() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        let _home = WardianHomeGuard::set(temp.path());
-        std::fs::create_dir_all(temp.path().join("workflows")).expect("workflows dir");
-        std::fs::write(
-            temp.path().join("workflows").join("wf-1.json"),
-            serde_json::to_string(&sample_workflow()).expect("workflow json"),
-        )
-        .expect("write workflow");
-
-        let summaries = remote_workflow_summaries().expect("workflow summaries");
-
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, "wf-1");
-        assert_eq!(summaries[0].name, "Remote Workflow");
-        assert_eq!(summaries[0].node_count, 2);
-    }
-
-    fn sample_workflow() -> WorkflowDefinition {
-        WorkflowDefinition {
-            id: "wf-1".to_string(),
-            name: "Remote Workflow".to_string(),
-            settings: WorkflowSettings {
-                max_iterations: 1,
-                on_limit_reached: "stop".to_string(),
-            },
-            nodes: vec![
-                WorkflowNode {
-                    id: "node-1".to_string(),
-                    r#type: "agent".to_string(),
-                    name: Some("First".to_string()),
-                    config: serde_json::json!({}),
-                    parameter_schema: None,
-                    dependencies: None,
-                    position: None,
-                },
-                WorkflowNode {
-                    id: "node-2".to_string(),
-                    r#type: "agent".to_string(),
-                    name: Some("Second".to_string()),
-                    config: serde_json::json!({}),
-                    parameter_schema: None,
-                    dependencies: None,
-                    position: None,
-                },
-            ],
-            role_mappings: Default::default(),
-        }
-    }
 }

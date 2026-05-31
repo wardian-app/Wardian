@@ -5,7 +5,6 @@ pub mod providers;
 pub mod remote;
 pub mod state;
 pub mod utils;
-pub mod workflow_engine;
 pub mod workflow_v2;
 pub use wardian_core::models;
 
@@ -233,7 +232,6 @@ pub fn run() {
                 if let Err(e) = reconcile_headless_agents().await {
                     eprintln!("Failed to reconcile headless agents: {}", e);
                 }
-                workflow_engine::init_triggers(app_handle.clone()).await;
                 crate::workflow_v2::schedule::start_v2_scheduler(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
@@ -442,22 +440,6 @@ pub fn run() {
             commands::watchlist::load_opencode_last_assistant_text,
             commands::watchlist::load_agent_interactions,
             commands::watchlist::save_agent_interactions,
-            commands::workflow::list_workflows,
-            commands::workflow::save_workflow,
-            commands::workflow::delete_workflow,
-            commands::workflow::run_workflow,
-            commands::workflow::stop_all_triggers,
-            commands::workflow::pause_all_triggers,
-            commands::workflow::resume_all_triggers,
-            commands::workflow::stop_workflow_triggers,
-            commands::workflow::stop_workflow_run,
-            commands::workflow::run_scheduled_workflow_now,
-            commands::workflow::load_workflow_library,
-            commands::workflow::save_workflow_library,
-            commands::workflow::list_scheduled_runs,
-            commands::workflow::create_scheduled_run,
-            commands::workflow::delete_scheduled_run,
-            commands::workflow::toggle_scheduled_run,
             commands::workflow::workflow_parse,
             commands::workflow::workflow_validate,
             commands::workflow::workflow_write,

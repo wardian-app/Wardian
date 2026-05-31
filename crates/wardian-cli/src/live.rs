@@ -9,10 +9,8 @@ use wardian_core::control::{
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
     ControlRequest, DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse,
     ReplyStatus, SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError,
-    WorkflowListResponse, WorkflowResponse, WorkflowSummary,
 };
 use wardian_core::identity::AgentIdentity;
-use wardian_core::models::WorkflowDefinition;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
 const CONTROL_GIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,10 +71,6 @@ enum ControlOperation {
     AgentWorktreeEnable,
     AgentWorktreeJoin,
     AgentWorktreeDisable,
-    WorkflowList,
-    WorkflowShow,
-    WorkflowRun,
-    WorkflowStop,
     SendMessage,
     Ask {
         requested: Duration,
@@ -365,54 +359,6 @@ pub fn agent_worktree_disable(target: &str) -> io::Result<AgentWorktreeMutationR
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
-}
-
-pub fn workflow_list() -> io::Result<Vec<WorkflowSummary>> {
-    let runtime = build_runtime()?;
-    let value = timeout_block(
-        &runtime,
-        ControlOperation::WorkflowList,
-        send_request(ControlRequest::WorkflowList),
-    )?;
-    let resp: WorkflowListResponse =
-        serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(resp.workflows)
-}
-
-pub fn workflow_show(target: &str) -> io::Result<WorkflowDefinition> {
-    let runtime = build_runtime()?;
-    let value = timeout_block(
-        &runtime,
-        ControlOperation::WorkflowShow,
-        send_request(ControlRequest::WorkflowShow {
-            target: target.to_string(),
-        }),
-    )?;
-    let resp: WorkflowResponse =
-        serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(resp.workflow)
-}
-
-pub fn workflow_run(id: &str) -> io::Result<()> {
-    let runtime = build_runtime()?;
-    timeout_block(
-        &runtime,
-        ControlOperation::WorkflowRun,
-        send_request(ControlRequest::WorkflowRun { id: id.to_string() }),
-    )
-    .map(|_| ())
-}
-
-pub fn workflow_stop(run_instance_id: &str) -> io::Result<()> {
-    let runtime = build_runtime()?;
-    timeout_block(
-        &runtime,
-        ControlOperation::WorkflowStop,
-        send_request(ControlRequest::WorkflowStop {
-            run_instance_id: run_instance_id.to_string(),
-        }),
-    )
-    .map(|_| ())
 }
 
 pub fn send_message(
@@ -769,9 +715,7 @@ fn timeout_block(
 
 fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
-        ControlOperation::AgentList
-        | ControlOperation::WorkflowList
-        | ControlOperation::WorkflowShow => CONTROL_TIMEOUT,
+        ControlOperation::AgentList => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
@@ -780,8 +724,6 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentWorktreeEnable
         | ControlOperation::AgentWorktreeJoin
         | ControlOperation::AgentWorktreeDisable
-        | ControlOperation::WorkflowRun
-        | ControlOperation::WorkflowStop
         | ControlOperation::SendMessage
         | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,

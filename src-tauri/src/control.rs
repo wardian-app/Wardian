@@ -14,8 +14,7 @@ use wardian_core::control::{
     ControlRequest, DeliveryDetail, DeliveryErrorDetail, InteractionBodyRef, MessageInputMode,
     MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy,
     ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
-    WatchDeliverySnapshot, WatchEvidenceError, WorkflowListResponse, WorkflowResponse,
-    WorkflowSummary,
+    WatchDeliverySnapshot, WatchEvidenceError,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -272,32 +271,6 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             handle_agent_worktree_disable(app, &target).await
         }
 
-        ControlRequest::WorkflowList => {
-            let workflows = crate::workflow_engine::list_workflows().unwrap_or_default();
-            ok_json(&WorkflowListResponse::new(workflow_summaries(&workflows)))
-        }
-
-        ControlRequest::WorkflowShow { target } => {
-            let workflow = crate::workflow_engine::list_workflows()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|w| w.id == target || w.name == target)
-                .ok_or_else(|| ControlError::not_found(format!("workflow not found: {target}")))?;
-            ok_json(&WorkflowResponse::new(workflow))
-        }
-
-        ControlRequest::WorkflowRun { id } => {
-            crate::workflow_engine::run_workflow(app.clone(), id, None)
-                .await
-                .map_err(ControlError::request_failed)?;
-            ok_json(&OkResponse::new())
-        }
-
-        ControlRequest::WorkflowStop { run_instance_id } => {
-            crate::workflow_engine::stop_workflow_run(app.clone(), &run_instance_id).await;
-            ok_json(&OkResponse::new())
-        }
-
         ControlRequest::SendMessage {
             target,
             message,
@@ -428,19 +401,6 @@ fn build_clone_agent_request(
         start: Some(true),
         profile_selection: None,
     }
-}
-
-fn workflow_summaries(
-    workflows: &[wardian_core::models::WorkflowDefinition],
-) -> Vec<WorkflowSummary> {
-    workflows
-        .iter()
-        .map(|w| WorkflowSummary {
-            id: w.id.clone(),
-            name: w.name.clone(),
-            node_count: w.nodes.len(),
-        })
-        .collect()
 }
 
 async fn list_agent_worktree_summaries(
@@ -3019,7 +2979,7 @@ mod tests {
     use super::*;
     use crate::state::ActiveAgent;
     use std::sync::{Arc, Mutex};
-    use wardian_core::models::{AgentConfig, WorkflowDefinition, WorkflowNode, WorkflowSettings};
+    use wardian_core::models::AgentConfig;
 
     /// Regression test for the silent release-build crash where `claim_control_endpoint`
     /// was called from Tauri's `setup` hook (no Tokio runtime context), causing
@@ -3123,19 +3083,6 @@ mod tests {
             crate::utils::terminal_input::provider_submit_chunks(provider, prompt).unwrap();
         assert_eq!(chunks.len(), 2);
         chunks
-    }
-
-    fn sample_workflow(id: &str, name: &str, nodes: Vec<WorkflowNode>) -> WorkflowDefinition {
-        WorkflowDefinition {
-            id: id.to_string(),
-            name: name.to_string(),
-            settings: WorkflowSettings {
-                max_iterations: 10,
-                on_limit_reached: "stop".to_string(),
-            },
-            nodes,
-            role_mappings: std::collections::HashMap::new(),
-        }
     }
 
     #[test]
@@ -3518,31 +3465,6 @@ mod tests {
         assert_eq!(req.agent_class, None);
         assert_eq!(req.start, Some(true));
         assert!(req.profile_selection.is_none());
-    }
-
-    #[test]
-    fn workflow_summaries_count_nodes_without_serializing_full_workflows() {
-        let summaries = workflow_summaries(&[
-            sample_workflow(
-                "wf-a",
-                "Daily review",
-                vec![WorkflowNode {
-                    id: "n1".to_string(),
-                    r#type: "agent".to_string(),
-                    name: Some("Reviewer".to_string()),
-                    config: serde_json::json!({}),
-                    parameter_schema: None,
-                    dependencies: None,
-                    position: None,
-                }],
-            ),
-            sample_workflow("wf-b", "Empty", Vec::new()),
-        ]);
-
-        assert_eq!(summaries.len(), 2);
-        assert_eq!(summaries[0].id, "wf-a");
-        assert_eq!(summaries[0].node_count, 1);
-        assert_eq!(summaries[1].node_count, 0);
     }
 
     #[test]
