@@ -7,7 +7,7 @@ export function NodeConfigForm({ node, onChange }: { node: BlueprintNode; onChan
   return (
     <div className="node-config-form" data-testid="node-config-form">
       {def.fields.map((f) => (
-        <FieldInput key={f.id} field={f} value={node.fields[f.id]} onChange={(v) => onChange(f.id, v)} />
+        <FieldInput key={f.id} field={f} value={node.fields?.[f.id]} onChange={(v) => onChange(f.id, v)} />
       ))}
     </div>
   );

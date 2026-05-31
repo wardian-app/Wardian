@@ -1,20 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BlueprintSelector } from '../features/workflows/BlueprintSelector';
-import { RunControls, type RunControlStatus } from '../features/workflows/RunControls';
 import { RunLaunchDialog, type RunInputParam } from '../features/workflows/RunLaunchDialog';
 import { BuilderCanvas } from '../features/workflows/builder/BuilderCanvas';
 import { BuilderToolbar } from '../features/workflows/builder/BuilderToolbar';
 import { DiagnosticsPanel } from '../features/workflows/builder/DiagnosticsPanel';
 import { NodeConfigForm } from '../features/workflows/builder/NodeConfigForm';
-import { NodePalette } from '../features/workflows/builder/NodePalette';
+import { NodeLibrary } from '../features/workflows/builder/NodeLibrary';
 import { VariableAssistantV2 } from '../features/workflows/builder/VariableAssistantV2';
 import type { Blueprint, BlueprintNode, NodeTypeDef } from '../features/workflows/builder/blueprintTypes';
-import { EventTimeline } from '../features/workflows/run/EventTimeline';
 import { WorkflowMonitor } from '../features/workflows/monitor/WorkflowMonitor';
-import { NodeInspector } from '../features/workflows/run/NodeInspector';
-import { RunDag } from '../features/workflows/run/RunDag';
 import { RunList } from '../features/workflows/run/RunList';
-import type { RunStatusKind } from '../features/workflows/run/runTypes';
+import { WorkflowObserveMode } from '../features/workflows/run/WorkflowObserveMode';
 import { useRunStore } from '../features/workflows/run/useRunStore';
 import { useBuilderStore } from '../store/useBuilderStore';
 import { useSchedulesStore } from '../store/useSchedulesStore';
@@ -58,7 +54,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
   const loadSchedules = useSchedulesStore((state) => state.load);
 
   const [launchOpen, setLaunchOpen] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [editSchedule, setEditSchedule] = useState<WorkflowSchedule | null>(null);
 
   const activeBlueprintId = blueprint?.id ?? runState?.blueprint_id ?? runBlueprint?.id ?? null;
@@ -87,6 +83,10 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
       setBlueprint(INITIAL_BLUEPRINT);
     }
   }, [blueprint, setBlueprint]);
+
+  useEffect(() => {
+    setDrawerOpen(mode === 'monitor');
+  }, [mode]);
 
   useEffect(() => {
     if (mode !== 'observe' || !selectedRunId || !activeBlueprintId) return;
@@ -243,6 +243,7 @@ function WorkflowEditMode({ theme }: WorkflowsViewProps) {
   const setBlueprint = useBuilderStore((state) => state.setBlueprint);
   const validate = useBuilderStore((state) => state.validate);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   useEffect(() => {
     if (!blueprint) return;
@@ -272,26 +273,40 @@ function WorkflowEditMode({ theme }: WorkflowsViewProps) {
 
   const addNode = (def: NodeTypeDef) => {
     const nextId = nextNodeId(activeBlueprint.nodes, def.id);
-    const index = activeBlueprint.nodes.length;
     const node: BlueprintNode = {
       id: nextId,
       type: def.id,
       name: def.label,
       fields: defaultFields(def),
-      position: { x: 120 + index * 80, y: 120 + index * 40 },
     };
     setBlueprint({ ...activeBlueprint, nodes: [...activeBlueprint.nodes, node] });
     setSelectedNodeId(node.id);
   };
 
+  const addNodeFromLibrary = (def: NodeTypeDef) => {
+    addNode(def);
+    setLibraryOpen(false);
+  };
+
   return (
-    <div data-testid="workflows-edit-mode" className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
+    <div data-testid="workflows-edit-mode" className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
       <BuilderToolbar />
-      <div className="grid h-full min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)_320px]">
-        <aside className="min-h-0 overflow-y-auto border-r border-wardian-border bg-[var(--color-wardian-card)] p-3">
-          <NodePalette onAdd={addNode} />
-        </aside>
-        <section className="min-h-0">
+      <div className="flex min-h-[44px] shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-3 py-1.5 text-xs font-bold text-[var(--color-wardian-text)] transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+            onClick={() => setLibraryOpen(true)}
+          >
+            Add node
+          </button>
+        </div>
+        <div className="truncate text-[10px] font-mono text-muted">
+          {activeBlueprint.nodes.length} nodes / {activeBlueprint.edges.length} edges
+        </div>
+      </div>
+      <div className={`grid h-full min-h-0 flex-1 ${selectedNode ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
+        <section className="relative min-h-0">
           <BuilderCanvas
             blueprint={activeBlueprint}
             diagnostics={diagnostics}
@@ -299,99 +314,52 @@ function WorkflowEditMode({ theme }: WorkflowsViewProps) {
             onSelectNode={setSelectedNodeId}
             theme={theme}
           />
+          {activeBlueprint.nodes.length === 0 ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
+              <div className="pointer-events-auto max-w-sm rounded-lg border border-dashed border-wardian-border bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_8%)] p-4 text-center shadow-lg">
+                <div className="text-sm font-bold text-[var(--color-wardian-text)]">Start from the registry</div>
+                <div className="mt-1 text-xs leading-relaxed text-muted">Add a trigger, agent, task decision, or control node. Layout is applied automatically.</div>
+                <button
+                  type="button"
+                  className="mt-3 rounded bg-[var(--color-wardian-accent)] px-3 py-1.5 text-xs font-bold text-[var(--color-wardian-bg)]"
+                  onClick={() => setLibraryOpen(true)}
+                >
+                  Browse registry
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
-        <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto border-l border-wardian-border bg-[var(--color-wardian-card)] p-3">
-          {selectedNode ? (
-            <>
+        {selectedNode ? (
+          <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto border-l border-wardian-border bg-[var(--color-wardian-card)] p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-[var(--color-wardian-text)]">Inspector</div>
+                <div className="mt-0.5 truncate text-[10px] font-mono text-muted">{selectedNode.id}</div>
+              </div>
+              <button
+                type="button"
+                className="rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                onClick={() => setSelectedNodeId(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="grid gap-3">
               <NodeConfigForm node={selectedNode} onChange={updateNodeField} />
               <VariableAssistantV2 blueprint={activeBlueprint} selectedNodeId={selectedNode.id} />
-            </>
-          ) : (
-            <div className="rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-3 text-xs text-muted">
-              Select a node to edit its fields.
             </div>
-          )}
-        </aside>
-      </div>
-      <DiagnosticsPanel diagnostics={diagnostics} onFocusNode={setSelectedNodeId} />
-    </div>
-  );
-}
-
-function WorkflowObserveMode({ theme }: WorkflowsViewProps) {
-  const state = useRunStore((store) => store.state);
-  const runs = useRunStore((store) => store.runs);
-  const events = useRunStore((store) => store.events);
-  const blueprint = useRunStore((store) => store.blueprint);
-  const scrubIndex = useRunStore((store) => store.scrubIndex);
-  const setScrubIndex = useRunStore((store) => store.setScrubIndex);
-  const currentNodeStatuses = useRunStore((store) => store.currentNodeStatuses);
-  const openRun = useRunStore((store) => store.openRun);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-
-  const statuses = currentNodeStatuses();
-  const awaitingNode = useMemo(() => {
-    if (state?.status !== 'awaiting_approval') return null;
-    return [...events].reverse().find((event) => event.kind === 'awaiting_approval')?.node ?? null;
-  }, [events, state?.status]);
-
-  const controlsStatus = toRunControlStatus(state?.status);
-  const activeRunPath = state
-    ? runs.find((run) => run.blueprint_id === state.blueprint_id && run.run_id === state.run_id)?.path ?? ''
-    : '';
-
-  return (
-    <div data-testid="workflows-observe-mode" className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
-      <div className="flex min-h-[48px] items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-4">
-        <div className="min-w-0">
-          <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]">{state?.run_id ?? 'No run selected'}</div>
-          <div className="mt-0.5 truncate text-[10px] font-mono text-muted">{state?.blueprint_id ?? 'Open a run from the drawer'}</div>
-        </div>
-        {state && controlsStatus ? (
-          <RunControls
-            blueprintId={state.blueprint_id}
-            runId={state.run_id}
-            blueprintPath={activeRunPath}
-            status={controlsStatus}
-            awaitingNode={awaitingNode}
-            onChanged={() => void openRun(state.blueprint_id, state.run_id)}
-          />
+          </aside>
         ) : null}
       </div>
-      <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_320px]">
-        <section className="grid min-h-0 grid-rows-[minmax(0,1fr)_220px]">
-          <div className="min-h-0 p-3">
-            <RunDag
-              blueprint={blueprint}
-              currentStatuses={statuses}
-              selectedNodeId={selectedNodeId}
-              onSelectNode={setSelectedNodeId}
-              theme={theme}
-            />
-          </div>
-          <div className="min-h-0 border-t border-wardian-border p-3">
-            <EventTimeline events={events} scrubIndex={scrubIndex} onScrub={setScrubIndex} />
-          </div>
-        </section>
-        <aside className="min-h-0 overflow-y-auto border-l border-wardian-border bg-[var(--color-wardian-card)] p-3">
-          <NodeInspector
-            selectedNodeId={selectedNodeId}
-            state={state}
-            currentStatuses={statuses}
-            events={events}
-          />
-        </aside>
-      </div>
+      <DiagnosticsPanel diagnostics={diagnostics} onFocusNode={setSelectedNodeId} />
+      {libraryOpen ? (
+        <div className="absolute inset-0 z-30 flex items-start justify-center bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_20%)] p-8">
+          <NodeLibrary mode="popover" onAdd={addNodeFromLibrary} onClose={() => setLibraryOpen(false)} />
+        </div>
+      ) : null}
     </div>
   );
-}
-
-function toRunControlStatus(status: RunStatusKind | 'interrupted' | undefined): RunControlStatus | null {
-  if (!status) return null;
-  if (status === 'running' || status === 'awaiting_approval' || status === 'completed' || status === 'failed' || status === 'interrupted') {
-    return status;
-  }
-  return null;
 }
 
 function nextNodeId(nodes: BlueprintNode[], type: string) {
@@ -415,7 +383,7 @@ function defaultFields(def: NodeTypeDef) {
 function inputParamsFromBlueprint(blueprint: Blueprint | null): RunInputParam[] {
   const entry = blueprint?.nodes.find((node) => node.type === 'manual_trigger');
   if (!entry) return [];
-  return inputParamsFromSchema(entry.fields.input_schema);
+  return inputParamsFromSchema(entry.fields?.input_schema);
 }
 
 function inputParamsFromSchema(inputSchema: unknown): RunInputParam[] {

@@ -36,6 +36,8 @@ This pass should:
 - make the inspector contextual and collapsible;
 - move run history out of the default edit-mode layout;
 - add essential canvas and node actions;
+- auto-layout workflows by default so agents and markdown authors do not need
+  to provide coordinates;
 - preserve v2-only concepts: one manual entry node, external schedules, durable
   runs, and registry-defined node schemas.
 
@@ -85,9 +87,9 @@ list. Each item shows:
 Search should match label, category, description, field names, and port labels.
 Categories are useful, but they should not be the only navigation path.
 
-The library should support "add at position" so right-click insertion places the
-new node where the user acted. Toolbar insertion can use the current viewport
-center.
+The library should support insertion from local context, but placement is still
+owned by the builder. Newly inserted nodes enter the graph without requiring
+authored coordinates; the canvas lays them out automatically.
 
 ### 4.3 Informative Node Cards
 
@@ -145,6 +147,22 @@ Restore high-value authoring actions from v1 as v2-native interactions:
 
 These actions operate on the v2 `Blueprint` shape and existing builder store.
 
+### 4.6 Default Auto Layout
+
+Auto layout is the default authoring behavior, not an optional enhancement or a
+button-first workflow. The engine model remains the graph: nodes and edges.
+Canvas positions are optional editor metadata.
+
+The builder should compute positions whenever a blueprint has missing positions,
+when a node is inserted, or when a layout-relevant graph change occurs. Agents
+and markdown-authored workflows should be valid and readable without any
+`position` fields. If a human manually moves nodes, the UI may preserve those
+positions as editor state, but manual coordinates should not be required for a
+usable workflow.
+
+A future explicit "save layout" or "lock layout" affordance can preserve human
+arrangement, but automatic readable layout remains the default.
+
 ## 5. Implementation Slices
 
 ### Slice 1: Canvas-First Edit Layout
@@ -174,7 +192,9 @@ This immediately improves screen real estate without changing the backend.
 
 - Add node/edge/canvas context menus.
 - Add duplicate/copy/delete actions.
-- Add fit-view on blueprint load and after template or multi-node insertion.
+- Add default auto layout for missing positions and inserted nodes.
+- Add fit-view on blueprint load after layout and after template or multi-node
+  insertion.
 
 ### Slice 5: Inspector and Field Quality
 
@@ -218,6 +238,9 @@ Browser E2E:
   high-frequency kinds first.
 - **Decision: v2 remains the source of truth.** All restored affordances must
   operate on v2 `Blueprint`, `NodeTypeDef`, and `FieldDef` objects.
+- **Decision: auto layout is default.** `position` remains optional editor
+  metadata for human-preserved layouts, but authored workflows must not need
+  positions.
 - **Decision: edit/observe/monitor layouts diverge intentionally.** Edit mode
   maximizes authoring space; observe and monitor can keep run/status panels.
 
@@ -226,6 +249,7 @@ Browser E2E:
 - Edit mode uses most of the viewport for the canvas.
 - Users can discover nodes through searchable, descriptive registry-backed UI.
 - Users can understand common workflow nodes without selecting each one.
+- Workflows with omitted node positions render in a readable default layout.
 - The inspector no longer appears as a low-value permanent panel.
 - Runs no longer occupy a permanent edit-mode drawer by default.
 - Core authoring actions from v1 are available in v2-native form.

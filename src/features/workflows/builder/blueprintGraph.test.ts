@@ -16,11 +16,12 @@ const bp: Blueprint = {
 };
 
 describe('blueprintGraph converter', () => {
-  it('maps a loop child to a React Flow parentId', () => {
+  it('preserves absolute positions for loop children without React Flow containment', () => {
     const { nodes } = toReactFlow(bp);
     const child = nodes.find((n) => n.id === 'b')!;
-    expect(child.parentId).toBe('lp');
-    expect(child.extent).toBe('parent');
+    expect(child.parentId).toBeUndefined();
+    expect(child.extent).toBeUndefined();
+    expect(child.position).toEqual({ x: 20, y: 40 });
   });
   it('maps ports to source/target handles', () => {
     const { edges } = toReactFlow(bp);
@@ -32,6 +33,7 @@ describe('blueprintGraph converter', () => {
     const rf = toReactFlow(bp);
     const back = fromReactFlow(rf.nodes, rf.edges, { schema: 2, id: 'wf', name: 'WF' });
     expect(back.nodes.find((n) => n.id === 'b')?.parent).toBe('lp');
+    expect(back.nodes.find((n) => n.id === 'b')?.position).toEqual({ x: 20, y: 40 });
     expect(back.edges).toEqual(bp.edges);
   });
 });

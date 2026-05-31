@@ -1,16 +1,16 @@
 import type { Node as RFNode, Edge as RFEdge } from '@xyflow/react';
 import type { Blueprint, BlueprintNode, BlueprintEdge } from './blueprintTypes';
+import { layoutBlueprintNodes } from './autoLayout';
 
 export interface RFGraph { nodes: RFNode[]; edges: RFEdge[]; }
 
-/** Blueprint -> React Flow. Loop body membership (`parent`) becomes `parentId`. */
+/** Blueprint -> React Flow. `parent` is workflow metadata, not React Flow visual containment. */
 export function toReactFlow(bp: Blueprint): RFGraph {
-  const nodes: RFNode[] = bp.nodes.map((n) => ({
+  const nodes: RFNode[] = layoutBlueprintNodes(bp).map((n) => ({
     id: n.id,
     type: n.type === 'loop' ? 'group' : 'wardian',
     position: n.position ?? { x: 0, y: 0 },
     data: { node: n },
-    ...(n.parent ? { parentId: n.parent, extent: 'parent' as const } : {}),
   }));
   const edges: RFEdge[] = bp.edges.map((e, i) => ({
     id: `e${i}`,
@@ -31,7 +31,7 @@ export function fromReactFlow(
     return {
       ...src,
       position: n.position,
-      ...(n.parentId ? { parent: n.parentId } : {}),
+      ...(src.parent ? { parent: src.parent } : {}),
     };
   });
   const bpEdges: BlueprintEdge[] = edges.map((e) => ({
