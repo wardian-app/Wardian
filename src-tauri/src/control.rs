@@ -3190,13 +3190,13 @@ mod tests {
             "\r\n›\u{1b}[22m Write tests for @filename"
         ));
         assert!(codex_output_has_ready_prompt(
-            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · D:\\Trading\\trident\r\n"
+            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · C:\\projects\\example\r\n"
         ));
         assert!(codex_output_has_ready_prompt(
             "\r\n› Working on test coverage\r\n"
         ));
         assert!(codex_output_has_ready_prompt(
-            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · D:\\Processing\\trident\r\n"
+            "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · C:\\projects\\sample\r\n"
         ));
         assert!(!codex_output_has_ready_prompt("Booting MCP server"));
     }
