@@ -343,50 +343,6 @@ struct AgentWatchCliOptions<'a> {
 
 fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
     match args.command {
-        WorkflowCommand::List => {
-            let workflows = match live::workflow_list() {
-                Ok(workflows) => workflows,
-                Err(error) if is_control_endpoint_unavailable(&error) => {
-                    let workflows = disk::list_workflows_from_disk()
-                        .map_err(|e| CliError::generic(e.to_string()))?;
-                    disk::workflow_summaries(&workflows)
-                }
-                Err(error) => return Err(control_error(error)),
-            };
-            output::render_workflow_list(&workflows, args.pretty)
-        }
-        WorkflowCommand::Show { target } => {
-            let wf = match live::workflow_show(&target) {
-                Ok(workflow) => workflow,
-                Err(error) if is_control_endpoint_unavailable(&error) => {
-                    let workflows = disk::list_workflows_from_disk()
-                        .map_err(|e| CliError::generic(e.to_string()))?;
-                    workflows
-                        .into_iter()
-                        .find(|w| w.id == target || w.name == target)
-                        .ok_or_else(|| CliError::not_found(&target))?
-                }
-                Err(error) => return Err(control_error(error)),
-            };
-            output::render_workflow_show(&wf, args.pretty)
-        }
-        WorkflowCommand::Run { target } => {
-            live::workflow_run(&target).map_err(control_error)?;
-            Ok(format!(
-                "{}\n",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"schema":1,"ok":true,"workflow":target})
-                )
-                .unwrap()
-            ))
-        }
-        WorkflowCommand::Stop { run_instance_id } => {
-            live::workflow_stop(&run_instance_id).map_err(control_error)?;
-            Ok(format!(
-                "{}\n",
-                serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true})).unwrap()
-            ))
-        }
         WorkflowCommand::NodeTypes { json } => render_workflow_node_types(json),
         WorkflowCommand::Validate { path } => render_workflow_validate(&path),
         WorkflowCommand::Exec {

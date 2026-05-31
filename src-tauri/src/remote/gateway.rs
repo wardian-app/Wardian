@@ -3,7 +3,7 @@ use crate::remote::models::{
     DeviceRecord, PairingSubmitRequest, PairingSubmitResponse, PendingPairingDecision,
     PendingPairingRequestRecord, RemoteAgentActionRequest, RemoteAuditRecord, RemoteGatewayConfig,
     RemoteSessionRecord, RemoteWebSocketTicketRequest, RemoteWebSocketTicketResponse,
-    RemoteWorkflowRunRequest, RemoteWorkflowStopRequest, REMOTE_AUDIT_SCHEMA_VERSION,
+    REMOTE_AUDIT_SCHEMA_VERSION,
 };
 use axum::{
     body::Body,
@@ -116,9 +116,6 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
             get(terminal_stream_upgrade),
         )
         .route("/remote/api/agents/action", post(run_agent_action))
-        .route("/remote/api/workflows", get(list_remote_workflows))
-        .route("/remote/api/workflows/run", post(run_workflow))
-        .route("/remote/api/workflows/stop", post(stop_workflow))
         .route("/remote/api/ws-ticket", post(create_ws_ticket))
         .route("/remote/api/status-stream", get(status_stream_upgrade))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -739,132 +736,6 @@ fn remote_agent_action_specific_limit(action: &str) -> Option<(usize, i64)> {
         "clear" | "kill" => Some((10, 10 * 60_000)),
         _ => None,
     }
-}
-
-async fn list_remote_workflows(
-    State(ctx): State<RemoteGatewayContext>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "list_workflows")?;
-    let session =
-        require_audited_remote_session(&ctx, &headers, &origin, "workflow_read", "list_workflows")
-            .await?;
-    let workflows = match crate::remote::operations::remote_workflow_summaries() {
-        Ok(workflows) => workflows,
-        Err(_) => {
-            let code = "workflow_list_failed";
-            audit_gateway_event(
-                &session,
-                &origin,
-                GatewayAuditEvent::rejected("workflow_read", "list_workflows", code),
-            );
-            return Err(RemoteGatewayError::bad_request(code));
-        }
-    };
-    audit_gateway_event(
-        &session,
-        &origin,
-        GatewayAuditEvent::accepted("workflow_read", "list_workflows"),
-    );
-    Ok(Json(serde_json::json!({ "workflows": workflows })))
-}
-
-async fn run_workflow(
-    State(ctx): State<RemoteGatewayContext>,
-    headers: HeaderMap,
-    Json(request): Json<RemoteWorkflowRunRequest>,
-) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "run_workflow")?;
-    let session =
-        require_audited_remote_session(&ctx, &headers, &origin, "workflow_action", "run").await?;
-    require_mutation_rate_limit(&ctx, &session, &origin, "workflow_action", "run").await?;
-    if let Err(error) = require_csrf_header(&session, &headers) {
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("workflow_action", "run", error.code)
-                .target("workflow", &request.workflow_id),
-        );
-        return Err(error);
-    }
-    if request.workflow_id.trim().is_empty() {
-        let code = "workflow_id_required";
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("workflow_action", "run", code)
-                .target("workflow", &request.workflow_id),
-        );
-        return Err(RemoteGatewayError::bad_request(code));
-    }
-    if request.payload.is_some() {
-        let code = "remote_workflow_payload_not_supported";
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("workflow_action", "run", code)
-                .target("workflow", &request.workflow_id),
-        );
-        return Err(RemoteGatewayError::bad_request(code));
-    }
-    if crate::workflow_engine::run_workflow(ctx.app.clone(), request.workflow_id.clone(), None)
-        .await
-        .is_err()
-    {
-        let code = "workflow_run_failed";
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("workflow_action", "run", code)
-                .target("workflow", &request.workflow_id),
-        );
-        return Err(RemoteGatewayError::bad_request(code));
-    }
-    audit_gateway_event(
-        &session,
-        &origin,
-        GatewayAuditEvent::accepted("workflow_action", "run")
-            .target("workflow", &request.workflow_id),
-    );
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn stop_workflow(
-    State(ctx): State<RemoteGatewayContext>,
-    headers: HeaderMap,
-    Json(request): Json<RemoteWorkflowStopRequest>,
-) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
-    let origin = require_audited_request_boundary(&ctx.config, &headers, true, "stop_workflow")?;
-    let session =
-        require_audited_remote_session(&ctx, &headers, &origin, "workflow_action", "stop").await?;
-    require_mutation_rate_limit(&ctx, &session, &origin, "workflow_action", "stop").await?;
-    if let Err(error) = require_csrf_header(&session, &headers) {
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("workflow_action", "stop", error.code)
-                .target("workflow_run", &request.run_instance_id),
-        );
-        return Err(error);
-    }
-    if request.run_instance_id.trim().is_empty() {
-        let code = "run_instance_id_required";
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("workflow_action", "stop", code)
-                .target("workflow_run", &request.run_instance_id),
-        );
-        return Err(RemoteGatewayError::bad_request(code));
-    }
-    crate::workflow_engine::stop_workflow_run(ctx.app.clone(), &request.run_instance_id).await;
-    audit_gateway_event(
-        &session,
-        &origin,
-        GatewayAuditEvent::accepted("workflow_action", "stop")
-            .target("workflow_run", &request.run_instance_id),
-    );
-    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn create_ws_ticket(

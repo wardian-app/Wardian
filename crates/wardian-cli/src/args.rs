@@ -61,16 +61,6 @@ pub struct WorkflowArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkflowCommand {
-    List,
-    Show {
-        target: String,
-    },
-    Run {
-        target: String,
-    },
-    Stop {
-        run_instance_id: String,
-    },
     /// Print the node type registry (the contract agents author against).
     NodeTypes {
         /// Emit the machine-readable JSON schema instead of a summary table.

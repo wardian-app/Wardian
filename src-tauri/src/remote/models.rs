@@ -273,24 +273,6 @@ pub struct RemoteAgentActionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoteWorkflowSummary {
-    pub id: String,
-    pub name: String,
-    pub node_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RemoteWorkflowRunRequest {
-    pub workflow_id: String,
-    pub payload: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoteWorkflowStopRequest {
-    pub run_instance_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteWebSocketTicketRequest {
     pub stream: String,
 }

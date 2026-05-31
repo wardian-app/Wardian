@@ -1,5 +1,4 @@
 use crate::identity::AgentIdentity;
-use crate::models::WorkflowDefinition;
 use serde::{Deserialize, Serialize};
 pub const CONTROL_SCHEMA: u8 = 1;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -39,16 +38,6 @@ pub enum ControlRequest {
     },
     AgentWorktreeDisable {
         target: String,
-    },
-    WorkflowList,
-    WorkflowShow {
-        target: String,
-    },
-    WorkflowRun {
-        id: String,
-    },
-    WorkflowStop {
-        run_instance_id: String,
     },
     SendMessage {
         target: String,
@@ -463,43 +452,6 @@ pub struct AgentWorktreeMutationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_name: Option<String>,
     pub cleared_session: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkflowSummary {
-    pub id: String,
-    pub name: String,
-    pub node_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkflowListResponse {
-    pub schema: u8,
-    pub workflows: Vec<WorkflowSummary>,
-}
-
-impl WorkflowListResponse {
-    pub fn new(workflows: Vec<WorkflowSummary>) -> Self {
-        Self {
-            schema: CONTROL_SCHEMA,
-            workflows,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowResponse {
-    pub schema: u8,
-    pub workflow: WorkflowDefinition,
-}
-
-impl WorkflowResponse {
-    pub fn new(workflow: WorkflowDefinition) -> Self {
-        Self {
-            schema: CONTROL_SCHEMA,
-            workflow,
-        }
-    }
 }
 
 pub fn endpoint_key() -> Option<String> {
@@ -1097,56 +1049,4 @@ mod tests {
         assert!(json.contains(r#""input_mode":"command""#));
     }
 
-    #[test]
-    fn workflow_summary_node_count_roundtrips() {
-        let summary = WorkflowSummary {
-            id: "wf-1".to_string(),
-            name: "My Flow".to_string(),
-            node_count: 3,
-        };
-        let json = serde_json::to_string(&summary).unwrap();
-        let back: WorkflowSummary = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.node_count, 3);
-    }
-
-    #[test]
-    fn workflow_show_request_serializes_with_target() {
-        let req = ControlRequest::WorkflowShow {
-            target: "wf-1".to_string(),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""command":"workflow_show""#));
-        assert!(json.contains(r#""target":"wf-1""#));
-    }
-
-    #[test]
-    fn workflow_response_serializes_full_definition() {
-        let workflow = crate::models::WorkflowDefinition {
-            id: "wf-1".to_string(),
-            name: "Daily Review".to_string(),
-            settings: crate::models::WorkflowSettings {
-                max_iterations: 10,
-                on_limit_reached: "stop".to_string(),
-            },
-            nodes: vec![crate::models::WorkflowNode {
-                id: "n1".to_string(),
-                r#type: "agent".to_string(),
-                name: Some("Coder".to_string()),
-                config: serde_json::json!({"agent_class": "Coder"}),
-                parameter_schema: None,
-                dependencies: None,
-                position: None,
-            }],
-            role_mappings: std::collections::HashMap::from([(
-                "primary_coder".to_string(),
-                "uuid-1".to_string(),
-            )]),
-        };
-
-        let json = serde_json::to_string(&WorkflowResponse::new(workflow)).unwrap();
-
-        assert!(json.contains(r#""workflow""#));
-        assert!(json.contains(r#""nodes""#));
-        assert!(json.contains(r#""role_mappings""#));
-    }
 }
