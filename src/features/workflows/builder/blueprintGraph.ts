@@ -8,7 +8,7 @@ export interface RFGraph { nodes: RFNode[]; edges: RFEdge[]; }
 export function toReactFlow(bp: Blueprint): RFGraph {
   const nodes: RFNode[] = layoutBlueprintNodes(bp).map((n) => ({
     id: n.id,
-    type: n.type === 'loop' ? 'group' : 'wardian',
+    type: 'wardian',
     position: n.position ?? { x: 0, y: 0 },
     data: { node: n },
   }));

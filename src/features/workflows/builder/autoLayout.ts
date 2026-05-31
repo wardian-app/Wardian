@@ -5,13 +5,11 @@ const ROW_GAP = 180;
 
 export function layoutBlueprintNodes(blueprint: Blueprint): BlueprintNode[] {
   if (blueprint.nodes.length === 0) return [];
-  if (blueprint.nodes.every((node) => node.position)) return blueprint.nodes;
 
   const depths = computeDepths(blueprint);
   const rowCounts = new Map<number, number>();
 
   return blueprint.nodes.map((node) => {
-    if (node.position) return node;
     const depth = depths.get(node.id) ?? 0;
     const row = rowCounts.get(depth) ?? 0;
     rowCounts.set(depth, row + 1);

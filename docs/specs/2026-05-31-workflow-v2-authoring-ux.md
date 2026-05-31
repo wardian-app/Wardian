@@ -153,12 +153,12 @@ Auto layout is the default authoring behavior, not an optional enhancement or a
 button-first workflow. The engine model remains the graph: nodes and edges.
 Canvas positions are optional editor metadata.
 
-The builder should compute positions whenever a blueprint has missing positions,
-when a node is inserted, or when a layout-relevant graph change occurs. Agents
-and markdown-authored workflows should be valid and readable without any
-`position` fields. If a human manually moves nodes, the UI may preserve those
-positions as editor state, but manual coordinates should not be required for a
-usable workflow.
+The builder should compute positions for the default view even when older
+blueprints include persisted coordinates. Agents and markdown-authored workflows
+should be valid and readable without any `position` fields, and bad legacy
+coordinates must not make the canvas open blank or offscreen. If a human manually
+moves nodes, the UI may eventually preserve those positions behind an explicit
+layout mode, but manual coordinates should not be required for a usable workflow.
 
 A future explicit "save layout" or "lock layout" affordance can preserve human
 arrangement, but automatic readable layout remains the default.
@@ -250,6 +250,8 @@ Browser E2E:
 - Users can discover nodes through searchable, descriptive registry-backed UI.
 - Users can understand common workflow nodes without selecting each one.
 - Workflows with omitted node positions render in a readable default layout.
+- Workflows with bad persisted positions still open in a readable default
+  layout.
 - The inspector no longer appears as a low-value permanent panel.
 - Runs no longer occupy a permanent edit-mode drawer by default.
 - Core authoring actions from v1 are available in v2-native form.
