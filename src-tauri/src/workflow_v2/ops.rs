@@ -1,5 +1,4 @@
 use std::path::Path;
-use tokio::process::Command;
 use wardian_core::engine::{
     NotifyRequest, ScriptRequest, ShellRequest, StateRequest, StepError, StepOutput,
 };
@@ -14,7 +13,8 @@ pub async fn run_shell(ws: &Path, req: &ShellRequest) -> Result<StepOutput, Step
         ("sh", "-c")
     };
 
-    let output = Command::new(shell)
+    let mut command = crate::utils::process::new_silent_command(shell);
+    let output = command
         .arg(flag)
         .arg(&req.command)
         .current_dir(cwd)
@@ -32,7 +32,8 @@ pub async fn run_shell(ws: &Path, req: &ShellRequest) -> Result<StepOutput, Step
 /// Run `runtime path` in the workspace and capture exit code, stdout, and
 /// stderr.
 pub async fn run_script(ws: &Path, req: &ScriptRequest) -> Result<StepOutput, StepError> {
-    let output = Command::new(&req.runtime)
+    let mut command = crate::utils::process::new_silent_command(&req.runtime);
+    let output = command
         .arg(&req.path)
         .current_dir(ws)
         .output()
