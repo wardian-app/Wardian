@@ -1,11 +1,7 @@
 //! A due schedule fires a real v2 run via the mock provider; a paused one does not.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use wardian_core::engine::{
-    driver::new_run_id,
-    store::read_checkpoint,
-    RunStatus,
-};
+use wardian_core::engine::{driver::new_run_id, store::read_checkpoint, RunStatus};
 
 const SCHEDULED_BLUEPRINT: &str = r#"---
 schema: 2
@@ -147,7 +143,10 @@ async fn due_schedule_fires_and_writes_a_run() {
         run_id,
         run_root.clone(),
         home.path().to_path_buf(),
-        fires[0].provider.clone().unwrap_or_else(|| "codex".to_string()),
+        fires[0]
+            .provider
+            .clone()
+            .unwrap_or_else(|| "codex".to_string()),
         fires[0].input.clone(),
         fires[0].bindings.clone(),
     )
@@ -165,4 +164,71 @@ fn paused_schedule_is_not_due() {
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let mut schedules = vec![schedule(true, now.saturating_sub(1_000))];
     assert!(wardian_core::schedule::plan_tick(&mut schedules, now).is_empty());
+}
+
+fn fire_request_for(id: &str, provider: Option<&str>) -> wardian_core::schedule::FireRequest {
+    wardian_core::schedule::FireRequest {
+        schedule_id: "s1".into(),
+        blueprint_id: id.into(),
+        name: "Sched".into(),
+        provider: provider.map(|p| p.to_string()),
+        workspace: None,
+        input: serde_json::json!({ "symbol": "SPY" }),
+        bindings: Default::default(),
+    }
+}
+
+#[test]
+fn resolve_fire_resolves_blueprint_run_root_and_provider() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set(home.path(), &mock_script_path());
+    seed_blueprint(home.path());
+
+    let resolved = wardian_app_lib::workflow_v2::schedule::resolve_fire(&fire_request_for(
+        "sched-test",
+        Some("mock"),
+    ))
+    .expect("resolve_fire should succeed for a seeded blueprint");
+
+    assert_eq!(resolved.blueprint.id, "sched-test");
+    assert_eq!(resolved.provider, "mock");
+    // workspace defaults to the run root when the request carries none
+    assert_eq!(resolved.workspace, resolved.run_root);
+    assert!(resolved
+        .run_root
+        .ends_with(std::path::Path::new(&resolved.run_id)));
+    assert_eq!(resolved.input["symbol"], "SPY");
+}
+
+#[test]
+fn resolve_fire_errors_for_a_missing_blueprint() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set(home.path(), &mock_script_path());
+    // no seed_blueprint -> the file does not exist
+
+    let result = wardian_app_lib::workflow_v2::schedule::resolve_fire(&fire_request_for(
+        "does-not-exist",
+        Some("mock"),
+    ));
+    assert!(
+        result.is_err(),
+        "missing blueprint must resolve to an error, not a panic"
+    );
+}
+
+#[test]
+fn resolve_fire_falls_back_to_settings_provider_when_request_has_none() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set(home.path(), &mock_script_path());
+    seed_blueprint(home.path());
+
+    let resolved =
+        wardian_app_lib::workflow_v2::schedule::resolve_fire(&fire_request_for("sched-test", None))
+            .expect("resolve_fire should succeed");
+    // With no per-schedule provider and no settings file, the fallback is the
+    // settings default ("auto") or "codex" -- never empty.
+    assert!(
+        !resolved.provider.is_empty(),
+        "provider fallback must not be empty"
+    );
 }
