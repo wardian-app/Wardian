@@ -8,7 +8,7 @@
 
 ## 1. Goal & scope
 
-Give v2 the ability to run blueprints on a schedule — the parity gap that made the 5c migration lossy (every Trident + heartbeat workflow was scheduled). A persisted schedule fires real v2 runs via 6a's `workflow_run_v2` path at the right times, survives app restart, and supports the same cadences v1 had.
+Give v2 the ability to run blueprints on a schedule — the parity gap that made the 5c migration lossy (most migrated workflows were scheduled). A persisted schedule fires real v2 runs via 6a's `workflow_run_v2` path at the right times, survives app restart, and supports the same cadences v1 had.
 
 **In scope (6b):**
 1. A `WorkflowSchedule` entity (wardian-core) = invocation context + `ScheduleDefinition` + runtime fields.
