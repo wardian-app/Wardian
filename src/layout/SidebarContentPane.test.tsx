@@ -67,11 +67,11 @@ const agents: AgentConfig[] = [];
 function renderPane({
   activeTab = "agent-config",
   selectedAgentIds = new Set<string>(),
-  onOpenWorkflowBuilder = vi.fn(),
+  onOpenWorkflowsView = vi.fn(),
 }: {
   activeTab?: "agent-config" | "workflows";
   selectedAgentIds?: Set<string>;
-  onOpenWorkflowBuilder?: () => void;
+  onOpenWorkflowsView?: () => void;
 } = {}) {
   return render(
     <SidebarContentPane
@@ -87,7 +87,7 @@ function renderPane({
       broadcastMessage=""
       setBroadcastMessage={vi.fn()}
       onBroadcast={vi.fn()}
-      onOpenWorkflowBuilder={onOpenWorkflowBuilder}
+      onOpenWorkflowsView={onOpenWorkflowsView}
     />,
   );
 }
@@ -109,12 +109,12 @@ describe("SidebarContentPane", () => {
   });
 
   it("opens the main workflows view before switching the glance to monitor", () => {
-    const onOpenWorkflowBuilder = vi.fn();
-    renderPane({ activeTab: "workflows", onOpenWorkflowBuilder });
+    const onOpenWorkflowsView = vi.fn();
+    renderPane({ activeTab: "workflows", onOpenWorkflowsView });
 
     fireEvent.click(screen.getByRole("button", { name: /open monitor/i }));
 
-    expect(onOpenWorkflowBuilder).toHaveBeenCalled();
+    expect(onOpenWorkflowsView).toHaveBeenCalled();
     expect(setModeMock).toHaveBeenCalledWith("monitor");
   });
 });

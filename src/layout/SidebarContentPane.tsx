@@ -13,8 +13,6 @@ import { GitPanel } from "../features/git/GitPanel";
 import { useRunStore } from "../features/workflows/run/useRunStore";
 import { useSchedulesStore } from "../store/useSchedulesStore";
 import { useWorkflowsView } from "../store/useWorkflowsView";
-import type { WorkflowDefinition } from "../types/workflow";
-import type { WorkflowLaunchKind } from "../features/workflows/workflowLaunch";
 
 interface SidebarContentPaneProps {
   activeTab: SidebarTab;
@@ -29,8 +27,7 @@ interface SidebarContentPaneProps {
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
-  onOpenWorkflowBuilder: () => void;
-  onOpenWorkflowRunModalInMain?: (workflow: WorkflowDefinition, kind: WorkflowLaunchKind) => void;
+  onOpenWorkflowsView: () => void;
 }
 
 export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
@@ -46,7 +43,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
-  onOpenWorkflowBuilder,
+  onOpenWorkflowsView,
 }) => {
   return (
     <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
@@ -102,7 +99,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             onClassesUpdated={onClassesUpdated}
           />
         )}
-        {activeTab === "workflows" && <WorkflowsGlancePane onOpenWorkflowBuilder={onOpenWorkflowBuilder} />}
+        {activeTab === "workflows" && <WorkflowsGlancePane onOpenWorkflowsView={onOpenWorkflowsView} />}
 
       </div>
       {!leftCollapsed && (
@@ -118,10 +115,10 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
 };
 
 interface WorkflowsGlancePaneProps {
-  onOpenWorkflowBuilder: () => void;
+  onOpenWorkflowsView: () => void;
 }
 
-const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflowBuilder }) => {
+const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflowsView }) => {
   const schedules = useSchedulesStore((state) => state.schedules);
   const loadSchedules = useSchedulesStore((state) => state.load);
   const runs = useRunStore((state) => state.runs);
@@ -141,11 +138,11 @@ const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflo
       schedules={schedules}
       activeRuns={activeRuns}
       onOpenRun={(blueprintId, runId) => {
-        onOpenWorkflowBuilder();
+        onOpenWorkflowsView();
         void openRun(blueprintId, runId).then(() => observeRun(runId));
       }}
       onOpenMonitor={() => {
-        onOpenWorkflowBuilder();
+        onOpenWorkflowsView();
         setMode('monitor');
       }}
     />
