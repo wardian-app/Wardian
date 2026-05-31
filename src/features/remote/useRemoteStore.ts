@@ -361,7 +361,13 @@ const ensureAuthenticatedSession = async (set: RemoteSet) => {
 };
 
 const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
-  const [agents, workflows] = await Promise.all([remoteClient.listAgents(), remoteClient.listWorkflows()]);
+  const [agents, workflows] = await Promise.all([
+    remoteClient.listAgents(),
+    remoteClient.listWorkflows().catch((error: unknown) => {
+      if (error instanceof RemoteRequestError && error.status === 404) return [];
+      throw error;
+    }),
+  ]);
   set((state) => {
     const liveAgentIds = new Set(agents.map((agent) => agent.session_id));
     const activeAgentId = state.activeAgentId && liveAgentIds.has(state.activeAgentId) ? state.activeAgentId : null;
