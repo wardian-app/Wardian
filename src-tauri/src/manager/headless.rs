@@ -185,10 +185,11 @@ pub async fn run_headless_with_options(
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
     let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(wardian_session_id))?;
     let provider_cwd = cwd.to_path_buf();
+    let persisted_config = persisted_agent_config(wardian_session_id);
     let persisted_provider_config = if matches!(provider_name, "opencode" | "antigravity") {
         config_override
             .cloned()
-            .or_else(|| persisted_agent_config(wardian_session_id))
+            .or_else(|| persisted_config.clone())
     } else {
         None
     };
@@ -222,6 +223,11 @@ pub async fn run_headless_with_options(
     }
     apply_headless_identity_env(&mut cmd, wardian_session_id);
     super::apply_managed_cli_path_to_process(&mut cmd);
+    if let Some(config) = persisted_config.as_ref() {
+        for (key, value) in super::worktree_build_env(config) {
+            cmd.env(key, value);
+        }
+    }
     if provider_name == "codex" {
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));

@@ -532,6 +532,31 @@ pub(crate) fn interactive_provider_cwd(
     }
 }
 
+pub(crate) fn worktree_build_env(config: &AgentConfig) -> Vec<(String, String)> {
+    if config.git_worktree != Some(true) {
+        return Vec::new();
+    }
+
+    let Some(source_folder) = config
+        .git_worktree_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+    else {
+        return Vec::new();
+    };
+
+    let source_path = std::path::Path::new(source_folder);
+    if !source_path.join("Cargo.toml").is_file() {
+        return Vec::new();
+    }
+
+    vec![(
+        "CARGO_TARGET_DIR".to_string(),
+        source_path.join("target").to_string_lossy().to_string(),
+    )]
+}
+
 pub(crate) fn interactive_provider_args(
     provider_name: &str,
     provider_cwd: &std::path::Path,
@@ -1144,6 +1169,39 @@ mod tests {
             current.ready_evidence,
             Some(ProviderReadyEvidence::ProviderEvent)
         );
+    }
+
+    #[test]
+    fn worktree_build_env_points_cargo_target_dir_to_source_checkout() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("Wardian");
+        let worktree = temp.path().join("Wardian.wt").join("debugging");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        std::fs::write(source.join("Cargo.toml"), "[workspace]\n").expect("cargo toml");
+        let config = AgentConfig {
+            git_worktree: Some(true),
+            git_worktree_source: Some(source.to_string_lossy().to_string()),
+            git_worktree_folder: Some(worktree.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let env = worktree_build_env(&config);
+
+        assert!(env.contains(&(
+            "CARGO_TARGET_DIR".to_string(),
+            source.join("target").to_string_lossy().to_string(),
+        )));
+    }
+
+    #[test]
+    fn worktree_build_env_skips_non_worktree_agents() {
+        let config = AgentConfig {
+            folder: "D:/Development/Wardian".to_string(),
+            ..Default::default()
+        };
+
+        assert!(worktree_build_env(&config).is_empty());
     }
 
     #[tokio::test]

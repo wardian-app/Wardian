@@ -499,10 +499,19 @@ fn remove_generated_cargo_config(
     if actual != expected {
         return Ok(());
     }
+    if git_tracks_relative_path(worktree_path, ".cargo/config.toml")? {
+        return Ok(());
+    }
 
     std::fs::remove_file(&config_path).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir(&cargo_dir);
     Ok(())
+}
+
+fn git_tracks_relative_path(repo_path: &Path, relative_path: &str) -> Result<bool, String> {
+    let cwd = path_to_git_arg(repo_path)?;
+    let raw = run_git(&cwd, &["ls-files", "--", relative_path])?;
+    Ok(raw.lines().any(|line| line.trim() == relative_path))
 }
 
 fn remove_generated_cache_link(link: &Path, target: &Path) -> Result<(), String> {
@@ -656,13 +665,17 @@ pub(crate) fn setup_worktree_build_caches(
 fn write_cargo_worktree_config(worktree_path: &Path, workspace_path: &Path) -> Result<(), String> {
     let cargo_dir = worktree_path.join(".cargo");
     std::fs::create_dir_all(&cargo_dir).map_err(|e| e.to_string())?;
+    let config_path = cargo_dir.join("config.toml");
+    if config_path.exists() || config_path.symlink_metadata().is_ok() {
+        return Ok(());
+    }
 
     let target_dir = workspace_path.join("target");
     let config = format!(
         "[build]\ntarget-dir = \"{}\"\n",
         escape_toml_basic_string(&target_dir.to_string_lossy())
     );
-    std::fs::write(cargo_dir.join("config.toml"), config).map_err(|e| e.to_string())
+    std::fs::write(config_path, config).map_err(|e| e.to_string())
 }
 
 fn ensure_shared_cache_dir(path: &Path) -> Result<PathBuf, String> {
@@ -1029,6 +1042,50 @@ mod tests {
     }
 
     #[test]
+    fn remove_worktree_without_force_preserves_tracked_matching_cargo_config_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("agents").join("agent-1").join("worktree");
+        std::fs::create_dir_all(workspace.join(".cargo")).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\n",
+        )
+        .unwrap();
+        let expected_target = absolute_existing_path(&workspace)
+            .unwrap()
+            .join("target")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let tracked_config = format!("[build]\ntarget-dir = \"{expected_target}\"\n");
+        std::fs::write(workspace.join(".cargo").join("config.toml"), &tracked_config).unwrap();
+
+        let cwd = workspace.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        run_git(cwd, &["config", "core.autocrlf", "false"]).unwrap();
+        run_git(cwd, &["add", "Cargo.toml", ".cargo/config.toml"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        create_worktree_with_build_caches(&workspace, &worktree, "wardian/repo-agent").unwrap();
+        std::fs::write(worktree.join("local.txt"), "keep me\n").unwrap();
+
+        let err = remove_worktree_without_force(&workspace, &worktree)
+            .expect_err("dirty worktree should block non-force removal");
+
+        assert!(
+            err.contains("modified or untracked") || err.contains("contains"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(".cargo").join("config.toml")).unwrap(),
+            tracked_config
+        );
+        assert!(git_worktree_contains_path(&workspace, &worktree).unwrap());
+    }
+
+    #[test]
     fn git_worktree_contains_path_detects_created_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
@@ -1224,6 +1281,33 @@ bare
             cargo_config,
             format!("[build]\ntarget-dir = \"{expected_target}\"\n")
         );
+    }
+
+    #[test]
+    fn setup_worktree_build_caches_preserves_existing_cargo_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let worktree = temp.path().join("worktree");
+        let cargo_dir = worktree.join(".cargo");
+
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&cargo_dir).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cargo_dir.join("config.toml"),
+            "[build]\ntarget-dir = \"target\"\n",
+        )
+        .unwrap();
+
+        setup_worktree_build_caches(&worktree, &workspace).unwrap();
+
+        let cargo_config =
+            std::fs::read_to_string(worktree.join(".cargo").join("config.toml")).unwrap();
+        assert_eq!(cargo_config, "[build]\ntarget-dir = \"target\"\n");
     }
 
     #[test]
