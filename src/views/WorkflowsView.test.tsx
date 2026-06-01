@@ -603,6 +603,40 @@ describe('WorkflowsView', () => {
     expect(screen.queryByRole('button', { name: /save/i })).toBeNull();
   });
 
+  it('uses the blueprint file path for observe approval controls', async () => {
+    seedObserveRun({
+      status: 'awaiting_approval',
+      nodes: { 'task-1': 'running' },
+    });
+    useRunStore.setState({
+      blueprintPath: '<absolute-workspace-path>/library/workflows/wf.md',
+      events: [
+        { seq: 0, ts: 't0', kind: 'run_started', blueprint_id: 'wf', schema: 2, trigger: {} },
+        { seq: 1, ts: 't1', kind: 'awaiting_approval', node: 'task-1' },
+      ],
+    });
+    render(<WorkflowsView theme="dark" />);
+
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        'workflow_approve',
+        expect.objectContaining({
+          blueprintId: 'wf',
+          runId: 'run-1',
+          blueprintPath: '<absolute-workspace-path>/library/workflows/wf.md',
+          node: 'task-1',
+          granted: true,
+        }),
+      );
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'workflow_approve',
+      expect.objectContaining({ blueprintPath: '<absolute-workspace-path>/library/runs/run-1.json' }),
+    );
+  });
+
   it('clears observe details when a different run opens', async () => {
     seedObserveRun();
     render(<WorkflowsView theme="dark" />);
@@ -691,6 +725,7 @@ function seedObserveRun(stateOverrides: Partial<ReturnType<typeof useRunStore.ge
       node_count: 1,
       failure: state.failure,
       path: '<absolute-workspace-path>/library/runs/run-1.json',
+      blueprint_path: '<absolute-workspace-path>/library/workflows/wf.md',
     }],
     state,
     events: [
@@ -704,6 +739,7 @@ function seedObserveRun(stateOverrides: Partial<ReturnType<typeof useRunStore.ge
       nodes: [{ id: 'task-1', type: 'task', name: 'Task' }],
       edges: [],
     },
+    blueprintPath: '<absolute-workspace-path>/library/workflows/wf.md',
     scrubIndex: 1,
   });
   useWorkflowsView.setState({
@@ -737,5 +773,6 @@ function readRunResult(runId: string, blueprintId = 'wf') {
       { seq: 1, ts: 't1', kind: 'run_completed' },
     ],
     blueprint: workflowBlueprint(blueprintId),
+    blueprint_path: `<absolute-workspace-path>/library/workflows/${blueprintId}.md`,
   };
 }

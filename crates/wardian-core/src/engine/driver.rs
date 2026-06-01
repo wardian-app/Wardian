@@ -552,7 +552,10 @@ mod tests {
             .expect("trigger node timestamp");
 
         assert_eq!(node_timestamp, global_timestamp);
-        assert_eq!(state.registry["nodes"]["trigger"]["output"]["source"], "manual");
+        assert_eq!(
+            state.registry["nodes"]["trigger"]["output"]["source"],
+            "manual"
+        );
     }
 
     #[tokio::test]

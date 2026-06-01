@@ -39,6 +39,7 @@ export interface RunSummary {
   node_count: number;
   failure?: string | null;
   path: string;
+  blueprint_path?: string | null;
   started_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;
@@ -48,4 +49,5 @@ export interface RunReadResult {
   state: RunState | null;
   events: RunEvent[];
   blueprint: Blueprint | null;
+  blueprint_path?: string | null;
 }

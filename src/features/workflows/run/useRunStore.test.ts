@@ -13,6 +13,7 @@ const summary: RunSummary = {
   node_count: 2,
   failure: 'boom',
   path: '/logs/workflows/wf/run-1',
+  blueprint_path: '/library/workflows/wf.md',
 };
 
 const events: RunEvent[] = [
@@ -33,6 +34,7 @@ const result: RunReadResult = {
   state,
   events,
   blueprint: { schema: 2, id: 'wf', name: 'Workflow', nodes: [], edges: [] },
+  blueprint_path: '/library/workflows/wf.md',
 };
 
 describe('useRunStore', () => {
@@ -59,6 +61,7 @@ describe('useRunStore', () => {
     expect(useRunStore.getState().state).toBe(state);
     expect(useRunStore.getState().events).toEqual(events);
     expect(useRunStore.getState().blueprint?.id).toBe('wf');
+    expect(useRunStore.getState().blueprintPath).toBe('/library/workflows/wf.md');
     expect(useRunStore.getState().scrubIndex).toBe(2);
   });
 

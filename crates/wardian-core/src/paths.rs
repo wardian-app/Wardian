@@ -114,7 +114,7 @@ pub fn agents_dir() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("agents"))
 }
 
-/// `<wardian-home>/logs/workflows` — root of all v2 run logs.
+/// `<wardian-home>/logs/workflows` — root of all workflow run logs.
 pub fn workflow_runs_dir() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("logs").join("workflows"))
 }
@@ -124,7 +124,7 @@ pub fn workflow_run_dir(blueprint_id: &str, run_id: &str) -> Option<PathBuf> {
     workflow_runs_dir().map(|dir| dir.join(blueprint_id).join(run_id))
 }
 
-/// `<wardian-home>/library/workflows` — where v2 blueprints live.
+/// `<wardian-home>/library/workflows` — where workflow blueprints live.
 pub fn library_workflows_dir() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("library").join("workflows"))
 }
@@ -134,7 +134,7 @@ pub fn blueprint_path(blueprint_id: &str) -> Option<PathBuf> {
     library_workflows_dir().map(|dir| dir.join(format!("{blueprint_id}.md")))
 }
 
-/// `<wardian-home>/library/schedules.json` — the v2 schedule index.
+/// `<wardian-home>/library/schedules.json` — the workflow schedule index.
 pub fn schedules_path() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("library").join("schedules.json"))
 }

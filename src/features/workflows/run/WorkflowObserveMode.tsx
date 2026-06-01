@@ -15,6 +15,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
   const runs = useRunStore((store) => store.runs);
   const events = useRunStore((store) => store.events);
   const blueprint = useRunStore((store) => store.blueprint);
+  const blueprintPath = useRunStore((store) => store.blueprintPath);
   const scrubIndex = useRunStore((store) => store.scrubIndex);
   const setScrubIndex = useRunStore((store) => store.setScrubIndex);
   const currentNodeStatuses = useRunStore((store) => store.currentNodeStatuses);
@@ -33,8 +34,8 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
   }, [events, state?.status]);
 
   const controlsStatus = toRunControlStatus(state?.status);
-  const activeRunPath = state
-    ? runs.find((run) => run.blueprint_id === state.blueprint_id && run.run_id === state.run_id)?.path ?? ''
+  const activeBlueprintPath = state
+    ? blueprintPath ?? runs.find((run) => run.blueprint_id === state.blueprint_id && run.run_id === state.run_id)?.blueprint_path ?? ''
     : '';
 
   return (
@@ -42,7 +43,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
       <ObserveRunHeader
         state={state}
         events={events}
-        activeRunPath={activeRunPath}
+        activeBlueprintPath={activeBlueprintPath}
         controlsStatus={controlsStatus}
         awaitingNode={awaitingNode}
         onChanged={() => {
@@ -100,13 +101,13 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
 interface ObserveRunHeaderProps {
   state: ReturnType<typeof useRunStore.getState>['state'];
   events: RunEvent[];
-  activeRunPath: string;
+  activeBlueprintPath: string;
   controlsStatus: RunControlStatus | null;
   awaitingNode: string | null;
   onChanged: () => void;
 }
 
-function ObserveRunHeader({ state, events, activeRunPath, controlsStatus, awaitingNode, onChanged }: ObserveRunHeaderProps) {
+function ObserveRunHeader({ state, events, activeBlueprintPath, controlsStatus, awaitingNode, onChanged }: ObserveRunHeaderProps) {
   const latest = events[events.length - 1] ?? null;
   const latestNode = latest && 'node' in latest ? latest.node : null;
   const failure = state?.failure ?? (latest?.kind === 'run_failed' ? latest.error : null);
@@ -133,7 +134,7 @@ function ObserveRunHeader({ state, events, activeRunPath, controlsStatus, awaiti
         <RunControls
           blueprintId={state.blueprint_id}
           runId={state.run_id}
-          blueprintPath={activeRunPath}
+          blueprintPath={activeBlueprintPath}
           status={controlsStatus}
           awaitingNode={awaitingNode}
           onChanged={onChanged}

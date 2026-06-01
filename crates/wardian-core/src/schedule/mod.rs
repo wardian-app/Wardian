@@ -1,4 +1,4 @@
-//! Pure scheduling math + persistence for v2 schedule invokers. No Tauri, no app state.
+//! Pure scheduling math + persistence for workflow schedule invokers. No Tauri, no app state.
 
 use crate::models::{ScheduleDefinition, WorkflowAssignments};
 use chrono::{Datelike, TimeZone};

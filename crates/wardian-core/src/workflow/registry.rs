@@ -50,7 +50,7 @@ pub struct NodeTypeDef {
 
 static NODE_TYPES: Lazy<Vec<NodeTypeDef>> = Lazy::new(build_registry);
 
-/// All node types in the v2 taxonomy.
+/// All node types in the workflow taxonomy.
 pub fn node_types() -> &'static [NodeTypeDef] {
     &NODE_TYPES
 }
@@ -285,7 +285,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_contains_the_v2_taxonomy() {
+    fn registry_contains_the_workflow_taxonomy() {
         let ids: Vec<&str> = node_types().iter().map(|n| n.id.as_str()).collect();
         for expected in [
             "task",

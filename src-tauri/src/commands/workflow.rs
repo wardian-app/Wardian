@@ -106,6 +106,8 @@ fn summarize_run_dir(dir: &std::path::Path) -> Option<serde_json::Value> {
         RunStatus::Completed => updated_at.clone(),
         RunStatus::Running | RunStatus::AwaitingApproval | RunStatus::Failed => None,
     };
+    let blueprint_path =
+        resolve_blueprint_path(&state.blueprint_id).map(|path| path.to_string_lossy().to_string());
 
     Some(serde_json::json!({
         "run_id": state.run_id,
@@ -114,6 +116,7 @@ fn summarize_run_dir(dir: &std::path::Path) -> Option<serde_json::Value> {
         "node_count": state.nodes.len(),
         "failure": state.failure,
         "path": dir.to_string_lossy(),
+        "blueprint_path": blueprint_path,
         "started_at": started_at,
         "updated_at": updated_at,
         "completed_at": completed_at,
@@ -131,8 +134,15 @@ pub fn workflow_read_run(
     let state = read_checkpoint(&dir).map_err(|e| e.to_string())?;
     let events = read_events(&dir).map_err(|e| e.to_string())?;
     let blueprint = resolve_blueprint(&blueprint_id);
+    let blueprint_path =
+        resolve_blueprint_path(&blueprint_id).map(|path| path.to_string_lossy().to_string());
 
-    Ok(serde_json::json!({ "state": state, "events": events, "blueprint": blueprint }))
+    Ok(serde_json::json!({
+        "state": state,
+        "events": events,
+        "blueprint": blueprint,
+        "blueprint_path": blueprint_path
+    }))
 }
 
 /// Launch a workflow blueprint run headlessly. Validates, then drives the engine in a
@@ -226,8 +236,7 @@ pub async fn workflow_resume(
     bindings: Option<HashMap<String, String>>,
     assignments: Option<WorkflowAssignments>,
 ) -> Result<serde_json::Value, String> {
-    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
-        .map_err(|e| e.to_string())?;
+    let blueprint = parse_blueprint_for_run(&blueprint_id, &blueprint_path)?;
     let run_root =
         wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
     let invocation = runs::read_run_invocation(&run_root)?;
@@ -300,8 +309,7 @@ pub async fn workflow_approve(
     bindings: Option<HashMap<String, String>>,
     assignments: Option<WorkflowAssignments>,
 ) -> Result<serde_json::Value, String> {
-    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
-        .map_err(|e| e.to_string())?;
+    let blueprint = parse_blueprint_for_run(&blueprint_id, &blueprint_path)?;
     let run_root =
         wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
 
@@ -483,17 +491,40 @@ pub async fn schedule_run_now(app: AppHandle, id: String) -> Result<(), String> 
     Ok(())
 }
 
-fn resolve_blueprint(id: &str) -> Option<serde_json::Value> {
+fn parse_blueprint_for_run(blueprint_id: &str, blueprint_path: &str) -> Result<Blueprint, String> {
+    let provided = std::path::Path::new(blueprint_path);
+    if !blueprint_path.trim().is_empty() && provided.is_file() {
+        return wardian_core::workflow::parse_file(provided).map_err(|e| e.to_string());
+    }
+    let resolved = resolve_blueprint_path(blueprint_id).ok_or_else(|| {
+        if blueprint_path.trim().is_empty() {
+            format!("could not resolve blueprint path for {blueprint_id}")
+        } else {
+            format!(
+                "could not resolve blueprint path for {blueprint_id}; provided path is not a file: {blueprint_path}"
+            )
+        }
+    })?;
+    wardian_core::workflow::parse_file(&resolved).map_err(|e| e.to_string())
+}
+
+fn resolve_blueprint_path(id: &str) -> Option<std::path::PathBuf> {
     let home = wardian_core::paths::wardian_home()?;
     let dir = home.join("library").join("workflows");
     for entry in walk_md(&dir) {
         if let Ok(bp) = wardian_core::workflow::parse_file(&entry) {
             if bp.id == id {
-                return serde_json::to_value(bp).ok();
+                return Some(entry);
             }
         }
     }
     None
+}
+
+fn resolve_blueprint(id: &str) -> Option<serde_json::Value> {
+    let path = resolve_blueprint_path(id)?;
+    let blueprint = wardian_core::workflow::parse_file(&path).ok()?;
+    serde_json::to_value(blueprint).ok()
 }
 
 fn walk_md(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -566,6 +597,28 @@ mod tests {
         }
     }
 
+    const WORKFLOW_BLUEPRINT: &str = r#"---
+schema: 2
+id: wf
+name: Workflow
+nodes:
+  - id: trigger
+    type: manual_trigger
+    fields: {}
+edges: []
+---
+
+# Workflow
+"#;
+
+    fn seed_workflow_blueprint(home: &std::path::Path) -> std::path::PathBuf {
+        let workflows_dir = home.join("library").join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        let path = workflows_dir.join("wf.md");
+        std::fs::write(&path, WORKFLOW_BLUEPRINT).unwrap();
+        path
+    }
+
     #[test]
     fn run_summary_uses_event_timestamps() {
         let dir = tempfile::tempdir().unwrap();
@@ -597,6 +650,53 @@ mod tests {
         assert_eq!(summary["started_at"], "2026-05-31T12:00:00Z");
         assert_eq!(summary["updated_at"], "2026-05-31T12:01:00Z");
         assert_eq!(summary["completed_at"], "2026-05-31T12:01:00Z");
+    }
+
+    #[test]
+    fn run_summary_carries_resolved_blueprint_path_separately_from_run_path() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(dir.path());
+        let blueprint_path = seed_workflow_blueprint(dir.path());
+        let run_root = dir
+            .path()
+            .join("logs")
+            .join("workflows")
+            .join("wf")
+            .join("run-1");
+        let mut state = RunState::new("run-1", "wf");
+        state.status = RunStatus::AwaitingApproval;
+        write_checkpoint(&run_root, &state).unwrap();
+
+        let summary = summarize_run_dir(&run_root).unwrap();
+
+        assert_eq!(
+            summary["path"].as_str(),
+            Some(run_root.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            summary["blueprint_path"].as_str(),
+            Some(blueprint_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn parse_blueprint_for_run_falls_back_from_run_dir_to_blueprint_id() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(dir.path());
+        seed_workflow_blueprint(dir.path());
+        let stale_run_dir = dir
+            .path()
+            .join("logs")
+            .join("workflows")
+            .join("wf")
+            .join("run-1");
+        std::fs::create_dir_all(&stale_run_dir).unwrap();
+
+        let blueprint = parse_blueprint_for_run("wf", &stale_run_dir.to_string_lossy()).unwrap();
+
+        assert_eq!(blueprint.id, "wf");
     }
 
     #[tokio::test]
