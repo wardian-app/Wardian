@@ -92,12 +92,12 @@ const makeUpdate = (overrides: Partial<{
 
 describe('useAppUpdate', () => {
   let updateEventHandler: ((event: { payload: DownloadEvent }) => void) | null = null;
-  let unlisten: ReturnType<typeof vi.fn>;
+  let unlistenCallCount = 0;
 
   beforeEach(() => {
     vi.clearAllMocks();
     updateEventHandler = null;
-    unlisten = vi.fn();
+    unlistenCallCount = 0;
     setTauriRuntime(true);
     mockGetVersion.mockResolvedValue(mockedRuntimeVersion);
     mockInvoke.mockResolvedValue({
@@ -108,7 +108,9 @@ describe('useAppUpdate', () => {
     });
     mockListen.mockImplementation(async (_eventName, handler) => {
       updateEventHandler = handler as (event: { payload: DownloadEvent }) => void;
-      return unlisten;
+      return () => {
+        unlistenCallCount += 1;
+      };
     });
     mockCheck.mockResolvedValue(null);
     mockRelaunch.mockResolvedValue();
@@ -201,7 +203,7 @@ describe('useAppUpdate', () => {
     expect(mockInvoke).toHaveBeenCalledWith('install_update_with_windows_handoff', {
       expectedVersion: update.version,
     });
-    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(unlistenCallCount).toBe(1);
     expect(update.downloadAndInstall).not.toHaveBeenCalled();
     expect(mockRelaunch).not.toHaveBeenCalled();
   });

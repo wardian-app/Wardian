@@ -67,29 +67,31 @@ function bytesToBase64(bytes: number[]) {
 describe("RemoteMobileApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(Terminal).mockImplementation((options) => ({
-      open: vi.fn(),
-      write: vi.fn(),
-      resize: vi.fn(),
-      clear: vi.fn(),
-      onData: vi.fn(),
-      onBinary: vi.fn(),
-      onTitleChange: vi.fn(),
-      onResize: vi.fn(),
-      onScroll: vi.fn(),
-      reset: vi.fn(),
-      dispose: vi.fn(),
-      focus: vi.fn(),
-      attachCustomKeyEventHandler: vi.fn(),
-      selectAll: vi.fn(),
-      loadAddon: vi.fn(),
-      scrollLines: vi.fn(),
-      scrollToBottom: vi.fn(),
-      scrollToTop: vi.fn(),
-      options: { ...(options ?? {}) },
-      cols: 80,
-      rows: 24,
-    }) as unknown as Terminal);
+    vi.mocked(Terminal).mockImplementation(function MockTerminal(options) {
+      return {
+        open: vi.fn(),
+        write: vi.fn(),
+        resize: vi.fn(),
+        clear: vi.fn(),
+        onData: vi.fn(),
+        onBinary: vi.fn(),
+        onTitleChange: vi.fn(),
+        onResize: vi.fn(),
+        onScroll: vi.fn(),
+        reset: vi.fn(),
+        dispose: vi.fn(),
+        focus: vi.fn(),
+        attachCustomKeyEventHandler: vi.fn(),
+        selectAll: vi.fn(),
+        loadAddon: vi.fn(),
+        scrollLines: vi.fn(),
+        scrollToBottom: vi.fn(),
+        scrollToTop: vi.fn(),
+        options: { ...(options ?? {}) },
+        cols: 80,
+        rows: 24,
+      } as unknown as Terminal;
+    });
     scrollIntoViewMock = vi.fn();
     Object.defineProperty(Element.prototype, "scrollIntoView", {
       configurable: true,

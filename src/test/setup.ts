@@ -50,7 +50,8 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 
 // Mock xterm since it requires a real DOM canvas
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn().mockImplementation(() => ({
+  Terminal: vi.fn().mockImplementation(function MockTerminal() {
+    return {
     open: vi.fn(),
     write: vi.fn(),
     resize: vi.fn(),
@@ -71,53 +72,62 @@ vi.mock("@xterm/xterm", () => ({
     scrollToTop: vi.fn(),
     cols: 80,
     rows: 24,
-  })),
+    };
+  }),
 }));
 
 vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: vi.fn().mockImplementation(() => ({
-    serialize: vi.fn(() => ""),
-    dispose: vi.fn(),
-    activate: vi.fn(),
-  })),
+  SerializeAddon: vi.fn().mockImplementation(function MockSerializeAddon() {
+    return {
+      serialize: vi.fn(() => ""),
+      dispose: vi.fn(),
+      activate: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: vi.fn().mockImplementation(() => ({
-    onContextLoss: vi.fn(),
-    clearTextureAtlas: vi.fn(),
-    dispose: vi.fn(),
-  })),
+  WebglAddon: vi.fn().mockImplementation(function MockWebglAddon() {
+    return {
+      onContextLoss: vi.fn(),
+      clearTextureAtlas: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock("@xterm/headless", () => ({
-  Terminal: vi.fn().mockImplementation(() => ({
-    open: vi.fn(),
-    write: vi.fn((_data: string, callback?: () => void) => callback?.()),
-    loadAddon: vi.fn(),
-    dispose: vi.fn(),
-    resize: vi.fn(),
-    onData: vi.fn(),
-    onBinary: vi.fn(),
-    onTitleChange: vi.fn(),
-    onResize: vi.fn(),
-    onScroll: vi.fn(),
-    scrollToTop: vi.fn(),
-    buffer: {
-      active: {
-        cursorX: 0,
-        cursorY: 0,
-        viewportY: 0,
+  Terminal: vi.fn().mockImplementation(function MockHeadlessTerminal() {
+    return {
+      open: vi.fn(),
+      write: vi.fn((_data: string, callback?: () => void) => callback?.()),
+      loadAddon: vi.fn(),
+      dispose: vi.fn(),
+      resize: vi.fn(),
+      onData: vi.fn(),
+      onBinary: vi.fn(),
+      onTitleChange: vi.fn(),
+      onResize: vi.fn(),
+      onScroll: vi.fn(),
+      scrollToTop: vi.fn(),
+      buffer: {
+        active: {
+          cursorX: 0,
+          cursorY: 0,
+          viewportY: 0,
+        },
       },
-    },
-    options: {},
-    cols: 80,
-    rows: 24,
-  })),
+      options: {},
+      cols: 80,
+      rows: 24,
+    };
+  }),
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: vi.fn().mockImplementation(() => ({
-    fit: vi.fn(),
-  })),
+  FitAddon: vi.fn().mockImplementation(function MockFitAddon() {
+    return {
+      fit: vi.fn(),
+    };
+  }),
 }));
