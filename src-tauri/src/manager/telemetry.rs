@@ -414,6 +414,16 @@ fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_init
     set_snapshot_status(snap, next_status);
 }
 
+fn apply_claude_log_status(
+    snap: &AgentSnapshot,
+    lines: &[serde_json::Value],
+    is_initial_replay: bool,
+) {
+    if let Some(status) = claude_status_from_log(lines) {
+        set_snapshot_status_from_log(snap, &status, is_initial_replay);
+    }
+}
+
 fn record_opencode_assistant_text(snap: &AgentSnapshot, session_id: &str, text: &str) {
     let text = text.trim();
     if text.is_empty() {
@@ -1007,19 +1017,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                         }
                                     }
 
-                                    let current_status_snap =
-                                        snap.current_status.lock().unwrap().clone();
-                                    if !current_status_snap.starts_with("Action Required")
-                                        && !current_status_snap.starts_with("Action Needed")
-                                    {
-                                        if let Some(status) = claude_status_from_log(&lines) {
-                                            set_snapshot_status_from_log(
-                                                snap,
-                                                &status,
-                                                is_initial_log_replay,
-                                            );
-                                        }
-                                    }
+                                    apply_claude_log_status(snap, &lines, is_initial_log_replay);
                                 }
                                 "opencode" => {
                                     let mut status = snap.current_status.lock().unwrap().clone();
@@ -1488,6 +1486,38 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("idle")
         );
+    }
+
+    #[test]
+    fn claude_log_status_can_clear_stale_action_needed() {
+        let snap = test_snapshot("Action Needed");
+        let lines = vec![
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "Run a tool" }
+            }),
+            serde_json::json!({
+                "type": "system",
+                "subtype": "permission_request",
+                "tool_name": "Bash"
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": "ok"
+                    }]
+                }
+            }),
+            serde_json::json!({ "type": "system", "subtype": "turn_duration" }),
+        ];
+
+        super::apply_claude_log_status(&snap, &lines, false);
+
+        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
     }
 
     #[test]

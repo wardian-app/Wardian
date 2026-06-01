@@ -27,6 +27,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   const confirm = useConfirm();
   const externalEditor = useSettingsStore((state) => state.externalEditor);
   const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
+  const explorerFileClickAction = useSettingsStore((state) => state.explorerFileClickAction);
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [gitStatusMap, setGitStatusMap] = useState<Record<string, string>>({});
   const changedDirectories = useMemo(() => {
@@ -128,23 +129,27 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     setMenuPos(null);
   };
 
+  const openExternalEditor = async (node: FileNode) => {
+    try {
+      await invoke('open_in_external_editor', {
+        path: node.path,
+        editor: {
+          external_editor: externalEditor,
+          external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
+        },
+      });
+      setExternalOpenError(null);
+    } catch (err) {
+      console.error("External editor open failed:", err);
+      setExternalOpenError(
+        `External app open failed for ${externalEditorLabel(externalEditor)}: ${String(err)}`,
+      );
+    }
+  };
+
   const handleOpenExternalEditor = async () => {
     if (activeNode) {
-      try {
-        await invoke('open_in_external_editor', {
-          path: activeNode.path,
-          editor: {
-            external_editor: externalEditor,
-            external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
-          },
-        });
-        setExternalOpenError(null);
-      } catch (err) {
-        console.error("External editor open failed:", err);
-        setExternalOpenError(
-          `External app open failed for ${externalEditorLabel(externalEditor)}: ${String(err)}`,
-        );
-      }
+      await openExternalEditor(activeNode);
     }
     setMenuPos(null);
   };
@@ -158,19 +163,42 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     }
   };
 
+  const openPreview = async (node: FileNode) => {
+    if (node.is_dir) return;
+    try {
+      const content = await invoke<string>('read_file_preview', { path: node.path });
+      setPreviewTitle(node.name);
+      setPreviewContent(content);
+    } catch (err) {
+      console.error("Preview failed:", err);
+      setPreviewTitle("Error reading " + node.name);
+      setPreviewContent(String(err));
+    }
+  };
+
   const handlePreview = async () => {
-    if (activeNode && !activeNode.is_dir) {
-      try {
-        const content = await invoke<string>('read_file_preview', { path: activeNode.path });
-        setPreviewTitle(activeNode.name);
-        setPreviewContent(content);
-      } catch (err) {
-        console.error("Preview failed:", err);
-        setPreviewTitle("Error reading " + activeNode.name);
-        setPreviewContent(String(err));
-      }
+    if (activeNode) {
+      await openPreview(activeNode);
     }
     setMenuPos(null);
+  };
+
+  const handleFileSelect = async (path: string, isDir: boolean) => {
+    if (isDir) return;
+    const normalizedPath = path.replace(/\\/g, '/');
+    const name = normalizedPath.split('/').filter(Boolean).pop() ?? path;
+    const node: FileNode = {
+      path,
+      name,
+      is_dir: false,
+      extension: name.includes('.') ? name.split('.').pop() ?? null : null,
+    };
+
+    if (explorerFileClickAction === 'external') {
+      await openExternalEditor(node);
+    } else {
+      await openPreview(node);
+    }
   };
 
   const handleDelete = async () => {
@@ -226,6 +254,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
             key={refreshKey}
             path={rootPath}
             onContextMenu={handleContextMenu}
+            onSelect={handleFileSelect}
             gitStatusMap={gitStatusMap}
             changedDirectories={changedDirectories}
             explorerRoot={rootPath}

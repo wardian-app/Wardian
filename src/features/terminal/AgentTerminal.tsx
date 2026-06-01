@@ -34,6 +34,7 @@ const LIGHT_TERM_THEME = {
 };
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
+const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 8;
 const RESIZE_FIT_DEBOUNCE_MS = 250;
@@ -81,6 +82,8 @@ type TerminalSessionEntry = {
   titleHandlerRef: TitleHandlerRef;
   drainInFlight: boolean;
   drainQueued: boolean;
+  initialPtyBackfillComplete: boolean;
+  initialPtyBackfillInFlight: boolean;
   generation: number;
   disposed: boolean;
   pendingForceResize: boolean;
@@ -120,6 +123,13 @@ async function resolveTerminalProvider(sessionId: string, provider?: string) {
   } catch {
     return undefined;
   }
+}
+
+function readAgentPty(sessionId: string, options?: { max_bytes?: number; peek?: boolean }) {
+  return invoke<string | null>(
+    "read_agent_pty",
+    options ? { sessionId, options } : { sessionId },
+  );
 }
 
 function setSessionProvider(entry: TerminalSessionEntry, provider?: string) {
@@ -885,30 +895,16 @@ function clearTerminalSession(sessionId: string) {
 
   entry.recentWritePreviews = [];
   entry.recentNormalizedWritePreviews = [];
+  entry.drainQueued = false;
+  entry.initialPtyBackfillComplete = false;
+  entry.initialPtyBackfillInFlight = false;
   entry.generation += 1;
   entry.latestTitle = null;
   entry.lastReportedSize = null;
   entry.fitCount = 0;
   entry.resizeCount = 0;
   entry.lastMeasuredHostSize = null;
-  entry.lastHomeRedrawLines = null;
-  entry.homeRedrawScrollbackSeen?.clear();
-  entry.transientHomeRedrawActive = false;
-  entry.existingKnownLines = undefined;
-
-  const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
-  if (typeof parserWithReset.reset === "function") {
-    parserWithReset.reset();
-  } else {
-    entry.parser.write("\u001bc");
-  }
-  (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
-
-  if (entry.renderer) {
-    entry.renderer.term.reset();
-    entry.renderer.term.scrollToBottom();
-    entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
-  }
+  resetTerminalOutputBuffers(entry);
 
   // The backend emits agent-terminal-cleared before the new PTY is spawned,
   // so we can't usefully resize here. Flag a force-resize that drainPty will
@@ -994,6 +990,166 @@ async function fitTerminalToContainer(
   }
 }
 
+function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
+  const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
+  if (typeof parserWithReset.reset === "function") {
+    parserWithReset.reset();
+  } else {
+    entry.parser.write("\u001bc");
+  }
+  (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
+
+  if (entry.renderer) {
+    entry.renderer.term.reset();
+    entry.renderer.term.scrollToBottom();
+    entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+  }
+
+  entry.lastHomeRedrawLines = null;
+  entry.homeRedrawScrollbackSeen?.clear();
+  entry.transientHomeRedrawActive = false;
+  entry.existingKnownLines = undefined;
+}
+
+async function writeTerminalOutputBatch(
+  sessionId: string,
+  entry: TerminalSessionEntry,
+  rawChunks: string[],
+  options?: {
+    resetBeforeWrite?: boolean;
+    recordOutput?: boolean;
+    queueCapabilityResponses?: boolean;
+  },
+) {
+  if (rawChunks.length === 0) {
+    return;
+  }
+
+  if (options?.resetBeforeWrite) {
+    resetTerminalOutputBuffers(entry);
+  }
+
+  if (options?.queueCapabilityResponses !== false) {
+    rawChunks.forEach((data) => queueTerminalCapabilityResponses(sessionId, data, entry));
+  }
+
+  rawChunks.forEach((data) => {
+    entry.recentWritePreviews.push(
+      data
+        .replace(/\u001b/g, "\\x1b")
+        .replace(/\r/g, "\\r")
+        .replace(/\n/g, "\\n")
+        .slice(0, 2000),
+    );
+  });
+  if (entry.recentWritePreviews.length > 12) {
+    entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
+  }
+
+  entry.existingKnownLines = readParserKnownLineSet(entry);
+  const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
+  const rendererWasAtBottom = entry.renderer
+    ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
+    : false;
+  entry.recentNormalizedWritePreviews.push(
+    batchedWrite
+      .replace(/\u001b/g, "\\x1b")
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n")
+      .slice(0, 2000),
+  );
+  if (entry.recentNormalizedWritePreviews.length > 12) {
+    entry.recentNormalizedWritePreviews.splice(0, entry.recentNormalizedWritePreviews.length - 12);
+  }
+  if (options?.recordOutput !== false) {
+    useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
+  }
+  const knownLines = entry.existingKnownLines;
+  let { scrollbackData, viewportData } = splitSyntheticScrollbackPrefix(batchedWrite);
+  const renderer = entry.renderer;
+  if (
+    isProviderViewportRedraw(entry.provider, viewportData) &&
+    supportsViewportRedrawInPlace(entry.parser) &&
+    (!renderer || supportsViewportRedrawInPlace(renderer.term))
+  ) {
+    scrollbackData = appendSyntheticScrollbackRows(
+      scrollbackData,
+      syntheticScrollbackRowsForViewportRedraw(viewportData, knownLines),
+    );
+    if (scrollbackData) {
+      await writeTerminalControl(entry.parser, scrollbackData);
+      if (renderer) {
+        await writeTerminalControl(renderer.term, scrollbackData);
+      }
+    }
+
+    await applyViewportRedrawInPlace(entry.parser, viewportData, {
+      preserveExistingViewport: false,
+    });
+    if (renderer) {
+      await applyViewportRedrawInPlace(renderer.term, viewportData, {
+        preserveExistingViewport: false,
+      });
+      renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+      if (!entry.disposed && rendererWasAtBottom) {
+        renderer.term.scrollToBottom();
+      }
+    }
+    entry.existingKnownLines = undefined;
+    return;
+  }
+  entry.existingKnownLines = undefined;
+  await writeTerminalControl(entry.parser, batchedWrite);
+  if (entry.renderer) {
+    await writeTerminalControl(entry.renderer.term, batchedWrite);
+    if (!entry.disposed && rendererWasAtBottom) {
+      entry.renderer?.term.scrollToBottom();
+    }
+  }
+}
+
+async function drainInitialPtyBackfill(sessionId: string) {
+  const entry = terminalSessionMap.get(sessionId);
+  if (!entry || entry.disposed || !entry.initialPtyBackfillInFlight) {
+    return;
+  }
+
+  const drainGeneration = entry.generation;
+  const rawChunks: string[] = [];
+
+  try {
+    while (!entry.disposed) {
+      const data = await readAgentPty(sessionId);
+      if (!data) {
+        break;
+      }
+      rawChunks.push(data);
+    }
+
+    if (entry.generation === drainGeneration && rawChunks.length > 0) {
+      await writeTerminalOutputBatch(sessionId, entry, rawChunks, { resetBeforeWrite: true });
+    }
+  } catch (error) {
+    entry.initialPtyBackfillInFlight = false;
+    const message = String(error);
+    if (message.includes("not found")) {
+      disposeTerminalSession(sessionId);
+      return;
+    }
+    console.warn("read_agent_pty error:", error);
+  } finally {
+    if (entry.generation === drainGeneration) {
+      entry.initialPtyBackfillComplete = true;
+      entry.initialPtyBackfillInFlight = false;
+    }
+    if (!entry.disposed && entry.drainQueued) {
+      queueMicrotask(() => {
+        void drainPty(sessionId);
+      });
+    }
+  }
+}
+
 async function drainPty(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
   if (!entry || entry.disposed) {
@@ -1001,6 +1157,11 @@ async function drainPty(sessionId: string) {
   }
 
   if (entry.drainInFlight) {
+    entry.drainQueued = true;
+    return;
+  }
+
+  if (entry.initialPtyBackfillInFlight) {
     entry.drainQueued = true;
     return;
   }
@@ -1017,26 +1178,44 @@ async function drainPty(sessionId: string) {
         { force: true },
       );
     }
+
+    if (!entry.initialPtyBackfillComplete && entry.provider === "codex") {
+      const initialGeneration = entry.generation;
+      entry.drainQueued = false;
+      entry.initialPtyBackfillInFlight = true;
+      const preview = await readAgentPty(sessionId, {
+        max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
+        peek: true,
+      });
+
+      if (entry.generation !== initialGeneration || entry.disposed) {
+        entry.initialPtyBackfillInFlight = false;
+        return;
+      }
+
+      if (preview) {
+        await writeTerminalOutputBatch(sessionId, entry, [preview], {
+          recordOutput: false,
+          queueCapabilityResponses: false,
+        });
+      }
+
+      queueMicrotask(() => {
+        void drainInitialPtyBackfill(sessionId);
+      });
+      return;
+    }
+
+    entry.initialPtyBackfillComplete = true;
+
     do {
       entry.drainQueued = false;
       const drainGeneration = entry.generation;
       const rawChunks: string[] = [];
       while (!entry.disposed) {
-        const data = await invoke<string | null>("read_agent_pty", { sessionId });
+        const data = await readAgentPty(sessionId);
         if (!data) {
           break;
-        }
-
-        queueTerminalCapabilityResponses(sessionId, data, entry);
-        entry.recentWritePreviews.push(
-          data
-            .replace(/\u001b/g, "\\x1b")
-            .replace(/\r/g, "\\r")
-            .replace(/\n/g, "\\n")
-            .slice(0, 2000),
-        );
-        if (entry.recentWritePreviews.length > 12) {
-          entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
         }
         rawChunks.push(data);
       }
@@ -1046,65 +1225,7 @@ async function drainPty(sessionId: string) {
       }
 
       if (rawChunks.length > 0) {
-        entry.existingKnownLines = readParserKnownLineSet(entry);
-        const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
-        const rendererWasAtBottom = entry.renderer
-          ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
-          : false;
-        entry.recentNormalizedWritePreviews.push(
-          batchedWrite
-            .replace(/\u001b/g, "\\x1b")
-            .replace(/\r/g, "\\r")
-            .replace(/\n/g, "\\n")
-            .slice(0, 2000),
-        );
-        if (entry.recentNormalizedWritePreviews.length > 12) {
-          entry.recentNormalizedWritePreviews.splice(0, entry.recentNormalizedWritePreviews.length - 12);
-        }
-        useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
-        const knownLines = entry.existingKnownLines;
-        let { scrollbackData, viewportData } = splitSyntheticScrollbackPrefix(batchedWrite);
-        const renderer = entry.renderer;
-        if (
-          isProviderViewportRedraw(entry.provider, viewportData) &&
-          supportsViewportRedrawInPlace(entry.parser) &&
-          (!renderer || supportsViewportRedrawInPlace(renderer.term))
-        ) {
-          scrollbackData = appendSyntheticScrollbackRows(
-            scrollbackData,
-            syntheticScrollbackRowsForViewportRedraw(viewportData, knownLines),
-          );
-          if (scrollbackData) {
-            await writeTerminalControl(entry.parser, scrollbackData);
-            if (renderer) {
-              await writeTerminalControl(renderer.term, scrollbackData);
-            }
-          }
-
-          await applyViewportRedrawInPlace(entry.parser, viewportData, {
-            preserveExistingViewport: false,
-          });
-          if (renderer) {
-            await applyViewportRedrawInPlace(renderer.term, viewportData, {
-              preserveExistingViewport: false,
-            });
-            renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-            if (!entry.disposed && rendererWasAtBottom) {
-              renderer.term.scrollToBottom();
-            }
-          }
-          entry.existingKnownLines = undefined;
-          continue;
-        }
-        entry.existingKnownLines = undefined;
-        entry.parser.write(batchedWrite);
-        if (entry.renderer) {
-          entry.renderer.term.write(batchedWrite, () => {
-            if (!entry.disposed && rendererWasAtBottom) {
-              entry.renderer?.term.scrollToBottom();
-            }
-          });
-        }
+        await writeTerminalOutputBatch(sessionId, entry, rawChunks);
       }
     } while (!entry.disposed && entry.drainQueued);
   } catch (error) {
@@ -1161,6 +1282,8 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     titleHandlerRef: {},
     drainInFlight: false,
     drainQueued: false,
+    initialPtyBackfillComplete: false,
+    initialPtyBackfillInFlight: false,
     generation: 0,
     disposed: false,
     pendingForceResize: false,

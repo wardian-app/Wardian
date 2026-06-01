@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use crate::utils::fs::create_directory_link;
+use crate::utils::process::apply_silent_std_command_policy;
 use notify::Watcher;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -114,11 +115,7 @@ fn build_git_command(program: &Path, cwd: &str, args: &[&str]) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "echo");
 
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
+    apply_silent_std_command_policy(&mut command);
 
     command
 }

@@ -41,7 +41,7 @@ jobs:
 
           git fetch origin "$release_branch"
           git checkout -B "$release_branch" "origin/$release_branch"
-          cargo metadata --format-version 1 --no-deps > /dev/null
+          cargo update --workspace
 
           if git diff --quiet -- Cargo.lock; then
             echo "Cargo.lock already matches release manifests."

@@ -764,7 +764,9 @@ async fn deliver_message_to_target(
             || matches!(queue_policy, QueuePolicy::MailboxOnly)
         {
             decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
-        } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
+        } else if provider_input_has_known_not_ready_state(state, &info.uuid).await
+            && !provider_idle_status_allows_live_delivery(&info, queue_policy)
+        {
             match queue_policy {
                 QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
                     runtime_state: "provider_input_not_ready",
@@ -820,15 +822,21 @@ async fn deliver_message_to_target(
                     let profile = crate::utils::delivery_profile::delivery_profile(&info.provider);
                     let delivery_lock = state.delivery_lock_for(&info.uuid).await;
                     let _delivery_guard = delivery_lock.lock().await;
-                    let payload_cursor =
-                        codex_payload_echo_cursor(state, &info.provider, &info.uuid).await;
-                    let result = match wait_for_terminal_ready_for_control_send(state, &info).await
+                    let result = if let (MessageInputMode::ApprovalAction, Some(action)) =
+                        (input_mode, approval_action)
                     {
-                        Ok(()) => {
-                            let wait_uuid = info.uuid.clone();
-                            let wait_provider = info.provider.clone();
-                            let wait_prompt = outbound_message.clone();
-                            crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
+                        submit_approval_action_via_sender(&tx, &info.provider, action)
+                            .await
+                            .map_err(|error| error.to_string())
+                    } else {
+                        let payload_cursor =
+                            codex_payload_echo_cursor(state, &info.provider, &info.uuid).await;
+                        match wait_for_terminal_ready_for_control_send(state, &info).await {
+                            Ok(()) => {
+                                let wait_uuid = info.uuid.clone();
+                                let wait_provider = info.provider.clone();
+                                let wait_prompt = outbound_message.clone();
+                                crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
                                 &tx,
                                 &outbound_message,
                                 &info.provider,
@@ -845,11 +853,17 @@ async fn deliver_message_to_target(
                             )
                             .await
                             .map_err(|error| error.to_string())
+                            }
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(error),
                     };
                     match result {
                         Ok(outcome) => {
+                            if input_mode == MessageInputMode::ApprovalAction
+                                && matches!(approval_action, Some(ApprovalAction::Accept))
+                            {
+                                mark_approval_accept_started(app, state, &info.uuid).await;
+                            }
                             delivered += 1;
                             let detail = DeliveryDetail {
                                 uuid: info.uuid,
@@ -930,6 +944,15 @@ async fn deliver_message_to_target(
     Ok(delivery)
 }
 
+fn provider_idle_status_allows_live_delivery(
+    info: &DeliveryTargetInfo,
+    queue_policy: QueuePolicy,
+) -> bool {
+    matches!(queue_policy, QueuePolicy::LiveOnly)
+        && info.provider == "claude"
+        && info.status == "idle"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryRoute {
     Live,
@@ -941,11 +964,15 @@ fn decide_delivery_route(
     status: &str,
     input_mode: MessageInputMode,
     queue_policy: QueuePolicy,
-    _approval_action: Option<&ApprovalAction>,
+    approval_action: Option<&ApprovalAction>,
 ) -> DeliveryRoute {
     if input_mode == MessageInputMode::ApprovalAction {
-        return DeliveryRoute::Reject {
-            failure: "unsupported_approval_shape",
+        return if approval_action.is_some() && status == "action_required" {
+            DeliveryRoute::Live
+        } else {
+            DeliveryRoute::Reject {
+                failure: "not_input_ready",
+            }
         };
     }
     if matches!(queue_policy, QueuePolicy::MailboxOnly) {
@@ -966,11 +993,7 @@ fn decide_delivery_route(
             QueuePolicy::MailboxOnly => unreachable!("handled above"),
         },
         "action_required" => {
-            if input_mode == MessageInputMode::ApprovalAction {
-                DeliveryRoute::Reject {
-                    failure: "unsupported_approval_shape",
-                }
-            } else if matches!(queue_policy, QueuePolicy::QueueIfBusy)
+            if matches!(queue_policy, QueuePolicy::QueueIfBusy)
                 && input_mode == MessageInputMode::Message
             {
                 DeliveryRoute::Mailbox {
@@ -993,6 +1016,71 @@ fn decide_delivery_route(
         _ => DeliveryRoute::Reject {
             failure: "not_input_ready",
         },
+    }
+}
+
+fn approval_action_bytes(provider: &str, action: &ApprovalAction) -> Vec<u8> {
+    match action {
+        ApprovalAction::Accept => {
+            if provider.eq_ignore_ascii_case("codex")
+                || provider.eq_ignore_ascii_case("antigravity")
+            {
+                b"\r".to_vec()
+            } else {
+                b"y\r".to_vec()
+            }
+        }
+        ApprovalAction::Reject => {
+            if provider.eq_ignore_ascii_case("codex") {
+                b"\x1b".to_vec()
+            } else {
+                b"n\r".to_vec()
+            }
+        }
+        ApprovalAction::Select { option } => {
+            let mut bytes = option.as_bytes().to_vec();
+            bytes.push(b'\r');
+            bytes
+        }
+        ApprovalAction::FreeText { text } => {
+            let mut bytes = text.as_bytes().to_vec();
+            bytes.push(b'\r');
+            bytes
+        }
+    }
+}
+
+async fn submit_approval_action_via_sender(
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    provider: &str,
+    action: &ApprovalAction,
+) -> Result<crate::utils::delivery_transaction::TerminalDeliveryOutcome, String> {
+    let bytes = approval_action_bytes(provider, action);
+    tx.send(bytes)
+        .await
+        .map_err(|_| "input channel closed".to_string())?;
+    Ok(
+        crate::utils::delivery_transaction::TerminalDeliveryOutcome {
+            delivery_state: "submit_sent_unverified".to_string(),
+            delivery_phase: "approval_key_sent".to_string(),
+            observed_state: Some("bytes_sent".to_string()),
+            reason: None,
+        },
+    )
+}
+
+async fn mark_approval_accept_started(app: Option<&AppHandle>, state: &AppState, session_id: &str) {
+    let Some(app) = app else {
+        return;
+    };
+    let current_status = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(session_id)
+            .map(|agent| agent.current_status.clone())
+    };
+    if let Some(current_status) = current_status {
+        manager::set_agent_status(app, session_id, &current_status, "Processing...");
     }
 }
 
@@ -3408,7 +3496,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_route_rejects_structured_approval_action_shape() {
+    fn delivery_route_sends_approval_action_when_action_required() {
         let approval_action = ApprovalAction::Accept;
         let route = decide_delivery_route(
             "action_required",
@@ -3417,16 +3505,11 @@ mod tests {
             Some(&approval_action),
         );
 
-        assert_eq!(
-            route,
-            DeliveryRoute::Reject {
-                failure: "unsupported_approval_shape"
-            }
-        );
+        assert_eq!(route, DeliveryRoute::Live);
     }
 
     #[test]
-    fn delivery_route_rejects_approval_action_without_payload() {
+    fn delivery_route_rejects_approval_action_without_action_required_status() {
         let route = decide_delivery_route(
             "idle",
             MessageInputMode::ApprovalAction,
@@ -3437,13 +3520,13 @@ mod tests {
         assert_eq!(
             route,
             DeliveryRoute::Reject {
-                failure: "unsupported_approval_shape"
+                failure: "not_input_ready"
             }
         );
     }
 
     #[test]
-    fn delivery_route_rejects_idle_structured_approval_action_shape() {
+    fn delivery_route_rejects_idle_approval_action() {
         let approval_action = ApprovalAction::Accept;
         let route = decide_delivery_route(
             "idle",
@@ -3455,13 +3538,13 @@ mod tests {
         assert_eq!(
             route,
             DeliveryRoute::Reject {
-                failure: "unsupported_approval_shape"
+                failure: "not_input_ready"
             }
         );
     }
 
     #[test]
-    fn delivery_route_rejects_mailbox_only_structured_approval_action_shape() {
+    fn delivery_route_rejects_mailbox_only_approval_action_when_not_action_required() {
         let approval_action = ApprovalAction::Accept;
         let route = decide_delivery_route(
             "processing",
@@ -3473,7 +3556,7 @@ mod tests {
         assert_eq!(
             route,
             DeliveryRoute::Reject {
-                failure: "unsupported_approval_shape"
+                failure: "not_input_ready"
             }
         );
     }
@@ -3867,6 +3950,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_action_delivery_sends_provider_approval_key() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let delivery = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "",
+            None,
+            MessageInputMode::ApprovalAction,
+            QueuePolicy::QueueIfBusy,
+            Some(&ApprovalAction::Accept),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        assert_eq!(delivery[0].runtime_state, "live_pty_available");
+        assert_eq!(delivery[0].delivery_state, "submit_sent_unverified");
+        assert_eq!(
+            delivery[0].delivery_phase.as_deref(),
+            Some("approval_key_sent")
+        );
+    }
+
+    #[tokio::test]
     async fn mailbox_drain_submits_next_pending_message_when_target_is_idle() {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -3987,6 +4110,51 @@ mod tests {
         assert_eq!(delivery[0].runtime_state, "provider_input_not_ready");
         assert_eq!(delivery[0].delivery_state, "queued");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn claude_idle_status_allows_live_delivery_despite_stale_readiness() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().provider = "claude".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        state
+            .interactions
+            .record_provider_input_state(
+                "agent-1",
+                4,
+                wardian_core::control::ProviderInputReadiness::Busy,
+                None,
+            )
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+
+        let delivery = deliver_message_to_target(
+            None,
+            &state,
+            "ClaudeOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::LiveOnly,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), b"queued work".to_vec());
+        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
+        assert_eq!(delivery[0].runtime_state, "live_pty_available");
     }
 
     #[tokio::test]

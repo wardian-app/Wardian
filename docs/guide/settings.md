@@ -19,7 +19,7 @@ computed defaults for the app and operating system.
 
 - `settings/app.json`: app preferences such as theme, top bar telemetry
   visibility, Grid card display, Watchlist new agent position, terminal font
-  size, terminal font family, Explorer external editor, and Gemini auto-patch.
+  size, terminal font family, Explorer opening behavior, and Gemini auto-patch.
 - `settings/shell.json`: runtime preferences such as shell selection, default
   provider, regular agent session policy, and Codex runtime defaults.
 
@@ -37,7 +37,8 @@ Categories:
 - **Appearance**: app theme and top bar telemetry visibility.
 - **Grid**: display mode for agent cards in the main Grid view.
 - **Queue**: queue event desktop and sound notification rules.
-- **Explorer**: external app or editor used by the Explorer right-click menu.
+- **Explorer**: file click behavior and the external app or editor used by the
+  Explorer.
 - **Watchlist**: roster behavior for newly spawned agents.
 - **Terminal**: terminal font and shell defaults.
 - **Agent Runtime**: default provider, regular agent session behavior, and
@@ -123,6 +124,16 @@ or detailed terminal behavior. Individual Grid cards can still be switched
 between Terminal and Chat from the card header without changing this default.
 
 ## Explorer
+
+The **File click action** control sets what happens when you click a file in the
+Explorer sidebar:
+
+- **Preview in Wardian** opens Wardian's read-only preview modal. This is the
+  default.
+- **Open in external app** opens the file through the configured external editor
+  preference.
+
+Folders always expand or collapse when clicked.
 
 The **External editor** control sets what happens when you choose **Open in
 External App** from the Explorer right-click menu:

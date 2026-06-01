@@ -1,5 +1,4 @@
 use std::path::Path;
-use tokio::process::Command;
 use wardian_core::engine::{
     NotifyRequest, ScriptRequest, ShellRequest, StateRequest, StepError, StepOutput,
 };
@@ -18,8 +17,8 @@ pub async fn run_shell(ws: &Path, req: &ShellRequest) -> Result<StepOutput, Step
 }
 
 #[cfg(windows)]
-fn shell_command(command: &str) -> Command {
-    let mut shell = Command::new("powershell.exe");
+fn shell_command(command: &str) -> tokio::process::Command {
+    let mut shell = crate::utils::process::new_silent_command("powershell.exe");
     shell
         .arg("-NoProfile")
         .arg("-NonInteractive")
@@ -31,8 +30,8 @@ fn shell_command(command: &str) -> Command {
 }
 
 #[cfg(not(windows))]
-fn shell_command(command: &str) -> Command {
-    let mut shell = Command::new("sh");
+fn shell_command(command: &str) -> tokio::process::Command {
+    let mut shell = crate::utils::process::new_silent_command("sh");
     shell.arg("-c").arg(command);
     shell
 }
@@ -40,7 +39,7 @@ fn shell_command(command: &str) -> Command {
 /// Run `runtime path` in the workspace and capture exit code, stdout, and
 /// stderr.
 pub async fn run_script(ws: &Path, req: &ScriptRequest) -> Result<StepOutput, StepError> {
-    let output = Command::new(&req.runtime)
+    let output = crate::utils::process::new_silent_command(&req.runtime)
         .arg(&req.path)
         .current_dir(ws)
         .output()

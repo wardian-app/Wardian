@@ -4,6 +4,7 @@ use crate::utils::append_bounded_pty_output;
 use crate::utils::terminal_input::submit_prompt_via_sender;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use serde::Deserialize;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -268,22 +269,65 @@ pub async fn resize_agent_terminal(
 #[tauri::command]
 pub async fn read_agent_pty(
     session_id: String,
+    options: Option<ReadAgentPtyOptions>,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
     let agents = state.agents.lock().await;
     if let Some(agent) = agents.get(&session_id) {
         if let Ok(mut buf) = agent.output_buffer.lock() {
-            if buf.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(std::mem::take(&mut *buf)))
-            }
+            Ok(read_pty_buffer(&mut buf, options.as_ref()))
         } else {
             Ok(None)
         }
     } else {
         Err(format!("Agent {} not found", session_id))
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReadAgentPtyOptions {
+    pub max_bytes: Option<usize>,
+    #[serde(default)]
+    pub peek: bool,
+}
+
+fn read_pty_buffer(buffer: &mut String, options: Option<&ReadAgentPtyOptions>) -> Option<String> {
+    if buffer.is_empty() {
+        return None;
+    }
+
+    let output = match options
+        .filter(|options| options.peek)
+        .and_then(|options| options.max_bytes)
+        .filter(|max_bytes| *max_bytes > 0)
+    {
+        Some(max_bytes) if buffer.len() > max_bytes => {
+            pty_tail_from_line_boundary(buffer, max_bytes)
+        }
+        _ => buffer.clone(),
+    };
+
+    if !options.is_some_and(|options| options.peek) {
+        buffer.clear();
+    }
+
+    Some(output)
+}
+
+fn pty_tail_from_line_boundary(buffer: &str, max_bytes: usize) -> String {
+    let mut start = buffer.len().saturating_sub(max_bytes);
+    while start < buffer.len() && !buffer.is_char_boundary(start) {
+        start += 1;
+    }
+
+    if let Some(newline_offset) = buffer[start..].find('\n') {
+        let line_start = start + newline_offset + 1;
+        if line_start < buffer.len() {
+            start = line_start;
+        }
+    }
+
+    buffer[start..].to_string()
 }
 
 fn normalized_user_terminal_size(cols: u16, rows: u16) -> PtySize {
@@ -614,7 +658,7 @@ pub async fn set_user_terminal_cwd(path: String, state: State<'_, AppState>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::validate_user_terminal_cwd;
+    use super::{read_pty_buffer, validate_user_terminal_cwd, ReadAgentPtyOptions};
 
     #[test]
     fn user_terminal_cwd_validation_rejects_missing_directory() {
@@ -639,5 +683,51 @@ mod tests {
         );
 
         assert_eq!(normalized, "hello world");
+    }
+
+    #[test]
+    fn read_pty_buffer_can_peek_a_bounded_recent_tail_without_draining() {
+        let mut buffer = "older scrollback\nmiddle scrollback\nrecent frame\n".to_string();
+
+        let peeked = read_pty_buffer(
+            &mut buffer,
+            Some(&ReadAgentPtyOptions {
+                max_bytes: Some(24),
+                peek: true,
+            }),
+        );
+
+        assert_eq!(peeked.as_deref(), Some("recent frame\n"));
+        assert_eq!(
+            buffer,
+            "older scrollback\nmiddle scrollback\nrecent frame\n"
+        );
+
+        let drained = read_pty_buffer(&mut buffer, None);
+
+        assert_eq!(
+            drained.as_deref(),
+            Some("older scrollback\nmiddle scrollback\nrecent frame\n")
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn read_pty_buffer_ignores_bounds_for_destructive_reads() {
+        let mut buffer = "older scrollback\nmiddle scrollback\nrecent frame\n".to_string();
+
+        let drained = read_pty_buffer(
+            &mut buffer,
+            Some(&ReadAgentPtyOptions {
+                max_bytes: Some(24),
+                peek: false,
+            }),
+        );
+
+        assert_eq!(
+            drained.as_deref(),
+            Some("older scrollback\nmiddle scrollback\nrecent frame\n")
+        );
+        assert!(buffer.is_empty());
     }
 }

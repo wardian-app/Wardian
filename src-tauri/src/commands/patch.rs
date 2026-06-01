@@ -1,6 +1,5 @@
 use crate::manager::log_debug;
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::{AppHandle, Manager};
 
 fn node_entrypoint_path(path: PathBuf) -> PathBuf {
@@ -69,15 +68,8 @@ pub async fn run_gemini_patch(app: AppHandle) -> Result<String, String> {
 
     let node_resource_path = node_entrypoint_path(resource_path);
 
-    #[allow(unused_mut)]
-    let mut cmd = Command::new("node");
+    let mut cmd = crate::utils::process::new_silent_std_command("node");
     cmd.arg(&node_resource_path);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
 
     let output = cmd
         .output()

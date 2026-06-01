@@ -19,7 +19,7 @@ describe("release workflow contract", () => {
     expect(releasePleaseWorkflow).toContain("steps.release.outputs.tag_name");
   });
 
-  it("keeps Rust workspace crate versions in the Release Please bump set", () => {
+  it("syncs Cargo.lock after Release Please bumps Rust workspace versions", () => {
     expect(releasePleaseConfig.packages["."]["extra-files"]).toContainEqual({
       type: "toml",
       path: "Cargo.toml",
@@ -32,7 +32,10 @@ describe("release workflow contract", () => {
     expect(releasePleaseWorkflow).toContain("RELEASE_PLEASE_PRS: ${{ steps.release.outputs.prs }}");
     expect(releasePleaseWorkflow).toContain("headBranchName");
     expect(releasePleaseWorkflow).not.toContain("gh pr list");
-    expect(releasePleaseWorkflow).toContain("cargo metadata --format-version 1 --no-deps");
+    expect(releasePleaseWorkflow).not.toContain("npm install --package-lock-only");
+    expect(releasePleaseWorkflow).not.toContain("cargo metadata --format-version 1 --no-deps");
+    expect(releasePleaseWorkflow).toContain("cargo update --workspace");
+    expect(releasePleaseWorkflow).toContain("git diff --quiet -- Cargo.lock");
     expect(releasePleaseWorkflow).toContain("git add Cargo.lock");
     expect(releasePleaseWorkflow).toContain("chore: sync release Cargo.lock");
   });

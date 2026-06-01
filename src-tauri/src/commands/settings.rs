@@ -319,10 +319,11 @@ fn spawn_windows_update_handoff(
 
 fn windows_update_handoff_creation_flags() -> u32 {
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
-    CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB
+    CREATE_NEW_PROCESS_GROUP
+        | crate::utils::process::windows_silent_process_creation_flags()
+        | CREATE_BREAKAWAY_FROM_JOB
 }
 
 #[cfg(test)]
