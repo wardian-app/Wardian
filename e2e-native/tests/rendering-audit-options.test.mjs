@@ -1292,6 +1292,20 @@ test("real-provider Wardian capture records DOM terminal geometry", () => {
   assert.match(testSource, /computedStyle/);
 });
 
+test("real-provider Wardian capture defaults main visual states to 1920x1080", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_WINDOW_WIDTH \?\? "1920"/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_WINDOW_HEIGHT \?\? "1080"/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_WIDE_WIDTH \?\? "1920"/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_WIDE_HEIGHT \?\? "1080"/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_RESIZED_WIDTH \?\? "980"/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_RESIZED_HEIGHT \?\? "980"/);
+});
+
 test("real-provider Wardian capture waits for provider input readiness and visible fixed input", () => {
   const testSource = fs.readFileSync(
     path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
