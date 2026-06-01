@@ -136,7 +136,8 @@ Explorer sidebar:
 Folders always expand or collapse when clicked.
 
 The **External editor** control sets what happens when you choose **Open in
-External App** from the Explorer right-click menu:
+External App** from the Explorer right-click menu and when you click file paths
+in terminal output:
 
 - **System default app** uses the operating system's registered app for the
   selected file or folder. This is Wardian's default because it respects file
@@ -149,6 +150,10 @@ External App** from the Explorer right-click menu:
 If VS Code does not open, Wardian shows the launch error in Explorer. Verify the
 `code` command is available on Wardian's app process PATH or use Custom
 executable to point directly at your editor.
+
+Terminal URLs open as URLs. Terminal file paths use this External editor
+preference so agent terminals and the bottom user terminal match Explorer's
+external-open behavior.
 
 ## Watchlist
 

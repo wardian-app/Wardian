@@ -109,6 +109,7 @@ describe("AgentTerminal scrollback", () => {
         dispose: vi.fn(),
         focus: vi.fn(),
         attachCustomKeyEventHandler: vi.fn(),
+        registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
         selectAll: vi.fn(),
         scrollToBottom: vi.fn(),
         scrollToLine: vi.fn((line: number) => {
@@ -123,7 +124,13 @@ describe("AgentTerminal scrollback", () => {
         scrollToTop: vi.fn(() => {
           terminal.buffer.active.viewportY = 0;
         }),
-        buffer: { active: { baseY: 10, viewportY: 10 } },
+        buffer: {
+          active: {
+            baseY: 10,
+            viewportY: 10,
+            getLine: vi.fn(() => ({ translateToString: () => "src/App.tsx:12" })),
+          },
+        },
         refresh: vi.fn(),
         cols: 80,
         rows: 24,
@@ -215,6 +222,40 @@ describe("AgentTerminal scrollback", () => {
 
     await waitFor(() => {
       expect(getLatestTerminalInstance().attachCustomKeyEventHandler).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("installs terminal link handling that opens files with the configured external editor", async () => {
+    useSettingsStore.setState({
+      externalEditor: "vscode",
+      externalEditorCustomExecutable: "",
+    });
+    render(
+      <AgentTerminal
+        sessionId="codex-links"
+        theme="dark"
+        workspacePath="C:\\repo"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance().registerLinkProvider).toHaveBeenCalledTimes(1);
+    });
+
+    const provider = getLatestTerminalInstance().registerLinkProvider.mock.calls[0][0];
+    const links = await new Promise<any[] | undefined>((resolve) => {
+      provider.provideLinks(1, resolve);
+    });
+    links?.[0].activate(new MouseEvent("click"), links[0].text);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("open_in_external_editor", {
+        path: "C:\\repo\\src\\App.tsx",
+        editor: {
+          external_editor: "vscode",
+          external_editor_custom_executable: null,
+        },
+      });
     });
   });
 

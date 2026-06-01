@@ -360,6 +360,11 @@ export const GridView: React.FC<GridViewProps> = ({
                     provider={agent.provider}
                     isMaximized={isAgentMaximized}
                     theme={theme}
+                    workspacePath={
+                      agent.git_worktree && agent.git_worktree_folder?.trim()
+                        ? agent.git_worktree_folder
+                        : agent.folder
+                    }
                     onTerminalFocus={() => onTerminalFocus?.(agentId)}
                     onTitleChange={(title) => handleTitleChange(agentId, title)}
                   />

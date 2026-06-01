@@ -15,6 +15,7 @@ import {
   type TerminalOutputState,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
+import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
@@ -51,6 +52,13 @@ type TitleHandlerRef = {
   current?: (title: string) => void;
 };
 
+type TerminalLinkContextRef = {
+  current: {
+    basePath?: string | null;
+    onOpenError?: (message: string) => void;
+  };
+};
+
 type TerminalRendererEntry = {
   resizeTimeout: ReturnType<typeof setTimeout> | null;
   fitTimeout: ReturnType<typeof setTimeout> | null;
@@ -80,6 +88,7 @@ type TerminalSessionEntry = {
   parserSerializeAddon: SerializeAddon;
   latestTitle: string | null;
   titleHandlerRef: TitleHandlerRef;
+  terminalLinkContextRef: TerminalLinkContextRef;
   drainInFlight: boolean;
   drainQueued: boolean;
   initialPtyBackfillComplete: boolean;
@@ -1280,6 +1289,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     parserSerializeAddon,
     latestTitle: null,
     titleHandlerRef: {},
+    terminalLinkContextRef: { current: {} },
     drainInFlight: false,
     drainQueued: false,
     initialPtyBackfillComplete: false,
@@ -1383,6 +1393,19 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     applyProviderTerminalOptions(term, entry.provider);
   }
   installConservativeTerminalShortcuts(term);
+  installTerminalLinkProvider(term, {
+    getBasePath: () => entry.terminalLinkContextRef.current.basePath,
+    getExternalEditor: () => {
+      const { externalEditor, externalEditorCustomExecutable } = useSettingsStore.getState();
+      return {
+        external_editor: externalEditor,
+        external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
+      };
+    },
+    onOpenError: (message) => {
+      entry.terminalLinkContextRef.current.onOpenError?.(message);
+    },
+  });
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -1522,6 +1545,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   provider,
   isMaximized,
   theme,
+  workspacePath,
   onTitleChange,
   onTerminalFocus,
 }: {
@@ -1529,6 +1553,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   provider?: string;
   isMaximized?: boolean;
   theme: "dark" | "light" | "system";
+  workspacePath?: string | null;
   onTitleChange?: (title: string) => void;
   onTerminalFocus?: () => void;
 }) {
@@ -1538,6 +1563,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
   const [initError, setInitError] = useState<string | null>(null);
+  const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
 
@@ -1621,6 +1647,10 @@ export const AgentTerminal = memo(function AgentTerminal({
         entry = session;
         setSessionProvider(session, provider);
         session.titleHandlerRef.current = onTitleChangeRef.current;
+        session.terminalLinkContextRef.current = {
+          basePath: workspacePath,
+          onOpenError: setLinkOpenError,
+        };
         session.currentTheme = termTheme;
 
         const renderer = mountRenderer(sessionId, session, terminalRef.current);
@@ -1685,10 +1715,13 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
       }
+      if (entry?.terminalLinkContextRef.current.onOpenError === setLinkOpenError) {
+        entry.terminalLinkContextRef.current.onOpenError = undefined;
+      }
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [performFit, provider, sessionId]);
+  }, [performFit, provider, sessionId, workspacePath]);
 
   useEffect(() => {
     const term = xtermRef.current;
@@ -1754,6 +1787,11 @@ export const AgentTerminal = memo(function AgentTerminal({
         <div className="absolute inset-0 z-50 bg-red-900 text-primary p-4 overflow-auto rounded m-2">
           <h3 className="font-bold mb-2">Terminal Initialization Fatal Error:</h3>
           <pre className="text-xs whitespace-pre-wrap">{initError}</pre>
+        </div>
+      )}
+      {linkOpenError && !initError && (
+        <div className="absolute bottom-2 left-2 right-2 z-40 rounded-md border border-wardian-error/40 bg-wardian-error/10 px-3 py-2 text-xs text-wardian-error">
+          {linkOpenError}
         </div>
       )}
       <div
