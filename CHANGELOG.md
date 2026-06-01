@@ -4,6 +4,39 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.4.0](https://github.com/wardian-app/Wardian/compare/v0.3.8...v0.4.0) (2026-06-01)
+
+
+### Features
+
+* **cli:** Workflow Engine v2 thin CLI — exec/runs/replay (sub-project 4) ([#441](https://github.com/wardian-app/Wardian/issues/441)) ([a24dd45](https://github.com/wardian-app/Wardian/commit/a24dd45399c495a5993fa324a9a14c1a2c70619f))
+* **explorer:** add configurable file click action ([#479](https://github.com/wardian-app/Wardian/issues/479)) ([7af8ef0](https://github.com/wardian-app/Wardian/commit/7af8ef0d8765be5c5a999e09bc202b8767c175be))
+* **run-view:** Workflow Run View — observe mode (sub-project 3b) ([#438](https://github.com/wardian-app/Wardian/issues/438)) ([cde6a4e](https://github.com/wardian-app/Wardian/commit/cde6a4e88f11fad44192026c3027c102c581a282))
+* **workflow-v2:** add invoker foundation ([#456](https://github.com/wardian-app/Wardian/issues/456)) ([5032e82](https://github.com/wardian-app/Wardian/commit/5032e8250e1de9b1b1d5fe9f8ea987b4756272b3))
+* **workflow-v2:** live executor — drive real agents + run lifecycle (sub-project 5a) ([#448](https://github.com/wardian-app/Wardian/issues/448)) ([b5466df](https://github.com/wardian-app/Wardian/commit/b5466df5e311ec4fe48790d33adb495a637a093c))
+* **workflow-v2:** monitoring sidebar + schedule UI (sub-project 6c) ([#458](https://github.com/wardian-app/Wardian/issues/458)) ([2bfddfb](https://github.com/wardian-app/Wardian/commit/2bfddfb87437a77bffc4806638218c1029282917))
+* **workflow-v2:** schedule invoker (sub-project 6b) ([#457](https://github.com/wardian-app/Wardian/issues/457)) ([35e9e21](https://github.com/wardian-app/Wardian/commit/35e9e216ba14550cb6e2f3a2cd2644955506e1fa))
+* **workflows:** stabilize authoring and monitoring ([#483](https://github.com/wardian-app/Wardian/issues/483)) ([06e3b7c](https://github.com/wardian-app/Wardian/commit/06e3b7cb02d623b20773f1acd001011680a0957f))
+* **workflows:** unified Workflows view — edit/observe/run, collapse tabs (sub-project 5b) ([#450](https://github.com/wardian-app/Wardian/issues/450)) ([9d4a3fa](https://github.com/wardian-app/Wardian/commit/9d4a3fa952d45efc968d679b74bf272bf0ae28d3))
+
+
+### Bug Fixes
+
+* **agents:** stabilize action-needed status transitions ([#473](https://github.com/wardian-app/Wardian/issues/473)) ([ec6ff75](https://github.com/wardian-app/Wardian/commit/ec6ff756d857ec826f86f3e417fdafc8e63d0df2))
+* **ci:** use release please PR output for lock sync ([#445](https://github.com/wardian-app/Wardian/issues/445)) ([09d513a](https://github.com/wardian-app/Wardian/commit/09d513ac9ee508b4934d2d7d8eab22a2382dec75))
+* **cli:** speed up worktree discovery ([#455](https://github.com/wardian-app/Wardian/issues/455)) ([4a8fe80](https://github.com/wardian-app/Wardian/commit/4a8fe8023e9ed682c1266c69a423001dd4b6abb4))
+* **release:** sync Cargo lockfile in release PRs ([#469](https://github.com/wardian-app/Wardian/issues/469)) ([594aeab](https://github.com/wardian-app/Wardian/commit/594aeabcc2ecf16514599d7228fdf8297eb8a83e))
+* **remote:** restore workflow list compatibility ([#467](https://github.com/wardian-app/Wardian/issues/467)) ([dfc9f1d](https://github.com/wardian-app/Wardian/commit/dfc9f1df6e02c64c78356e22d3123d322828d28f))
+* **remote:** tolerate missing workflow list ([#466](https://github.com/wardian-app/Wardian/issues/466)) ([3323789](https://github.com/wardian-app/Wardian/commit/33237892aa8fc1b322929989b099a887cb87d139))
+* **runtime:** silence Windows background process launches ([#471](https://github.com/wardian-app/Wardian/issues/471)) ([6d8963d](https://github.com/wardian-app/Wardian/commit/6d8963d5cdee2334543e75de44060f8612fc9e08))
+* **terminal:** lazy-load Codex scrollback ([#477](https://github.com/wardian-app/Wardian/issues/477)) ([ed1057f](https://github.com/wardian-app/Wardian/commit/ed1057f692d267ca58d68cc8b05113fa2ceec47b))
+* **worktrees:** place agent worktrees beside source checkout ([#464](https://github.com/wardian-app/Wardian/issues/464)) ([1ecc44c](https://github.com/wardian-app/Wardian/commit/1ecc44c0c5a28ee976c06dd4d23d933229244e2e))
+
+
+### Documentation
+
+* add llms.txt index ([#449](https://github.com/wardian-app/Wardian/issues/449)) ([c262185](https://github.com/wardian-app/Wardian/commit/c262185cc32cfedbcad407c59b68e4f21e27ec21))
+
 ## [0.3.8](https://github.com/wardian-app/Wardian/compare/v0.3.7...v0.3.8) (2026-05-29)
 
 
