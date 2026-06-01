@@ -56,7 +56,7 @@ function describeField(node: BlueprintNode, field: FieldDef): FieldSummary | nul
 
 function summarizeValue(value: unknown): string {
   if (Array.isArray(value)) return value.map((item) => String(item)).join(', ');
-  if (typeof value === 'object' && value !== null) return summarizeObject(value);
+  if (value && typeof value === 'object') return summarizeObject(value);
   return truncate(String(value).replace(/\s+/g, ' ').trim());
 }
 
