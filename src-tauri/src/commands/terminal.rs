@@ -297,6 +297,7 @@ fn read_pty_buffer(buffer: &mut String, options: Option<&ReadAgentPtyOptions>) -
     }
 
     let output = match options
+        .filter(|options| options.peek)
         .and_then(|options| options.max_bytes)
         .filter(|max_bytes| *max_bytes > 0)
     {
@@ -703,6 +704,25 @@ mod tests {
         );
 
         let drained = read_pty_buffer(&mut buffer, None);
+
+        assert_eq!(
+            drained.as_deref(),
+            Some("older scrollback\nmiddle scrollback\nrecent frame\n")
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn read_pty_buffer_ignores_bounds_for_destructive_reads() {
+        let mut buffer = "older scrollback\nmiddle scrollback\nrecent frame\n".to_string();
+
+        let drained = read_pty_buffer(
+            &mut buffer,
+            Some(&ReadAgentPtyOptions {
+                max_bytes: Some(24),
+                peek: false,
+            }),
+        );
 
         assert_eq!(
             drained.as_deref(),

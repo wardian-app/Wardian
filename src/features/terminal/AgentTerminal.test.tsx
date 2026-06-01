@@ -923,6 +923,7 @@ describe("AgentTerminal scrollback", () => {
   it("renders a small initial PTY tail before draining the full retained scrollback", async () => {
     const fullBackfill = deferred<string | null>();
     const readCalls: Array<Parameters<typeof invoke>[1]> = [];
+    const appendTerminalOutput = vi.spyOn(useQueueStore.getState(), "appendAgentTerminalOutput");
 
     mockInvoke.mockImplementation(async (cmd: string, args?: Parameters<typeof invoke>[1]) => {
       switch (cmd) {
@@ -961,6 +962,7 @@ describe("AgentTerminal scrollback", () => {
       "older retained scrollback\nrecent codex frame\n",
       expect.any(Function),
     );
+    expect(appendTerminalOutput).not.toHaveBeenCalled();
 
     fullBackfill.resolve("older retained scrollback\nrecent codex frame\n");
 
@@ -971,6 +973,12 @@ describe("AgentTerminal scrollback", () => {
         expect.any(Function),
       );
     });
+    expect(appendTerminalOutput).toHaveBeenCalledTimes(1);
+    expect(appendTerminalOutput).toHaveBeenCalledWith(
+      "codex-lazy-history",
+      "older retained scrollback\nrecent codex frame\n",
+      "codex",
+    );
   });
 
   it("drains additional PTY output when the backend emits an output-ready event", async () => {
