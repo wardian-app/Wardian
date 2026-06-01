@@ -55,6 +55,10 @@ management:
 - **Copy Path**: Copies the absolute path of the file to your clipboard.
 - **Delete**: Permanently removes the file or directory from your disk (requires confirmation).
 
+Agent terminals and the bottom user terminal also make recognized file paths and
+URLs clickable. File paths use the same Explorer external editor preference as
+**Open in External App**; URLs open as URLs.
+
 ## Git Status Markers
 
 When the selected root is a Git repository, the Explorer uses status colors and markers to identify changed, staged, deleted, and untracked paths. Parent folders are highlighted when they contain changed files.

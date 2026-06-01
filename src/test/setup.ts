@@ -48,6 +48,10 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
   sendNotification: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn(async () => {}),
+}));
+
 // Mock xterm since it requires a real DOM canvas
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(function MockTerminal() {
@@ -65,6 +69,7 @@ vi.mock("@xterm/xterm", () => ({
     dispose: vi.fn(),
     focus: vi.fn(),
     attachCustomKeyEventHandler: vi.fn(),
+    registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
     selectAll: vi.fn(),
     loadAddon: vi.fn(),
     scrollLines: vi.fn(),

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { UserTerminalPanel } from "./UserTerminalPanel";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -24,6 +25,7 @@ const selectAllMock = vi.fn();
 const writeMock = vi.fn();
 const clearMock = vi.fn();
 const refreshMock = vi.fn();
+const registerLinkProviderMock = vi.fn(() => ({ dispose: vi.fn() }));
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(function MockTerminal() {
@@ -42,6 +44,12 @@ vi.mock("@xterm/xterm", () => ({
       write: writeMock,
       clear: clearMock,
       refresh: refreshMock,
+      registerLinkProvider: registerLinkProviderMock,
+      buffer: {
+        active: {
+          getLine: vi.fn(() => ({ translateToString: () => "src/App.tsx:12" })),
+        },
+      },
     };
   }),
 }));
@@ -70,6 +78,10 @@ const mockListen = vi.mocked(listen);
 describe("UserTerminalPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useSettingsStore.setState({
+      externalEditor: "system",
+      externalEditorCustomExecutable: "",
+    });
     mockInvoke.mockImplementation((command) => {
       if (command === "ensure_user_terminal" || command === "restart_user_terminal") {
         return Promise.resolve("test-user-terminal-session");
@@ -116,6 +128,44 @@ describe("UserTerminalPanel", () => {
 
     await waitFor(() => {
       expect(attachCustomKeyEventHandlerMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("installs terminal link handling that opens files with the configured external editor", async () => {
+    useSettingsStore.setState({
+      externalEditor: "vscode",
+      externalEditorCustomExecutable: "",
+    });
+    render(
+      <UserTerminalPanel
+        theme="dark"
+        height={320}
+        selectedWorkspace="C:\\repo"
+        onHeightChange={vi.fn()}
+        onHide={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(registerLinkProviderMock).toHaveBeenCalledTimes(1);
+    });
+
+    const provider = (registerLinkProviderMock.mock.calls as unknown as Array<[{
+      provideLinks: (line: number, callback: (links: any[] | undefined) => void) => void;
+    }]>)[0][0];
+    const links = await new Promise<any[] | undefined>((resolve) => {
+      provider.provideLinks(1, resolve);
+    });
+    links?.[0].activate(new MouseEvent("click"), links[0].text);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("open_in_external_editor", {
+        path: "C:\\repo\\src\\App.tsx",
+        editor: {
+          external_editor: "vscode",
+          external_editor_custom_executable: null,
+        },
+      });
     });
   });
 

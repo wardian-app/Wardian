@@ -9,6 +9,7 @@ import { FolderOpen, RefreshCcw, X } from "lucide-react";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { DocsLink } from "../../components/DocsLink";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
+import { installTerminalLinkProvider } from "./terminalLinks";
 
 const DARK_TERM_THEME = {
   background: "#020402",
@@ -54,6 +55,7 @@ export function UserTerminalPanel({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const selectedWorkspaceRef = useRef<string | null>(selectedWorkspace);
   const drainStateRef = useRef({ generation: 0, inFlight: false, queued: false });
   const [initError, setInitError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -61,6 +63,10 @@ export function UserTerminalPanel({
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
   const [effectiveTheme, setEffectiveTheme] = useState<"dark" | "light">(() => currentTheme(theme));
+
+  useEffect(() => {
+    selectedWorkspaceRef.current = selectedWorkspace;
+  }, [selectedWorkspace]);
 
   useEffect(() => {
     if (theme !== "system") {
@@ -155,6 +161,17 @@ export function UserTerminalPanel({
       theme: termTheme,
     });
     installConservativeTerminalShortcuts(term);
+    installTerminalLinkProvider(term, {
+      getBasePath: () => selectedWorkspaceRef.current,
+      getExternalEditor: () => {
+        const { externalEditor, externalEditorCustomExecutable } = useSettingsStore.getState();
+        return {
+          external_editor: externalEditor,
+          external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
+        };
+      },
+      onOpenError: setStatusMessage,
+    });
     const fitAddon = new FitAddon();
     const unicodeAddon = new Unicode11Addon();
     term.loadAddon(fitAddon);
