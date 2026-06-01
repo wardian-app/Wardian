@@ -103,6 +103,7 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/remote/api/auth/challenge", post(create_auth_challenge))
         .route("/remote/api/auth/session", post(create_auth_session))
         .route("/remote/api/agents", get(list_remote_agents))
+        .route("/remote/api/workflows", get(list_remote_workflows))
         .route(
             "/remote/api/agents/{session_id}/chat",
             get(load_remote_agent_chat),
@@ -593,6 +594,31 @@ async fn list_remote_agents(
         GatewayAuditEvent::accepted("roster_read", "list_agents"),
     );
     Ok(Json(serde_json::json!({ "agents": agents })))
+}
+
+async fn list_remote_workflows(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "list_workflows")?;
+    let session = require_audited_remote_session(
+        &ctx,
+        &headers,
+        &origin,
+        "workflow_read",
+        "list_workflows",
+    )
+    .await?;
+    audit_gateway_event(
+        &session,
+        &origin,
+        GatewayAuditEvent::accepted("workflow_read", "list_workflows"),
+    );
+    Ok(Json(remote_workflow_compat_empty_list_response()))
+}
+
+fn remote_workflow_compat_empty_list_response() -> serde_json::Value {
+    serde_json::json!({ "workflows": [] })
 }
 
 async fn load_remote_agent_chat(
@@ -2155,6 +2181,14 @@ mod tests {
         assert_eq!(response.csrf_nonce, "csrf-1");
         assert!(response.expires_at.ends_with('Z'));
         assert!(response.absolute_expires_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn remote_workflow_compat_empty_list_preserves_v1_shape() {
+        assert_eq!(
+            remote_workflow_compat_empty_list_response(),
+            serde_json::json!({ "workflows": [] })
+        );
     }
 
     #[test]
