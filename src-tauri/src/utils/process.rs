@@ -6,6 +6,30 @@ static APP_PROCESS_SUPERVISOR: OnceLock<AppProcessSupervisor> = OnceLock::new();
 #[cfg(windows)]
 static APP_PROCESS_SUPERVISOR_ERROR: OnceLock<String> = OnceLock::new();
 
+pub(crate) fn windows_create_no_window_flag() -> u32 {
+    0x0800_0000
+}
+
+pub(crate) fn windows_silent_process_creation_flags() -> u32 {
+    windows_create_no_window_flag()
+}
+
+pub(crate) fn apply_silent_tokio_command_policy(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(windows_silent_process_creation_flags());
+    }
+}
+
+pub(crate) fn apply_silent_std_command_policy(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        cmd.creation_flags(windows_silent_process_creation_flags());
+    }
+}
+
 #[cfg(windows)]
 #[derive(Debug)]
 struct AppProcessSupervisor {
@@ -42,20 +66,27 @@ pub fn headless_command_spec(program: &str) -> HeadlessCommandSpec {
 
 pub fn new_headless_command(program: &str) -> tokio::process::Command {
     use std::process::Stdio;
+
+    let mut cmd = new_silent_command(program);
+
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+
+    cmd
+}
+
+pub fn new_silent_command(program: &str) -> tokio::process::Command {
     use tokio::process::Command;
 
     let spec = headless_command_spec(program);
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
 
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
-
     #[cfg(target_os = "windows")]
     {
         if spec.use_no_window {
-            cmd.creation_flags(0x08000000);
+            apply_silent_tokio_command_policy(&mut cmd);
         }
     }
 
@@ -65,20 +96,24 @@ pub fn new_headless_command(program: &str) -> tokio::process::Command {
 pub fn new_headless_std_command(program: &str) -> std::process::Command {
     use std::process::Stdio;
 
-    let spec = headless_command_spec(program);
-    let mut cmd = std::process::Command::new(&spec.program);
-    cmd.args(&spec.args);
+    let mut cmd = new_silent_std_command(program);
 
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
 
+    cmd
+}
+
+pub fn new_silent_std_command(program: &str) -> std::process::Command {
+    let spec = headless_command_spec(program);
+    let mut cmd = std::process::Command::new(&spec.program);
+    cmd.args(&spec.args);
+
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-
         if spec.use_no_window {
-            cmd.creation_flags(0x08000000);
+            apply_silent_std_command_policy(&mut cmd);
         }
     }
 
@@ -318,7 +353,7 @@ pub fn force_kill_process_tree(pid: u32) -> Result<(), String> {
         return Ok(());
     }
 
-    let output = new_headless_std_command("taskkill.exe")
+    let output = new_silent_std_command("taskkill.exe")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()
         .map_err(|err| format!("taskkill failed to launch for {}: {}", pid, err))?;
@@ -343,7 +378,29 @@ pub fn force_kill_process_tree(pid: u32) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{headless_command_spec, new_headless_std_command};
+    use super::{
+        headless_command_spec, new_headless_std_command, new_silent_command, new_silent_std_command,
+    };
+
+    fn captured_output_command() -> (String, Vec<String>) {
+        if cfg!(target_os = "windows") {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "echo wardian_stdout&& echo wardian_stderr 1>&2".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "printf '%s\\n' wardian_stdout; printf '%s\\n' wardian_stderr >&2".to_string(),
+                ],
+            )
+        }
+    }
 
     #[test]
     fn wraps_cmd_shims_for_headless_windows_execution() {
@@ -378,6 +435,42 @@ mod tests {
         } else {
             assert_eq!(cmd.get_program().to_string_lossy(), "example.cmd");
         }
+    }
+
+    #[test]
+    fn silent_std_command_preserves_captured_stdout_and_stderr() {
+        let (program, args) = captured_output_command();
+        let output = new_silent_std_command(&program)
+            .args(args)
+            .output()
+            .expect("silent std command should run");
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("wardian_stdout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("wardian_stderr"));
+    }
+
+    #[tokio::test]
+    async fn silent_tokio_command_preserves_captured_stdout_and_stderr() {
+        let (program, args) = captured_output_command();
+        let output = new_silent_command(&program)
+            .args(args)
+            .output()
+            .await
+            .expect("silent tokio command should run");
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("wardian_stdout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("wardian_stderr"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_silent_process_creation_flags_include_no_window() {
+        assert_eq!(
+            super::windows_silent_process_creation_flags() & super::windows_create_no_window_flag(),
+            super::windows_create_no_window_flag()
+        );
     }
 
     #[cfg(windows)]

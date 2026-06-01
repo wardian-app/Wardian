@@ -416,7 +416,7 @@ fn link_skill_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         _ => dst.to_path_buf(),
     };
 
-    let output = std::process::Command::new("cmd")
+    let output = crate::utils::process::new_silent_std_command("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(&dst)
         .arg(&src)

@@ -165,7 +165,7 @@ pub async fn load_remote_setup_check() -> RemoteSetupCheckResult {
 }
 
 async fn run_tailscale_json(args: &[&str]) -> Result<String, String> {
-    let mut command = tokio::process::Command::new("tailscale");
+    let mut command = crate::utils::process::new_silent_command("tailscale");
     command.args(args);
     command.kill_on_drop(true);
     let output = tokio::time::timeout(TAILSCALE_TIMEOUT, command.output())

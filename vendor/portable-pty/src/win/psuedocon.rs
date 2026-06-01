@@ -32,6 +32,10 @@ pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
 #[allow(dead_code)]
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
 
+fn conpty_child_process_creation_flags() -> DWORD {
+    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+}
+
 shared_library!(ConPtyFuncs,
     pub fn CreatePseudoConsole(
         size: COORD,
@@ -147,7 +151,7 @@ impl PsuedoCon {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                conpty_child_process_creation_flags(),
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())
@@ -176,5 +180,26 @@ impl PsuedoCon {
         Ok(WinChild {
             proc: Mutex::new(proc),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn conpty_child_process_creation_flags_preserve_extended_startup_info() {
+        assert_ne!(
+            super::conpty_child_process_creation_flags() & super::EXTENDED_STARTUPINFO_PRESENT,
+            0
+        );
+    }
+
+    #[test]
+    fn conpty_child_process_creation_flags_do_not_create_no_window() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        assert_eq!(
+            super::conpty_child_process_creation_flags() & CREATE_NO_WINDOW,
+            0
+        );
     }
 }

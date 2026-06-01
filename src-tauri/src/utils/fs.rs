@@ -877,10 +877,8 @@ pub(crate) fn create_directory_link(
             link.to_string_lossy(),
             target.to_string_lossy()
         );
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.raw_arg("/c")
-            .raw_arg(&command)
-            .creation_flags(0x08000000);
+        let mut cmd = crate::utils::process::new_silent_std_command("cmd");
+        cmd.raw_arg("/c").raw_arg(&command);
         let output = cmd.output().map_err(|e| e.to_string())?;
         if output.status.success() {
             Ok(())

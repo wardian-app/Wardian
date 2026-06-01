@@ -1,6 +1,6 @@
 # Wardian patch
 
-This is `portable-pty` 0.9.0 with a small Windows-only ConPTY startup hint:
+This is `portable-pty` 0.9.0 with a small Windows-only ConPTY startup patch:
 `STARTF_USESHOWWINDOW` + `SW_HIDE` is set when creating PTY child processes.
 
 Wardian uses visible embedded PTYs for CLI providers. Some Windows CLI launches
