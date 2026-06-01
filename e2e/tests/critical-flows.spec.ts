@@ -39,10 +39,11 @@ test.describe("Critical browser flows", () => {
       .locator(".titlebar-center")
       .getByRole("button", { name: "Workflows" })
       .click();
-    await expect(page.locator('[data-testid="workflow-builder"]')).toBeVisible();
+    await expect(page.getByTestId("workflows-view")).toBeVisible();
+    await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
 
-    await page.locator('[data-testid="add-block-button"]').click();
-    await expect(page.getByRole("heading", { name: "Block Library" })).toBeVisible();
+    await page.getByTestId("workflows-view").getByRole("button", { name: "Add node" }).click();
+    await expect(page.getByTestId("node-library")).toBeVisible();
 
     await page.getByRole("button", { name: /Manual Trigger/ }).click();
 
@@ -51,6 +52,6 @@ test.describe("Critical browser flows", () => {
       .filter({ hasText: "Manual Trigger" });
     await expect(manualTriggerNode).toHaveCount(1);
     await expect(manualTriggerNode).toBeVisible();
-    await expect(page.locator('[data-testid="run-workflow-button"]')).toBeDisabled();
+    await expect(page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ })).toBeDisabled();
   });
 });

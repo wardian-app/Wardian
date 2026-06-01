@@ -69,10 +69,21 @@ async function installRunViewIpcMock(page: Page) {
         if (command === "get_library_tree") return { type: "Folder", path: "", name: "Root", children: [] };
         if (command === "list_deployed_skills") return [];
         if (command === "load_app_settings") return null;
+        if (command === "load_shell_settings") {
+          return {
+            shell_id: "auto",
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: "resume",
+            default_provider: "codex",
+          };
+        }
+        if (command === "list_available_shells") return [];
         if (command === "plugin:event|listen") return callbackId++;
         if (command === "plugin:event|unlisten") return null;
         if (command === "sync_provider_theme_settings") return null;
 
+        if (command === "workflow_list_blueprints") return [];
         if (command === "workflow_list_runs") {
           return [{
             run_id: "run-e2e-1",
@@ -112,9 +123,14 @@ async function openRunView(page: Page) {
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
-  await page.locator(".titlebar-center").getByRole("button", { name: "Runs" }).click();
-  await expect(page.locator('[data-testid="run-view"]')).toBeVisible();
-  await page.getByRole("button", { name: /run-e2e-1/ }).click();
+  await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+  await page.evaluate(async () => {
+    const { useWorkflowsView } = await import("/src/store/useWorkflowsView.ts");
+    const { useRunStore } = await import("/src/features/workflows/run/useRunStore.ts");
+    useWorkflowsView.getState().observeRun("wf-run-e2e", "run-e2e-1");
+    await useRunStore.getState().openRun("wf-run-e2e", "run-e2e-1");
+  });
+  await expect(page.getByTestId("workflows-observe-mode")).toBeVisible();
   await expect(nodeById(page, "a")).toBeVisible();
   await expect(nodeById(page, "b")).toBeVisible();
 }
@@ -148,16 +164,16 @@ test("run view observes, scrubs, and inspects a failed run", async ({ page }) =>
   await expect(nodeB).toHaveAttribute("data-status", "pending");
 
   if (process.env.WARDIAN_RUN_VIEW_SCREENSHOT_DIR) {
-    await page.locator('[data-testid="run-view"]').screenshot({
+    await page.getByTestId("workflows-observe-mode").screenshot({
       path: `${process.env.WARDIAN_RUN_VIEW_SCREENSHOT_DIR}/run-view-mid-scrub.png`,
     });
   }
 
   await nodeB.click();
-  await expect(page.locator('[data-testid="run-view"] aside').last().getByText("boom")).toBeVisible();
+  await expect(page.getByTestId("workflows-observe-mode").locator("aside").last().getByText("boom")).toBeVisible();
 
   if (process.env.WARDIAN_RUN_VIEW_SCREENSHOT_DIR) {
-    await page.locator('[data-testid="run-view"]').screenshot({
+    await page.getByTestId("workflows-observe-mode").screenshot({
       path: `${process.env.WARDIAN_RUN_VIEW_SCREENSHOT_DIR}/run-view-failed-inspector.png`,
     });
   }

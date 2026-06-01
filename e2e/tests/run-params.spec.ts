@@ -153,7 +153,7 @@ test("parameterized run dialog sends entry input to workflow_run", async ({ page
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByLabel(/provider/i)).toHaveValue("codex");
+  await expect(dialog.getByText("New temporary Codex agent")).toBeVisible();
   await expect(dialog.getByLabel(/symbol/i)).toBeVisible();
   await dialog.getByLabel(/symbol/i).fill("SPY");
   await dialog.screenshot({ path: "e2e/screenshots/run-params/param-form.png" });
@@ -163,7 +163,10 @@ test("parameterized run dialog sends entry input to workflow_run", async ({ page
   const runCall = await page.evaluate(() => window.__runParamsInvokes?.find((call) => call.command === "workflow_run"));
   expect(runCall?.args).toMatchObject({
     path: "/x/wf.md",
-    provider: "codex",
     input: { symbol: "SPY" },
+    bindings: { planner: "codex" },
+    assignments: {
+      planner: { target_type: "temporary_provider", provider: "codex" },
+    },
   });
 });

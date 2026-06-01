@@ -217,7 +217,7 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
 
   await page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByLabel(/provider/i)).toHaveValue("codex");
+  await expect(page.getByText("New temporary Codex agent")).toHaveCount(2);
   await page.getByRole("dialog").getByRole("button", { name: /^Run$/ }).click();
 
   await expect(page.getByTestId("workflows-observe-mode")).toBeVisible();

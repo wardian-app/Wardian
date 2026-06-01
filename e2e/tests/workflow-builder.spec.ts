@@ -87,6 +87,7 @@ async function installWorkflowBuilderIpcMock(page: Page) {
         if (command === "load_watchlist_prefs") return null;
         if (command === "load_agent_interactions") return {};
         if (command === "load_queue_items") return [];
+        if (command === "load_queue_preferences") return {};
         if (command === "load_onboarding_hints") return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
         if (command === "dismiss_onboarding_hint") return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
         if (command === "list_workflows") return [];
@@ -94,10 +95,25 @@ async function installWorkflowBuilderIpcMock(page: Page) {
         if (command === "load_workflow_library") return { folders: [], rootWorkflowIds: [] };
         if (command === "get_library_tree") return { type: "Folder", path: "", name: "Root", children: [] };
         if (command === "list_deployed_skills") return [];
+        if (command === "load_app_settings") return null;
+        if (command === "load_shell_settings") {
+          return {
+            shell_id: "auto",
+            custom_executable: null,
+            custom_args: null,
+            agent_session_persistence: "resume",
+            default_provider: "codex",
+          };
+        }
+        if (command === "list_available_shells") return [];
         if (command === "plugin:event|listen") return callbackId++;
         if (command === "plugin:event|unlisten") return null;
         if (command === "sync_provider_theme_settings") return null;
 
+        if (command === "workflow_list_blueprints") return [];
+        if (command === "workflow_list_runs") return [];
+        if (command === "workflow_read_run") return { state: null, events: [], blueprint: null };
+        if (command === "schedule_list") return [];
         if (command === "workflow_validate") {
           const diagnostics = validateBlueprint(args?.blueprint as Blueprint | undefined);
           return { ok: diagnostics.length === 0, diagnostics };
@@ -127,9 +143,10 @@ async function openWorkflowBuilder(page: Page) {
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   await page
     .locator(".titlebar-center")
-    .getByRole("button", { name: "Blueprints" })
+    .getByRole("button", { name: "Workflows" })
     .click();
-  await expect(page.locator('[data-testid="workflow-builder"]')).toBeVisible();
+  await expect(page.getByTestId("workflows-view")).toBeVisible();
+  await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
   await page.evaluate(async () => {
     const { useBuilderStore } = await import("/src/store/useBuilderStore.ts");
     useBuilderStore.setState({ path: "C:/tmp/workflow-builder-e2e.md" });
@@ -137,7 +154,9 @@ async function openWorkflowBuilder(page: Page) {
 }
 
 async function addNode(page: Page, name: string) {
-  await page.locator('[data-testid="node-palette"]').getByRole("button", { name }).click();
+  await page.getByTestId("workflows-view").getByRole("button", { name: "Add node" }).click();
+  await expect(page.getByTestId("node-library")).toBeVisible();
+  await page.getByTestId("node-library").getByRole("button", { name }).click();
   const node = page.locator(".react-flow__node").filter({ hasText: name }).last();
   await expect(node).toHaveCount(1);
   return node;
@@ -173,6 +192,11 @@ test("workflow builder authors, validates, and saves a workflow blueprint", asyn
 
   await expect(page.getByLabel(/Prompt/i)).toBeVisible();
   await expect(page.getByText("missing_required_field")).toBeVisible({ timeout: 5_000 });
+  if (process.env.WARDIAN_WORKFLOW_BUILDER_SCREENSHOT_DIR) {
+    await page.getByTestId("workflows-view").screenshot({
+      path: `${process.env.WARDIAN_WORKFLOW_BUILDER_SCREENSHOT_DIR}/save-disabled-invalid-workflow.png`,
+    });
+  }
   await expect(page.getByRole("button", { name: "Save" })).toBeDisabled();
 
   await page.getByLabel(/Prompt/i).fill("Plan the work.");
