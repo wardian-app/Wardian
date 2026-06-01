@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { upstreamVariables } from './useUpstreamContextV2';
+import { upstreamVariables } from './useUpstreamContext';
 import type { Blueprint } from './blueprintTypes';
 
 const bp: Blueprint = {

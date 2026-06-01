@@ -72,6 +72,7 @@ pub struct MockExecutor {
     task_outputs: HashMap<String, serde_json::Value>,
     decisions: HashMap<String, String>,
     fail_nodes: HashMap<String, String>,
+    skip_nodes: HashMap<String, String>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -95,6 +96,11 @@ impl MockExecutor {
         self
     }
 
+    pub fn with_skipped(mut self, node: &str, reason: &str) -> Self {
+        self.skip_nodes.insert(node.into(), reason.into());
+        self
+    }
+
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
@@ -104,6 +110,9 @@ impl MockExecutor {
     }
 
     fn check_fail(&self, node: &str) -> Result<(), StepError> {
+        if let Some(reason) = self.skip_nodes.get(node) {
+            return Err(StepError::skipped(reason.clone()));
+        }
         match self.fail_nodes.get(node) {
             Some(e) => Err(StepError::new(e.clone())),
             None => Ok(()),

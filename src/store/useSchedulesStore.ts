@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { create } from 'zustand';
-import type { ScheduleDefinition, WorkflowSchedule } from '../types/workflow';
+import type { ScheduleDefinition, WorkflowAssignments, WorkflowSchedule } from '../types/workflow';
 
 export interface CreateScheduleArgs {
   blueprintId: string;
@@ -11,6 +11,7 @@ export interface CreateScheduleArgs {
   workspace?: string;
   input?: unknown;
   bindings?: Record<string, string>;
+  assignments?: WorkflowAssignments;
 }
 
 interface SchedulesState {
@@ -34,7 +35,7 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
   async load() {
     set({ loading: true, error: null });
     try {
-      const schedules = await invoke<WorkflowSchedule[]>('schedule_list_v2');
+      const schedules = await invoke<WorkflowSchedule[]>('schedule_list');
       set({ schedules: Array.isArray(schedules) ? schedules : [], loading: false });
     } catch (error) {
       set({ error: String(error), loading: false });
@@ -42,14 +43,14 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
   },
 
   async subscribe() {
-    return listen('v2-schedules-updated', () => {
+    return listen('schedules-updated', () => {
       void get().load();
     });
   },
 
   async create(args) {
     try {
-      await invoke('schedule_create_v2', {
+      await invoke('schedule_create', {
         blueprintId: args.blueprintId,
         name: args.name,
         schedule: args.schedule,
@@ -57,6 +58,7 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
         ...(args.workspace ? { workspace: args.workspace } : {}),
         ...(args.input !== undefined ? { input: args.input } : {}),
         ...(args.bindings ? { bindings: args.bindings } : {}),
+        ...(args.assignments ? { assignments: args.assignments } : {}),
       });
       await get().load();
     } catch (error) {
@@ -66,7 +68,7 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
 
   async pause(id) {
     try {
-      await invoke('schedule_pause_v2', { id });
+      await invoke('schedule_pause', { id });
       await get().load();
     } catch (error) {
       set({ error: String(error) });
@@ -75,7 +77,7 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
 
   async resume(id) {
     try {
-      await invoke('schedule_resume_v2', { id });
+      await invoke('schedule_resume', { id });
       await get().load();
     } catch (error) {
       set({ error: String(error) });
@@ -84,7 +86,7 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
 
   async remove(id) {
     try {
-      await invoke('schedule_remove_v2', { id });
+      await invoke('schedule_remove', { id });
       await get().load();
     } catch (error) {
       set({ error: String(error) });
@@ -93,7 +95,7 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
 
   async runNow(id) {
     try {
-      await invoke('schedule_run_now_v2', { id });
+      await invoke('schedule_run_now', { id });
       await get().load();
     } catch (error) {
       set({ error: String(error) });

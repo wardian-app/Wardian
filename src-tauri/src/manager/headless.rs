@@ -336,10 +336,23 @@ pub async fn run_headless_with_options(
     let output = output.unwrap_or_default();
     let err_output = err_output.unwrap_or_default();
 
-    let _ = child.wait().await;
+    let status = child.wait().await.map_err(|error| error.to_string())?;
 
     if !err_output.is_empty() {
         log_debug(&format!("[Wardian] Headless stderr: {}", err_output.trim()));
+    }
+    if !status.success() {
+        let detail = if !err_output.trim().is_empty() {
+            err_output.trim()
+        } else if !output.trim().is_empty() {
+            output.trim()
+        } else {
+            "provider exited without output"
+        };
+        return Err(format!(
+            "Headless provider {provider_name} exited with status {}: {detail}",
+            status.code().unwrap_or(-1)
+        ));
     }
 
     if provider_name == "codex" {

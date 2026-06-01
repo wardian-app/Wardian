@@ -39,7 +39,7 @@ export interface BlueprintNode {
   type: string;
   name?: string;
   parent?: string;
-  fields: Record<string, unknown>;
+  fields?: Record<string, unknown>;
   position?: { x: number; y: number };
 }
 export interface BlueprintEdge {

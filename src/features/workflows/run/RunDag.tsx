@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -8,6 +8,7 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useReactFlow,
   type ColorMode,
   type Node,
   type NodeProps,
@@ -34,6 +35,22 @@ type RunNodeData = {
 };
 
 export function RunDag({ blueprint, currentStatuses, selectedNodeId, onSelectNode, theme }: RunDagProps) {
+  return (
+    <ReactFlowProvider>
+      <RunDagInner
+        blueprint={blueprint}
+        currentStatuses={currentStatuses}
+        selectedNodeId={selectedNodeId}
+        onSelectNode={onSelectNode}
+        theme={theme}
+      />
+    </ReactFlowProvider>
+  );
+}
+
+function RunDagInner({ blueprint, currentStatuses, selectedNodeId, onSelectNode, theme }: RunDagProps) {
+  const { fitView } = useReactFlow();
+
   const graph = useMemo(() => {
     if (!blueprint) return null;
     const rf = toReactFlow(blueprint);
@@ -61,6 +78,14 @@ export function RunDag({ blueprint, currentStatuses, selectedNodeId, onSelectNod
     return theme;
   }, [theme]);
 
+  useEffect(() => {
+    if (!graph || graph.nodes.length === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      void fitView({ padding: 0.2, duration: 120 });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [blueprint?.id, graph?.nodes.length, fitView]);
+
   if (!blueprint || !graph) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-wardian-border bg-[var(--color-wardian-card)] p-6 text-center text-sm text-[var(--color-wardian-text-muted)]">
@@ -70,29 +95,27 @@ export function RunDag({ blueprint, currentStatuses, selectedNodeId, onSelectNod
   }
 
   return (
-    <ReactFlowProvider>
-      <ReactFlow
-        nodes={graph.nodes}
-        edges={graph.edges}
-        nodeTypes={nodeTypes}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable
-        onNodeClick={(_, node) => onSelectNode(node.id)}
-        onPaneClick={() => onSelectNode(null)}
-        fitView
-        colorMode={flowColorMode}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--color-wardian-border-heavy)" />
-        <Controls className="!bg-[var(--color-wardian-card)] !border-wardian-border !fill-[var(--color-wardian-text)]" />
-        <MiniMap
-          className="!bg-[var(--color-wardian-card)] !border-wardian-border"
-          maskColor="color-mix(in srgb, var(--color-wardian-bg), transparent 50%)"
-          nodeStrokeWidth={3}
-        />
-      </ReactFlow>
-    </ReactFlowProvider>
+    <ReactFlow
+      nodes={graph.nodes}
+      edges={graph.edges}
+      nodeTypes={nodeTypes}
+      nodesDraggable={false}
+      nodesConnectable={false}
+      elementsSelectable
+      onNodeClick={(_, node) => onSelectNode(node.id)}
+      onPaneClick={() => onSelectNode(null)}
+      fitView
+      colorMode={flowColorMode}
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--color-wardian-border-heavy)" />
+      <Controls className="!bg-[var(--color-wardian-card)] !border-wardian-border !fill-[var(--color-wardian-text)]" />
+      <MiniMap
+        className="!bg-[var(--color-wardian-card)] !border-wardian-border"
+        maskColor="color-mix(in srgb, var(--color-wardian-bg), transparent 50%)"
+        nodeStrokeWidth={3}
+      />
+    </ReactFlow>
   );
 }
 
@@ -161,7 +184,7 @@ function portsFor(ports: PortDef[]) {
 
 function outputPorts(node: BlueprintNode, ports: PortDef[], dynamicField?: string) {
   if (!dynamicField) return portsFor(ports);
-  const dynamic = node.fields[dynamicField];
+  const dynamic = node.fields?.[dynamicField];
   if (!Array.isArray(dynamic)) return portsFor(ports);
   return dynamic.map((port) => ({ id: String(port), label: String(port) }));
 }

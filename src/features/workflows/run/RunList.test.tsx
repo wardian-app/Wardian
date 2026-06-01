@@ -25,9 +25,16 @@ describe('RunList', () => {
     const onOpen = vi.fn();
     render(<RunList runs={runs} selectedRunId={null} onOpen={onOpen} />);
 
-    fireEvent.click(screen.getByRole('button', { name: /run-1/ }));
+    fireEvent.click(screen.getByRole('button', { name: /open wf run run-1/i }));
 
     expect(onOpen).toHaveBeenCalledWith('wf', 'run-1');
     expect(screen.getByText('failed')).toBeInTheDocument();
+  });
+
+  it('keeps run text selectable instead of making the whole card a button', () => {
+    render(<RunList runs={runs} selectedRunId={null} onOpen={vi.fn()} />);
+
+    expect(screen.getByText('run-1').closest('.select-text')).not.toBeNull();
+    expect(screen.getAllByRole('button')).toHaveLength(1);
   });
 });

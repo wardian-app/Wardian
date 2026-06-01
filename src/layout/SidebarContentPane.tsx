@@ -121,7 +121,11 @@ interface WorkflowsGlancePaneProps {
 const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflowsView }) => {
   const schedules = useSchedulesStore((state) => state.schedules);
   const loadSchedules = useSchedulesStore((state) => state.load);
+  const pauseSchedule = useSchedulesStore((state) => state.pause);
+  const resumeSchedule = useSchedulesStore((state) => state.resume);
+  const runScheduleNow = useSchedulesStore((state) => state.runNow);
   const runs = useRunStore((state) => state.runs);
+  const loadRuns = useRunStore((state) => state.loadRuns);
   const openRun = useRunStore((state) => state.openRun);
   const observeRun = useWorkflowsView((state) => state.observeRun);
   const setMode = useWorkflowsView((state) => state.setMode);
@@ -131,7 +135,10 @@ const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflo
     if (schedules.length === 0) {
       void loadSchedules();
     }
-  }, [loadSchedules, schedules.length]);
+    void loadRuns();
+    const timer = window.setInterval(() => void loadRuns(), 1500);
+    return () => window.clearInterval(timer);
+  }, [loadRuns, loadSchedules, schedules.length]);
 
   return (
     <WorkflowMonitorGlance
@@ -139,12 +146,15 @@ const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflo
       activeRuns={activeRuns}
       onOpenRun={(blueprintId, runId) => {
         onOpenWorkflowsView();
-        void openRun(blueprintId, runId).then(() => observeRun(runId));
+        void openRun(blueprintId, runId).then(() => observeRun(blueprintId, runId));
       }}
       onOpenMonitor={() => {
         onOpenWorkflowsView();
         setMode('monitor');
       }}
+      onPauseSchedule={(id) => void pauseSchedule(id)}
+      onResumeSchedule={(id) => void resumeSchedule(id)}
+      onRunScheduleNow={(id) => void runScheduleNow(id)}
     />
   );
 };

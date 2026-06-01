@@ -68,10 +68,8 @@ pub enum WorkflowCommand {
         json: bool,
     },
     /// Validate a blueprint `.md` file and report diagnostics.
-    Validate {
-        path: String,
-    },
-    /// Execute a v2 blueprint headlessly and write a durable run.
+    Validate { path: String },
+    /// Execute a workflow blueprint headlessly and write a durable run.
     Exec {
         path: String,
         /// Execution backend. Only `mock` is available until the real executor lands.
@@ -84,22 +82,20 @@ pub enum WorkflowCommand {
         #[arg(long)]
         bind: Vec<String>,
     },
-    /// List v2 runs under <home>/logs/workflows.
+    /// List workflow runs under <home>/logs/workflows.
     Runs,
-    /// Show one v2 run's state + event trace.
+    /// Show one workflow run's state + event trace.
     RunShow {
         blueprint_id: String,
         run_id: String,
     },
-    /// Replay a v2 run's event log into its final state (no execution).
+    /// Replay a workflow run's event log into its final state (no execution).
     Replay {
         blueprint_id: String,
         run_id: String,
     },
     /// Parse a blueprint `.md` and print the structured graph.
-    Parse {
-        path: String,
-    },
+    Parse { path: String },
     /// Normalize a blueprint `.md` (print, or --write back in place).
     Normalize {
         path: String,
@@ -119,12 +115,12 @@ pub enum WorkflowCommand {
     },
     /// Write the generated node-type reference doc.
     GenDocs {
-        #[arg(long, default_value = "docs/workflows/node-reference-v2.md")]
+        #[arg(long, default_value = "docs/workflows/node-reference.md")]
         out: String,
         #[arg(long)]
         check: bool,
     },
-    /// Manage v2 schedules (schedules.json). UI lives in the app; these edit the file.
+    /// Manage workflow schedules (schedules.json). UI lives in the app; these edit the file.
     #[command(subcommand)]
     Schedule(WorkflowScheduleCommand),
 }

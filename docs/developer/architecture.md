@@ -12,9 +12,9 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 - **Provider Adapters**: Agent CLIs are integrated behind a Rust provider layer so session spawn, headless execution, and telemetry enrichment can support Gemini, Antigravity, Claude, Codex, and OpenCode without rewriting the rest of the backend.
   See [Provider Runtime Notes](./provider-runtimes.md) for the provider-specific working-root, skill, and session rules that sit behind this abstraction.
 - **Habitat Projection**: For providers that cannot natively discover Wardian instructions and skills from external include roots, the backend materializes a neutral per-session `habitat` directory. That habitat links the real workspace, projects a scoped `AGENTS.md`, and exposes provider-native skill layouts without mutating the user repository. OpenCode is an explicit exception: it stays in the real workspace and receives class/skill scope through injected runtime config instead of a projected workspace.
-- **State Management**: `AppState` holds `Mutex`-protected maps of active agents, metrics, and background triggers.
+- **State Management**: `AppState` holds `Mutex`-protected maps of active agents, metrics, workflow runs, and background tasks.
 - **Worker Threads**:
-  - **Heartbeat (Scheduler)**: Handles periodic tasks and cron triggers.
+  - **Workflow Scheduler**: Fires persisted workflow schedule invokers.
   - **Metrics Push**: Pushes system/agent resource usage to the UI via Tauri events.
 - **App Queue Persistence**: Completion triage state is stored under the active Wardian home so agent and workflow outcomes survive app restarts.
 
@@ -44,7 +44,7 @@ Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tau
 Wardian uses a bidirectional event system, detailed in [IPC and Event Governance](./ipc-events.md).
 
 - **Events (Push)**: Rust pushes telemetry (`agent-metrics`), structured logs (`agent-json-event`), and PTY readiness notifications (`agent-pty-output-ready`) to the UI.
-- **Commands (Pull)**: The UI invokes Rust functions for high-level actions (`spawn_agent`, `run_workflow`).
+- **Commands (Pull)**: The UI invokes Rust functions for high-level actions (`spawn_agent`, `workflow_run`).
 - **Terminal Input**: The UI invokes `send_input_to_agent` and `send_binary_input_to_agent` directly so PTY control replies and raw mouse bytes take the shortest path back to the agent process.
 - **Terminal Host Lifecycle**: The frontend keeps one live xterm instance per session and reattaches its DOM host across pane remounts instead of disposing and reconstructing the emulator.
 

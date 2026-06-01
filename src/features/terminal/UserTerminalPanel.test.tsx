@@ -26,34 +26,40 @@ const clearMock = vi.fn();
 const refreshMock = vi.fn();
 
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn().mockImplementation(() => ({
-    cols: 80,
-    rows: 24,
-    options: {},
-    open: openMock,
-    loadAddon: loadAddonMock,
-    onData: onDataMock,
-    onBinary: onBinaryMock,
-    dispose: disposeMock,
-    focus: focusMock,
-    attachCustomKeyEventHandler: attachCustomKeyEventHandlerMock,
-    selectAll: selectAllMock,
-    write: writeMock,
-    clear: clearMock,
-    refresh: refreshMock,
-  })),
+  Terminal: vi.fn().mockImplementation(function MockTerminal() {
+    return {
+      cols: 80,
+      rows: 24,
+      options: {},
+      open: openMock,
+      loadAddon: loadAddonMock,
+      onData: onDataMock,
+      onBinary: onBinaryMock,
+      dispose: disposeMock,
+      focus: focusMock,
+      attachCustomKeyEventHandler: attachCustomKeyEventHandlerMock,
+      selectAll: selectAllMock,
+      write: writeMock,
+      clear: clearMock,
+      refresh: refreshMock,
+    };
+  }),
 }));
 
 const fitMock = vi.fn();
 
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: vi.fn().mockImplementation(() => ({
-    fit: fitMock,
-  })),
+  FitAddon: vi.fn().mockImplementation(function MockFitAddon() {
+    return {
+      fit: fitMock,
+    };
+  }),
 }));
 
 vi.mock("@xterm/addon-unicode11", () => ({
-  Unicode11Addon: vi.fn().mockImplementation(() => ({})),
+  Unicode11Addon: vi.fn().mockImplementation(function MockUnicode11Addon() {
+    return {};
+  }),
 }));
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));

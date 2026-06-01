@@ -1,6 +1,6 @@
-//! Pure scheduling math + persistence for v2 schedule invokers. No Tauri, no app state.
+//! Pure scheduling math + persistence for workflow schedule invokers. No Tauri, no app state.
 
-use crate::models::ScheduleDefinition;
+use crate::models::{ScheduleDefinition, WorkflowAssignments};
 use chrono::{Datelike, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,7 +32,9 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
             let today = now_local.date_naive();
             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
             let target_naive = today.and_time(target_time);
-            let target_local = chrono::Local.from_local_datetime(&target_naive).earliest()?;
+            let target_local = chrono::Local
+                .from_local_datetime(&target_naive)
+                .earliest()?;
 
             let target_ms = target_local.timestamp_millis() as u64;
             if target_ms > now_ms {
@@ -88,8 +90,9 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                             }
                             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
                             let candidate_naive = candidate_date.and_time(target_time);
-                            if let Some(candidate_local) =
-                                chrono::Local.from_local_datetime(&candidate_naive).earliest()
+                            if let Some(candidate_local) = chrono::Local
+                                .from_local_datetime(&candidate_naive)
+                                .earliest()
                             {
                                 let candidate_ms = candidate_local.timestamp_millis() as u64;
                                 if candidate_ms > now_ms {
@@ -134,8 +137,9 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                         chrono::NaiveDate::from_ymd_opt(candidate_year, candidate_month_norm, day)
                     {
                         let candidate_naive = candidate_date.and_time(target_time);
-                        if let Some(candidate_local) =
-                            chrono::Local.from_local_datetime(&candidate_naive).earliest()
+                        if let Some(candidate_local) = chrono::Local
+                            .from_local_datetime(&candidate_naive)
+                            .earliest()
                         {
                             let candidate_ms = candidate_local.timestamp_millis() as u64;
                             if candidate_ms > now_ms {
@@ -170,8 +174,9 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
             for date_str in &dates {
                 if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
                     let candidate_naive = date.and_time(target_time);
-                    if let Some(candidate_local) =
-                        chrono::Local.from_local_datetime(&candidate_naive).earliest()
+                    if let Some(candidate_local) = chrono::Local
+                        .from_local_datetime(&candidate_naive)
+                        .earliest()
                     {
                         let candidate_ms = candidate_local.timestamp_millis() as u64;
                         if candidate_ms > now_ms {
@@ -187,12 +192,19 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
             let run_at = schedule.run_at.as_deref().unwrap_or("");
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(run_at) {
                 let ms = dt.timestamp_millis() as u64;
-                if ms > now_ms { Some(ms) } else { None }
-            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M")
-            {
+                if ms > now_ms {
+                    Some(ms)
+                } else {
+                    None
+                }
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M") {
                 let local = chrono::Local.from_local_datetime(&dt).earliest()?;
                 let ms = local.timestamp_millis() as u64;
-                if ms > now_ms { Some(ms) } else { None }
+                if ms > now_ms {
+                    Some(ms)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -259,6 +271,7 @@ pub struct FireRequest {
     pub workspace: Option<String>,
     pub input: serde_json::Value,
     pub bindings: HashMap<String, String>,
+    pub assignments: WorkflowAssignments,
 }
 
 fn is_expired(schedule: &WorkflowSchedule, now_ms: u64) -> bool {
@@ -268,8 +281,7 @@ fn is_expired(schedule: &WorkflowSchedule, now_ms: u64) -> bool {
             .max_occurrences
             .is_some_and(|max| schedule.schedule.occurrence_count >= max),
         "on_date" => schedule.schedule.end_date.as_ref().is_some_and(|date| {
-            let Some(now) =
-                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms as i64)
+            let Some(now) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms as i64)
             else {
                 return false;
             };
@@ -290,6 +302,7 @@ fn fire_request(schedule: &WorkflowSchedule) -> FireRequest {
         workspace: schedule.workspace.clone(),
         input: schedule.input.clone(),
         bindings: schedule.bindings.clone(),
+        assignments: schedule.assignments.clone(),
     }
 }
 
@@ -358,6 +371,7 @@ mod tests {
             workspace: None,
             input: serde_json::json!({}),
             bindings: std::collections::HashMap::new(),
+            assignments: std::collections::HashMap::new(),
             schedule: ScheduleDefinition {
                 schedule_type: "interval".into(),
                 interval_minutes: Some(60),
@@ -486,7 +500,10 @@ mod tests {
         let mut v = vec![s];
         let fires = plan_tick(&mut v, 1000);
         assert_eq!(fires.len(), 1);
-        assert!(v.is_empty(), "one_time schedule should be removed after firing");
+        assert!(
+            v.is_empty(),
+            "one_time schedule should be removed after firing"
+        );
     }
 
     #[test]

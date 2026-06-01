@@ -30,4 +30,23 @@ describe('EventTimeline', () => {
     expect(onScrub).toHaveBeenNthCalledWith(2, 0);
     expect(onScrub).toHaveBeenNthCalledWith(3, 2);
   });
+
+  it('selects the event node when an event row is opened', () => {
+    const onScrub = vi.fn();
+    const onSelectNode = vi.fn();
+    render(<EventTimeline events={events} scrubIndex={0} onScrub={onScrub} onSelectNode={onSelectNode} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /node_failed/i }));
+
+    expect(onScrub).toHaveBeenCalledWith(2);
+    expect(onSelectNode).toHaveBeenCalledWith('a');
+  });
+
+  it('collapses to the latest event strip', () => {
+    render(<EventTimeline events={events} scrubIndex={2} onScrub={vi.fn()} collapsed />);
+
+    expect(screen.getByText('Latest event')).toBeInTheDocument();
+    expect(screen.getByText('node_failed')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Event scrubber')).toBeNull();
+  });
 });

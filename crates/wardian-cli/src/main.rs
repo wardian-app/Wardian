@@ -438,11 +438,7 @@ fn render_workflow_exec(
     let mock = wardian_core::engine::MockExecutor::new();
     let state = runtime
         .block_on(wardian_core::engine::Engine::start_with_id(
-            &blueprint,
-            &run_id,
-            input,
-            &run_root,
-            &mock,
+            &blueprint, &run_id, input, &run_root, &mock,
         ))
         .map_err(|e| CliError::generic(e.to_string()))?;
 
@@ -590,8 +586,8 @@ fn render_workflow_normalize(path: &str, write: bool) -> Result<String, CliError
 }
 
 fn render_workflow_schedule(command: WorkflowScheduleCommand) -> Result<String, CliError> {
-    use WorkflowScheduleCommand as C;
     use wardian_core::schedule::{compute_next_run, load_schedules, save_schedules};
+    use WorkflowScheduleCommand as C;
 
     match command {
         C::List => render_json(serde_json::json!({
@@ -621,6 +617,7 @@ fn render_workflow_schedule(command: WorkflowScheduleCommand) -> Result<String, 
                 workspace: None,
                 input,
                 bindings,
+                assignments: Default::default(),
                 next_run_epoch_ms: compute_next_run(&schedule, now),
                 paused_remaining_ms: None,
                 is_paused: false,
@@ -704,9 +701,9 @@ fn build_schedule_definition(
         definition.schedule_type = "daily".into();
         definition.time_of_day = Some(time);
     } else if let Some(spec) = weekly {
-        let (days, time) = spec.split_once('@').ok_or_else(|| {
-            CliError::generic("--weekly expects Days@HH:MM, e.g. Mon,Fri@09:30")
-        })?;
+        let (days, time) = spec
+            .split_once('@')
+            .ok_or_else(|| CliError::generic("--weekly expects Days@HH:MM, e.g. Mon,Fri@09:30"))?;
         definition.schedule_type = "weekly".into();
         definition.days_of_week = Some(days.split(',').map(|day| day.trim().to_string()).collect());
         definition.time_of_day = Some(time.to_string());

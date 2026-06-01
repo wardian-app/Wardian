@@ -1,4 +1,4 @@
-# Workflow v2 CLI Verbs
+# Workflow CLI Verbs
 
 - **Status:** Accepted
 - **Date:** 2026-05-29
@@ -6,24 +6,24 @@
 
 ## Context
 
-Wardian now has a Rust workflow v2 blueprint model and deterministic engine in
+Wardian now has a Rust workflow blueprint model and deterministic engine in
 `wardian-core`. The CLI needs a thin surface for agents and automation to run a
 blueprint headlessly, inspect durable run artifacts, and normalize or parse
 blueprint Markdown without requiring the desktop app.
 
-The existing workflow CLI verbs remain the app-owned v1 surface:
+The existing workflow CLI verbs remain the app-owned old workflow system surface:
 `wardian workflow list`, `show`, `run`, and `stop`. Those commands continue to
-coexist with v2 while the desktop app and run view migrate. The new v2 verbs use
-names that avoid overloading v1 `run`.
+coexist with workflow while the desktop app and run view migrate. The new workflow verbs use
+names that avoid overloading old workflow system `run`.
 
 ## Verb Surface
 
-The v2 CLI verbs are:
+The workflow CLI verbs are:
 
 | Command | Purpose |
 |---|---|
-| `wardian workflow exec <path> [--executor mock]` | Execute a workflow v2 blueprint headlessly and write a durable run. |
-| `wardian workflow runs` | List durable workflow v2 runs from `<wardian-home>/logs/workflows`. |
+| `wardian workflow exec <path> [--executor mock]` | Execute a workflow blueprint headlessly and write a durable run. |
+| `wardian workflow runs` | List durable workflow runs from `<wardian-home>/logs/workflows`. |
 | `wardian workflow run-show <blueprint-id> <run-id>` | Show one run's checkpoint state and event trace. |
 | `wardian workflow replay <blueprint-id> <run-id>` | Rebuild final state from the run event log without executing nodes. |
 | `wardian workflow parse <path>` | Parse a blueprint Markdown file and print the structured blueprint JSON. |
@@ -60,7 +60,7 @@ executor and provider-runtime handoff.
 Bash:
 
 ```bash
-export WARDIAN_HOME="$PWD/.tmp/wardian-workflow-v2"
+export WARDIAN_HOME="$PWD/.tmp/wardian-workflow"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/demo.md"
 wardian workflow runs
 wardian workflow run-show demo <run-id>
@@ -73,7 +73,7 @@ wardian workflow normalize "$WARDIAN_HOME/library/workflows/demo.md" --write
 PowerShell:
 
 ```powershell
-$env:WARDIAN_HOME = "$PWD\.tmp\wardian-workflow-v2"
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-workflow"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\demo.md"
 wardian workflow runs
 wardian workflow run-show demo <run-id>
@@ -83,7 +83,7 @@ wardian workflow normalize "$env:WARDIAN_HOME\library\workflows\demo.md"
 wardian workflow normalize "$env:WARDIAN_HOME\library\workflows\demo.md" --write
 ```
 
-The v1 app-owned commands remain valid during the migration:
+The old workflow system app-owned commands remain valid during the migration:
 
 ```bash
 wardian workflow list

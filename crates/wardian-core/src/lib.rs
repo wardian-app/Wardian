@@ -1,4 +1,5 @@
 pub mod control;
+pub mod conversation_lease;
 pub mod db;
 pub mod engine;
 pub mod identity;

@@ -1,65 +1,103 @@
 # Workflow Engine Architecture
 
-The Wardian Workflow Engine is a **Deterministic, Event-Driven Execution Environment** designed for multi-agent orchestration. It supports manual, scheduled, and listener-style triggers; conditional logic; loops; waits; agent execution modes; shared storage; and workflow run telemetry.
+Wardian's current workflow engine is the durable blueprint runner in `wardian-core`.
+Blueprints live as markdown-backed workflow definitions, execute through
+`wardian_core::engine`, and are launched by the Tauri workflow commands in
+`src-tauri/src/commands/workflow.rs`.
 
-## 🧱 Core Concepts
+The old JSON workflow system used `run_workflow`, `WorkflowDefinition`,
+`workflow_engine`, trigger nodes, and live telemetry events. Treat those names as
+old workflow system references only; new workflow work should use the blueprint,
+run-log, and schedule APIs below.
 
-### 1. The Registry (Stateful Context)
-The engine maintains a transient `HashMap<String, Value>` called the **Registry** during a workflow run.
-- **`nodes.[id]`**: Stores the output of each node.
-- **`trigger`**: Stores the payload that initiated the run (e.g., Cron timestamp, File Watcher event).
-- **`storage`**: Provides access to `shared_storage.json` for cross-workflow persistence.
+## Core Concepts
 
-### 2. Transactional Consumption Logic
-Unlike traditional DAGs, Wardian supports **Cycles** and **Loops** through a pulse-based consumption model:
-- **Pulses**: When a node finishes, it "pulses" its output ports.
-- **Consumption**: A downstream node only executes if it has "unconsumed pulses" from its dependencies.
-- **Wait Nodes**: Specifically require a pulse from *every* dependency before triggering.
+### Blueprint
 
-### 3. Internal Candidate Queue
-Each run owns a FIFO queue of candidate node IDs. The engine seeds the queue from trigger entry points, pops one node at a time, validates dependency consumption, executes the node, stores output in the registry, and enqueues downstream candidates. This keeps graph execution inspectable without making each agent node responsible for orchestrating the rest of the graph.
+A workflow blueprint is the authored graph. It declares nodes, edges, fields, and
+registry-backed node types. The current authoring surface writes markdown
+blueprints under `library/workflows`, and the backend parses and validates them
+through `wardian_core::workflow`.
 
-## 🚀 Execution Flow
+### Run
 
-1. **Trigger Phase**:
-   - **Cron**: Uses the `cron` crate to evaluate standard expressions.
-   - **File Watcher**: Uses the `notify` crate to monitor filesystem events.
-   - **Manual**: Triggered via the `run_workflow` Tauri command.
-2. **Initialization**:
-   - Resolves the `WorkflowDefinition` from JSON.
-   - Sets up the `Registry` and execution queue by identifying entry-point candidates.
-3. **The Loop**:
-   - Pops a candidate node ID from the execution queue.
-   - Validates dependency satisfaction (Transactional Logic).
-   - Executes node-specific logic (see below).
-   - Updates the `Registry` and pulses downstream nodes.
-4. **Finalization**:
-   - Emits telemetry events (`workflow-telemetry`) for real-time UI visualization.
-   - Emits workflow completion status for app-level subscribers.
-   - Persists `shared_storage.json` if memory nodes were used.
+A run is one execution instance of a blueprint. Runs are durable on disk under
+`logs/workflows/<blueprint-id>/<run-id>/` and write:
 
-## 🧩 Node Types & Logic
+- `events.jsonl` for append-only execution events;
+- `state.json` for the current checkpoint;
+- run-local files such as cancellation markers.
 
-### Agent Node
-The most complex node type. The builder exposes one execution policy selector:
+The frontend Observe and Monitor modes read these durable files through
+`workflow_list_runs` and `workflow_read_run`; workflow progress is not driven by
+the old workflow system telemetry events.
 
-- **`ephemeral`**: build a fresh workflow-run agent config from the node's class and folder fields.
-- **`inherit_fresh`**: clone the selected agent's provider, class, workspace, skills, and scoped read configuration, but clear provider resume state and run under a workflow-run session ID.
-- **`inherit_resume`**: intentionally use the selected agent's provider session and mutable runtime state.
+### Invoker
 
-The backend resolves that selector into an `AgentExecutionContext` before launch. Fresh modes use headless execution and must not kill or mutate a live source agent. Resume mode may use the live PTY for text output, or temporarily switch to provider-native headless execution for structured JSON output when the provider requires it.
+An invoker supplies the context for a run. Manual runs, schedules, and future
+file/webhook listeners all use the same contract:
 
-Workflow-spawned agent runs skip interactive startup prompts. Provider resume flags are emitted only when the resolved context is `inherit_resume`.
+- `input`: the trigger payload available to template fields as `trigger.output`;
+- `bindings`: per-run role or class overrides for agent selection;
+- optional provider and workspace overrides.
 
-### Logic Node
-Evaluates a string condition (e.g., `nodes.gatekeeper.output.decision === 'PROCEED'`) using a regex-based parser. Pulses either the `on_true` or `on_false` port.
+Schedules are persisted invokers stored in `library/schedules.json` and managed
+by `schedule_create`, `schedule_list`, `schedule_pause`, `schedule_resume`,
+`schedule_remove`, and `schedule_run_now`.
 
-### Loop Node
-Maintains an internal iterator count in the `Registry`. Pulses the `body` port until the limit is reached, then pulses `done`.
+### Registry
 
-### Memory Node
-Performs `get`, `set`, or `delete` operations on the `shared_storage.json` file.
+During execution the engine keeps a registry of run data:
 
-## 🔒 Security & Isolation
-- **Headless Execution**: Uses `tokio::process::Command` with strictly limited `current_dir` validation via `validate_workspace_path`.
-- **Interpolation**: All strings (prompts, paths, commands) are safely interpolated using `\{\{nodes.id.output.path\}\}` syntax before execution.
+- `nodes.<id>.output`: the output from completed nodes;
+- `trigger.output`: the invocation input payload;
+- `storage`: persistent workflow storage made available to interpolation.
+
+Template fields resolve against this registry before each node executes.
+
+## Execution Flow
+
+1. The frontend or scheduler calls `workflow_run` with a blueprint path and
+   invocation context.
+2. The backend parses and validates the blueprint.
+3. `LiveStepExecutor` resolves agents, shell/script actions, notify operations,
+   and state operations.
+4. `wardian_core::engine` drives runnable nodes, records events, and checkpoints
+   state.
+5. Observe and Monitor refresh durable run state through `workflow_read_run`.
+
+Resume and human approval use the same durable run records:
+
+- `workflow_resume` resumes an interrupted run;
+- `workflow_approve` grants or rejects an approval gate;
+- `workflow_cancel` writes a cancellation marker for a live run.
+
+## Agent Execution
+
+Task and decision nodes resolve their `agent` field through the workflow
+resolver:
+
+- `role:<name>` or `class:<name>` resolves to a headless worker unless an
+  invocation binding overrides it;
+- explicit active-agent bindings can route a role to a selected agent;
+- provider-supplied fresh agents remain available through provider/workspace
+  defaults when no active-agent binding is supplied.
+
+Headless execution uses the provider adapters behind
+`run_headless_with_options`, with structured output parsed into node outputs.
+
+## Old Workflow System
+
+The old workflow system remains relevant only as migration history and
+compatibility cleanup:
+
+- `workflow_engine/`
+- `WorkflowDefinition`
+- `run_workflow`
+- `list_workflows`
+- `ScheduledRun`
+- `scheduled_workflows.json`
+
+Do not add new behavior to that surface. New workflow behavior belongs in
+`wardian-core`, `src-tauri/src/workflow/`, and the unversioned workflow Tauri
+commands.

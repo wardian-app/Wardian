@@ -1,6 +1,12 @@
-# Visual Builder Architecture
+# Workflow Builder Architecture
 
-The Wardian Visual Builder provides a node-based interface for designing complex, multi-agent workflows. It translates a visual Directed Acyclic Graph (DAG) into the JSON-native `WorkflowDefinition` executed by the Rust backend.
+The Wardian workflow builder is the current node-based authoring surface for
+workflow blueprints. It edits the markdown-backed `Blueprint` model consumed by
+`wardian_core::workflow` and executed by the durable workflow engine.
+
+The old workflow system visual builder produced JSON `WorkflowDefinition`
+records. Treat `WorkflowDefinition` and old trigger-node behavior as old
+workflow system concepts, not the current authoring contract.
 
 ## 🎨 The Canvas
 Built on top of React Flow, the canvas provides a drag-and-drop environment for positioning nodes and defining execution paths (edges). 
@@ -8,13 +14,19 @@ Built on top of React Flow, the canvas provides a drag-and-drop environment for 
 ### Type-Safe Port System
 Nodes communicate via defined input and output ports. The visual builder enforces "type-safety" at the connection level:
 - Ports are visually and logically distinguished (e.g., `default`, `body`, `done`, `on_true`, `on_false`).
-- This maps directly to the **Transactional Consumption Logic** used by the backend workflow engine.
+- This maps directly to the current workflow engine's graph execution model.
 
 ## 🧠 Integrated Variable Assistant (IVA)
-A standout feature of the Wardian Visual Builder is the **Integrated Variable Assistant (IVA)**. Instead of requiring users to memorize the exact dot-notation paths of upstream node outputs, the IVA provides a contextual, interactive cheat sheet.
+A standout feature of the workflow builder is the **Integrated Variable
+Assistant (IVA)**. Instead of requiring users to memorize the exact dot-notation
+paths of upstream node outputs, the IVA provides a contextual, interactive cheat
+sheet.
 
 ### How it Works
-The IVA is implemented as a React component (`VariableAssistant.tsx`) that sits alongside the canvas. When a node is selected, the IVA calculates the specific execution path leading up to that node and displays available variables.
+The IVA is implemented as a React component (`VariableAssistant.tsx`) that sits
+alongside the selected node fields. When a node is selected, the IVA calculates
+the specific execution path leading up to that node and displays available
+variables.
 
 #### 1. Upstream Context Calculation
 The IVA uses a custom hook (`useUpstreamContext.ts`) to traverse the graph backwards from the currently selected node. It identifies all upstream nodes whose outputs are guaranteed to be available in the `Registry` when the selected node executes.

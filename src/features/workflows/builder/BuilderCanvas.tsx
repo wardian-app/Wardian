@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from 'react';
 import {
   addEdge,
   applyEdgeChanges,
@@ -11,6 +11,7 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useReactFlow,
   type ColorMode,
   type Connection,
   type Edge,
@@ -22,6 +23,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { toReactFlow, fromReactFlow } from './blueprintGraph';
 import { findNodeType } from './registry';
+import { describeNodeFields } from './nodeSummary';
 import { useBuilderStore } from '../../../store/useBuilderStore';
 import type { Blueprint, BlueprintNode, Diagnostic, PortDef } from './blueprintTypes';
 
@@ -30,13 +32,53 @@ interface BuilderCanvasProps {
   diagnostics: Diagnostic[];
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
+  onRequestAddNode?: () => void;
+  onNodeContextMenu?: (nodeId: string, x: number, y: number) => void;
+  onEdgeContextMenu?: (edgeId: string, x: number, y: number) => void;
   theme: 'dark' | 'light' | 'system';
 }
 
 type BuilderNodeData = { node: BlueprintNode; diagnostics?: Diagnostic[] };
+type FlowContextMenuEvent = MouseEvent | ReactMouseEvent<Element, MouseEvent>;
 
-export function BuilderCanvas({ blueprint, diagnostics, selectedNodeId, onSelectNode, theme }: BuilderCanvasProps) {
+export function BuilderCanvas({
+  blueprint,
+  diagnostics,
+  selectedNodeId,
+  onSelectNode,
+  onRequestAddNode,
+  onNodeContextMenu,
+  onEdgeContextMenu,
+  theme,
+}: BuilderCanvasProps) {
+  return (
+    <ReactFlowProvider>
+      <BuilderCanvasInner
+        blueprint={blueprint}
+        diagnostics={diagnostics}
+        selectedNodeId={selectedNodeId}
+        onSelectNode={onSelectNode}
+        onRequestAddNode={onRequestAddNode}
+        onNodeContextMenu={onNodeContextMenu}
+        onEdgeContextMenu={onEdgeContextMenu}
+        theme={theme}
+      />
+    </ReactFlowProvider>
+  );
+}
+
+function BuilderCanvasInner({
+  blueprint,
+  diagnostics,
+  selectedNodeId,
+  onSelectNode,
+  onRequestAddNode,
+  onNodeContextMenu,
+  onEdgeContextMenu,
+  theme,
+}: BuilderCanvasProps) {
   const setBlueprint = useBuilderStore((state) => state.setBlueprint);
+  const { fitView } = useReactFlow();
 
   const graph = useMemo(() => {
     const rf = toReactFlow(blueprint);
@@ -69,7 +111,9 @@ export function BuilderCanvas({ blueprint, diagnostics, selectedNodeId, onSelect
   }, [blueprint.id, blueprint.name, blueprint.schema, setBlueprint]);
 
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
-    commitGraph(applyNodeChanges(changes, graph.nodes), graph.edges);
+    const blueprintChanges = changes.filter((change) => change.type !== 'dimensions' && change.type !== 'select');
+    if (blueprintChanges.length === 0) return;
+    commitGraph(applyNodeChanges(blueprintChanges, graph.nodes), graph.edges);
   }, [commitGraph, graph.edges, graph.nodes]);
 
   const handleEdgesChange = useCallback((changes: EdgeChange[]) => {
@@ -81,30 +125,56 @@ export function BuilderCanvas({ blueprint, diagnostics, selectedNodeId, onSelect
     commitGraph(graph.nodes, addEdge({ ...connection, id: edgeId }, graph.edges));
   }, [commitGraph, graph.edges, graph.nodes]);
 
+  const handlePaneContextMenu = useCallback((event: FlowContextMenuEvent) => {
+    event.preventDefault();
+    onRequestAddNode?.();
+  }, [onRequestAddNode]);
+
+  const handleNodeContextMenu = useCallback((event: FlowContextMenuEvent, node: Node) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onNodeContextMenu?.(node.id, event.clientX, event.clientY);
+  }, [onNodeContextMenu]);
+
+  const handleEdgeContextMenu = useCallback((event: FlowContextMenuEvent, edge: Edge) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onEdgeContextMenu?.(edge.id, event.clientX, event.clientY);
+  }, [onEdgeContextMenu]);
+
+  useEffect(() => {
+    if (graph.nodes.length === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      void fitView({ padding: 0.2, duration: 120 });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [blueprint.id, graph.nodes.length, fitView]);
+
   return (
-    <ReactFlowProvider>
-      <ReactFlow
-        nodes={graph.nodes}
-        edges={graph.edges}
-        nodeTypes={nodeTypes}
-        onNodesChange={handleNodesChange}
-        onEdgesChange={handleEdgesChange}
-        onConnect={handleConnect}
-        onNodeClick={(_, node) => onSelectNode(node.id)}
-        onPaneClick={() => onSelectNode(null)}
-        fitView
-        colorMode={flowColorMode}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--color-wardian-border-heavy)" />
-        <Controls className="!bg-[var(--color-wardian-card)] !border-wardian-border !fill-[var(--color-wardian-text)]" />
-        <MiniMap
-          className="!bg-[var(--color-wardian-card)] !border-wardian-border"
-          maskColor="color-mix(in srgb, var(--color-wardian-bg), transparent 50%)"
-          nodeStrokeWidth={3}
-        />
-      </ReactFlow>
-    </ReactFlowProvider>
+    <ReactFlow
+      nodes={graph.nodes}
+      edges={graph.edges}
+      nodeTypes={nodeTypes}
+      onNodesChange={handleNodesChange}
+      onEdgesChange={handleEdgesChange}
+      onConnect={handleConnect}
+      onNodeClick={(_, node) => onSelectNode(node.id)}
+      onPaneClick={() => onSelectNode(null)}
+      onPaneContextMenu={handlePaneContextMenu}
+      onNodeContextMenu={handleNodeContextMenu}
+      onEdgeContextMenu={handleEdgeContextMenu}
+      fitView
+      colorMode={flowColorMode}
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="var(--color-wardian-border-heavy)" />
+      <Controls className="!bg-[var(--color-wardian-card)] !border-wardian-border !fill-[var(--color-wardian-text)]" />
+      <MiniMap
+        className="!bg-[var(--color-wardian-card)] !border-wardian-border"
+        maskColor="color-mix(in srgb, var(--color-wardian-bg), transparent 50%)"
+        nodeStrokeWidth={3}
+      />
+    </ReactFlow>
   );
 }
 
@@ -112,9 +182,10 @@ const BuilderNode = memo(({ data, selected }: NodeProps<Node<BuilderNodeData>>) 
   const node = data.node;
   const def = findNodeType(node.type);
   const hasDiagnostics = Boolean(data.diagnostics?.some((d) => d.severity === 'error'));
+  const summaries = describeNodeFields(node, def);
 
   return (
-    <div className={`w-[260px] rounded-lg border-2 bg-[var(--color-wardian-card)] px-3 py-3 shadow-md transition-all ${
+    <div data-testid={`builder-node-${node.id}`} className={`w-[260px] rounded-lg border-2 bg-[var(--color-wardian-card)] px-3 py-3 shadow-md transition-all ${
       hasDiagnostics
         ? 'border-[var(--color-wardian-error)]'
         : selected
@@ -133,6 +204,18 @@ const BuilderNode = memo(({ data, selected }: NodeProps<Node<BuilderNodeData>>) 
         {def?.description && (
           <div className="line-clamp-2 text-[10px] leading-snug text-muted">{def.description}</div>
         )}
+        {summaries.length > 0 ? (
+          <div className="grid gap-1 border-t border-wardian-border pt-2">
+            {summaries.map((summary) => (
+              <div key={summary.label} className="grid grid-cols-[74px_minmax(0,1fr)] gap-2 text-[10px] leading-tight">
+                <span className="truncate font-bold text-[var(--color-wardian-text-muted)]">{summary.label}</span>
+                <span className={`truncate ${summary.state === 'missing' ? 'text-[var(--color-wardian-error)]' : 'text-[var(--color-wardian-text)]'}`}>
+                  {summary.value}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
       {renderHandles('source', outputPorts(node, def?.outputs ?? [], def?.outputs_from_field), Position.Right)}
     </div>
@@ -145,7 +228,7 @@ const LoopGroupNode = memo(({ data, selected }: NodeProps<Node<BuilderNodeData>>
   const hasDiagnostics = Boolean(data.diagnostics?.some((d) => d.severity === 'error'));
 
   return (
-    <div className={`h-full min-h-[220px] w-full min-w-[360px] rounded-lg border-2 bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_20%)] px-4 py-3 ${
+    <div data-testid={`builder-node-${node.id}`} className={`h-full min-h-[220px] w-full min-w-[360px] rounded-lg border-2 bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_20%)] px-4 py-3 ${
       hasDiagnostics
         ? 'border-[var(--color-wardian-error)]'
         : selected
@@ -171,7 +254,7 @@ function portsFor(ports: PortDef[]) {
 
 function outputPorts(node: BlueprintNode, ports: PortDef[], dynamicField?: string) {
   if (!dynamicField) return portsFor(ports);
-  const dynamic = node.fields[dynamicField];
+  const dynamic = node.fields?.[dynamicField];
   if (!Array.isArray(dynamic)) return portsFor(ports);
   return dynamic.map((port) => ({ id: String(port), label: String(port) }));
 }

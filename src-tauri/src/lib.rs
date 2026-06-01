@@ -5,7 +5,7 @@ pub mod providers;
 pub mod remote;
 pub mod state;
 pub mod utils;
-pub mod workflow_v2;
+pub mod workflow;
 pub use wardian_core::models;
 
 // Tauri's Windows resource contains the Common Controls v6 manifest required by
@@ -214,10 +214,10 @@ pub fn run() {
             start_metrics_supervisor(app.handle().clone());
 
             if let Some(runs_dir) = wardian_core::paths::workflow_runs_dir() {
-                let interrupted = crate::workflow_v2::runs::scan_interrupted_runs(&runs_dir);
+                let interrupted = crate::workflow::runs::scan_interrupted_runs(&runs_dir);
                 if !interrupted.is_empty() {
                     crate::utils::logging::log_debug(&format!(
-                        "[workflow-v2] {} interrupted run(s) on startup: {:?}",
+                        "[workflow] {} interrupted run(s) on startup: {:?}",
                         interrupted.len(),
                         interrupted
                     ));
@@ -232,7 +232,7 @@ pub fn run() {
                 if let Err(e) = reconcile_headless_agents().await {
                     eprintln!("Failed to reconcile headless agents: {}", e);
                 }
-                crate::workflow_v2::schedule::start_v2_scheduler(app_handle.clone()).await;
+                crate::workflow::schedule::start_scheduler(app_handle.clone()).await;
 
                 if let Some(app_dir) = manager::get_wardian_home() {
                     let state_path = app_dir.join("settings/state.json");
@@ -446,16 +446,16 @@ pub fn run() {
             commands::workflow::workflow_list_blueprints,
             commands::workflow::workflow_list_runs,
             commands::workflow::workflow_read_run,
-            commands::workflow::workflow_run_v2,
-            commands::workflow::workflow_resume_v2,
-            commands::workflow::workflow_approve_v2,
-            commands::workflow::workflow_cancel_v2,
-            commands::workflow::schedule_create_v2,
-            commands::workflow::schedule_list_v2,
-            commands::workflow::schedule_pause_v2,
-            commands::workflow::schedule_resume_v2,
-            commands::workflow::schedule_remove_v2,
-            commands::workflow::schedule_run_now_v2,
+            commands::workflow::workflow_run,
+            commands::workflow::workflow_resume,
+            commands::workflow::workflow_approve,
+            commands::workflow::workflow_cancel,
+            commands::workflow::schedule_create,
+            commands::workflow::schedule_list,
+            commands::workflow::schedule_pause,
+            commands::workflow::schedule_resume,
+            commands::workflow::schedule_remove,
+            commands::workflow::schedule_run_now,
             commands::library::get_library_tree,
             commands::library::save_library_item,
             commands::library::update_library_metadata,

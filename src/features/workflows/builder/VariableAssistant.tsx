@@ -1,15 +1,15 @@
 import { memo, useState } from 'react';
 import type { Blueprint } from './blueprintTypes';
-import { useUpstreamContextV2 } from './useUpstreamContextV2';
+import { useUpstreamContext } from './useUpstreamContext';
 
-interface VariableAssistantV2Props {
+interface VariableAssistantProps {
   blueprint: Blueprint | null;
   selectedNodeId: string | null;
 }
 
-export const VariableAssistantV2 = memo(({ blueprint, selectedNodeId }: VariableAssistantV2Props) => {
+export const VariableAssistant = memo(({ blueprint, selectedNodeId }: VariableAssistantProps) => {
   const [copied, setCopied] = useState<string | null>(null);
-  const variables = useUpstreamContextV2(blueprint, selectedNodeId);
+  const variables = useUpstreamContext(blueprint, selectedNodeId);
 
   const copyVariable = (token: string) => {
     navigator.clipboard?.writeText(token);
@@ -18,17 +18,18 @@ export const VariableAssistantV2 = memo(({ blueprint, selectedNodeId }: Variable
   };
 
   return (
-    <div className="flex flex-col rounded-lg border border-wardian-border bg-[var(--color-wardian-card)]">
-      <div className="border-b border-wardian-border px-3 py-2">
-        <div className="text-[10px] font-bold tracking-wide text-muted">Variable Assistant</div>
+    <div className="grid gap-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-wide text-muted">Insert variable</div>
+        <div className="text-[9px] font-mono text-muted">{variables.length}</div>
       </div>
-      <div className="flex flex-col gap-1 p-3">
+      <div className="grid gap-1">
         {variables.map((token) => (
           <button
             key={token}
             type="button"
             onClick={() => copyVariable(token)}
-            className="flex items-center justify-between gap-3 rounded-md border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1.5 text-left text-[10px] font-mono text-[var(--color-wardian-text)] transition-colors hover:border-[var(--color-wardian-accent)]"
+            className="flex h-8 items-center justify-between gap-2 rounded-md border border-wardian-border bg-[var(--color-wardian-bg)] px-2 text-left text-[10px] font-mono text-[var(--color-wardian-text)] transition-colors hover:border-[var(--color-wardian-accent)]"
             title={token}
           >
             <span className="truncate">{token}</span>

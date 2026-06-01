@@ -23,6 +23,39 @@ const blueprint = {
   ],
 };
 
+const loopBlueprint = {
+  schema: 2,
+  id: "loop-test",
+  name: "Loop Test",
+  nodes: [
+    { id: "trigger-1", type: "manual_trigger", position: { x: -928, y: 497 } },
+    { id: "loop-1", type: "loop", name: "Loop", fields: { max_iterations: 3 }, position: { x: -450, y: 508 } },
+    {
+      id: "command-1",
+      type: "shell",
+      name: "Shell Command",
+      parent: "loop-1",
+      fields: { command: "echo \"Hello!\"", cwd: "D:/Development" },
+      position: { x: -42, y: 219 },
+    },
+    {
+      id: "communication-1",
+      type: "notify",
+      name: "Notify",
+      parent: "loop-1",
+      fields: { message: "Test iteration" },
+      position: { x: 288, y: 310 },
+    },
+    { id: "communication-2", type: "notify", name: "Notify Done", fields: { message: "Done!" }, position: { x: -30, y: 691 } },
+  ],
+  edges: [
+    { from: "trigger-1", to: "loop-1", from_port: "out", to_port: "in" },
+    { from: "loop-1", to: "command-1", from_port: "body", to_port: "in" },
+    { from: "command-1", to: "communication-1", from_port: "out", to_port: "in" },
+    { from: "loop-1", to: "communication-2", from_port: "done", to_port: "in" },
+  ],
+};
+
 const events = [
   { seq: 0, ts: "t0", kind: "run_started", blueprint_id: "wf", schema: 2, trigger: {} },
   { seq: 1, ts: "t1", kind: "node_started", node: "plan" },
@@ -32,17 +65,17 @@ const events = [
   { seq: 5, ts: "t5", kind: "run_completed" },
 ];
 
-async function installWorkflowsV2IpcMock(page: Page) {
+async function installWorkflowsIpcMock(page: Page, blueprintFixture = blueprint) {
   await page.addInitScript(({ blueprintFixture, eventFixture }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
     const tauriWindow = window as Window & {
-      __workflowsV2Invokes?: Array<{ command: string; args?: Record<string, unknown> }>;
+      __workflowsInvokes?: Array<{ command: string; args?: Record<string, unknown> }>;
       __TAURI_INTERNALS__?: Record<string, unknown>;
       __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
     };
 
-    tauriWindow.__workflowsV2Invokes = [];
+    tauriWindow.__workflowsInvokes = [];
     tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: () => undefined,
     };
@@ -62,7 +95,7 @@ async function installWorkflowsV2IpcMock(page: Page) {
       },
       convertFileSrc: (filePath: string) => filePath,
       invoke: async (command: string, args?: Record<string, unknown>) => {
-        tauriWindow.__workflowsV2Invokes?.push({ command, args });
+        tauriWindow.__workflowsInvokes?.push({ command, args });
 
         if (command === "list_agents") return [];
         if (command === "list_agent_classes") return [];
@@ -111,7 +144,7 @@ async function installWorkflowsV2IpcMock(page: Page) {
         if (command === "workflow_validate") {
           return { ok: true, diagnostics: [] };
         }
-        if (command === "workflow_run_v2") {
+        if (command === "workflow_run") {
           return { ok: true, run_id: "run-1", blueprint_id: "wf", run_dir: "/runs/run-1" };
         }
         if (command === "workflow_list_runs") {
@@ -146,7 +179,7 @@ async function installWorkflowsV2IpcMock(page: Page) {
         return null;
       },
     };
-  }, { blueprintFixture: blueprint, eventFixture: events });
+  }, { blueprintFixture, eventFixture: events });
 }
 
 function nodeById(page: Page, id: string) {
@@ -158,7 +191,7 @@ function builderNodeById(page: Page, id: string) {
 }
 
 test("unified Workflows view edits, launches, observes, and returns to edit", async ({ page }) => {
-  await installWorkflowsV2IpcMock(page);
+  await installWorkflowsIpcMock(page);
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
@@ -188,7 +221,8 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
   await page.getByRole("dialog").getByRole("button", { name: /^Run$/ }).click();
 
   await expect(page.getByTestId("workflows-observe-mode")).toBeVisible();
-  await expect(page.getByRole("button", { name: /run-1/ })).toBeVisible();
+  await expect(page.getByTestId("workflows-observe-mode").getByText("run-1")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Runs" })).toHaveCount(0);
   await expect(nodeById(page, "plan")).toHaveAttribute("data-status", "completed");
   await expect(nodeById(page, "ship")).toHaveAttribute("data-status", "completed");
 
@@ -197,7 +231,48 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
   await expect(builderNodeById(page, "plan")).toHaveCount(1);
   await expect(builderNodeById(page, "ship")).toHaveCount(1);
 
-  const invokes = await page.evaluate(() => window.__workflowsV2Invokes);
-  expect(invokes?.some((call) => call.command === "workflow_run_v2")).toBe(true);
+  const invokes = await page.evaluate(() => window.__workflowsInvokes);
+  expect(invokes?.some((call) => call.command === "workflow_run")).toBe(true);
   expect(invokes?.some((call) => call.command === "workflow_read_run")).toBe(true);
+});
+
+test("workflow builder renders persisted loop workflow nodes on a visible canvas", async ({ page }) => {
+  await installWorkflowsIpcMock(page, loopBlueprint);
+  await page.setViewportSize({ width: 1700, height: 980 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+  const titlebar = page.locator(".titlebar-center");
+  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await page.getByTestId("blueprint-selector").getByRole("combobox").selectOption("/x/wf.md");
+
+  await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
+  await expect(page.locator(".react-flow__node")).toHaveCount(loopBlueprint.nodes.length);
+
+  const canvasBox = await page.locator(".react-flow").boundingBox();
+  expect(canvasBox?.width).toBeGreaterThan(400);
+  expect(canvasBox?.height).toBeGreaterThan(300);
+
+  const nodeBoxes = await page.locator(".react-flow__node").evaluateAll((nodes) => (
+    nodes.map((node) => {
+      const rect = node.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    })
+  ));
+  expect(nodeBoxes.every((box) => box.width > 0 && box.height > 0)).toBe(true);
+
+  const nodeVisibility = await page.locator(".react-flow__node").evaluateAll((nodes) => (
+    nodes.map((node) => getComputedStyle(node).visibility)
+  ));
+  expect(nodeVisibility.every((visibility) => visibility === "visible")).toBe(true);
+
+  const visibleNodeBoxes = await page.locator(".react-flow__node").evaluateAll((nodes) => (
+    nodes.map((node) => {
+      const rect = node.getBoundingClientRect();
+      const canvas = node.closest(".react-flow")?.getBoundingClientRect();
+      if (!canvas) return false;
+      return rect.right > canvas.left && rect.left < canvas.right && rect.bottom > canvas.top && rect.top < canvas.bottom;
+    })
+  ));
+  expect(visibleNodeBoxes.some(Boolean)).toBe(true);
 });

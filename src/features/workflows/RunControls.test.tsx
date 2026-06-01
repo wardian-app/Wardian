@@ -29,7 +29,7 @@ describe('RunControls', () => {
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith('workflow_cancel_v2', { blueprintId: 'wf', runId: 'run-1' });
+      expect(invokeMock).toHaveBeenCalledWith('workflow_cancel', { blueprintId: 'wf', runId: 'run-1' });
     });
   });
 
@@ -47,7 +47,7 @@ describe('RunControls', () => {
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith(
-        'workflow_approve_v2',
+        'workflow_approve',
         expect.objectContaining({ blueprintId: 'wf', runId: 'run-1', node: 'gate', granted: true }),
       );
     });

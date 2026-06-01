@@ -1,18 +1,18 @@
-# Workflow Engine v2 — Live Executor (sub-project 5a) Design
+# Workflow Engine — Live Executor (sub-project 5a) Design
 
 - **Status:** Implemented (5a)
 - **Date:** 2026-05-29
-- **Part of:** [Workflow Engine v2 epic (#425)]; follows sub-projects 1 (library/registry), 2 (durable engine), 3a (builder), 3b (run view), 4 (CLI).
+- **Part of:** [Workflow rework epic (#425)]; follows sub-projects 1 (library/registry), 2 (durable engine), 3a (builder), 3b (run view), 4 (CLI).
 
-> **Structure note:** the v2 engine/workflow logic lives as modules in `wardian-core` (`wardian_core::engine`, `wardian_core::workflow`). The live executor lives in `src-tauri` because it owns the agent runtime. Read "executor" as a `src-tauri` impl of the `wardian_core::engine::StepExecutor` trait.
+> **Structure note:** the workflow engine/workflow logic lives as modules in `wardian-core` (`wardian_core::engine`, `wardian_core::workflow`). The live executor lives in `src-tauri` because it owns the agent runtime. Read "executor" as a `src-tauri` impl of the `wardian_core::engine::StepExecutor` trait.
 
-> **Implementation note (5a):** shipped the `src-tauri` live executor, headless/fake runner boundary, output and decision parsing, agent resolution, shell/script/notify/state ops, run/resume/approve/cancel commands, startup interrupted-run logging, and mock-provider end-to-end validation. Deferred scope remains live named-agent routing, visible grouped workers, per-node worktrees, scheduled/event triggers, per-run session continuity, v1 retirement, and UI unification.
+> **Implementation note (5a):** shipped the `src-tauri` live executor, headless/fake runner boundary, output and decision parsing, agent resolution, shell/script/notify/state ops, run/resume/approve/cancel commands, startup interrupted-run logging, and mock-provider end-to-end validation. Deferred scope remains live named-agent routing, visible grouped workers, per-node worktrees, scheduled/event triggers, per-run session continuity, old workflow system retirement, and UI unification.
 
 ## 1. Problem & goal
 
-The v2 durable engine (`wardian_core::engine`) executes a validated blueprint as a resumable run, but every side-effecting step goes through the dependency-inverted `StepExecutor` trait — and the only implementation today is `MockExecutor`. So v2 can author (builder), observe (run view), and mock-execute (CLI), but **nothing drives real agents**. v1's `workflow_engine` is still the only thing that actually runs a workflow against live agents.
+The workflow durable engine (`wardian_core::engine`) executes a validated blueprint as a resumable run, but every side-effecting step goes through the dependency-inverted `StepExecutor` trait — and the only implementation today is `MockExecutor`. So workflow can author (builder), observe (run view), and mock-execute (CLI), but **nothing drives real agents**. old workflow system's `workflow_engine` is still the only thing that actually runs a workflow against live agents.
 
-**Goal of 5a:** a real `StepExecutor` (`LiveStepExecutor`) in `src-tauri` that drives live work, plus the Tauri commands to launch / resume / cancel a run and pause for approval. This makes v2 actually execute and is the prerequisite for retiring v1 (5c) and unifying the workflow UI (5b).
+**Goal of 5a:** a real `StepExecutor` (`LiveStepExecutor`) in `src-tauri` that drives live work, plus the Tauri commands to launch / resume / cancel a run and pause for approval. This makes workflow actually execute and is the prerequisite for retiring old workflow system (5c) and unifying the workflow UI (5b).
 
 **Non-goal / explicitly deferred:** live named-agent routing (sending a step to an already-running interactive roster agent over its PTY), per-node git worktrees, scheduled/cron triggers, cross-run concurrency caps, and per-run agent session continuity. See §7.
 
@@ -20,7 +20,7 @@ The v2 durable engine (`wardian_core::engine`) executes a validated blueprint as
 
 `src-tauri/src/manager/headless.rs::run_headless_with_options` already spawns a provider in one-shot headless mode (codex `exec --json`, claude `--print`, opencode `run --format json`, antigravity `--print`, **`mock`**), reads its output, and **returns the agent's final response as a value**. It is **request/response, not a PTY** — so it never uses the `ask`/`reply` channels (whose headless behavior is unvalidated). This is the correct transport primitive for headless workers.
 
-**Caveat (explicit):** v1's headless *orchestration* was buggy. We treat `run_headless` as the right building block but **not** as proven, and we do **not** copy v1's patterns. 5a builds a clean executor and validates the primitive end-to-end (mock provider integration test + a gated real-provider smoke). v1's `workflow_engine` headless code is a cautionary reference only.
+**Caveat (explicit):** old workflow system's headless *orchestration* was buggy. We treat `run_headless` as the right building block but **not** as proven, and we do **not** copy old workflow system's patterns. 5a builds a clean executor and validates the primitive end-to-end (mock provider integration test + a gated real-provider smoke). old workflow system's `workflow_engine` headless code is a cautionary reference only.
 
 ## 3. Agent resolution (hybrid by reference)
 
@@ -31,7 +31,7 @@ A Task/Decision node's `agent` field resolves as:
 
 ## 4. `LiveStepExecutor` (the StepExecutor impl)
 
-New module `src-tauri/src/workflow_v2/` with `LiveStepExecutor` implementing `wardian_core::engine::StepExecutor`. Each side-effecting trait method maps to a real action:
+New module `src-tauri/src/workflow/` with `LiveStepExecutor` implementing `wardian_core::engine::StepExecutor`. Each side-effecting trait method maps to a real action:
 
 - **`run_agent_task`** — resolve `agent` → build `AgentConfig` → `run_headless_with_options(cwd, prompt, session, "json", provider)` → take the returned response → **extract structured output**: if `output_schema` is set, parse/validate JSON (trailing fenced ```json block or whole response); otherwise best-effort parse, falling back to `{"text": <response>}`. Returns `StepOutput(value)` stored at `nodes.<id>.output`.
 - **`run_decision`** — same call, with the prompt appended: "Respond with exactly one of: `<choices>`." Parse the chosen port. If the answer is not a declared choice, **re-prompt once**; if still invalid, fail the node. Returns `ChosenPort`.
@@ -48,16 +48,16 @@ New module `src-tauri/src/workflow_v2/` with `LiveStepExecutor` implementing `wa
 
 ## 5. Run lifecycle (Tauri commands)
 
-- **`workflow_run_v2(path)`** — load + validate the blueprint (refuse to run if invalid), build a `LiveStepExecutor`, generate a `run_id`, set `run_root = paths::workflow_run_dir(bp.id, run_id)`, and drive `Engine::start_with_id` in a **background tokio task**. Returns the `run_id` immediately; the run proceeds async, writing `events.jsonl` + `state.json` that **Run View (3b) already observes live**.
-- **Approval** — when the engine reaches `AwaitingApproval` it returns and the status persists. `workflow_approve_v2(id, run, granted, note)` resumes via `Engine::grant_approval` / `reject_approval` in a new background task.
-- **`workflow_resume_v2(id, run)`** — resume an interrupted/paused run via `Engine::resume` (completed nodes skipped).
-- **`workflow_cancel_v2(id, run)`** — abort a live run (cancel the background task; mark the run failed/stopped with a reason).
-- **Crash recovery** — on app start, scan `logs/workflows/**` for runs still marked `Running` (their workers are gone) and mark them **interrupted**; Run View surfaces a **Resume** affordance that calls `workflow_resume_v2`. No auto-resume (no surprise re-execution of side-effecting steps at startup).
+- **`workflow_run(path)`** — load + validate the blueprint (refuse to run if invalid), build a `LiveStepExecutor`, generate a `run_id`, set `run_root = paths::workflow_run_dir(bp.id, run_id)`, and drive `Engine::start_with_id` in a **background tokio task**. Returns the `run_id` immediately; the run proceeds async, writing `events.jsonl` + `state.json` that **Run View (3b) already observes live**.
+- **Approval** — when the engine reaches `AwaitingApproval` it returns and the status persists. `workflow_approve(id, run, granted, note)` resumes via `Engine::grant_approval` / `reject_approval` in a new background task.
+- **`workflow_resume(id, run)`** — resume an interrupted/paused run via `Engine::resume` (completed nodes skipped).
+- **`workflow_cancel(id, run)`** — abort a live run (cancel the background task; mark the run failed/stopped with a reason).
+- **Crash recovery** — on app start, scan `logs/workflows/**` for runs still marked `Running` (their workers are gone) and mark them **interrupted**; Run View surfaces a **Resume** affordance that calls `workflow_resume`. No auto-resume (no surprise re-execution of side-effecting steps at startup).
 
 ## 6. Testing
 
 - **Unit** (`wardian-core` unchanged; tests in `src-tauri`): `LiveStepExecutor` with an injected fake `AgentRunner` — agent resolution, output/schema extraction, decision constraint + re-prompt, shell/script/state ops. No real spawn.
-- **Integration (the real validation):** end-to-end run through real `run_headless` with the **`mock` provider** — seed a blueprint in a temp `WARDIAN_HOME`, invoke `workflow_run_v2`, and assert the run dir / `events.jsonl` / terminal `state.json`, and that the CLI `runs`/`run-show` (sub-project 4) read it back. This properly validates the headless primitive that v1 used incorrectly.
+- **Integration (the real validation):** end-to-end run through real `run_headless` with the **`mock` provider** — seed a blueprint in a temp `WARDIAN_HOME`, invoke `workflow_run`, and assert the run dir / `events.jsonl` / terminal `state.json`, and that the CLI `runs`/`run-show` (sub-project 4) read it back. This properly validates the headless primitive that old workflow system used incorrectly.
 - **Real-provider smoke:** opt-in (one headless codex/claude task), gated like the other real-provider tests.
 
 ## 7. Scope boundaries (deferred to later sub-projects)
@@ -65,9 +65,9 @@ New module `src-tauri/src/workflow_v2/` with `LiveStepExecutor` implementing `wa
 - **Live named-agent routing** (PTY send/await/capture against a running roster agent) — the unvalidated transport; its own follow-up.
 - **Visible/grouped run workers** in the Command Center (5a workers are headless).
 - **Per-node git worktrees** for isolation.
-- **Scheduled / event triggers** — 5a is manual-run only (`workflow_run_v2`); triggers are later.
+- **Scheduled / event triggers** — 5a is manual-run only (`workflow_run`); triggers are later.
 - **Per-run agent session continuity** (resume_session reuse across a run's nodes).
-- **v1 retirement & UI unification** — sub-projects 5b (unified Workflows view, edit↔observe↔run) and 5c (v1→v2 migration, delete v1 engine).
+- **Old workflow system retirement & UI unification** — sub-projects 5b (unified Workflows view, edit↔observe↔run) and 5c (old workflow system -> workflow migration, delete old workflow system engine).
 
 ## 8. Risks
 

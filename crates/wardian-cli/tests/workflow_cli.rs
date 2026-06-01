@@ -20,7 +20,7 @@ edges:
 
 # Demo
 
-A tiny v2 workflow for CLI round-trip tests.
+A tiny workflow for CLI round-trip tests.
 "#;
 
 fn bin() -> std::path::PathBuf {
@@ -71,7 +71,7 @@ fn workflow_command(home: &TempDir, args: &[&str]) -> serde_json::Value {
 }
 
 #[test]
-fn workflow_v2_exec_runs_show_replay_round_trip() {
+fn workflow_exec_runs_show_replay_round_trip() {
     let home = TempDir::new().unwrap();
     let workflow_path = seed_demo_workflow(&home);
 

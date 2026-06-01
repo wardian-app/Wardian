@@ -76,7 +76,7 @@ describe("AgentTerminal scrollback", () => {
     mockListen.mockResolvedValue(() => {});
     fitDimensions = { cols: 80, rows: 24 };
 
-    mockTerminal.mockImplementation((options?: ConstructorParameters<typeof Terminal>[0]) => {
+    mockTerminal.mockImplementation(function MockTerminal(options?: ConstructorParameters<typeof Terminal>[0]) {
       const state = { serializedState: "" };
       let resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined;
       let scrollHandler: ((position: number) => void) | undefined;
@@ -139,7 +139,9 @@ describe("AgentTerminal scrollback", () => {
       return terminal;
     });
 
-    mockHeadlessTerminal.mockImplementation((options?: ConstructorParameters<typeof HeadlessTerminal>[0]) => {
+    mockHeadlessTerminal.mockImplementation(function MockHeadlessTerminal(
+      options?: ConstructorParameters<typeof HeadlessTerminal>[0],
+    ) {
       const terminal = {
         open: vi.fn(),
         write: vi.fn((_data: string, callback?: () => void) => callback?.()),
@@ -170,7 +172,7 @@ describe("AgentTerminal scrollback", () => {
       return terminal;
     });
 
-    mockSerializeAddon.mockImplementation(() => {
+    mockSerializeAddon.mockImplementation(function MockSerializeAddon() {
       return {
         __termState: undefined as { serializedState: string } | undefined,
         serialize: vi.fn(function (this: { __termState?: { serializedState: string } }) {
@@ -180,7 +182,7 @@ describe("AgentTerminal scrollback", () => {
       } as any;
     });
 
-    mockFitAddon.mockImplementation(() => {
+    mockFitAddon.mockImplementation(function MockFitAddon() {
       return {
         fit: vi.fn(),
         proposeDimensions: vi.fn(() => fitDimensions),
@@ -188,7 +190,7 @@ describe("AgentTerminal scrollback", () => {
       } as any;
     });
 
-    mockWebglAddon.mockImplementation(() => {
+    mockWebglAddon.mockImplementation(function MockWebglAddon() {
       return {
         onContextLoss: vi.fn(),
         clearTextureAtlas: vi.fn(),
@@ -319,7 +321,7 @@ describe("AgentTerminal scrollback", () => {
       clone: () => createLine(text),
       translateToString: () => text,
     });
-    const createHeadlessTerm = (options?: ConstructorParameters<typeof HeadlessTerminal>[0]) => {
+    function createHeadlessTerm(options?: ConstructorParameters<typeof HeadlessTerminal>[0]) {
       const lines: ReturnType<typeof createLine>[] = [];
       const internalBuffer = {
         x: 0,
@@ -366,7 +368,7 @@ describe("AgentTerminal scrollback", () => {
         dispose: vi.fn(),
       } as any;
       return terminal;
-    };
+    }
     mockHeadlessTerminal.mockImplementation(createHeadlessTerm);
     const term = createHeadlessTerm({ cols: 120, rows: 40 });
     for (let index = 0; index < 40; index += 1) {

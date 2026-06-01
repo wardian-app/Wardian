@@ -37,3 +37,12 @@ export function scheduleStatusColor(schedule: WorkflowSchedule): string {
   if (schedule.last_run_status === 'completed') return 'var(--color-wardian-success)';
   return 'var(--color-wardian-text-muted)';
 }
+
+/** Operational status label shown in dense workflow monitor rows. */
+export function scheduleStatusLabel(schedule: WorkflowSchedule): string {
+  if (schedule.is_paused) return 'paused';
+  if (schedule.last_run_status === 'running') return 'running';
+  if (schedule.last_run_status === 'failed') return 'failed';
+  if (schedule.last_run_status === 'completed') return 'scheduled';
+  return schedule.next_run_epoch_ms ? 'scheduled' : 'idle';
+}

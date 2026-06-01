@@ -1,18 +1,18 @@
-# Workflow Engine v2 — Trigger / Invoker Foundation (sub-project 6a) Design
+# Workflow Engine — Trigger / Invoker Foundation (sub-project 6a) Design
 
 - **Status:** Implemented (6a)
 - **Date:** 2026-05-30
-- **Part of:** [Workflow Engine v2 epic (#425)]; v1-parity track. Foundation for 6b (schedule invoker), 6c (monitoring sidebar), 6d (v1 deletion). Builds on 5a (`workflow_run_v2`) + 5b (Run dialog).
+- **Part of:** [Workflow rework epic (#425)]; old-system parity track. Foundation for 6b (schedule invoker), 6c (monitoring sidebar), 6d (old workflow system deletion). Builds on 5a (`workflow_run`) + 5b (Run dialog).
 
 > **Model (from brainstorming):** a *run* is an **instance** of a blueprint, like an **agent is an instance of a class**. The **blueprint** is the single source of truth for *behavior*; an **invoker** supplies the *context* of one invocation — `{ blueprint, input, bindings }`. Triggers aren't graph nodes that hold a mechanism; the mechanism lives in the invoker (manual now; schedule / file-watch / webhook later). The blueprint has one generic **entry node** that declares the input contract and is invocation-agnostic.
 
 ## 1. Goal & scope
 
-Establish the **invocation contract** every invoker shares — a run parameterized by **`input`** (params, available graph-wide) and **`bindings`** (role→agent overrides) — and collapse the trigger node types into one generic entry. Ship **parameterized manual runs** (the v1 "runtime modal", generalized) on top of it.
+Establish the **invocation contract** every invoker shares — a run parameterized by **`input`** (params, available graph-wide) and **`bindings`** (role→agent overrides) — and collapse the trigger node types into one generic entry. Ship **parameterized manual runs** (the old workflow system "runtime modal", generalized) on top of it.
 
 **In scope (6a):**
 1. Collapse trigger node types → one generic entry (`manual_trigger`, which already carries `input_schema`); remove `scheduled_trigger` + `file_watcher` node types.
-2. Thread `input` + `bindings` through `workflow_run_v2` → the engine + executor.
+2. Thread `input` + `bindings` through `workflow_run` → the engine + executor.
 3. Render a **parameterized Run modal** from the entry node's `input_schema` in the unified view.
 
 **Deferred:** persistent **invoker entities** (stored schedules/webhooks/file-watchers as their own records) — 6b builds the first (schedule) on this contract. Concrete file-watch / webhook invokers — later, same rails. A bindings *editor UI* beyond the minimal case — folded into 6b's invoker UI.
@@ -21,7 +21,7 @@ Establish the **invocation contract** every invoker shares — a run parameteriz
 
 - `manual_trigger` **already** declares an `input_schema` field (`FieldType::JsonSchema`) and is the engine's initial runnable node — it is the generic entry node.
 - The engine **already** exposes the run's trigger payload graph-wide: `RunState::set_trigger(v)` writes `registry["trigger"]["output"] = v`; `RunStarted { trigger }` calls it; interpolation resolves `{{trigger.output.*}}` (tested in `engine/core.rs`).
-- `Engine::start_with_id(bp, run_id, trigger, run_root, exec)` **already** takes a `trigger: Value` — 5a's `workflow_run_v2` currently passes `json!({})`. The plumbing is there; 6a feeds it real input.
+- `Engine::start_with_id(bp, run_id, trigger, run_root, exec)` **already** takes a `trigger: Value` — 5a's `workflow_run` currently passes `json!({})`. The plumbing is there; 6a feeds it real input.
 - 5a's executor resolves `role:`/`class:` agent refs (`resolve.rs`) — 6a adds a `bindings` override layer in front of it.
 
 ## 3. Changes
@@ -32,25 +32,25 @@ Remove the `scheduled_trigger` and `file_watcher` `NodeTypeDef`s from `workflow/
 ### 3.2 Invocation contract — `input` + `bindings` (`src-tauri` + executor)
 Extend the run commands:
 ```
-workflow_run_v2(path, provider?, workspace?, input?: Value, bindings?: Map<String,String>)
+workflow_run(path, provider?, workspace?, input?: Value, bindings?: Map<String,String>)
 ```
 - **`input`** → passed as the engine `trigger` (replacing `json!({})`), so it lands at `registry["trigger"]["output"]` and is referenceable anywhere as `{{trigger.output.*}}`. (Bonus: this lets the 5c-migrated blueprints' stripped `{{trigger.output.*}}` references be restored.)
-- **`bindings`** (role→target, e.g. `{"reasoning_gate": "class:Researcher"}`) → carried into the `LiveStepExecutor`; `resolve_agent` consults `bindings` first: if a task's `agent` is `role:X`/`class:X` and `bindings` has `X`, resolve to the bound target; else fall back to today's default resolution. This is v1's `role_mappings`, now a per-invocation binding owned by the invoker — not the blueprint.
+- **`bindings`** (role→target, e.g. `{"reasoning_gate": "class:Researcher"}`) → carried into the `LiveStepExecutor`; `resolve_agent` consults `bindings` first: if a task's `agent` is `role:X`/`class:X` and `bindings` has `X`, resolve to the bound target; else fall back to today's default resolution. This is old workflow system's `role_mappings`, now a per-invocation binding owned by the invoker — not the blueprint.
 
-`workflow_resume_v2` carries the same `input`/`bindings` for the resumed run (read back from the run's `RunStarted` event so a resume reuses the original invocation context). Same extension on the CLI `exec` verb (optional `--input <json>` / `--bind role=target`) for parity.
+`workflow_resume` carries the same `input`/`bindings` for the resumed run (read back from the run's `RunStarted` event so a resume reuses the original invocation context). Same extension on the CLI `exec` verb (optional `--input <json>` / `--bind role=target`) for parity.
 
 ### 3.3 Parameterized Run modal (`src` / 5b)
-In the unified view's **Run** flow (`RunLaunchDialog`), after the blueprint is loaded, read the entry node's `input_schema`. If non-empty, render an input form (one control per declared param, typed from the schema) below the existing provider/workspace fields. On confirm, collect the values into `input` and pass them to `workflow_run_v2`. If `input_schema` is empty, the dialog is unchanged. (Role→agent `bindings` entry in the manual modal is optional in 6a — minimal/absent; the rich bindings UI ships with 6b's invokers.)
+In the unified view's **Run** flow (`RunLaunchDialog`), after the blueprint is loaded, read the entry node's `input_schema`. If non-empty, render an input form (one control per declared param, typed from the schema) below the existing provider/workspace fields. On confirm, collect the values into `input` and pass them to `workflow_run`. If `input_schema` is empty, the dialog is unchanged. (Role→agent `bindings` entry in the manual modal is optional in 6a — minimal/absent; the rich bindings UI ships with 6b's invokers.)
 
 ## 4. Components & files (indicative)
 ```
 crates/wardian-core/src/workflow/registry.rs   # remove scheduled_trigger + file_watcher
 src/features/workflows/nodeRegistry.schema.json # regenerated (gen-schema)
-docs/workflows/node-reference-v2.md             # regenerated (gen-docs)
+docs/workflows/node-reference-workflow.md             # regenerated (gen-docs)
 crates/wardian-core/src/engine/executor.rs      # AgentTaskRequest unchanged; bindings applied in resolve
-src-tauri/src/workflow_v2/resolve.rs            # resolve_agent honors bindings
-src-tauri/src/workflow_v2/runs.rs               # thread input + bindings into the executor + engine trigger
-src-tauri/src/commands/workflow.rs              # workflow_run_v2 / resume_v2 gain input + bindings
+src-tauri/src/workflow/resolve.rs            # resolve_agent honors bindings
+src-tauri/src/workflow/runs.rs               # thread input + bindings into the executor + engine trigger
+src-tauri/src/commands/workflow.rs              # workflow_run / workflow_resume gain input + bindings
 crates/wardian-cli/src/...                      # exec --input / --bind (parity)
 src/features/workflows/RunLaunchDialog.tsx      # param form from entry input_schema
 ```
@@ -58,9 +58,9 @@ src/features/workflows/RunLaunchDialog.tsx      # param form from entry input_sc
 ## 5. Testing
 - **Unit (wardian-core):** registry no longer contains `scheduled_trigger`/`file_watcher`; engine: a run started with a non-empty `trigger` resolves `{{trigger.output.X}}` in a downstream node's field (extend the existing interpolation test).
 - **Unit (executor/resolve):** `resolve_agent` with a `bindings` map maps `role:X` → the bound target; without a binding, falls back to default.
-- **Frontend (RTL):** `RunLaunchDialog` renders fields from a non-empty `input_schema` and passes the collected `input` to `invoke('workflow_run_v2', …)`; renders nothing extra for an empty schema.
-- **Browser E2E (5b):** open a blueprint whose entry declares an input param → Run → fill the param → assert `workflow_run_v2` got the `input`; the run observes as before.
-- **Integration (src-tauri, mock provider):** `workflow_run_v2` with `input` + a `bindings` map → the run's `RunStarted` records the trigger; a `{{trigger.output.*}}`-referencing node resolves; a `role:`-bound task resolves to the bound target. (Reuses 5a's mock-provider harness.)
+- **Frontend (RTL):** `RunLaunchDialog` renders fields from a non-empty `input_schema` and passes the collected `input` to `invoke('workflow_run', …)`; renders nothing extra for an empty schema.
+- **Browser E2E (5b):** open a blueprint whose entry declares an input param → Run → fill the param → assert `workflow_run` got the `input`; the run observes as before.
+- **Integration (src-tauri, mock provider):** `workflow_run` with `input` + a `bindings` map → the run's `RunStarted` records the trigger; a `{{trigger.output.*}}`-referencing node resolves; a `role:`-bound task resolves to the bound target. (Reuses 5a's mock-provider harness.)
 - Registry drift: `gen-schema --check` + `gen-docs --check` pass.
 
 ## 6. Risks / notes

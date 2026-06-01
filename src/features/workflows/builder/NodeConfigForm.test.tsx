@@ -23,4 +23,14 @@ describe('NodeConfigForm', () => {
     const select = screen.getByLabelText(/Runtime/i) as HTMLSelectElement;
     expect([...select.options].map((o) => o.value)).toEqual(['python', 'node', 'sh']);
   });
+  it('uses vertical, full-width field blocks with useful textarea room', () => {
+    render(<NodeConfigForm node={taskNode} onChange={() => {}} />);
+
+    const promptField = screen.getByTestId('field-prompt');
+    const prompt = screen.getByLabelText(/Prompt/i);
+
+    expect(promptField).toHaveClass('grid');
+    expect(prompt).toHaveClass('min-h-[132px]');
+    expect(prompt).toHaveClass('w-full');
+  });
 });

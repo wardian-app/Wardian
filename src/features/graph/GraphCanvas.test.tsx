@@ -17,16 +17,20 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("sigma", () => ({
-  default: vi.fn().mockImplementation(() => ({
-    on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
-    getCamera: () => ({ animatedReset: mocks.animatedReset }),
-    kill: mocks.kill,
-    refresh: mocks.refresh,
-  })),
+  default: vi.fn().mockImplementation(function MockSigma() {
+    return {
+      on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
+      getCamera: () => ({ animatedReset: mocks.animatedReset }),
+      kill: mocks.kill,
+      refresh: mocks.refresh,
+    };
+  }),
 }));
 
 vi.mock("graphology", () => ({
-  default: vi.fn().mockImplementation(() => mocks.graphology),
+  default: vi.fn().mockImplementation(function MockGraph() {
+    return mocks.graphology;
+  }),
 }));
 
 const projection: AgentGraphProjection = {

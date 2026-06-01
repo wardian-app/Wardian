@@ -1,9 +1,10 @@
-//! `wardian-workflow` is the single gate for Workflow Engine v2 blueprints.
+//! `wardian-workflow` is the single gate for workflow blueprints.
 //!
 //! It parses, validates, normalizes, diffs, and round-trips the declarative
 //! `.md` blueprint, and owns the Node Type Registry that every other surface
 //! (builder, CLI, docs) is generated from.
 
+pub mod assignment;
 pub mod blueprint;
 pub mod diff;
 pub mod error;

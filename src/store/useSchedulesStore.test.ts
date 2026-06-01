@@ -26,26 +26,26 @@ describe('useSchedulesStore', () => {
     useSchedulesStore.setState({ schedules: [], loading: false, error: null });
   });
 
-  it('load populates schedules from schedule_list_v2', async () => {
+  it('load populates schedules from schedule_list', async () => {
     invokeMock.mockResolvedValueOnce([sample]);
     await useSchedulesStore.getState().load();
-    expect(invokeMock).toHaveBeenCalledWith('schedule_list_v2');
+    expect(invokeMock).toHaveBeenCalledWith('schedule_list');
     expect(useSchedulesStore.getState().schedules).toHaveLength(1);
   });
 
-  it('pause invokes schedule_pause_v2 with the id', async () => {
+  it('pause invokes schedule_pause with the id', async () => {
     invokeMock.mockResolvedValue([]);
     await useSchedulesStore.getState().pause('s1');
-    expect(invokeMock).toHaveBeenCalledWith('schedule_pause_v2', { id: 's1' });
+    expect(invokeMock).toHaveBeenCalledWith('schedule_pause', { id: 's1' });
   });
 
-  it('runNow invokes schedule_run_now_v2 with the id', async () => {
+  it('runNow invokes schedule_run_now with the id', async () => {
     invokeMock.mockResolvedValue([]);
     await useSchedulesStore.getState().runNow('s1');
-    expect(invokeMock).toHaveBeenCalledWith('schedule_run_now_v2', { id: 's1' });
+    expect(invokeMock).toHaveBeenCalledWith('schedule_run_now', { id: 's1' });
   });
 
-  it('create invokes schedule_create_v2 with camelCase args', async () => {
+  it('create invokes schedule_create with camelCase args', async () => {
     invokeMock.mockResolvedValue(sample);
     await useSchedulesStore.getState().create({
       blueprintId: 'heartbeat',
@@ -56,13 +56,13 @@ describe('useSchedulesStore', () => {
       bindings: {},
     });
     expect(invokeMock).toHaveBeenCalledWith(
-      'schedule_create_v2',
+      'schedule_create',
       expect.objectContaining({ blueprintId: 'heartbeat', name: 'HB' }),
     );
   });
 
-  it('subscribe registers a v2-schedules-updated listener', async () => {
+  it('subscribe registers a schedules-updated listener', async () => {
     await useSchedulesStore.getState().subscribe();
-    expect(listenMock).toHaveBeenCalledWith('v2-schedules-updated', expect.any(Function));
+    expect(listenMock).toHaveBeenCalledWith('schedules-updated', expect.any(Function));
   });
 });

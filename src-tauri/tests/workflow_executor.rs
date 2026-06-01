@@ -84,7 +84,7 @@ fn mock_script_path() -> std::path::PathBuf {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn mock_provider_drives_workflow_v2_run_to_completion() {
+async fn mock_provider_drives_workflow_run_to_completion() {
     let home = tempfile::tempdir().unwrap();
     let workflows_dir = home.path().join("library").join("workflows");
     std::fs::create_dir_all(&workflows_dir).unwrap();
@@ -99,7 +99,7 @@ async fn mock_provider_drives_workflow_v2_run_to_completion() {
 
     let run_id = new_run_id();
     let run_root = wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id).unwrap();
-    let exec = wardian_app_lib::workflow_v2::runs::live_executor(
+    let exec = wardian_app_lib::workflow::runs::live_executor(
         home.path().to_path_buf(),
         "mock".into(),
         std::collections::HashMap::new(),

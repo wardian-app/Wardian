@@ -8,11 +8,12 @@ interface BlueprintRef {
 }
 
 interface BlueprintSelectorProps {
+  selectedPath?: string | null;
   onOpen: (path: string) => void;
   onNew: () => void;
 }
 
-export function BlueprintSelector({ onOpen, onNew }: BlueprintSelectorProps) {
+export function BlueprintSelector({ selectedPath, onOpen, onNew }: BlueprintSelectorProps) {
   const [blueprints, setBlueprints] = useState<BlueprintRef[]>([]);
 
   useEffect(() => {
@@ -25,7 +26,7 @@ export function BlueprintSelector({ onOpen, onNew }: BlueprintSelectorProps) {
     <div className="blueprint-selector flex items-center gap-2" data-testid="blueprint-selector">
       <select
         className="rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-wardian-text"
-        defaultValue=""
+        value={selectedPath ?? ''}
         onChange={(event) => {
           if (event.target.value) {
             onOpen(event.target.value);

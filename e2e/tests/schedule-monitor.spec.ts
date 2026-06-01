@@ -106,8 +106,8 @@ async function installScheduleMonitorIpcMock(page: Page) {
         if (command === "workflow_list_runs") return [];
         if (command === "workflow_read_run") return { state: null, events: [], blueprint: null };
 
-        if (command === "schedule_list_v2") return schedules;
-        if (command === "schedule_create_v2") {
+        if (command === "schedule_list") return schedules;
+        if (command === "schedule_create") {
           const schedule = {
             id: `schedule-${schedules.length + 1}`,
             blueprint_id: args?.blueprintId,
@@ -127,23 +127,23 @@ async function installScheduleMonitorIpcMock(page: Page) {
           schedules = [...schedules, schedule];
           return schedule;
         }
-        if (command === "schedule_pause_v2") {
+        if (command === "schedule_pause") {
           schedules = schedules.map((schedule) => (
             schedule.id === args?.id ? { ...schedule, is_paused: true } : schedule
           ));
           return null;
         }
-        if (command === "schedule_resume_v2") {
+        if (command === "schedule_resume") {
           schedules = schedules.map((schedule) => (
             schedule.id === args?.id ? { ...schedule, is_paused: false } : schedule
           ));
           return null;
         }
-        if (command === "schedule_remove_v2") {
+        if (command === "schedule_remove") {
           schedules = schedules.filter((schedule) => schedule.id !== args?.id);
           return null;
         }
-        if (command === "schedule_run_now_v2") return null;
+        if (command === "schedule_run_now") return null;
 
         return null;
       },
@@ -188,7 +188,7 @@ test("schedule a blueprint and pause it in Monitor", async ({ page }) => {
   const scheduleCall = await page.evaluate(() => (
     (window as Window & {
       __scheduleMonitorInvokes?: Array<{ command: string; args?: Record<string, unknown> }>;
-    }).__scheduleMonitorInvokes?.find((call) => call.command === "schedule_create_v2")
+    }).__scheduleMonitorInvokes?.find((call) => call.command === "schedule_create")
   ));
   expect(scheduleCall?.args).toMatchObject({ blueprintId: "wf", name: "E2E Nightly" });
 });

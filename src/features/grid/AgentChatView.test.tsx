@@ -49,7 +49,7 @@ describe("AgentChatView", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     listenMock.mockReset();
-    listenMock.mockResolvedValue(vi.fn());
+    listenMock.mockResolvedValue(() => {});
     writeTextMock.mockReset();
   });
 
@@ -101,7 +101,7 @@ describe("AgentChatView", () => {
       if (eventName === "agent-terminal-cleared") {
         clearHandler = handler as typeof clearHandler;
       }
-      return vi.fn();
+      return () => {};
     });
     invokeMock.mockResolvedValue([
       event({

@@ -338,9 +338,8 @@ fn normalize_app_overrides(mut overrides: AppSettingsOverrides) -> AppSettingsOv
     overrides.external_editor_custom_executable = overrides
         .external_editor_custom_executable
         .map(|executable| executable.and_then(|value| trim_to_option(&value)));
-    overrides.explorer_file_click_action = overrides
-        .explorer_file_click_action
-        .and_then(|action| {
+    overrides.explorer_file_click_action =
+        overrides.explorer_file_click_action.and_then(|action| {
             let normalized = normalize_explorer_file_click_action(&action);
             (normalized != default_explorer_file_click_action()).then_some(normalized)
         });
@@ -551,7 +550,9 @@ mod tests {
         assert!(json["overrides"].get("auto_patch_gemini").is_none());
         assert!(json["overrides"].get("terminal_font_size").is_none());
         assert!(json["overrides"].get("grid_card_display_mode").is_none());
-        assert!(json["overrides"].get("explorer_file_click_action").is_none());
+        assert!(json["overrides"]
+            .get("explorer_file_click_action")
+            .is_none());
     }
 
     #[test]
@@ -572,7 +573,9 @@ mod tests {
         let raw = fs::read_to_string(&path).expect("read settings file");
         let json: serde_json::Value = serde_json::from_str(&raw).expect("parse settings file");
 
-        assert!(json["overrides"].get("explorer_file_click_action").is_none());
+        assert!(json["overrides"]
+            .get("explorer_file_click_action")
+            .is_none());
     }
 
     #[test]

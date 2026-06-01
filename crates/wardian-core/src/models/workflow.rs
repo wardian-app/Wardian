@@ -1,5 +1,54 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "target_type", rename_all = "snake_case")]
+pub enum WorkflowRoleAssignment {
+    Agent {
+        agent_id: String,
+        #[serde(default = "default_agent_conversation")]
+        conversation: AgentConversationMode,
+        #[serde(default = "default_busy_policy")]
+        busy_policy: BusyPolicy,
+    },
+    TemporaryProvider {
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+    },
+}
+
+pub type WorkflowAssignments = std::collections::HashMap<String, WorkflowRoleAssignment>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentConversationMode {
+    Current,
+    FreshBackground,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BusyPolicy {
+    Wait,
+    Queue,
+    Skip,
+    Fail,
+}
+
+fn default_agent_conversation() -> AgentConversationMode {
+    AgentConversationMode::Current
+}
+
+fn default_busy_policy() -> BusyPolicy {
+    BusyPolicy::Fail
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationKind {
+    Manual,
+    Scheduled,
+}
+
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduleDefinition {
     /// "interval" | "daily" | "weekly" | "monthly" | "specific_dates" | "one_time"
@@ -47,7 +96,7 @@ fn default_end_condition() -> String {
     "never".to_string()
 }
 
-/// A persisted v2 invoker: a blueprint + invocation context (input/bindings/provider)
+/// A persisted workflow invoker: a blueprint + invocation context (input/bindings/provider)
 /// that fires on a `ScheduleDefinition` cadence.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkflowSchedule {
@@ -65,6 +114,8 @@ pub struct WorkflowSchedule {
     /// role/class -> target provider (6a bindings).
     #[serde(default)]
     pub bindings: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub assignments: WorkflowAssignments,
     pub schedule: ScheduleDefinition,
     #[serde(default)]
     pub next_run_epoch_ms: Option<u64>,
@@ -97,6 +148,7 @@ mod schedule_dto_tests {
         assert!(s.provider.is_none());
         assert!(s.input.is_null() || s.input.is_object());
         assert!(s.bindings.is_empty());
+        assert!(s.assignments.is_empty());
         assert!(!s.is_paused);
         let back = serde_json::to_string(&s).unwrap();
         let s2: WorkflowSchedule = serde_json::from_str(&back).unwrap();
