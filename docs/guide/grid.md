@@ -36,6 +36,10 @@ Chat mode sends ordinary text through the same provider submit path used by Ward
 
 In Terminal mode, Wardian follows conservative terminal shortcut handling. On macOS, **Cmd+A** selects the visible terminal buffer. Windows and Linux control-key combinations, including **Ctrl+A** and **Ctrl+Shift+A**, continue through to the shell or provider TUI by default.
 
+Terminal output can also expose clickable HTTP/HTTPS URLs and workspace file paths. URL links open in the system browser, while file path links use the external editor behavior configured in Settings.
+
+![Terminal output showing clickable URL and workspace file path links with underlines aligned below the detected text](../assets/screenshots/terminal/clickable-links.png)
+
 ![Grid chat mode showing normalized agent messages, action-needed output, and prompt composers](../assets/screenshots/grid-chat/chat-composer.png)
 
 ## Important Limits
