@@ -4,7 +4,7 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
-## [0.3.9](https://github.com/wardian-app/Wardian/compare/v0.3.8...v0.3.9) (2026-06-01)
+## [0.4.0](https://github.com/wardian-app/Wardian/compare/v0.3.8...v0.4.0) (2026-06-01)
 
 
 ### Features
