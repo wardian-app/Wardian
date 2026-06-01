@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from 'react';
 import {
   addEdge,
   applyEdgeChanges,
@@ -32,12 +32,25 @@ interface BuilderCanvasProps {
   diagnostics: Diagnostic[];
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
+  onRequestAddNode?: () => void;
+  onNodeContextMenu?: (nodeId: string, x: number, y: number) => void;
+  onEdgeContextMenu?: (edgeId: string, x: number, y: number) => void;
   theme: 'dark' | 'light' | 'system';
 }
 
 type BuilderNodeData = { node: BlueprintNode; diagnostics?: Diagnostic[] };
+type FlowContextMenuEvent = MouseEvent | ReactMouseEvent<Element, MouseEvent>;
 
-export function BuilderCanvas({ blueprint, diagnostics, selectedNodeId, onSelectNode, theme }: BuilderCanvasProps) {
+export function BuilderCanvas({
+  blueprint,
+  diagnostics,
+  selectedNodeId,
+  onSelectNode,
+  onRequestAddNode,
+  onNodeContextMenu,
+  onEdgeContextMenu,
+  theme,
+}: BuilderCanvasProps) {
   return (
     <ReactFlowProvider>
       <BuilderCanvasInner
@@ -45,13 +58,25 @@ export function BuilderCanvas({ blueprint, diagnostics, selectedNodeId, onSelect
         diagnostics={diagnostics}
         selectedNodeId={selectedNodeId}
         onSelectNode={onSelectNode}
+        onRequestAddNode={onRequestAddNode}
+        onNodeContextMenu={onNodeContextMenu}
+        onEdgeContextMenu={onEdgeContextMenu}
         theme={theme}
       />
     </ReactFlowProvider>
   );
 }
 
-function BuilderCanvasInner({ blueprint, diagnostics, selectedNodeId, onSelectNode, theme }: BuilderCanvasProps) {
+function BuilderCanvasInner({
+  blueprint,
+  diagnostics,
+  selectedNodeId,
+  onSelectNode,
+  onRequestAddNode,
+  onNodeContextMenu,
+  onEdgeContextMenu,
+  theme,
+}: BuilderCanvasProps) {
   const setBlueprint = useBuilderStore((state) => state.setBlueprint);
   const { fitView } = useReactFlow();
 
@@ -100,6 +125,23 @@ function BuilderCanvasInner({ blueprint, diagnostics, selectedNodeId, onSelectNo
     commitGraph(graph.nodes, addEdge({ ...connection, id: edgeId }, graph.edges));
   }, [commitGraph, graph.edges, graph.nodes]);
 
+  const handlePaneContextMenu = useCallback((event: FlowContextMenuEvent) => {
+    event.preventDefault();
+    onRequestAddNode?.();
+  }, [onRequestAddNode]);
+
+  const handleNodeContextMenu = useCallback((event: FlowContextMenuEvent, node: Node) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onNodeContextMenu?.(node.id, event.clientX, event.clientY);
+  }, [onNodeContextMenu]);
+
+  const handleEdgeContextMenu = useCallback((event: FlowContextMenuEvent, edge: Edge) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onEdgeContextMenu?.(edge.id, event.clientX, event.clientY);
+  }, [onEdgeContextMenu]);
+
   useEffect(() => {
     if (graph.nodes.length === 0) return;
     const frame = window.requestAnimationFrame(() => {
@@ -118,6 +160,9 @@ function BuilderCanvasInner({ blueprint, diagnostics, selectedNodeId, onSelectNo
       onConnect={handleConnect}
       onNodeClick={(_, node) => onSelectNode(node.id)}
       onPaneClick={() => onSelectNode(null)}
+      onPaneContextMenu={handlePaneContextMenu}
+      onNodeContextMenu={handleNodeContextMenu}
+      onEdgeContextMenu={handleEdgeContextMenu}
       fitView
       colorMode={flowColorMode}
       proOptions={{ hideAttribution: true }}

@@ -302,8 +302,14 @@ mod tests {
         ] {
             assert!(ids.contains(&expected), "missing node type: {expected}");
         }
-        assert!(!ids.contains(&"scheduled_trigger"), "scheduled_trigger should be removed (scheduling is an invoker, not a node)");
-        assert!(!ids.contains(&"file_watcher"), "file_watcher should be removed (file-watch is an invoker, not a node)");
+        assert!(
+            !ids.contains(&"scheduled_trigger"),
+            "scheduled_trigger should be removed (scheduling is an invoker, not a node)"
+        );
+        assert!(
+            !ids.contains(&"file_watcher"),
+            "file_watcher should be removed (file-watch is an invoker, not a node)"
+        );
     }
 
     #[test]

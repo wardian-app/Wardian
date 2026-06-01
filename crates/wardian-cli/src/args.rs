@@ -68,9 +68,7 @@ pub enum WorkflowCommand {
         json: bool,
     },
     /// Validate a blueprint `.md` file and report diagnostics.
-    Validate {
-        path: String,
-    },
+    Validate { path: String },
     /// Execute a v2 blueprint headlessly and write a durable run.
     Exec {
         path: String,
@@ -97,9 +95,7 @@ pub enum WorkflowCommand {
         run_id: String,
     },
     /// Parse a blueprint `.md` and print the structured graph.
-    Parse {
-        path: String,
-    },
+    Parse { path: String },
     /// Normalize a blueprint `.md` (print, or --write back in place).
     Normalize {
         path: String,

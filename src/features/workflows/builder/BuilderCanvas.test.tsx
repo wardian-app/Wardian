@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BuilderCanvas } from './BuilderCanvas';
 import type { Blueprint } from './blueprintTypes';
 
@@ -7,12 +7,44 @@ const fitViewMock = vi.fn();
 
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  ReactFlow: ({ nodes, nodeTypes }: { nodes: any[]; nodeTypes: Record<string, React.ComponentType<any>> }) => (
-    <div data-testid="mock-flow">
+  ReactFlow: ({
+    nodes,
+    edges,
+    nodeTypes,
+    onPaneContextMenu,
+    onNodeContextMenu,
+    onEdgeContextMenu,
+  }: {
+    nodes: any[];
+    edges: any[];
+    nodeTypes: Record<string, React.ComponentType<any>>;
+    onPaneContextMenu?: (event: React.MouseEvent) => void;
+    onNodeContextMenu?: (event: React.MouseEvent, node: any) => void;
+    onEdgeContextMenu?: (event: React.MouseEvent, edge: any) => void;
+  }) => (
+    <div data-testid="mock-flow" onContextMenu={(event) => onPaneContextMenu?.(event)}>
       {nodes.map((node) => {
         const NodeComponent = nodeTypes[node.type];
-        return <NodeComponent key={node.id} data={node.data} selected={node.selected} />;
+        return (
+          <div
+            key={node.id}
+            data-testid={`flow-node-${node.id}`}
+            onContextMenu={(event) => onNodeContextMenu?.(event, node)}
+          >
+            <NodeComponent data={node.data} selected={node.selected} />
+          </div>
+        );
       })}
+      {edges.map((edge) => (
+        <button
+          key={edge.id}
+          type="button"
+          data-testid={`flow-edge-${edge.id}`}
+          onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
+        >
+          edge
+        </button>
+      ))}
     </div>
   ),
   Background: () => null,
@@ -44,7 +76,7 @@ const blueprint: Blueprint = {
       fields: {},
     },
   ],
-  edges: [],
+  edges: [{ from: 'task-1', to: 'branch-1', from_port: 'out', to_port: 'in' }],
 };
 
 describe('BuilderCanvas', () => {
@@ -98,5 +130,33 @@ describe('BuilderCanvas', () => {
     );
 
     await waitFor(() => expect(fitViewMock).toHaveBeenCalledWith({ padding: 0.2, duration: 120 }));
+  });
+
+  it('reports pane, node, and edge context menu requests', () => {
+    const onRequestAddNode = vi.fn();
+    const onNodeContextMenu = vi.fn();
+    const onEdgeContextMenu = vi.fn();
+
+    render(
+      <BuilderCanvas
+        blueprint={blueprint}
+        diagnostics={[]}
+        selectedNodeId={null}
+        onSelectNode={() => {}}
+        onRequestAddNode={onRequestAddNode}
+        onNodeContextMenu={onNodeContextMenu}
+        onEdgeContextMenu={onEdgeContextMenu}
+        theme="dark"
+      />,
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('mock-flow'), { clientX: 12, clientY: 24 });
+    expect(onRequestAddNode).toHaveBeenCalled();
+
+    fireEvent.contextMenu(screen.getByTestId('flow-node-task-1'), { clientX: 32, clientY: 48 });
+    expect(onNodeContextMenu).toHaveBeenCalledWith('task-1', 32, 48);
+
+    fireEvent.contextMenu(screen.getByTestId('flow-edge-e0'), { clientX: 64, clientY: 96 });
+    expect(onEdgeContextMenu).toHaveBeenCalledWith('e0', 64, 96);
   });
 });

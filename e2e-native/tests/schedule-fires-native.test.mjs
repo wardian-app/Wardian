@@ -83,7 +83,7 @@ async function waitForCompletedRun(home, blueprintId, timeoutMs = 30000) {
   assert.fail(`Timed out waiting for a completed run under ${base}`);
 }
 
-test("the v2 scheduler tick loop fires a scheduled run", { timeout: 180000 }, async (t) => {
+test("the workflow scheduler tick loop fires a scheduled run", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
   assert.ok(harness.appPath);
 
@@ -125,16 +125,16 @@ test("the v2 scheduler tick loop fires a scheduled run", { timeout: 180000 }, as
 
   await waitForAppShell(session.driver, 20000);
 
-  const created = await invokeTauri(session.driver, "schedule_create_v2", {
+  const created = await invokeTauri(session.driver, "schedule_create", {
     blueprintId: "sched-fires",
     name: "Native Scheduled Fire",
     schedule: { schedule_type: "interval", interval_minutes: 60, active: true },
     provider: "mock",
     input: { symbol: "SPY" },
   });
-  assert.ok(created.id, "schedule_create_v2 should return a schedule with an id");
+  assert.ok(created.id, "schedule_create should return a schedule with an id");
 
-  await invokeTauri(session.driver, "schedule_run_now_v2", { id: created.id });
+  await invokeTauri(session.driver, "schedule_run_now", { id: created.id });
 
   const state = await waitForCompletedRun(harness.isolatedHome, "sched-fires");
   assert.equal(state.status, "completed");

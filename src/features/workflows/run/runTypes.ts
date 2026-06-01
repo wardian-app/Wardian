@@ -39,6 +39,9 @@ export interface RunSummary {
   node_count: number;
   failure?: string | null;
   path: string;
+  started_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
 }
 
 export interface RunReadResult {

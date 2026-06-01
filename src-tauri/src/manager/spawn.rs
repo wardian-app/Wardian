@@ -270,16 +270,10 @@ pub async fn spawn_agent(
     let initial_ignored_conversation_id = if config.provider == "antigravity" && !is_restored {
         let home = AntigravityProvider::antigravity_home();
         home.as_ref()
-            .and_then(|home| {
-                AntigravityProvider::conversation_for_workspace(
-                    home,
-                    &cwd,
-                )
-            })
+            .and_then(|home| AntigravityProvider::conversation_for_workspace(home, &cwd))
             .or_else(|| {
-                home.as_ref().and_then(|home| {
-                    AntigravityProvider::latest_conversation_id(home)
-                })
+                home.as_ref()
+                    .and_then(|home| AntigravityProvider::latest_conversation_id(home))
             })
     } else {
         None
@@ -1264,7 +1258,8 @@ pub async fn spawn_agent(
                             .filter(|value| !value.is_empty())
                     };
                     configured.or_else(|| {
-                        let detected = home.as_ref()
+                        let detected = home
+                            .as_ref()
                             .and_then(|home| {
                                 AntigravityProvider::conversation_for_workspace(
                                     home,
@@ -1524,9 +1519,6 @@ mod tests {
             filter_ignored_conversation_id(Some("conv_abc".to_string()), None),
             Some("conv_abc".to_string())
         );
-        assert_eq!(
-            filter_ignored_conversation_id(None, Some("conv_abc")),
-            None
-        );
+        assert_eq!(filter_ignored_conversation_id(None, Some("conv_abc")), None);
     }
 }

@@ -30,7 +30,7 @@ export function upstreamVariables(bp: Blueprint, nodeId: string): string[] {
   return [...new Set(vars)];
 }
 
-export function useUpstreamContextV2(bp: Blueprint | null, nodeId: string | null): string[] {
+export function useUpstreamContext(bp: Blueprint | null, nodeId: string | null): string[] {
   return useMemo(() => {
     if (!bp || !nodeId) return ['{{trigger.output}}', '{{storage}}'];
     return upstreamVariables(bp, nodeId);

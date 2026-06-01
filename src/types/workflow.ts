@@ -24,7 +24,25 @@ export interface ScheduleDefinition {
   active: boolean;
 }
 
-/** Mirrors the 6b Rust `WorkflowSchedule` DTO (a persisted v2 invoker). */
+export type WorkflowBusyPolicy = 'wait' | 'queue' | 'skip' | 'fail';
+export type WorkflowAgentConversation = 'current' | 'fresh_background';
+
+export type WorkflowRoleAssignment =
+  | {
+      target_type: 'agent';
+      agent_id: string;
+      conversation: WorkflowAgentConversation;
+      busy_policy?: WorkflowBusyPolicy;
+    }
+  | {
+      target_type: 'temporary_provider';
+      provider: string;
+      workspace?: string;
+    };
+
+export type WorkflowAssignments = Record<string, WorkflowRoleAssignment>;
+
+/** Mirrors the 6b Rust `WorkflowSchedule` DTO (a persisted workflow invoker). */
 export interface WorkflowSchedule {
   id: string;
   blueprint_id: string;
@@ -33,6 +51,7 @@ export interface WorkflowSchedule {
   workspace?: string | null;
   input: unknown;
   bindings: Record<string, string>;
+  assignments?: WorkflowAssignments;
   schedule: ScheduleDefinition;
   next_run_epoch_ms?: number | null;
   paused_remaining_ms?: number | null;

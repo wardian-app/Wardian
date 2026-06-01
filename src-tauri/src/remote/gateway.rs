@@ -601,14 +601,9 @@ async fn list_remote_workflows(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
     let origin = require_audited_request_boundary(&ctx.config, &headers, false, "list_workflows")?;
-    let session = require_audited_remote_session(
-        &ctx,
-        &headers,
-        &origin,
-        "workflow_read",
-        "list_workflows",
-    )
-    .await?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "workflow_read", "list_workflows")
+            .await?;
     audit_gateway_event(
         &session,
         &origin,

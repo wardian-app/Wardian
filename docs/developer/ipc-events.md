@@ -18,10 +18,14 @@ The UI invokes these functions via `invoke("command_name", { args })`.
 
 ### Workflow Governance
 
-- **`run_workflow`**: Initiates a one-off workflow run.
-- **`stop_all_triggers`**: Aborts all active background workflow tasks (Stop All).
-- **`pause_all_triggers`**: Signals the Heartbeat to temporarily skip trigger evaluation.
-- **`resume_all_triggers`**: Resumes trigger evaluation in the Heartbeat thread.
+- **`workflow_run`**: Initiates a workflow blueprint run.
+- **`workflow_resume`**: Resumes an interrupted durable run.
+- **`workflow_approve`**: Grants or rejects a paused approval node.
+- **`workflow_cancel`**: Requests cancellation for a live run.
+- **`schedule_*`**: Manages persisted schedule invokers for workflow blueprints.
+
+Old workflow system commands such as `run_workflow`, `stop_all_triggers`,
+`pause_all_triggers`, and `resume_all_triggers` are compatibility history only.
 
 ### Queue and Readiness
 

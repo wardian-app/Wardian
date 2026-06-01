@@ -132,28 +132,38 @@ pub fn normalize_status(value: &str) -> String {
 }
 
 fn row_to_identity(row: AgentRow) -> AgentIdentity {
+    let status = row
+        .last_status
+        .as_deref()
+        .map(normalize_status)
+        .unwrap_or_else(|| {
+            if row.is_off {
+                "off".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        });
+    let status = active_conversation_lease_status(&row.session_id).unwrap_or(status);
+
     AgentIdentity {
         name: row.session_name,
         uuid: row.session_id,
         class: row.agent_class.unwrap_or_default(),
         provider: row.provider.unwrap_or_else(|| "claude".to_string()),
-        status: row
-            .last_status
-            .as_deref()
-            .map(normalize_status)
-            .unwrap_or_else(|| {
-                if row.is_off {
-                    "off".to_string()
-                } else {
-                    "unknown".to_string()
-                }
-            }),
+        status,
         pid: row.last_pid,
         started_at: row.created_at,
         workspace: row.workspace,
         last_status_at: row.last_status_at,
         status_source: StatusSource::Persisted,
     }
+}
+
+fn active_conversation_lease_status(agent_id: &str) -> Option<String> {
+    let leases = crate::conversation_lease::load_leases();
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::conversation_lease::find_active_conflict(&leases, agent_id, "", &now)
+        .map(|_| "headless".to_string())
 }
 
 fn matches_status(agent: &AgentIdentity, status: Option<&str>) -> bool {

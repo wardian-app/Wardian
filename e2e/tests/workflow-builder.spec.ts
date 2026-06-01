@@ -15,7 +15,7 @@ type Blueprint = {
   edges: unknown[];
 };
 
-async function installBuilderV2IpcMock(page: Page) {
+async function installWorkflowBuilderIpcMock(page: Page) {
   await page.addInitScript(() => {
     type BlueprintNode = {
       id: string;
@@ -35,14 +35,14 @@ async function installBuilderV2IpcMock(page: Page) {
     const callbacks = new Map<number, unknown>();
     let callbackId = 1;
     const tauriWindow = window as Window & {
-      __builderV2Invokes?: Array<{ command: string; args?: Record<string, unknown> }>;
-      __builderV2Writes?: Array<{ path: string; blueprint: Blueprint }>;
+      __workflowBuilderInvokes?: Array<{ command: string; args?: Record<string, unknown> }>;
+      __workflowBuilderWrites?: Array<{ path: string; blueprint: Blueprint }>;
       __TAURI_INTERNALS__?: Record<string, unknown>;
       __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
     };
 
-    tauriWindow.__builderV2Invokes = [];
-    tauriWindow.__builderV2Writes = [];
+    tauriWindow.__workflowBuilderInvokes = [];
+    tauriWindow.__workflowBuilderWrites = [];
 
     const validateBlueprint = (blueprint?: Blueprint) => {
       const diagnostics: Diagnostic[] = [];
@@ -78,7 +78,7 @@ async function installBuilderV2IpcMock(page: Page) {
       },
       convertFileSrc: (filePath: string) => filePath,
       invoke: async (command: string, args?: Record<string, unknown>) => {
-        tauriWindow.__builderV2Invokes?.push({ command, args });
+        tauriWindow.__workflowBuilderInvokes?.push({ command, args });
 
         if (command === "list_agents") return [];
         if (command === "list_agent_classes") return [];
@@ -108,7 +108,7 @@ async function installBuilderV2IpcMock(page: Page) {
           if (diagnostics.length > 0 || !blueprint) {
             return { written: false, diagnostics };
           }
-          tauriWindow.__builderV2Writes?.push({
+          tauriWindow.__workflowBuilderWrites?.push({
             path: String(args?.path),
             blueprint,
           });
@@ -121,7 +121,7 @@ async function installBuilderV2IpcMock(page: Page) {
   });
 }
 
-async function openBuilderV2(page: Page) {
+async function openWorkflowBuilder(page: Page) {
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
@@ -129,10 +129,10 @@ async function openBuilderV2(page: Page) {
     .locator(".titlebar-center")
     .getByRole("button", { name: "Blueprints" })
     .click();
-  await expect(page.locator('[data-testid="builder-v2"]')).toBeVisible();
+  await expect(page.locator('[data-testid="workflow-builder"]')).toBeVisible();
   await page.evaluate(async () => {
     const { useBuilderStore } = await import("/src/store/useBuilderStore.ts");
-    useBuilderStore.setState({ path: "C:/tmp/builder-v2-e2e.md" });
+    useBuilderStore.setState({ path: "C:/tmp/workflow-builder-e2e.md" });
   });
 }
 
@@ -159,9 +159,9 @@ async function connectBlueprintNodes(page: Page) {
   });
 }
 
-test("v2 builder authors, validates, and saves a workflow blueprint", async ({ page }) => {
-  await installBuilderV2IpcMock(page);
-  await openBuilderV2(page);
+test("workflow builder authors, validates, and saves a workflow blueprint", async ({ page }) => {
+  await installWorkflowBuilderIpcMock(page);
+  await openWorkflowBuilder(page);
 
   await addNode(page, "Manual Trigger");
   await addNode(page, "Task");
@@ -185,10 +185,10 @@ test("v2 builder authors, validates, and saves a workflow blueprint", async ({ p
   await expect(page.getByRole("button", { name: "Save" })).toBeEnabled();
   await page.getByRole("button", { name: "Save" }).click();
 
-  await page.waitForFunction(() => window.__builderV2Writes?.length === 1);
-  const writes = await page.evaluate(() => window.__builderV2Writes);
+  await page.waitForFunction(() => window.__workflowBuilderWrites?.length === 1);
+  const writes = await page.evaluate(() => window.__workflowBuilderWrites);
   expect(writes).toHaveLength(1);
-  expect(writes?.[0].path).toBe("C:/tmp/builder-v2-e2e.md");
+  expect(writes?.[0].path).toBe("C:/tmp/workflow-builder-e2e.md");
   expect(writes?.[0].blueprint.nodes.some((node: BlueprintNode) => node.type === "manual_trigger")).toBe(true);
   expect(writes?.[0].blueprint.nodes.some((node: BlueprintNode) => node.type === "task")).toBe(true);
   expect(writes?.[0].blueprint.edges).toEqual([

@@ -12,6 +12,7 @@ interface RunStoreState {
   scrubIndex: number;
   loadRuns: () => Promise<void>;
   openRun: (blueprintId: string, runId: string) => Promise<void>;
+  clearOpenRun: () => void;
   setScrubIndex: (index: number) => void;
   currentNodeStatuses: () => Record<string, NodeStatusKind>;
   reset: () => void;
@@ -39,6 +40,14 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
       events,
       blueprint: result.blueprint,
       scrubIndex: Math.max(0, events.length - 1),
+    });
+  },
+  clearOpenRun() {
+    set({
+      state: null,
+      events: [],
+      blueprint: null,
+      scrubIndex: 0,
     });
   },
   setScrubIndex(index) {

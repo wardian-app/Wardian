@@ -979,9 +979,9 @@ Do you want to proceed?
     fn skips_codex_provider_log_from_cleared_provider_session() {
         let temp = tempfile::tempdir().expect("temp dir");
         let cleared_session = "019db2f3-22de-7861-8bc6-1b86db1686db";
-        let log_path = temp
-            .path()
-            .join(format!("rollout-2026-04-20T00-00-00-{cleared_session}.jsonl"));
+        let log_path = temp.path().join(format!(
+            "rollout-2026-04-20T00-00-00-{cleared_session}.jsonl"
+        ));
         std::fs::write(
             &log_path,
             r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"message","role":"assistant","content":"Before clear"}}"#,

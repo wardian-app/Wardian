@@ -1,13 +1,13 @@
-# Workflow v2 Authoring UX Refresh
+# Workflow Authoring UX Refresh
 
 - **Status:** Proposed
 - **Date:** 2026-05-31
-- **Branch:** `debug/v2-workflow-crash`
-- **Scope:** Frontend authoring experience for v2 workflow blueprints.
+- **Branch:** `debug/workflow-crash`
+- **Scope:** Frontend authoring experience for workflow blueprints.
 
 ## 1. Problem
 
-Workflow v2 has the right backend direction: registry-backed node types, durable
+Workflow has the right backend direction: registry-backed node types, durable
 blueprints, run logs, observe mode, schedules, and monitor surfaces. The current
 authoring UI does not match that strength. It feels like a backend demo:
 
@@ -16,12 +16,12 @@ authoring UI does not match that strength. It feels like a backend demo:
 - a permanent runs drawer competes with authoring even in edit mode;
 - node cards hide too much of the authored workflow;
 - adding, duplicating, deleting, and inspecting nodes is less fluid than the old
-  v1 builder;
+  old workflow system builder;
 - the canvas is visually dominant but functionally underused.
 
-The old v1 frontend had better authoring affordances, but its architecture and
+The old workflow system frontend had better authoring affordances, but its architecture and
 workflow model should not be restored. This refresh restores the interaction
-quality while keeping the v2 model intact.
+quality while keeping the workflow model intact.
 
 ## 2. Goals
 
@@ -38,14 +38,14 @@ This pass should:
 - add essential canvas and node actions;
 - auto-layout workflows by default so agents and markdown authors do not need
   to provide coordinates;
-- preserve v2-only concepts: one manual entry node, external schedules, durable
+- preserve workflow-only concepts: one manual entry node, external schedules, durable
   runs, and registry-defined node schemas.
 
 ## 3. Non-Goals
 
-- Do not restore the v1 workflow store or v1 frontend component cluster.
+- Do not restore the old workflow system store or old workflow system frontend component cluster.
 - Do not restore scheduled trigger or file watcher trigger nodes.
-- Do not recreate v1 launch behavior.
+- Do not recreate old workflow system launch behavior.
 - Do not make the builder a separate top-level route again.
 - Do not introduce a new backend contract for this first authoring pass.
 
@@ -74,7 +74,7 @@ needed, but not a permanent 280px drawer.
 
 ### 4.2 Registry-Backed Block Library
 
-The block library is generated from `nodeRegistry.schema.json`, not a v1 block
+The block library is generated from `nodeRegistry.schema.json`, not an old workflow system block
 list. Each item shows:
 
 - label and category;
@@ -135,7 +135,7 @@ issues with focus actions.
 
 ### 4.5 Canvas Actions
 
-Restore high-value authoring actions from v1 as v2-native interactions:
+Restore high-value authoring actions from old workflow system as workflow-native interactions:
 
 - right-click canvas: open block library at pointer;
 - right-click node: duplicate, copy node id, delete, inspect;
@@ -145,7 +145,7 @@ Restore high-value authoring actions from v1 as v2-native interactions:
 - keyboard shortcuts where safe: Delete/Backspace for selected node or edge,
   Escape to close menus/drawers.
 
-These actions operate on the v2 `Blueprint` shape and existing builder store.
+These actions operate on the workflow `Blueprint` shape and existing builder store.
 
 ### 4.6 Default Auto Layout
 
@@ -236,8 +236,8 @@ Browser E2E:
 - **Risk: typed field editors can grow into a separate form-builder project.**
   Mitigation: start with registry field kinds already present; improve only the
   high-frequency kinds first.
-- **Decision: v2 remains the source of truth.** All restored affordances must
-  operate on v2 `Blueprint`, `NodeTypeDef`, and `FieldDef` objects.
+- **Decision: workflow remains the source of truth.** All restored affordances must
+  operate on workflow `Blueprint`, `NodeTypeDef`, and `FieldDef` objects.
 - **Decision: auto layout is default.** `position` remains optional editor
   metadata for human-preserved layouts, but authored workflows must not need
   positions.
@@ -254,6 +254,6 @@ Browser E2E:
   layout.
 - The inspector no longer appears as a low-value permanent panel.
 - Runs no longer occupy a permanent edit-mode drawer by default.
-- Core authoring actions from v1 are available in v2-native form.
+- Core authoring actions from old workflow system are available in workflow-native form.
 - Existing workflow execution, observe, monitor, and scheduling behavior remain
   unchanged.

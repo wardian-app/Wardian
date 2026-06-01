@@ -65,17 +65,17 @@ const events = [
   { seq: 5, ts: "t5", kind: "run_completed" },
 ];
 
-async function installWorkflowsV2IpcMock(page: Page, blueprintFixture = blueprint) {
+async function installWorkflowsIpcMock(page: Page, blueprintFixture = blueprint) {
   await page.addInitScript(({ blueprintFixture, eventFixture }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
     const tauriWindow = window as Window & {
-      __workflowsV2Invokes?: Array<{ command: string; args?: Record<string, unknown> }>;
+      __workflowsInvokes?: Array<{ command: string; args?: Record<string, unknown> }>;
       __TAURI_INTERNALS__?: Record<string, unknown>;
       __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
     };
 
-    tauriWindow.__workflowsV2Invokes = [];
+    tauriWindow.__workflowsInvokes = [];
     tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: () => undefined,
     };
@@ -95,7 +95,7 @@ async function installWorkflowsV2IpcMock(page: Page, blueprintFixture = blueprin
       },
       convertFileSrc: (filePath: string) => filePath,
       invoke: async (command: string, args?: Record<string, unknown>) => {
-        tauriWindow.__workflowsV2Invokes?.push({ command, args });
+        tauriWindow.__workflowsInvokes?.push({ command, args });
 
         if (command === "list_agents") return [];
         if (command === "list_agent_classes") return [];
@@ -144,7 +144,7 @@ async function installWorkflowsV2IpcMock(page: Page, blueprintFixture = blueprin
         if (command === "workflow_validate") {
           return { ok: true, diagnostics: [] };
         }
-        if (command === "workflow_run_v2") {
+        if (command === "workflow_run") {
           return { ok: true, run_id: "run-1", blueprint_id: "wf", run_dir: "/runs/run-1" };
         }
         if (command === "workflow_list_runs") {
@@ -191,7 +191,7 @@ function builderNodeById(page: Page, id: string) {
 }
 
 test("unified Workflows view edits, launches, observes, and returns to edit", async ({ page }) => {
-  await installWorkflowsV2IpcMock(page);
+  await installWorkflowsIpcMock(page);
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
@@ -231,13 +231,13 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
   await expect(builderNodeById(page, "plan")).toHaveCount(1);
   await expect(builderNodeById(page, "ship")).toHaveCount(1);
 
-  const invokes = await page.evaluate(() => window.__workflowsV2Invokes);
-  expect(invokes?.some((call) => call.command === "workflow_run_v2")).toBe(true);
+  const invokes = await page.evaluate(() => window.__workflowsInvokes);
+  expect(invokes?.some((call) => call.command === "workflow_run")).toBe(true);
   expect(invokes?.some((call) => call.command === "workflow_read_run")).toBe(true);
 });
 
 test("workflow builder renders persisted loop workflow nodes on a visible canvas", async ({ page }) => {
-  await installWorkflowsV2IpcMock(page, loopBlueprint);
+  await installWorkflowsIpcMock(page, loopBlueprint);
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });

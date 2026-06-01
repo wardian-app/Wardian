@@ -1058,7 +1058,11 @@ mod tests {
             .to_string_lossy()
             .replace('\\', "\\\\");
         let tracked_config = format!("[build]\ntarget-dir = \"{expected_target}\"\n");
-        std::fs::write(workspace.join(".cargo").join("config.toml"), &tracked_config).unwrap();
+        std::fs::write(
+            workspace.join(".cargo").join("config.toml"),
+            &tracked_config,
+        )
+        .unwrap();
 
         let cwd = workspace.to_str().unwrap();
         run_git(cwd, &["init"]).unwrap();

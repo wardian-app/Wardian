@@ -65,7 +65,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
               <div className="text-[10px] font-bold uppercase text-muted">Events</div>
               <button
                 type="button"
-                className="rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                className="cursor-pointer select-none rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
                 onClick={() => setTimelineCollapsed((collapsed) => !collapsed)}
               >
                 {timelineCollapsed ? 'Expand' : 'Collapse'}
@@ -112,7 +112,7 @@ function ObserveRunHeader({ state, events, activeRunPath, controlsStatus, awaiti
   const failure = state?.failure ?? (latest?.kind === 'run_failed' ? latest.error : null);
 
   return (
-    <div className="flex min-h-[56px] items-center justify-between gap-4 border-b border-wardian-border bg-[var(--color-wardian-card)] px-4">
+    <div className="flex min-h-[56px] select-text items-center justify-between gap-4 border-b border-wardian-border bg-[var(--color-wardian-card)] px-4">
       <div className="flex min-w-0 items-center gap-4">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusClass(state?.status)}`} aria-hidden="true" />
         <div className="min-w-0">

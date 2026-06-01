@@ -4,7 +4,7 @@ import { BuilderToolbar } from '../features/workflows/builder/BuilderToolbar';
 import { DiagnosticsPanel } from '../features/workflows/builder/DiagnosticsPanel';
 import { NodeConfigForm } from '../features/workflows/builder/NodeConfigForm';
 import { NodePalette } from '../features/workflows/builder/NodePalette';
-import { VariableAssistantV2 } from '../features/workflows/builder/VariableAssistantV2';
+import { VariableAssistant } from '../features/workflows/builder/VariableAssistant';
 import type { Blueprint, BlueprintNode, NodeTypeDef } from '../features/workflows/builder/blueprintTypes';
 import { useBuilderStore } from '../store/useBuilderStore';
 
@@ -72,7 +72,7 @@ export function BuilderView({ theme }: BuilderViewProps) {
   };
 
   return (
-    <div data-testid="builder-v2" className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
+    <div data-testid="workflow-builder" className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
       <BuilderToolbar />
       <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)_320px]">
         <aside className="min-h-0 overflow-y-auto border-r border-wardian-border bg-[var(--color-wardian-card)] p-3">
@@ -91,7 +91,7 @@ export function BuilderView({ theme }: BuilderViewProps) {
           {selectedNode ? (
             <>
               <NodeConfigForm node={selectedNode} onChange={updateNodeField} />
-              <VariableAssistantV2 blueprint={activeBlueprint} selectedNodeId={selectedNode.id} />
+              <VariableAssistant blueprint={activeBlueprint} selectedNodeId={selectedNode.id} />
             </>
           ) : (
             <div className="rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)] p-3 text-xs text-muted">

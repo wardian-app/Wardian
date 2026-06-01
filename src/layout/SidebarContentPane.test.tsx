@@ -4,6 +4,10 @@ import { SidebarContentPane } from "./SidebarContentPane";
 import type { AgentClassDefinition, AgentConfig } from "../types";
 
 const loadSchedulesMock = vi.hoisted(() => vi.fn());
+const pauseScheduleMock = vi.hoisted(() => vi.fn());
+const resumeScheduleMock = vi.hoisted(() => vi.fn());
+const runScheduleNowMock = vi.hoisted(() => vi.fn());
+const loadRunsMock = vi.hoisted(() => vi.fn());
 const openRunMock = vi.hoisted(() => vi.fn());
 const observeRunMock = vi.hoisted(() => vi.fn());
 const setModeMock = vi.hoisted(() => vi.fn());
@@ -25,22 +29,43 @@ vi.mock("../features/commands/CommandPanel", () => ({
 }));
 
 vi.mock("../features/workflows/monitor/WorkflowMonitorGlance", () => ({
-  WorkflowMonitorGlance: ({ onOpenMonitor }: { onOpenMonitor: () => void }) => (
-    <button type="button" onClick={onOpenMonitor}>
-      Open Monitor
-    </button>
+  WorkflowMonitorGlance: ({
+    onOpenMonitor,
+    onPauseSchedule,
+    onResumeSchedule,
+    onRunScheduleNow,
+  }: {
+    onOpenMonitor: () => void;
+    onPauseSchedule: (id: string) => void;
+    onResumeSchedule: (id: string) => void;
+    onRunScheduleNow: (id: string) => void;
+  }) => (
+    <div>
+      <button type="button" onClick={onOpenMonitor}>
+        Open Monitor
+      </button>
+      <button type="button" onClick={() => onPauseSchedule("schedule-1")}>
+        Pause schedule
+      </button>
+      <button type="button" onClick={() => onResumeSchedule("schedule-1")}>
+        Resume schedule
+      </button>
+      <button type="button" onClick={() => onRunScheduleNow("schedule-1")}>
+        Run schedule now
+      </button>
+    </div>
   ),
 }));
 
 vi.mock("../store/useSchedulesStore", () => ({
-  useSchedulesStore: <T,>(selector: (state: { schedules: unknown[]; load: () => void }) => T) => (
-    selector({ schedules: [], load: loadSchedulesMock })
+  useSchedulesStore: <T,>(selector: (state: { schedules: unknown[]; load: () => void; pause: (id: string) => void; resume: (id: string) => void; runNow: (id: string) => void }) => T) => (
+    selector({ schedules: [], load: loadSchedulesMock, pause: pauseScheduleMock, resume: resumeScheduleMock, runNow: runScheduleNowMock })
   ),
 }));
 
 vi.mock("../features/workflows/run/useRunStore", () => ({
-  useRunStore: <T,>(selector: (state: { runs: unknown[]; openRun: () => Promise<void> }) => T) => (
-    selector({ runs: [], openRun: openRunMock })
+  useRunStore: <T,>(selector: (state: { runs: unknown[]; openRun: () => Promise<void>; loadRuns: () => void }) => T) => (
+    selector({ runs: [], openRun: openRunMock, loadRuns: loadRunsMock })
   ),
 }));
 
@@ -95,6 +120,10 @@ function renderPane({
 describe("SidebarContentPane", () => {
   beforeEach(() => {
     loadSchedulesMock.mockReset();
+    pauseScheduleMock.mockReset();
+    resumeScheduleMock.mockReset();
+    runScheduleNowMock.mockReset();
+    loadRunsMock.mockReset();
     openRunMock.mockReset();
     openRunMock.mockResolvedValue(undefined);
     observeRunMock.mockReset();
@@ -116,5 +145,35 @@ describe("SidebarContentPane", () => {
 
     expect(onOpenWorkflowsView).toHaveBeenCalled();
     expect(setModeMock).toHaveBeenCalledWith("monitor");
+  });
+
+  it("loads workflow state and wires schedule controls into the glance pane", () => {
+    renderPane({ activeTab: "workflows" });
+
+    expect(loadSchedulesMock).toHaveBeenCalled();
+    expect(loadRunsMock).toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /pause schedule/i }));
+    fireEvent.click(screen.getByRole("button", { name: /resume schedule/i }));
+    fireEvent.click(screen.getByRole("button", { name: /run schedule now/i }));
+
+    expect(pauseScheduleMock).toHaveBeenCalledWith("schedule-1");
+    expect(resumeScheduleMock).toHaveBeenCalledWith("schedule-1");
+    expect(runScheduleNowMock).toHaveBeenCalledWith("schedule-1");
+  });
+
+  it("refreshes active workflow runs while the workflow glance is mounted", () => {
+    vi.useFakeTimers();
+
+    try {
+      renderPane({ activeTab: "workflows" });
+
+      loadRunsMock.mockClear();
+      vi.advanceTimersByTime(1500);
+
+      expect(loadRunsMock).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

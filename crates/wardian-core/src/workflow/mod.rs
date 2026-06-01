@@ -4,6 +4,7 @@
 //! `.md` blueprint, and owns the Node Type Registry that every other surface
 //! (builder, CLI, docs) is generated from.
 
+pub mod assignment;
 pub mod blueprint;
 pub mod diff;
 pub mod error;

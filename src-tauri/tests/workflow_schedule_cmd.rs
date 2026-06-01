@@ -1,7 +1,7 @@
 //! Unit-level checks for schedule command semantics that do not need a running app.
 //!
 //! These tests mutate the process-global `WARDIAN_HOME` env var, so they share a
-//! lock (CI runs `cargo test` multi-threaded). Pattern mirrors `workflow_v2_invoker.rs`.
+//! lock (CI runs `cargo test` multi-threaded). Pattern mirrors `workflow_invoker.rs`.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -45,6 +45,7 @@ fn sample_schedule() -> wardian_core::models::WorkflowSchedule {
         workspace: None,
         input: serde_json::json!({}),
         bindings: Default::default(),
+        assignments: Default::default(),
         schedule: wardian_core::models::ScheduleDefinition {
             schedule_type: "interval".into(),
             interval_minutes: Some(60),
@@ -61,12 +62,12 @@ fn sample_schedule() -> wardian_core::models::WorkflowSchedule {
 }
 
 #[tokio::test]
-async fn schedule_list_v2_reads_persisted_schedules() {
+async fn schedule_list_reads_persisted_schedules() {
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set(dir.path());
 
     wardian_core::schedule::save_schedules(&[sample_schedule()]).unwrap();
-    let loaded = wardian_app_lib::commands::workflow::schedule_list_v2()
+    let loaded = wardian_app_lib::commands::workflow::schedule_list()
         .await
         .unwrap();
 

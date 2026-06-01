@@ -230,13 +230,22 @@ async fn dispatch(
     // Triggers + join: pass-through completion.
     if node.r#type.ends_with("_trigger") || node.r#type == "manual_trigger" || node.r#type == "join"
     {
+        let output = if node.r#type.ends_with("_trigger") || node.r#type == "manual_trigger" {
+            s.registry
+                .get("trigger")
+                .and_then(|value| value.get("output"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
         emit(
             run_root,
             g,
             s,
             EventKind::NodeCompleted {
                 node: node.id.clone(),
-                output: serde_json::json!({}),
+                output,
             },
         )?;
         return Ok(());
@@ -289,15 +298,28 @@ async fn dispatch(
                 output: out,
             },
         )?,
-        Err(StepError(e)) => emit(
-            run_root,
-            g,
-            s,
-            EventKind::NodeFailed {
-                node: node.id.clone(),
-                error: e,
-            },
-        )?,
+        Err(error) => {
+            if error.skipped_reason().is_some() {
+                emit(
+                    run_root,
+                    g,
+                    s,
+                    EventKind::NodeSkipped {
+                        node: node.id.clone(),
+                    },
+                )?
+            } else {
+                emit(
+                    run_root,
+                    g,
+                    s,
+                    EventKind::NodeFailed {
+                        node: node.id.clone(),
+                        error: error.0,
+                    },
+                )?
+            }
+        }
     }
     Ok(())
 }
@@ -490,5 +512,109 @@ mod tests {
         assert_eq!(state.run_id, "run-xyz");
         let checkpoint = read_checkpoint(dir.path()).unwrap().unwrap();
         assert_eq!(checkpoint.run_id, "run-xyz");
+    }
+
+    #[tokio::test]
+    async fn trigger_node_outputs_runtime_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint = Blueprint {
+            schema: 2,
+            id: "wf".into(),
+            name: "Workflow".into(),
+            nodes: vec![Node {
+                id: "trigger".into(),
+                r#type: "manual_trigger".into(),
+                name: None,
+                parent: None,
+                fields: serde_json::Map::new(),
+                position: None,
+            }],
+            edges: vec![],
+            body: String::new(),
+        };
+        let exec = MockExecutor::new();
+
+        let state = Engine::start_with_id(
+            &blueprint,
+            "run-xyz",
+            serde_json::json!({"source":"manual"}),
+            dir.path(),
+            &exec,
+        )
+        .await
+        .unwrap();
+
+        let global_timestamp = state.registry["trigger"]["output"]["timestamp"]
+            .as_str()
+            .expect("global trigger timestamp");
+        let node_timestamp = state.registry["nodes"]["trigger"]["output"]["timestamp"]
+            .as_str()
+            .expect("trigger node timestamp");
+
+        assert_eq!(node_timestamp, global_timestamp);
+        assert_eq!(state.registry["nodes"]["trigger"]["output"]["source"], "manual");
+    }
+
+    #[tokio::test]
+    async fn skipped_step_emits_node_skipped_instead_of_failing_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint = Blueprint {
+            schema: 2,
+            id: "wf".into(),
+            name: "Workflow".into(),
+            nodes: vec![
+                Node {
+                    id: "start".into(),
+                    r#type: "manual_trigger".into(),
+                    name: None,
+                    parent: None,
+                    fields: serde_json::Map::new(),
+                    position: None,
+                },
+                Node {
+                    id: "task".into(),
+                    r#type: "task".into(),
+                    name: None,
+                    parent: None,
+                    fields: serde_json::json!({
+                        "agent": "role:worker",
+                        "prompt": "work"
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    position: None,
+                },
+            ],
+            edges: vec![crate::workflow::Edge {
+                from: "start".into(),
+                from_port: "out".into(),
+                to: "task".into(),
+                to_port: "in".into(),
+            }],
+            body: String::new(),
+        };
+        let exec = MockExecutor::new().with_skipped("task", "busy");
+
+        let state = Engine::start_with_id(
+            &blueprint,
+            "run-xyz",
+            serde_json::json!({}),
+            dir.path(),
+            &exec,
+        )
+        .await
+        .unwrap();
+        let events = read_events(dir.path()).unwrap();
+
+        assert_eq!(state.status, RunStatus::Completed);
+        assert_eq!(state.nodes["task"], NodeStatus::Skipped);
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::NodeSkipped { ref node } if node == "task"
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::NodeFailed { .. })));
     }
 }

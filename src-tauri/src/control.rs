@@ -774,6 +774,16 @@ async fn deliver_message_to_target(
                 },
                 QueuePolicy::MailboxOnly => unreachable!("handled above"),
             }
+        } else if active_conversation_lease_for_delivery(&info) {
+            match queue_policy {
+                QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
+                    runtime_state: "conversation_leased",
+                },
+                QueuePolicy::LiveOnly => DeliveryRoute::Reject {
+                    failure: "conversation_leased",
+                },
+                QueuePolicy::MailboxOnly => unreachable!("handled above"),
+            }
         } else {
             decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
         };
@@ -1115,6 +1125,17 @@ async fn provider_input_has_known_not_ready_state(state: &AppState, session_id: 
         .is_some_and(|input_state| input_state != ProviderInputReadiness::Ready)
 }
 
+fn active_conversation_lease_for_delivery(info: &DeliveryTargetInfo) -> bool {
+    let leases = wardian_core::conversation_lease::load_leases();
+    wardian_core::conversation_lease::find_active_conflict(
+        &leases,
+        &info.uuid,
+        info.resume_session.as_deref().unwrap_or_default(),
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .is_some()
+}
+
 async fn provider_input_current_state(
     state: &AppState,
     session_id: &str,
@@ -1289,15 +1310,14 @@ async fn wait_for_codex_payload_echo_before_submit(
         return;
     };
 
-    if let Err(error) =
-        wait_for_codex_prompt_echo_since(
-            state,
-            session_id,
-            since_cursor,
-            prompt,
-            CODEX_PAYLOAD_ECHO_TIMEOUT_MS,
-        )
-        .await
+    if let Err(error) = wait_for_codex_prompt_echo_since(
+        state,
+        session_id,
+        since_cursor,
+        prompt,
+        CODEX_PAYLOAD_ECHO_TIMEOUT_MS,
+    )
+    .await
     {
         manager::log_debug(&format!(
             "[Wardian] [{session_id}] Codex prompt echo wait before submit did not complete: {error}"
@@ -1369,7 +1389,10 @@ fn codex_output_has_prompt_echo(output: &str, prompt: &str) -> bool {
 }
 
 fn codex_prompt_echo_token(prompt: &str) -> Option<String> {
-    let first_line = prompt.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let first_line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
     let prefix: String = first_line.chars().take(96).collect();
     let token = normalize_codex_prompt_echo_text(&prefix);
     (!token.is_empty()).then_some(token)
@@ -2459,6 +2482,7 @@ struct DeliveryTargetInfo {
     uuid: String,
     name: String,
     provider: String,
+    resume_session: Option<String>,
     status: String,
 }
 
@@ -2485,6 +2509,7 @@ async fn delivery_target_infos(
                 uuid: session_id.clone(),
                 name: config.session_name.clone(),
                 provider: config.provider.clone(),
+                resume_session: config.resume_session.clone(),
                 status: normalize_status(&status),
             })
         })
@@ -2631,6 +2656,9 @@ async fn drain_next_mailbox_message_for_idle_agent(
         return Ok(None);
     }
     if provider_input_blocks_mailbox_drain(state, session_id).await {
+        return Ok(None);
+    }
+    if active_conversation_lease_for_delivery(&info) {
         return Ok(None);
     }
 
@@ -3262,6 +3290,70 @@ mod tests {
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\x1b[13u".to_vec());
+    }
+
+    #[tokio::test]
+    async fn message_delivery_queues_when_current_conversation_is_leased() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp wardian home");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            let mut config = agent.config.lock().unwrap();
+            config.provider = "mock".to_string();
+            config.resume_session = Some("resume-1".to_string());
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+        wardian_core::conversation_lease::acquire_lease(
+            wardian_core::conversation_lease::ConversationLease {
+                agent_id: "agent-1".to_string(),
+                provider: "mock".to_string(),
+                resume_session: "resume-1".to_string(),
+                owner_kind: "workflow_run".to_string(),
+                owner_id: "wf/run-1/node-1".to_string(),
+                owner_node_id: Some("node-1".to_string()),
+                mode: "background_resume".to_string(),
+                started_at: "2026-06-01T00:00:00Z".to_string(),
+                heartbeat_at: "2026-06-01T00:00:00Z".to_string(),
+                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            },
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .expect("lease");
+
+        let delivery = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "hello",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(delivery[0].delivery_state, "queued");
+        assert_eq!(delivery[0].runtime_state, "conversation_leased");
+        assert!(rx.try_recv().is_err());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 
     #[test]
@@ -4397,6 +4489,76 @@ mod tests {
             records[0].status,
             crate::state::MailboxMessageStatus::Pending
         );
+    }
+
+    #[tokio::test]
+    async fn mailbox_drain_waits_while_current_conversation_is_leased() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp wardian home");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            let mut config = agent.config.lock().unwrap();
+            config.resume_session = Some("resume-1".to_string());
+            *agent.current_status.lock().unwrap() = "Processing".to_string();
+        }
+        let queued = deliver_message_to_target(
+            None,
+            &state,
+            "CoderOne",
+            "queued work",
+            None,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let message_id = queued[0].message_id.clone().unwrap();
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        wardian_core::conversation_lease::acquire_lease(
+            wardian_core::conversation_lease::ConversationLease {
+                agent_id: "agent-1".to_string(),
+                provider: "mock".to_string(),
+                resume_session: "resume-1".to_string(),
+                owner_kind: "workflow_run".to_string(),
+                owner_id: "wf/run-1/node-1".to_string(),
+                owner_node_id: Some("node-1".to_string()),
+                mode: "background_resume".to_string(),
+                started_at: "2026-06-01T00:00:00Z".to_string(),
+                heartbeat_at: "2026-06-01T00:00:00Z".to_string(),
+                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            },
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .expect("lease");
+
+        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
+            .await
+            .unwrap();
+
+        assert!(drained.is_none());
+        let records = state.mailbox.lock().await.list_for_target("agent-1");
+        assert_eq!(records[0].id, message_id);
+        assert_eq!(
+            records[0].status,
+            crate::state::MailboxMessageStatus::Pending
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 
     #[tokio::test]

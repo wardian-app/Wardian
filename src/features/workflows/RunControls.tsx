@@ -36,7 +36,7 @@ export function RunControls({
             type="button"
             className="rounded bg-[var(--color-wardian-success)] px-2 py-1 text-xs text-[var(--color-wardian-bg)]"
             onClick={() =>
-              call('workflow_approve_v2', {
+              call('workflow_approve', {
                 blueprintId,
                 runId,
                 blueprintPath,
@@ -52,7 +52,7 @@ export function RunControls({
             type="button"
             className="rounded bg-[var(--color-wardian-error)] px-2 py-1 text-xs text-[var(--color-wardian-bg)]"
             onClick={() =>
-              call('workflow_approve_v2', {
+              call('workflow_approve', {
                 blueprintId,
                 runId,
                 blueprintPath,
@@ -70,7 +70,7 @@ export function RunControls({
         <button
           type="button"
           className="rounded border border-wardian-border px-2 py-1 text-xs text-primary"
-          onClick={() => call('workflow_resume_v2', { blueprintId, runId, blueprintPath })}
+          onClick={() => call('workflow_resume', { blueprintId, runId, blueprintPath })}
         >
           Resume
         </button>
@@ -79,7 +79,7 @@ export function RunControls({
         <button
           type="button"
           className="rounded border border-wardian-border px-2 py-1 text-xs text-primary"
-          onClick={() => call('workflow_cancel_v2', { blueprintId, runId })}
+          onClick={() => call('workflow_cancel', { blueprintId, runId })}
         >
           Cancel
         </button>

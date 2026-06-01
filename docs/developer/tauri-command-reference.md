@@ -89,22 +89,28 @@ Queue commands persist the frontend Queue projection and preferences for the act
 
 ## Workflows (`commands/workflow.rs`)
 
-- `list_workflows`
-- `save_workflow`
-- `delete_workflow`
-- `run_workflow`
-- `stop_all_triggers`
-- `stop_workflow_triggers`
-- `stop_workflow_run`
-- `run_scheduled_workflow_now`
-- `pause_all_triggers`
-- `resume_all_triggers`
-- `load_workflow_library`
-- `save_workflow_library`
-- `list_scheduled_runs`
-- `create_scheduled_run`
-- `delete_scheduled_run`
-- `toggle_scheduled_run`
+Current workflow commands:
+
+- `workflow_parse`
+- `workflow_validate`
+- `workflow_write`
+- `workflow_list_blueprints`
+- `workflow_list_runs`
+- `workflow_read_run`
+- `workflow_run`
+- `workflow_resume`
+- `workflow_approve`
+- `workflow_cancel`
+- `schedule_create`
+- `schedule_list`
+- `schedule_pause`
+- `schedule_resume`
+- `schedule_remove`
+- `schedule_run_now`
+
+Old workflow system command names such as `run_workflow`, `list_workflows`,
+`list_scheduled_runs`, and `create_scheduled_run` belong to the retired JSON
+workflow system. Do not add new frontend behavior against those names.
 
 ## Library (`commands/library.rs`)
 

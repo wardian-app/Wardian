@@ -107,7 +107,7 @@ async fn input_interpolates_and_role_binding_selects_provider() {
 
     let run_id = new_run_id();
     let run_root = wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id).unwrap();
-    wardian_app_lib::workflow_v2::runs::drive_new_run(
+    wardian_app_lib::workflow::runs::drive_new_run(
         blueprint,
         run_id,
         run_root.clone(),

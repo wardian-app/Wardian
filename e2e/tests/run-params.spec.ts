@@ -102,7 +102,7 @@ async function installRunParamsIpcMock(page: Page) {
         }
         if (command === "workflow_parse") return { blueprint: blueprintFixture, diagnostics: [] };
         if (command === "workflow_validate") return { ok: true, diagnostics: [] };
-        if (command === "workflow_run_v2") {
+        if (command === "workflow_run") {
           return { ok: true, run_id: "run-params-1", blueprint_id: "wf", run_dir: "/runs/run-params-1" };
         }
         if (command === "workflow_list_runs") return [];
@@ -135,7 +135,7 @@ async function installRunParamsIpcMock(page: Page) {
   }, { blueprintFixture: blueprint });
 }
 
-test("parameterized run dialog sends entry input to workflow_run_v2", async ({ page }) => {
+test("parameterized run dialog sends entry input to workflow_run", async ({ page }) => {
   await installRunParamsIpcMock(page);
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -159,8 +159,8 @@ test("parameterized run dialog sends entry input to workflow_run_v2", async ({ p
   await dialog.screenshot({ path: "e2e/screenshots/run-params/param-form.png" });
   await dialog.getByRole("button", { name: /^Run$/ }).click();
 
-  await page.waitForFunction(() => window.__runParamsInvokes?.some((call) => call.command === "workflow_run_v2"));
-  const runCall = await page.evaluate(() => window.__runParamsInvokes?.find((call) => call.command === "workflow_run_v2"));
+  await page.waitForFunction(() => window.__runParamsInvokes?.some((call) => call.command === "workflow_run"));
+  const runCall = await page.evaluate(() => window.__runParamsInvokes?.find((call) => call.command === "workflow_run"));
   expect(runCall?.args).toMatchObject({
     path: "/x/wf.md",
     provider: "codex",

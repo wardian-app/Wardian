@@ -16,7 +16,7 @@ describe('ActiveRunsList', () => {
   it('lists runs and opens on click', () => {
     const onOpen = vi.fn();
     render(<ActiveRunsList runs={[run()]} onOpen={onOpen} />);
-    fireEvent.click(screen.getByText(/heartbeat/i));
+    fireEvent.click(screen.getByRole('button', { name: /open heartbeat run r1/i }));
     expect(onOpen).toHaveBeenCalledWith('heartbeat', 'r1');
   });
 

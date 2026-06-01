@@ -667,6 +667,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             .iter()
             .map(|snap| snap.session_id.clone())
             .collect::<Vec<_>>();
+        let active_leases = wardian_core::conversation_lease::load_leases();
+        let lease_now = chrono::Utc::now().to_rfc3339();
         let pass_started = std::time::Instant::now();
         let mut results = Vec::new();
         let system_snapshot = refresh_system_process_snapshot(&sys_metrics, &session_ids);
@@ -1118,6 +1120,19 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 set_snapshot_status(snap, "Off");
             }
 
+            let current_status = if wardian_core::conversation_lease::find_active_conflict(
+                &active_leases,
+                &snap.session_id,
+                snap.resume_session.as_deref().unwrap_or_default(),
+                &lease_now,
+            )
+            .is_some()
+            {
+                "Headless".to_string()
+            } else {
+                snap.current_status.lock().unwrap().clone()
+            };
+
             results.push(AgentTelemetry {
                 session_id: snap.session_id.clone(),
                 cpu_usage: cpu,
@@ -1125,7 +1140,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 uptime_seconds: uptime,
                 query_count: *snap.query_count.lock().unwrap(),
                 init_timestamp: snap.init_timestamp.lock().unwrap().clone(),
-                current_status: snap.current_status.lock().unwrap().clone(),
+                current_status,
                 log_path: log_path_display,
             });
             let agent_duration = agent_started.elapsed();

@@ -1,9 +1,10 @@
-use crate::workflow_v2::runs;
+use crate::{state::AppState, workflow::runs};
 use serde_json::Value;
 use std::collections::HashMap;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 use wardian_core::engine::store::{read_checkpoint, read_events};
-use wardian_core::models::WorkflowSchedule;
+use wardian_core::engine::RunStatus;
+use wardian_core::models::{InvocationKind, WorkflowAssignments, WorkflowSchedule};
 use wardian_core::schedule::{compute_next_run, load_schedules, save_schedules};
 use wardian_core::workflow::{self, Blueprint};
 
@@ -53,7 +54,7 @@ pub fn workflow_list_blueprints() -> Result<Vec<serde_json::Value>, String> {
     Ok(out)
 }
 
-/// List all v2 runs under `<home>/logs/workflows/<id>/<run_id>/`.
+/// List all workflow runs under `<home>/logs/workflows/<id>/<run_id>/`.
 #[tauri::command]
 pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
     let root = wardian_core::paths::workflow_runs_dir().ok_or("no wardian home")?;
@@ -77,20 +78,46 @@ pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
             if !dir.is_dir() {
                 continue;
             }
-            if let Ok(Some(state)) = read_checkpoint(&dir) {
-                out.push(serde_json::json!({
-                    "run_id": state.run_id,
-                    "blueprint_id": state.blueprint_id,
-                    "status": state.status,
-                    "node_count": state.nodes.len(),
-                    "failure": state.failure,
-                    "path": dir.to_string_lossy(),
-                }));
+            if let Some(summary) = summarize_run_dir(&dir) {
+                out.push(summary);
             }
         }
     }
 
+    out.sort_by(|a, b| {
+        let a_updated = a.get("updated_at").and_then(Value::as_str).unwrap_or("");
+        let b_updated = b.get("updated_at").and_then(Value::as_str).unwrap_or("");
+        b_updated.cmp(a_updated).then_with(|| {
+            let a_run = a.get("run_id").and_then(Value::as_str).unwrap_or("");
+            let b_run = b.get("run_id").and_then(Value::as_str).unwrap_or("");
+            b_run.cmp(a_run)
+        })
+    });
+
     Ok(out)
+}
+
+fn summarize_run_dir(dir: &std::path::Path) -> Option<serde_json::Value> {
+    let state = read_checkpoint(dir).ok().flatten()?;
+    let events = read_events(dir).unwrap_or_default();
+    let started_at = events.first().map(|event| event.ts.clone());
+    let updated_at = events.last().map(|event| event.ts.clone());
+    let completed_at = match state.status {
+        RunStatus::Completed => updated_at.clone(),
+        RunStatus::Running | RunStatus::AwaitingApproval | RunStatus::Failed => None,
+    };
+
+    Some(serde_json::json!({
+        "run_id": state.run_id,
+        "blueprint_id": state.blueprint_id,
+        "status": state.status,
+        "node_count": state.nodes.len(),
+        "failure": state.failure,
+        "path": dir.to_string_lossy(),
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "completed_at": completed_at,
+    }))
 }
 
 /// Read one run: its RunState checkpoint, full event trace, and optional blueprint.
@@ -108,15 +135,19 @@ pub fn workflow_read_run(
     Ok(serde_json::json!({ "state": state, "events": events, "blueprint": blueprint }))
 }
 
-/// Launch a v2 blueprint run headlessly. Validates, then drives the engine in a
+/// Launch a workflow blueprint run headlessly. Validates, then drives the engine in a
 /// background task writing logs/workflows/<id>/<run-id>/. Returns the run id.
 #[tauri::command]
-pub async fn workflow_run_v2(
+#[allow(clippy::too_many_arguments)]
+pub async fn workflow_run(
+    state: State<'_, AppState>,
+    app: AppHandle,
     path: String,
     provider: Option<String>,
     workspace: Option<String>,
     input: Option<Value>,
     bindings: Option<HashMap<String, String>>,
+    assignments: Option<WorkflowAssignments>,
 ) -> Result<serde_json::Value, String> {
     let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
@@ -137,12 +168,26 @@ pub async fn workflow_run_v2(
         .unwrap_or_else(|| run_root.clone());
     let input = input.unwrap_or_else(|| serde_json::json!({}));
     let bindings = bindings.unwrap_or_default();
+    let assignments = wardian_core::workflow::assignment::normalize_assignments(
+        assignments,
+        &bindings,
+        InvocationKind::Manual,
+    );
+    let agent_catalog = runs::agent_catalog_from_state_with_assignments(
+        &state,
+        &bindings,
+        &assignments,
+        &workspace,
+        &provider,
+    )
+    .await;
     let blueprint_for_run = blueprint.clone();
     let run_id_for_run = run_id.clone();
     let run_root_for_run = run_root.clone();
 
     tokio::spawn(async move {
-        if let Err(error) = runs::drive_new_run(
+        if let Err(error) = runs::drive_new_run_with_catalog_and_assignments(
+            Some(app),
             blueprint_for_run,
             run_id_for_run,
             run_root_for_run,
@@ -150,10 +195,12 @@ pub async fn workflow_run_v2(
             provider,
             input,
             bindings,
+            assignments,
+            agent_catalog,
         )
         .await
         {
-            crate::utils::logging::log_debug(&format!("[workflow-v2] run failed: {error}"));
+            crate::utils::logging::log_debug(&format!("[workflow] run failed: {error}"));
         }
     });
 
@@ -165,29 +212,70 @@ pub async fn workflow_run_v2(
     }))
 }
 
-/// Resume an interrupted or parked v2 run.
+/// Resume an interrupted or parked workflow run.
 #[tauri::command]
-pub async fn workflow_resume_v2(
+#[allow(clippy::too_many_arguments)]
+pub async fn workflow_resume(
+    state: State<'_, AppState>,
+    app: AppHandle,
     blueprint_id: String,
     run_id: String,
     blueprint_path: String,
     provider: Option<String>,
     workspace: Option<String>,
     bindings: Option<HashMap<String, String>>,
+    assignments: Option<WorkflowAssignments>,
 ) -> Result<serde_json::Value, String> {
     let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
         .map_err(|e| e.to_string())?;
     let run_root =
         wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
-    let provider = provider.unwrap_or_else(|| "codex".to_string());
+    let invocation = runs::read_run_invocation(&run_root)?;
+    let provider = provider
+        .or_else(|| invocation.as_ref().map(|value| value.provider.clone()))
+        .unwrap_or_else(|| "codex".to_string());
     let workspace = workspace
         .map(std::path::PathBuf::from)
+        .or_else(|| {
+            invocation
+                .as_ref()
+                .map(|value| std::path::PathBuf::from(&value.workspace))
+        })
         .unwrap_or_else(|| run_root.clone());
-    let bindings = bindings.unwrap_or_default();
+    let bindings = bindings
+        .or_else(|| invocation.as_ref().map(|value| value.bindings.clone()))
+        .unwrap_or_default();
+    let assignments = wardian_core::workflow::assignment::normalize_assignments(
+        assignments.or_else(|| invocation.as_ref().map(|value| value.assignments.clone())),
+        &bindings,
+        InvocationKind::Manual,
+    );
+    let agent_catalog = runs::agent_catalog_from_state_with_assignments(
+        &state,
+        &bindings,
+        &assignments,
+        &workspace,
+        &provider,
+    )
+    .await;
+    let owner_id = format!("{}/{}", blueprint.id, run_id);
 
     tokio::spawn(async move {
-        if let Err(error) = runs::drive_resume(blueprint, run_root, workspace, provider, bindings).await {
-            crate::utils::logging::log_debug(&format!("[workflow-v2] resume failed: {error}"));
+        let exec = runs::live_executor_with_catalog_assignments_and_app(
+            app,
+            workspace,
+            provider,
+            bindings,
+            assignments,
+            agent_catalog,
+        )
+        .with_owner_id(owner_id);
+        if let Err(error) = wardian_core::engine::Engine::resume(&blueprint, &run_root, &exec)
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+        {
+            crate::utils::logging::log_debug(&format!("[workflow] resume failed: {error}"));
         }
     });
 
@@ -197,7 +285,9 @@ pub async fn workflow_resume_v2(
 /// Grant or reject an approval gate, resuming the run when granted.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn workflow_approve_v2(
+pub async fn workflow_approve(
+    state: State<'_, AppState>,
+    app: AppHandle,
     blueprint_id: String,
     run_id: String,
     blueprint_path: String,
@@ -207,6 +297,8 @@ pub async fn workflow_approve_v2(
     note: Option<String>,
     provider: Option<String>,
     workspace: Option<String>,
+    bindings: Option<HashMap<String, String>>,
+    assignments: Option<WorkflowAssignments>,
 ) -> Result<serde_json::Value, String> {
     let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&blueprint_path))
         .map_err(|e| e.to_string())?;
@@ -214,11 +306,43 @@ pub async fn workflow_approve_v2(
         wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
 
     let result = if granted {
-        let provider = provider.unwrap_or_else(|| "codex".to_string());
+        let invocation = runs::read_run_invocation(&run_root)?;
+        let provider = provider
+            .or_else(|| invocation.as_ref().map(|value| value.provider.clone()))
+            .unwrap_or_else(|| "codex".to_string());
         let workspace = workspace
             .map(std::path::PathBuf::from)
+            .or_else(|| {
+                invocation
+                    .as_ref()
+                    .map(|value| std::path::PathBuf::from(&value.workspace))
+            })
             .unwrap_or_else(|| run_root.clone());
-        let exec = runs::live_executor(workspace, provider, HashMap::new());
+        let bindings = bindings
+            .or_else(|| invocation.as_ref().map(|value| value.bindings.clone()))
+            .unwrap_or_default();
+        let assignments = wardian_core::workflow::assignment::normalize_assignments(
+            assignments.or_else(|| invocation.as_ref().map(|value| value.assignments.clone())),
+            &bindings,
+            InvocationKind::Manual,
+        );
+        let agent_catalog = runs::agent_catalog_from_state_with_assignments(
+            &state,
+            &bindings,
+            &assignments,
+            &workspace,
+            &provider,
+        )
+        .await;
+        let exec = runs::live_executor_with_catalog_assignments_and_app(
+            app.clone(),
+            workspace,
+            provider,
+            bindings,
+            assignments,
+            agent_catalog,
+        )
+        .with_owner_id(format!("{}/{}", blueprint.id, run_id));
         wardian_core::engine::Engine::grant_approval(
             &blueprint, &run_root, &node, &actor, note, &exec,
         )
@@ -236,10 +360,7 @@ pub async fn workflow_approve_v2(
 /// Record a cancel request for a run. Cooperative cancellation of the live loop
 /// is deferred; the marker gives the UI a durable cancellation request.
 #[tauri::command]
-pub fn workflow_cancel_v2(
-    blueprint_id: String,
-    run_id: String,
-) -> Result<serde_json::Value, String> {
+pub fn workflow_cancel(blueprint_id: String, run_id: String) -> Result<serde_json::Value, String> {
     let run_root =
         wardian_core::paths::workflow_run_dir(&blueprint_id, &run_id).ok_or("no wardian home")?;
     std::fs::write(run_root.join("cancel.marker"), "cancelled").map_err(|e| e.to_string())?;
@@ -252,13 +373,13 @@ fn now_ms() -> u64 {
 
 fn emit_schedules_updated(app: &AppHandle) {
     use tauri::Emitter;
-    let _ = app.emit("v2-schedules-updated", ());
+    let _ = app.emit("schedules-updated", ());
 }
 
-/// Create a v2 schedule. `schedule` is the cadence definition; runtime fields are seeded.
+/// Create a workflow schedule. `schedule` is the cadence definition; runtime fields are seeded.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn schedule_create_v2(
+pub async fn schedule_create(
     app: AppHandle,
     blueprint_id: String,
     name: String,
@@ -267,9 +388,16 @@ pub async fn schedule_create_v2(
     workspace: Option<String>,
     input: Option<Value>,
     bindings: Option<HashMap<String, String>>,
+    assignments: Option<wardian_core::models::WorkflowAssignments>,
 ) -> Result<WorkflowSchedule, String> {
     let mut schedules = load_schedules();
     let now = now_ms();
+    let bindings = bindings.unwrap_or_default();
+    let assignments = wardian_core::workflow::assignment::normalize_assignments(
+        assignments,
+        &bindings,
+        InvocationKind::Scheduled,
+    );
     let record = WorkflowSchedule {
         id: wardian_core::engine::driver::new_run_id(),
         blueprint_id,
@@ -277,7 +405,8 @@ pub async fn schedule_create_v2(
         provider,
         workspace,
         input: input.unwrap_or_else(|| serde_json::json!({})),
-        bindings: bindings.unwrap_or_default(),
+        bindings,
+        assignments,
         schedule,
         next_run_epoch_ms: None,
         paused_remaining_ms: None,
@@ -295,12 +424,12 @@ pub async fn schedule_create_v2(
 }
 
 #[tauri::command]
-pub async fn schedule_list_v2() -> Result<Vec<WorkflowSchedule>, String> {
+pub async fn schedule_list() -> Result<Vec<WorkflowSchedule>, String> {
     Ok(load_schedules())
 }
 
 #[tauri::command]
-pub async fn schedule_pause_v2(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn schedule_pause(app: AppHandle, id: String) -> Result<(), String> {
     let mut schedules = load_schedules();
     let now = now_ms();
     if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
@@ -316,7 +445,7 @@ pub async fn schedule_pause_v2(app: AppHandle, id: String) -> Result<(), String>
 }
 
 #[tauri::command]
-pub async fn schedule_resume_v2(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn schedule_resume(app: AppHandle, id: String) -> Result<(), String> {
     let mut schedules = load_schedules();
     let now = now_ms();
     if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
@@ -332,7 +461,7 @@ pub async fn schedule_resume_v2(app: AppHandle, id: String) -> Result<(), String
 }
 
 #[tauri::command]
-pub async fn schedule_remove_v2(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn schedule_remove(app: AppHandle, id: String) -> Result<(), String> {
     let mut schedules = load_schedules();
     schedules.retain(|schedule| schedule.id != id);
     save_schedules(&schedules).map_err(|error| error.to_string())?;
@@ -342,7 +471,7 @@ pub async fn schedule_remove_v2(app: AppHandle, id: String) -> Result<(), String
 
 /// Fire ASAP: set next_run to now so the scheduler's next tick launches it live.
 #[tauri::command]
-pub async fn schedule_run_now_v2(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn schedule_run_now(app: AppHandle, id: String) -> Result<(), String> {
     let mut schedules = load_schedules();
     let now = now_ms();
     if let Some(schedule) = schedules.iter_mut().find(|schedule| schedule.id == id) {
@@ -380,4 +509,45 @@ fn walk_md(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wardian_core::engine::event::{Event, EventKind};
+    use wardian_core::engine::store::{append_event, write_checkpoint};
+    use wardian_core::engine::{RunState, RunStatus};
+
+    #[test]
+    fn run_summary_uses_event_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("wf").join("run-1");
+        let mut state = RunState::new("run-1", "wf");
+        state.status = RunStatus::Completed;
+        write_checkpoint(&run_root, &state).unwrap();
+        append_event(
+            &run_root,
+            &Event::at(
+                0,
+                "2026-05-31T12:00:00Z".into(),
+                EventKind::RunStarted {
+                    blueprint_id: "wf".into(),
+                    schema: 2,
+                    trigger: serde_json::json!({}),
+                },
+            ),
+        )
+        .unwrap();
+        append_event(
+            &run_root,
+            &Event::at(1, "2026-05-31T12:01:00Z".into(), EventKind::RunCompleted),
+        )
+        .unwrap();
+
+        let summary = summarize_run_dir(&run_root).unwrap();
+
+        assert_eq!(summary["started_at"], "2026-05-31T12:00:00Z");
+        assert_eq!(summary["updated_at"], "2026-05-31T12:01:00Z");
+        assert_eq!(summary["completed_at"], "2026-05-31T12:01:00Z");
+    }
 }

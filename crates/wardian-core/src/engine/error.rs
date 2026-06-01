@@ -9,6 +9,14 @@ impl StepError {
     pub fn new(msg: impl Into<String>) -> Self {
         Self(msg.into())
     }
+
+    pub fn skipped(reason: impl Into<String>) -> Self {
+        Self(format!("WARDIAN_STEP_SKIPPED:{}", reason.into()))
+    }
+
+    pub fn skipped_reason(&self) -> Option<&str> {
+        self.0.strip_prefix("WARDIAN_STEP_SKIPPED:")
+    }
 }
 
 /// Error from the engine itself (IO, state, protocol).

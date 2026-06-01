@@ -39,7 +39,7 @@ pub fn step(g: &Graph, s: &RunState) -> Vec<String> {
 pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::engine::Result<()> {
     match &ev.kind {
         EventKind::RunStarted { trigger, .. } => {
-            s.set_trigger(trigger.clone());
+            s.set_trigger(runtime_trigger_output(trigger, &ev.ts));
         }
         EventKind::NodeStarted { node } => s.set_node_status(node, NodeStatus::Running),
         EventKind::NodeCompleted { node, output } => {
@@ -88,6 +88,22 @@ pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::engine::Result<(
     }
     s.next_seq = ev.seq + 1;
     Ok(())
+}
+
+fn runtime_trigger_output(trigger: &serde_json::Value, timestamp: &str) -> serde_json::Value {
+    match trigger {
+        serde_json::Value::Object(map) => {
+            let mut output = map.clone();
+            output
+                .entry("timestamp".to_string())
+                .or_insert_with(|| serde_json::Value::String(timestamp.to_string()));
+            serde_json::Value::Object(output)
+        }
+        other => serde_json::json!({
+            "timestamp": timestamp,
+            "payload": other,
+        }),
+    }
 }
 
 /// Deliver the node's single named port (used for normal "out" completion).

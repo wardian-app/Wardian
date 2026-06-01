@@ -490,7 +490,9 @@ pub fn list_structured_replies() -> Result<Vec<StructuredReply>, Box<dyn std::er
     })
 }
 
-pub fn list_structured_replies_with_conn(conn: &Connection) -> rusqlite::Result<Vec<StructuredReply>> {
+pub fn list_structured_replies_with_conn(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<StructuredReply>> {
     let mut stmt = conn.prepare(
         "SELECT request_id, status, body, target_session_id, source_session_id, replied_at
          FROM structured_replies",

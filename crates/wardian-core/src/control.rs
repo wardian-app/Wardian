@@ -1048,5 +1048,4 @@ mod tests {
         assert!(json.contains(r#""delivery_state":"submitted""#));
         assert!(json.contains(r#""input_mode":"command""#));
     }
-
 }
