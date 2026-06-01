@@ -19,9 +19,12 @@ use super::codex::{
 };
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
 use super::{
-    apply_agent_event, apply_agent_status_event, apply_terminal_identity_env, debug_preview_bytes,
-    extract_terminal_titles, finalize_interactive_spawn_args, interactive_provider_args,
-    interactive_provider_cwd, interactive_provider_launch, set_agent_status,
+    apply_agent_event, apply_agent_event_with_policy, apply_agent_status_event,
+    apply_agent_status_event_with_policy, apply_terminal_identity_env, debug_preview_bytes,
+    extract_terminal_titles,
+    finalize_interactive_spawn_args, interactive_provider_args, interactive_provider_cwd,
+    interactive_provider_launch, provider_status_from_event, set_agent_status,
+    ProviderStatusEventPolicy,
 };
 use crate::providers::gemini::gemini_status_from_title;
 
@@ -174,6 +177,26 @@ fn save_agent_state_after_session_capture(app: &AppHandle) {
 
 fn should_cleanup_stale_session_processes_before_spawn(is_restored: bool) -> bool {
     !is_restored
+}
+
+fn pty_status_event_policy_for_provider(provider_name: &str) -> ProviderStatusEventPolicy {
+    if provider_name == "claude" || provider_name == "codex" {
+        ProviderStatusEventPolicy::PreserveActionRequired
+    } else {
+        ProviderStatusEventPolicy::Normal
+    }
+}
+
+fn line_event_status_for_pty_provider(
+    provider_name: &str,
+    current_status: &str,
+    event: &AgentEvent,
+) -> Option<&'static str> {
+    provider_status_from_event(
+        current_status,
+        event,
+        pty_status_event_policy_for_provider(provider_name),
+    )
 }
 
 fn filter_ignored_conversation_id(
@@ -583,29 +606,23 @@ pub async fn spawn_agent(
                     // Use a simple line-based approach for stream-json events
                     for line in text.lines() {
                         if let Some(event) = pty_provider.parse_output(line) {
-                            match event {
-                                AgentEvent::Init {
+                            if provider_name_for_pty == "claude" {
+                                if let AgentEvent::Init {
                                     session_id,
                                     timestamp,
-                                } => {
+                                } = &event
+                                {
                                     if let Some(ts) = timestamp {
                                         let mut it = init_timestamp_clone.lock().unwrap();
                                         if it.is_none() {
-                                            *it = Some(ts);
+                                            *it = Some(ts.clone());
                                         }
                                     }
                                     if !session_id.trim().is_empty() {
                                         let needs_save = {
                                             let mut config = config_lock_clone.lock().unwrap();
-                                            if capture_codex_init_resume_session(
-                                                &provider_name_for_pty,
-                                                &session_id,
-                                                &mut config,
-                                            ) {
-                                                true
-                                            } else if provider_name_for_pty != "codex"
-                                                && config.resume_session.as_deref()
-                                                    != Some(&session_id)
+                                            if config.resume_session.as_deref()
+                                                != Some(session_id.as_str())
                                             {
                                                 config.resume_session = Some(session_id.clone());
                                                 true
@@ -618,8 +635,6 @@ pub async fn spawn_agent(
                                                 "[Wardian] Session ID mapped for {}: {}",
                                                 sid_for_pty, session_id
                                             ));
-
-                                            // Notify UI that metadata (resume_session ID) has changed
                                             let _ = pty_emit_app.emit("agents-updated", ());
                                             let _ = pty_emit_app.emit(
                                                 "agent-pty-output-ready",
@@ -629,39 +644,77 @@ pub async fn spawn_agent(
                                         }
                                     }
                                 }
-                                AgentEvent::ActionRequired { message: _ } => {
-                                    set_agent_status(
-                                        &pty_app,
-                                        &sid_for_pty,
-                                        &current_status_clone,
-                                        "Action Needed",
-                                    );
+                                apply_agent_status_event_with_policy(
+                                    &pty_app,
+                                    &sid_for_pty,
+                                    event,
+                                    &current_status_clone,
+                                    ProviderStatusEventPolicy::PreserveActionRequired,
+                                );
+                                continue;
+                            }
+
+                            if let AgentEvent::Init {
+                                session_id,
+                                timestamp,
+                            } = &event
+                            {
+                                if let Some(ts) = timestamp {
+                                    let mut it = init_timestamp_clone.lock().unwrap();
+                                    if it.is_none() {
+                                        *it = Some(ts.clone());
+                                    }
                                 }
-                                AgentEvent::ModelResponse => {
-                                    set_agent_status(
-                                        &pty_app,
-                                        &sid_for_pty,
-                                        &current_status_clone,
-                                        "Idle",
-                                    );
+                                if !session_id.trim().is_empty() {
+                                    let needs_save = {
+                                        let mut config = config_lock_clone.lock().unwrap();
+                                        if capture_codex_init_resume_session(
+                                            &provider_name_for_pty,
+                                            session_id,
+                                            &mut config,
+                                        ) {
+                                            true
+                                        } else if provider_name_for_pty != "codex"
+                                            && config.resume_session.as_deref()
+                                                != Some(session_id.as_str())
+                                        {
+                                            config.resume_session = Some(session_id.clone());
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if needs_save {
+                                        log_debug(&format!(
+                                            "[Wardian] Session ID mapped for {}: {}",
+                                            sid_for_pty, session_id
+                                        ));
+
+                                        // Notify UI that metadata (resume_session ID) has changed
+                                        let _ = pty_emit_app.emit("agents-updated", ());
+                                        let _ = pty_emit_app.emit(
+                                            "agent-pty-output-ready",
+                                            serde_json::json!({ "session_id": sid_for_pty }),
+                                        );
+                                        save_agent_state_after_session_capture(&pty_emit_app);
+                                    }
                                 }
-                                AgentEvent::TurnCompleted => {
-                                    set_agent_status(
-                                        &pty_app,
-                                        &sid_for_pty,
-                                        &current_status_clone,
-                                        "Idle",
-                                    );
-                                }
-                                AgentEvent::UserQuery | AgentEvent::Generating => {
-                                    set_agent_status(
-                                        &pty_app,
-                                        &sid_for_pty,
-                                        &current_status_clone,
-                                        "Processing...",
-                                    );
-                                }
-                                _ => {}
+                            }
+                            let current = current_status_clone
+                                .lock()
+                                .map(|status| status.clone())
+                                .unwrap_or_default();
+                            if let Some(next_status) = line_event_status_for_pty_provider(
+                                &provider_name_for_pty,
+                                &current,
+                                &event,
+                            ) {
+                                set_agent_status(
+                                    &pty_app,
+                                    &sid_for_pty,
+                                    &current_status_clone,
+                                    next_status,
+                                );
                             }
                         }
                     }
@@ -815,18 +868,22 @@ pub async fn spawn_agent(
                                             }
                                         }
 
-                                        // Claude uses a dedicated log watcher for status, so
-                                        // only capture Init timestamps from its PTY JSON.
-                                        if provider_name_for_pty != "claude" {
-                                            apply_agent_event(
-                                                &pty_app,
-                                                &sid_for_pty,
-                                                event,
-                                                &query_count_clone,
-                                                &init_timestamp_clone,
-                                                &current_status_clone,
-                                            );
-                                        }
+                                        let status_policy = if provider_name_for_pty == "claude"
+                                            || provider_name_for_pty == "codex"
+                                        {
+                                            ProviderStatusEventPolicy::PreserveActionRequired
+                                        } else {
+                                            ProviderStatusEventPolicy::Normal
+                                        };
+                                        apply_agent_event_with_policy(
+                                            &pty_app,
+                                            &sid_for_pty,
+                                            event,
+                                            &query_count_clone,
+                                            &init_timestamp_clone,
+                                            &current_status_clone,
+                                            status_policy,
+                                        );
                                     }
                                     let _ = pty_emit_app.emit("agent-json-event", serde_json::json!({ "session_id": sid_out, "data": parsed }));
                                     let consumed = stream.byte_offset();
@@ -960,13 +1017,14 @@ pub async fn spawn_agent(
                                         }
                                     }
                                     if let Some(event) = watcher_provider.parse_output(&raw_line) {
-                                        apply_agent_event(
+                                        apply_agent_event_with_policy(
                                             &watcher_app,
                                             &watcher_session,
                                             event,
                                             &watcher_query_count,
                                             &watcher_init_timestamp,
                                             &watcher_current_status,
+                                            ProviderStatusEventPolicy::PreserveActionRequired,
                                         );
                                     }
                                     let _ = watcher_app.emit(
@@ -1488,6 +1546,32 @@ mod tests {
     fn restored_spawns_skip_stale_process_scan() {
         assert!(!should_cleanup_stale_session_processes_before_spawn(true));
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
+    }
+
+    #[test]
+    fn codex_line_status_preserves_action_needed_until_completion() {
+        assert_eq!(
+            line_event_status_for_pty_provider(
+                "codex",
+                "Idle",
+                &AgentEvent::ActionRequired {
+                    message: "approve command".to_string(),
+                },
+            ),
+            Some("Action Needed")
+        );
+        assert_eq!(
+            line_event_status_for_pty_provider("codex", "Action Needed", &AgentEvent::Generating),
+            None
+        );
+        assert_eq!(
+            line_event_status_for_pty_provider(
+                "codex",
+                "Action Needed",
+                &AgentEvent::TurnCompleted,
+            ),
+            Some("Idle")
+        );
     }
 
     #[test]

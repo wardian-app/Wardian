@@ -207,6 +207,16 @@ impl AgentProvider for AntigravityProvider {
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {
+        let trimmed = line.trim();
+        if trimmed.contains("Do you trust the contents of this project?")
+            || trimmed.contains("requires permission to read, edit, and execute files here")
+            || trimmed.contains("Requesting permission for:")
+        {
+            return Some(AgentEvent::ActionRequired {
+                message: "Antigravity permission required".to_string(),
+            });
+        }
+
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         match parsed.get("type").and_then(|value| value.as_str()) {
             Some("USER_INPUT") => Some(AgentEvent::UserQuery),
@@ -345,6 +355,17 @@ mod tests {
                 .unwrap(),
             AgentEvent::TurnCompleted
         );
+    }
+
+    #[test]
+    fn parse_output_detects_workspace_trust_prompt_as_action_required() {
+        let provider = make_provider();
+        let line = "Do you trust the contents of this project? Antigravity CLI requires permission to read, edit, and execute files here.";
+
+        assert!(matches!(
+            provider.parse_output(line),
+            Some(AgentEvent::ActionRequired { .. })
+        ));
     }
 
     #[test]
