@@ -41,7 +41,8 @@ Use alt text that describes the visible state. Avoid vague labels such as `Scree
 - Capture real Wardian UI with seeded or sanitized data.
 - Keep screenshots feature-specific. Avoid generic empty-window captures.
 - Hide or avoid local usernames, absolute paths, API keys, provider tokens, and private repository names.
-- Capture the smallest useful app region or viewport that still shows the interaction clearly.
+- For PR visual evidence, prefer a 1920x1080 desktop viewport or native window so the screenshot resembles a normal fullscreen desktop.
+- Use smaller viewports, cropped regions, or component screenshots only when the screenshot is deliberately proving responsive behavior, cramped layout, resize behavior, or a specific detail that would be harder to see fullscreen.
 - Prefer PNG for UI screenshots.
 - Compress large images before committing.
 - Refresh screenshots in the same PR when a visual change makes existing documentation images stale.

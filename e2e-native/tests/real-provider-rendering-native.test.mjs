@@ -40,12 +40,12 @@ const auditInputRepeatCount = Math.max(
   1,
   Number.parseInt(process.env.WARDIAN_E2E_RENDERING_INPUT_REPEAT_COUNT ?? "1", 10) || 1,
 );
-const auditWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WINDOW_WIDTH ?? "1280", 10);
-const auditWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WINDOW_HEIGHT ?? "1100", 10);
+const auditWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WINDOW_WIDTH ?? "1920", 10);
+const auditWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WINDOW_HEIGHT ?? "1080", 10);
 const auditResizedWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_RESIZED_WIDTH ?? "980", 10);
 const auditResizedWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_RESIZED_HEIGHT ?? "980", 10);
-const auditWideWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WIDE_WIDTH ?? "1440", 10);
-const auditWideWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WIDE_HEIGHT ?? "1100", 10);
+const auditWideWindowWidth = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WIDE_WIDTH ?? "1920", 10);
+const auditWideWindowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_WIDE_HEIGHT ?? "1080", 10);
 const auditStableRowsQuietMs = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_STABLE_ROWS_QUIET_MS ?? "750", 10);
 const auditSettleTimeoutMs = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_SETTLE_TIMEOUT_MS ?? "10000", 10);
 const auditProviderTurnTimeoutMs = Number.parseInt(

@@ -158,12 +158,12 @@ When terminal history exists, the lab also captures `<state>-scrollback-top` and
 Useful tuning variables:
 
 ```bash
-WARDIAN_E2E_RENDERING_WINDOW_WIDTH=1280
-WARDIAN_E2E_RENDERING_WINDOW_HEIGHT=1100
+WARDIAN_E2E_RENDERING_WINDOW_WIDTH=1920
+WARDIAN_E2E_RENDERING_WINDOW_HEIGHT=1080
 WARDIAN_E2E_RENDERING_RESIZED_WIDTH=980
 WARDIAN_E2E_RENDERING_RESIZED_HEIGHT=980
-WARDIAN_E2E_RENDERING_WIDE_WIDTH=1440
-WARDIAN_E2E_RENDERING_WIDE_HEIGHT=1100
+WARDIAN_E2E_RENDERING_WIDE_WIDTH=1920
+WARDIAN_E2E_RENDERING_WIDE_HEIGHT=1080
 WARDIAN_E2E_RENDERING_RAPID_SEQUENCE=1040x900,1320x1040,1160x980,980x980
 WARDIAN_E2E_RENDERING_ROW_HEIGHT=900
 WARDIAN_E2E_TERMINAL_FONT_SIZE=10
@@ -178,6 +178,8 @@ WARDIAN_E2E_RENDERING_CODEX_MODEL=<optional-codex-model>
 WARDIAN_E2E_RENDERING_CLAUDE_MODEL=<optional-claude-model>
 WARDIAN_E2E_RENDERING_OPENCODE_MODEL=opencode/deepseek-v4-flash-free
 ```
+
+The default `initial`, `settled`, and `wide` visual states use a 1920x1080 desktop window so PR evidence resembles a normal fullscreen desktop. Keep the smaller `resized`, `narrow`, rapid-resize, geometry sweep, and outside-terminal sizes when the test is deliberately proving wrapping, cramped layout, or resize behavior.
 
 The lab sends the configured input text as PTY keystrokes and, by default, submits it with carriage return (`\r`). This is intentional: the real-provider run must create actual conversation history before resize, scrollback, clear, pause, and resume evidence is captured. When `WARDIAN_E2E_RENDERING_INPUT_TEXT` is unset, the default prompt asks the provider to print 50 numbered lines from `WARDIAN_SCROLL_001` through `WARDIAN_SCROLL_050`, and the expected response marker defaults to `WARDIAN_SCROLL_050`. For custom deterministic history checks, make the input text ask for a short marker and set `WARDIAN_E2E_RENDERING_EXPECT_RESPONSE_TEXT` to that marker. Set `WARDIAN_E2E_RENDERING_SUBMIT_INPUT=0` only when intentionally inspecting prompt-editing behavior without a completed provider turn.
 
