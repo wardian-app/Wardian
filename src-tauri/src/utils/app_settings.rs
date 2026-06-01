@@ -25,6 +25,8 @@ pub struct AppSettings {
     pub external_editor: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_editor_custom_executable: Option<String>,
+    #[serde(default = "default_explorer_file_click_action")]
+    pub explorer_file_click_action: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +49,8 @@ pub struct AppSettingsOverrides {
     pub external_editor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_editor_custom_executable: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explorer_file_click_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +81,7 @@ impl Default for AppSettings {
             titlebar_telemetry_visible: default_titlebar_telemetry_visible(),
             external_editor: default_external_editor(),
             external_editor_custom_executable: None,
+            explorer_file_click_action: default_explorer_file_click_action(),
         }
     }
 }
@@ -106,6 +111,10 @@ fn default_titlebar_telemetry_visible() -> bool {
 
 fn default_external_editor() -> String {
     "system".to_string()
+}
+
+fn default_explorer_file_click_action() -> String {
+    "preview".to_string()
 }
 
 fn titlebar_telemetry_visible_default_for_build(
@@ -239,6 +248,8 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     settings.external_editor_custom_executable = settings
         .external_editor_custom_executable
         .and_then(|value| trim_to_option(&value));
+    settings.explorer_file_click_action =
+        normalize_explorer_file_click_action(&settings.explorer_file_click_action);
     settings
 }
 
@@ -300,6 +311,10 @@ fn app_settings_from_overrides_for_build(
             .external_editor_custom_executable
             .clone()
             .unwrap_or(defaults.external_editor_custom_executable),
+        explorer_file_click_action: overrides
+            .explorer_file_click_action
+            .clone()
+            .unwrap_or(defaults.explorer_file_click_action),
     })
 }
 
@@ -323,6 +338,12 @@ fn normalize_app_overrides(mut overrides: AppSettingsOverrides) -> AppSettingsOv
     overrides.external_editor_custom_executable = overrides
         .external_editor_custom_executable
         .map(|executable| executable.and_then(|value| trim_to_option(&value)));
+    overrides.explorer_file_click_action = overrides
+        .explorer_file_click_action
+        .and_then(|action| {
+            let normalized = normalize_explorer_file_click_action(&action);
+            (normalized != default_explorer_file_click_action()).then_some(normalized)
+        });
     overrides
 }
 
@@ -352,6 +373,9 @@ fn app_overrides_from_settings(
         external_editor_custom_executable: (settings.external_editor_custom_executable
             != defaults.external_editor_custom_executable)
             .then(|| settings.external_editor_custom_executable.clone()),
+        explorer_file_click_action: (settings.explorer_file_click_action
+            != defaults.explorer_file_click_action)
+            .then(|| settings.explorer_file_click_action.clone()),
     }
 }
 
@@ -382,6 +406,13 @@ fn normalize_external_editor(value: &str) -> String {
         "vscode" => "vscode".to_string(),
         "custom" => "custom".to_string(),
         _ => "system".to_string(),
+    }
+}
+
+fn normalize_explorer_file_click_action(value: &str) -> String {
+    match value.trim() {
+        "external" => "external".to_string(),
+        _ => "preview".to_string(),
     }
 }
 
@@ -418,6 +449,7 @@ mod tests {
         assert!(settings.titlebar_telemetry_visible);
         assert_eq!(settings.external_editor, "system");
         assert_eq!(settings.external_editor_custom_executable, None);
+        assert_eq!(settings.explorer_file_click_action, "preview");
     }
 
     #[test]
@@ -481,6 +513,7 @@ mod tests {
             titlebar_telemetry_visible: true,
             external_editor: "custom".to_string(),
             external_editor_custom_executable: Some("/opt/editor/bin/editor".to_string()),
+            explorer_file_click_action: "external".to_string(),
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -506,6 +539,7 @@ mod tests {
             titlebar_telemetry_visible: true,
             external_editor: "system".to_string(),
             external_editor_custom_executable: None,
+            explorer_file_click_action: "preview".to_string(),
         };
 
         save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -517,6 +551,28 @@ mod tests {
         assert!(json["overrides"].get("auto_patch_gemini").is_none());
         assert!(json["overrides"].get("terminal_font_size").is_none());
         assert!(json["overrides"].get("grid_card_display_mode").is_none());
+        assert!(json["overrides"].get("explorer_file_click_action").is_none());
+    }
+
+    #[test]
+    fn app_settings_drops_default_explorer_file_click_override() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("settings/app.json");
+        let document = AppSettingsDocument {
+            schema_version: 2,
+            settings: AppSettings::default(),
+            overrides: AppSettingsOverrides {
+                explorer_file_click_action: Some("preview".to_string()),
+                ..AppSettingsOverrides::default()
+            },
+            persisted: false,
+        };
+
+        save_app_settings_document_to_path(&path, &document).expect("save settings");
+        let raw = fs::read_to_string(&path).expect("read settings file");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse settings file");
+
+        assert!(json["overrides"].get("explorer_file_click_action").is_none());
     }
 
     #[test]
@@ -531,7 +587,8 @@ mod tests {
               "overrides": {
                 "terminal_font_family": "JetBrains Mono, monospace",
                 "watchlist_new_agent_position": "bottom",
-                "external_editor": "vscode"
+                "external_editor": "vscode",
+                "explorer_file_click_action": "external"
               }
             }"#,
         )
@@ -549,6 +606,7 @@ mod tests {
         assert_eq!(loaded.grid_card_display_mode, "terminal");
         assert_eq!(loaded.watchlist_new_agent_position, "bottom");
         assert_eq!(loaded.external_editor, "vscode");
+        assert_eq!(loaded.explorer_file_click_action, "external");
     }
 
     #[test]
@@ -566,7 +624,8 @@ mod tests {
               "grid_card_display_mode": "cards",
               "watchlist_new_agent_position": "middle",
               "external_editor": "emacs",
-              "external_editor_custom_executable": "   "
+              "external_editor_custom_executable": "   ",
+              "explorer_file_click_action": "open"
             }"#,
         )
         .expect("write settings");
@@ -581,5 +640,6 @@ mod tests {
         assert_eq!(loaded.watchlist_new_agent_position, "top");
         assert_eq!(loaded.external_editor, "system");
         assert_eq!(loaded.external_editor_custom_executable, None);
+        assert_eq!(loaded.explorer_file_click_action, "preview");
     }
 }

@@ -53,6 +53,7 @@ describe("SettingsModal", () => {
       titlebarTelemetryVisible: true,
       externalEditor: "system",
       externalEditorCustomExecutable: "",
+      explorerFileClickAction: "preview",
       shell_id: "auto",
       custom_executable: "",
       custom_args: "",
@@ -301,10 +302,11 @@ describe("SettingsModal", () => {
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe("bottom");
   });
 
-  it("loads and saves the Explorer external editor preference", async () => {
+  it("loads and saves Explorer opening preferences", async () => {
     useSettingsStore.setState({
       externalEditor: "system",
       externalEditorCustomExecutable: "",
+      explorerFileClickAction: "preview",
     });
     render(<SettingsModal isOpen onClose={vi.fn()} />);
 
@@ -318,6 +320,9 @@ describe("SettingsModal", () => {
     fireEvent.change(screen.getByLabelText("Custom editor executable"), {
       target: { value: "C:/Tools/editor.exe" },
     });
+    fireEvent.change(screen.getByLabelText("File click action"), {
+      target: { value: "external" },
+    });
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
@@ -326,11 +331,13 @@ describe("SettingsModal", () => {
           overrides: expect.objectContaining({
             external_editor: "custom",
             external_editor_custom_executable: "C:/Tools/editor.exe",
+            explorer_file_click_action: "external",
           }),
         }),
       });
     });
     expect(useSettingsStore.getState().externalEditor).toBe("custom");
+    expect(useSettingsStore.getState().explorerFileClickAction).toBe("external");
   });
 
   it("loads and saves the top bar telemetry preference", async () => {

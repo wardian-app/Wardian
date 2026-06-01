@@ -11,6 +11,7 @@ export type DefaultProviderSetting = 'auto' | 'claude' | 'codex' | 'gemini' | 'a
 export type AppThemeSetting = 'dark' | 'light' | 'system';
 export type WatchlistNewAgentPosition = 'top' | 'bottom';
 export type ExternalEditorSetting = 'system' | 'vscode' | 'custom';
+export type ExplorerFileClickAction = 'preview' | 'external';
 
 export interface CodexRuntimePolicy {
   sandbox_mode: CodexSandboxMode;
@@ -52,6 +53,7 @@ export interface AppSettings {
   titlebar_telemetry_visible: boolean;
   external_editor: ExternalEditorSetting;
   external_editor_custom_executable: string | null;
+  explorer_file_click_action: ExplorerFileClickAction;
 }
 
 export interface AppSettingsOverrides {
@@ -64,6 +66,7 @@ export interface AppSettingsOverrides {
   titlebar_telemetry_visible?: boolean;
   external_editor?: ExternalEditorSetting;
   external_editor_custom_executable?: string | null;
+  explorer_file_click_action?: ExplorerFileClickAction;
 }
 
 export interface SettingsDocument<TSettings, TOverrides> {

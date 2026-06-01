@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ChevronRight, ChevronDown, Folder, File, FileText, Image, Code } from 'lucide-react';
+import { ChevronRight, ChevronDown, File, FileText, Image, Code } from 'lucide-react';
 
 export interface FileNode {
   name: string;
@@ -123,13 +123,11 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
                 <span className="w-4 h-4 shrink-0 inline-block" />
               )}
 
-              <span className="text-wardian-text-muted flex items-center shrink-0">
-                {node.is_dir ? (
-                  <Folder className={`w-4 h-4 ${expanded[node.path] ? 'fill-wardian-accent/20 text-wardian-accent' : 'text-wardian-processing'}`} />
-                ) : (
-                  getFileIcon(node.extension)
-                )}
-              </span>
+              {!node.is_dir && (
+                <span className="text-wardian-text-muted flex items-center shrink-0">
+                  {getFileIcon(node.extension)}
+                </span>
+              )}
 
               <span
                 className={`truncate flex-1 ${node.is_dir ? 'font-medium' : ''} ${!gitColor ? (node.is_dir ? 'text-wardian-text' : 'text-wardian-text-muted group-hover:text-wardian-text') : ''} transition-colors`}

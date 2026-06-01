@@ -13,7 +13,12 @@ import { useAppUpdate } from "./useAppUpdate";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES } from "../queue/queueFilters";
 import { useQueueStore } from "../../store/useQueueStore";
-import type { AppThemeSetting, ExternalEditorSetting, WatchlistNewAgentPosition } from "../../types/settings";
+import type {
+  AppThemeSetting,
+  ExplorerFileClickAction,
+  ExternalEditorSetting,
+  WatchlistNewAgentPosition,
+} from "../../types/settings";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -126,6 +131,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "External editor",
     detail: "Choose how Explorer opens files and folders from the right-click menu.",
     keywords: ["explorer", "files", "editor", "open", "vscode", "default app"],
+  },
+  {
+    id: "explorer-file-click-action",
+    category: "Explorer",
+    label: "File click action",
+    detail: "Choose whether clicking a file previews it in Wardian or opens it externally.",
+    keywords: ["explorer", "files", "click", "preview", "external", "open"],
   },
   {
     id: "custom-editor-executable",
@@ -359,6 +371,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setExternalEditor,
     externalEditorCustomExecutable,
     setExternalEditorCustomExecutable,
+    explorerFileClickAction,
+    setExplorerFileClickAction,
     gridCardDisplayMode,
     setGridCardDisplayMode,
     watchlistNewAgentPosition,
@@ -520,6 +534,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
   const handleExternalEditorCustomExecutableChange = async (value: string) => {
     setExternalEditorCustomExecutable(value);
+    await useSettingsStore.getState().saveAppSettings();
+  };
+
+  const handleExplorerFileClickActionChange = async (value: ExplorerFileClickAction) => {
+    setExplorerFileClickAction(value);
     await useSettingsStore.getState().saveAppSettings();
   };
 
@@ -812,6 +831,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               placeholder="Path to editor executable"
               className={optionClass}
             />
+          </SettingRow>
+        );
+      case "explorer-file-click-action":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <select
+              aria-label="File click action"
+              value={explorerFileClickAction}
+              onChange={(event) => void handleExplorerFileClickActionChange(event.target.value as ExplorerFileClickAction)}
+              className={optionClass}
+            >
+              <option value="preview">Preview in Wardian</option>
+              <option value="external">Open in external app</option>
+            </select>
           </SettingRow>
         );
       case "shell":
