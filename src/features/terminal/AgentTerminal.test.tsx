@@ -26,6 +26,16 @@ function getLatestHeadlessTerminalInstance() {
   return mockHeadlessTerminal.mock.results[mockHeadlessTerminal.mock.results.length - 1]?.value as any;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("AgentTerminal scrollback", () => {
   let rectSpy: ReturnType<typeof vi.spyOn>;
   let fitDimensions: { cols: number; rows: number };
@@ -908,6 +918,67 @@ describe("AgentTerminal scrollback", () => {
       const instance = getLatestTerminalInstance();
       expect(instance.write).toHaveBeenCalledWith("hello from codex\n", expect.any(Function));
     });
+  });
+
+  it("renders a small initial PTY tail before draining the full retained scrollback", async () => {
+    const fullBackfill = deferred<string | null>();
+    const readCalls: Array<Parameters<typeof invoke>[1]> = [];
+    const appendTerminalOutput = vi.spyOn(useQueueStore.getState(), "appendAgentTerminalOutput");
+
+    mockInvoke.mockImplementation(async (cmd: string, args?: Parameters<typeof invoke>[1]) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCalls.push(args);
+          if (readCalls.length === 1) {
+            return "recent codex frame\n";
+          }
+          if (readCalls.length === 2) {
+            return fullBackfill.promise;
+          }
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="codex-lazy-history" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      const instance = getLatestTerminalInstance();
+      expect(instance.write).toHaveBeenCalledWith("recent codex frame\n", expect.any(Function));
+    });
+
+    const instance = getLatestTerminalInstance();
+    expect(readCalls[0]).toMatchObject({
+      sessionId: "codex-lazy-history",
+      options: {
+        max_bytes: 131_072,
+        peek: true,
+      },
+    });
+    expect(instance.write).not.toHaveBeenCalledWith(
+      "older retained scrollback\nrecent codex frame\n",
+      expect.any(Function),
+    );
+    expect(appendTerminalOutput).not.toHaveBeenCalled();
+
+    fullBackfill.resolve("older retained scrollback\nrecent codex frame\n");
+
+    await waitFor(() => {
+      expect(instance.reset).toHaveBeenCalled();
+      expect(instance.write).toHaveBeenCalledWith(
+        "older retained scrollback\nrecent codex frame\n",
+        expect.any(Function),
+      );
+    });
+    expect(appendTerminalOutput).toHaveBeenCalledTimes(1);
+    expect(appendTerminalOutput).toHaveBeenCalledWith(
+      "codex-lazy-history",
+      "older retained scrollback\nrecent codex frame\n",
+      "codex",
+    );
   });
 
   it("drains additional PTY output when the backend emits an output-ready event", async () => {
