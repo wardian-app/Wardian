@@ -10,6 +10,7 @@ import type {
   CodexRuntimePolicy,
   CodexSandboxMode,
   DefaultProviderSetting,
+  ExplorerFileClickAction,
   ExternalEditorSetting,
   SettingsDocument,
   ShellOption,
@@ -76,6 +77,7 @@ const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', '
 const GRID_CARD_DISPLAY_MODES: GridCardDisplayMode[] = ['terminal', 'chat'];
 const WATCHLIST_NEW_AGENT_POSITIONS: WatchlistNewAgentPosition[] = ['top', 'bottom'];
 const EXTERNAL_EDITOR_SETTINGS: ExternalEditorSetting[] = ['system', 'vscode', 'custom'];
+const EXPLORER_FILE_CLICK_ACTIONS: ExplorerFileClickAction[] = ['preview', 'external'];
 
 export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
   sandbox_mode: 'workspace-write',
@@ -133,6 +135,14 @@ export function normalizeExternalEditorSetting(
     : 'system';
 }
 
+export function normalizeExplorerFileClickAction(
+  value: string | null | undefined,
+): ExplorerFileClickAction {
+  return EXPLORER_FILE_CLICK_ACTIONS.includes(value as ExplorerFileClickAction)
+    ? value as ExplorerFileClickAction
+    : 'preview';
+}
+
 interface SettingsState {
   theme: AppThemeSetting;
   autoPatchGemini: boolean;
@@ -143,6 +153,7 @@ interface SettingsState {
   titlebarTelemetryVisible: boolean;
   externalEditor: ExternalEditorSetting;
   externalEditorCustomExecutable: string;
+  explorerFileClickAction: ExplorerFileClickAction;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -164,6 +175,7 @@ interface SettingsState {
   setTitlebarTelemetryVisible: (value: boolean) => void;
   setExternalEditor: (value: ExternalEditorSetting) => void;
   setExternalEditorCustomExecutable: (value: string) => void;
+  setExplorerFileClickAction: (value: ExplorerFileClickAction) => void;
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
@@ -191,6 +203,7 @@ type PersistedSettingsState = Pick<
   | 'titlebarTelemetryVisible'
   | 'externalEditor'
   | 'externalEditorCustomExecutable'
+  | 'explorerFileClickAction'
 >;
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -212,6 +225,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   titlebar_telemetry_visible: true,
   external_editor: 'system',
   external_editor_custom_executable: null,
+  explorer_file_click_action: 'preview',
 };
 
 const EMPTY_APP_SETTINGS_OVERRIDES: AppSettingsOverrides = {};
@@ -289,6 +303,9 @@ function appOverridesFromSettings(settings: AppSettings): AppSettingsOverrides {
     ...((settings.external_editor_custom_executable?.trim() ?? '') !== ''
       ? { external_editor_custom_executable: settings.external_editor_custom_executable?.trim() ?? null }
       : {}),
+    ...(normalizeExplorerFileClickAction(settings.explorer_file_click_action) !== DEFAULT_APP_SETTINGS.explorer_file_click_action
+      ? { explorer_file_click_action: normalizeExplorerFileClickAction(settings.explorer_file_click_action) }
+      : {}),
   };
 }
 
@@ -303,6 +320,7 @@ function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
     titlebar_telemetry_visible: state.titlebarTelemetryVisible,
     external_editor: state.externalEditor,
     external_editor_custom_executable: state.externalEditorCustomExecutable.trim() || null,
+    explorer_file_click_action: state.explorerFileClickAction,
   });
 }
 
@@ -363,6 +381,9 @@ function normalizeAppOverrides(overrides: AppSettingsOverrides | undefined): App
     ...('external_editor_custom_executable' in (overrides ?? {})
       ? { external_editor_custom_executable: overrides?.external_editor_custom_executable?.trim() || null }
       : {}),
+    ...(normalizeExplorerFileClickAction(overrides?.explorer_file_click_action) !== DEFAULT_APP_SETTINGS.explorer_file_click_action
+      ? { explorer_file_click_action: normalizeExplorerFileClickAction(overrides?.explorer_file_click_action) }
+      : {}),
   };
 }
 
@@ -399,7 +420,8 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
     state.watchlistNewAgentPosition !== DEFAULT_APP_SETTINGS.watchlist_new_agent_position ||
     state.titlebarTelemetryVisible !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible ||
     state.externalEditor !== DEFAULT_APP_SETTINGS.external_editor ||
-    state.externalEditorCustomExecutable.trim() !== ''
+    state.externalEditorCustomExecutable.trim() !== '' ||
+    state.explorerFileClickAction !== DEFAULT_APP_SETTINGS.explorer_file_click_action
   );
 }
 
@@ -415,6 +437,7 @@ export const useSettingsStore = create<SettingsState>()(
       titlebarTelemetryVisible: true,
       externalEditor: 'system',
       externalEditorCustomExecutable: '',
+      explorerFileClickAction: 'preview',
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -483,6 +506,16 @@ export const useSettingsStore = create<SettingsState>()(
           app_settings_overrides: trimmed
             ? { ...state.app_settings_overrides, external_editor_custom_executable: trimmed }
             : rest,
+        };
+      }),
+      setExplorerFileClickAction: (explorerFileClickAction) => set((state) => {
+        const normalized = normalizeExplorerFileClickAction(explorerFileClickAction);
+        const { explorer_file_click_action: _removed, ...rest } = state.app_settings_overrides;
+        return {
+          explorerFileClickAction: normalized,
+          app_settings_overrides: normalized === DEFAULT_APP_SETTINGS.explorer_file_click_action
+            ? rest
+            : { ...state.app_settings_overrides, explorer_file_click_action: normalized },
         };
       }),
       setShellId: (shell_id) => set((state) => ({
@@ -571,6 +604,7 @@ export const useSettingsStore = create<SettingsState>()(
             titlebarTelemetryVisible: settings.titlebar_telemetry_visible !== false,
             externalEditor: normalizeExternalEditorSetting(settings.external_editor),
             externalEditorCustomExecutable: settings.external_editor_custom_executable?.trim() ?? '',
+            explorerFileClickAction: normalizeExplorerFileClickAction(settings.explorer_file_click_action),
             app_settings_overrides: normalizeAppOverrides(overrides),
             app_settings_loaded: true,
           });
@@ -590,6 +624,7 @@ export const useSettingsStore = create<SettingsState>()(
           titlebar_telemetry_visible: get().titlebarTelemetryVisible,
           external_editor: normalizeExternalEditorSetting(get().externalEditor),
           external_editor_custom_executable: get().externalEditorCustomExecutable.trim() || null,
+          explorer_file_click_action: normalizeExplorerFileClickAction(get().explorerFileClickAction),
         };
         const settings: SettingsDocument<AppSettings, AppSettingsOverrides> = {
           schema_version: 2,
@@ -609,6 +644,7 @@ export const useSettingsStore = create<SettingsState>()(
           titlebarTelemetryVisible: saved.titlebar_telemetry_visible !== false,
           externalEditor: normalizeExternalEditorSetting(saved.external_editor),
           externalEditorCustomExecutable: saved.external_editor_custom_executable?.trim() ?? '',
+          explorerFileClickAction: normalizeExplorerFileClickAction(saved.explorer_file_click_action),
           app_settings_overrides: normalizeAppOverrides(overrides),
           app_settings_loaded: true,
         });
@@ -707,6 +743,7 @@ export const useSettingsStore = create<SettingsState>()(
           titlebarTelemetryVisible: typeof state.titlebarTelemetryVisible === 'boolean' ? state.titlebarTelemetryVisible : true,
           externalEditor: normalizeExternalEditorSetting(state.externalEditor),
           externalEditorCustomExecutable: state.externalEditorCustomExecutable?.trim() ?? '',
+          explorerFileClickAction: normalizeExplorerFileClickAction(state.explorerFileClickAction),
         };
       },
       partialize: (state) => ({
@@ -719,6 +756,7 @@ export const useSettingsStore = create<SettingsState>()(
         titlebarTelemetryVisible: state.titlebarTelemetryVisible,
         externalEditor: normalizeExternalEditorSetting(state.externalEditor),
         externalEditorCustomExecutable: state.externalEditorCustomExecutable.trim(),
+        explorerFileClickAction: normalizeExplorerFileClickAction(state.explorerFileClickAction),
       }),
     }
   )

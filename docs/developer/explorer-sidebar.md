@@ -10,13 +10,14 @@ The Explorer Sidebar is a dedicated panel found in the Wardian sidebar (`Sidebar
 ### 1. `ExplorerPanel.tsx`
 This is the main container component for the file explorer tab.
 - **Root Resolution**: It queries the backend command `get_explorer_root(sessionId)` to identify which path to render.
+- **File Click Action**: It receives file selections from `FileTree` and routes them through the Settings-backed `explorerFileClickAction` preference. Preview mode uses `read_file_preview`; external mode reuses `open_in_external_editor`.
 - **Context Menu Context**: Provides right-click operations tailored to `FileTree` items (Open Preview, Open in External App, Reveal in OS, Copy Absolute Path, Delete).
 - **Preview Modal**: Implements a themed modal overlay to securely display raw text file contents queried from the OS.
 
 ### 2. `FileTree.tsx`
 A recursive, lazy-loading component responsible for accurately representing nested directory structures.
 - **Lazy Loading**: Instead of indexing the entire workspace at once, it fetches child nodes only when a directory is expanded, ensuring optimal performance for large projects.
-- **Theming**: Integrates seamlessly with Wardian typography and spacing. Nested items have fixed padding metrics to align correctly underneath parent elements without succumbing to horizontal flex contraction (`shrink-0`). File icons use `lucide-react` with colors mapped explicitly to `wardian-*` CSS variables based on file extensions.
+- **Theming**: Integrates seamlessly with Wardian typography and spacing. Nested items have fixed padding metrics to align correctly underneath parent elements without succumbing to horizontal flex contraction (`shrink-0`). Directory rows use only their expansion chevron; file rows use `lucide-react` icons with colors mapped explicitly to `wardian-*` CSS variables based on file extensions.
 
 ### 3. Backend Commands (`src-tauri/src/commands/fs.rs`)
 The file system operations strictly enforce security and platform agnosticism:

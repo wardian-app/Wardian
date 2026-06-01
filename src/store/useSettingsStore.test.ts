@@ -23,6 +23,7 @@ function resetAppPreferences() {
     titlebarTelemetryVisible: true,
     externalEditor: 'system',
     externalEditorCustomExecutable: '',
+    explorerFileClickAction: 'preview',
     app_settings_overrides: {},
     app_settings_loaded: false,
   });
@@ -144,6 +145,7 @@ describe('app settings persistence', () => {
       titlebar_telemetry_visible: false,
       external_editor: 'vscode',
       external_editor_custom_executable: null,
+      explorer_file_click_action: 'external',
     });
 
     await useSettingsStore.getState().loadAppSettings();
@@ -157,6 +159,7 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
     expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
     expect(useSettingsStore.getState().externalEditor).toBe('vscode');
+    expect(useSettingsStore.getState().explorerFileClickAction).toBe('external');
     expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
   });
 
@@ -171,6 +174,7 @@ describe('app settings persistence', () => {
       titlebar_telemetry_visible: false,
       external_editor: 'custom',
       external_editor_custom_executable: 'C:/Tools/editor.exe',
+      explorer_file_click_action: 'external',
     });
 
     useSettingsStore.getState().setTheme('light');
@@ -182,6 +186,7 @@ describe('app settings persistence', () => {
     useSettingsStore.getState().setTitlebarTelemetryVisible(false);
     useSettingsStore.getState().setExternalEditor('custom');
     useSettingsStore.getState().setExternalEditorCustomExecutable('C:/Tools/editor.exe');
+    useSettingsStore.getState().setExplorerFileClickAction('external');
 
     await useSettingsStore.getState().saveAppSettings();
 
@@ -197,6 +202,7 @@ describe('app settings persistence', () => {
           titlebar_telemetry_visible: false,
           external_editor: 'custom',
           external_editor_custom_executable: 'C:/Tools/editor.exe',
+          explorer_file_click_action: 'external',
         }),
       }),
     });
@@ -206,6 +212,21 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().watchlistNewAgentPosition).toBe('bottom');
     expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
     expect(useSettingsStore.getState().externalEditor).toBe('custom');
+    expect(useSettingsStore.getState().explorerFileClickAction).toBe('external');
+  });
+
+  it('removes the Explorer file click override when reset to preview', () => {
+    useSettingsStore.getState().setExplorerFileClickAction('external');
+    expect(useSettingsStore.getState().app_settings_overrides).toEqual(
+      expect.objectContaining({
+        explorer_file_click_action: 'external',
+      }),
+    );
+
+    useSettingsStore.getState().setExplorerFileClickAction('preview');
+
+    expect(useSettingsStore.getState().explorerFileClickAction).toBe('preview');
+    expect(useSettingsStore.getState().app_settings_overrides).not.toHaveProperty('explorer_file_click_action');
   });
 
   it('keeps migrated local preferences when no backend app settings file exists yet', async () => {

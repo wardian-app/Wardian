@@ -19,8 +19,9 @@ Use it when you need to inspect generated files, logs, prompt assets, or the sel
 1. Select an agent in the right roster, or clear selection for global Wardian home browsing.
 2. Open the **Explorer** tab in the left sidebar.
 3. Expand folders to inspect files.
-4. Use preview, open externally, reveal, copy path, or delete from the file context menu.
-5. Move to [Source Control](./source-control.md) when the selected root is a Git workspace and you need to review changes.
+4. Click a file to preview it, or change the click behavior in [Settings](./settings.md).
+5. Use preview, open externally, reveal, copy path, or delete from the file context menu.
+6. Move to [Source Control](./source-control.md) when the selected root is a Git workspace and you need to review changes.
 
 ## Root Behavior
 
@@ -38,7 +39,15 @@ This allows you to manually browse common data, shared lineages, and global conf
 
 ## 🖱️ File Interactions
 
-The Explorer supports standard right-click actions for rapid file management:
+Clicking a folder expands or collapses it. Clicking a file uses the configured
+**File click action** from Settings:
+
+- **Preview in Wardian** opens the read-only preview modal. This is the default.
+- **Open in external app** opens the file using the configured Explorer external
+  editor preference.
+
+The Explorer also supports standard right-click actions for rapid file
+management:
 
 - **Open Preview**: Opens a read-only plaintext viewer within Wardian for quick inspection of markdown, JSON, or log files.
 - **Open in External App**: Opens the selected file or folder using the configured Explorer editor preference. The default is the operating system's default app for that path. You can switch to VS Code or a custom executable in [Settings](./settings.md).

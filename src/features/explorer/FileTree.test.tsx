@@ -65,4 +65,26 @@ describe('FileTree Component', () => {
     expect(contextMenuSpy).toHaveBeenCalledTimes(1);
     expect(contextMenuSpy).toHaveBeenCalledWith(expect.anything(), mockNodes[0]);
   });
+
+  it('uses the expand chevron without a folder glyph for directories and keeps file type icons', async () => {
+    const mockNodes = [
+      { name: 'src', path: '/test/src', is_dir: true, extension: null },
+      { name: 'notes.md', path: '/test/notes.md', is_dir: false, extension: 'md' },
+    ];
+
+    vi.mocked(invoke).mockResolvedValueOnce(mockNodes);
+
+    render(<FileTree path="/test" />);
+
+    await waitFor(() => {
+      expect(screen.getByText('src')).toBeInTheDocument();
+      expect(screen.getByText('notes.md')).toBeInTheDocument();
+    });
+
+    const directoryRow = screen.getByText('src').closest('div');
+    const fileRow = screen.getByText('notes.md').closest('div');
+
+    expect(directoryRow?.querySelectorAll('svg')).toHaveLength(1);
+    expect(fileRow?.querySelectorAll('svg')).toHaveLength(1);
+  });
 });
