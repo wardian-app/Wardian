@@ -37,7 +37,7 @@ the old workflow system telemetry events.
 An invoker supplies the context for a run. Manual runs, schedules, and future
 file/webhook listeners all use the same contract:
 
-- `input`: the trigger payload available as `{{trigger.output}}`;
+- `input`: the trigger payload available to template fields as `trigger.output`;
 - `bindings`: per-run role or class overrides for agent selection;
 - optional provider and workspace overrides.
 
