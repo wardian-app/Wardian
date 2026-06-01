@@ -49,7 +49,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
   const setBlueprint = useBuilderStore((state) => state.setBlueprint);
   const dirty = useBuilderStore((state) => state.dirty);
   const saveBlueprint = useBuilderStore((state) => state.save);
-  const hasErrors = useBuilderStore((state) => state.hasErrors);
+  const diagnostics = useBuilderStore((state) => state.diagnostics);
 
   const runs = useRunStore((state) => state.runs);
   const runState = useRunStore((state) => state.state);
@@ -76,7 +76,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
     [activeBlueprintId, runs],
   );
   const inputParams = useMemo(() => inputParamsFromBlueprint(blueprint), [blueprint]);
-  const invalid = hasErrors();
+  const invalid = diagnostics.some((diagnostic) => diagnostic.severity === 'error');
   const runDisabled = !blueprintPath || invalid;
 
   useEffect(() => {

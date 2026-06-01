@@ -20,53 +20,42 @@ test.describe("Workflow Builder UI", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
     await page.locator('[data-testid="sidebar-tab-workflows"]').click();
-    await page.locator('[data-testid="workflow-sidebar"]').waitFor();
+    await page.locator("aside").nth(1).getByRole("heading", { name: "Workflows" }).waitFor();
   });
 
   test.afterAll(async () => {
     await page.close();
   });
 
-  test("workflow sidebar renders", async () => {
-    await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
+  test("workflow glance pane renders", async () => {
+    const sidebar = page.locator("aside").nth(1);
+    await expect(sidebar.getByRole("heading", { name: "Workflows" })).toBeVisible();
+    await expect(sidebar.getByRole("button", { name: "Monitor" })).toBeVisible();
   });
 
-  test("switching to workflow builder view renders canvas", async () => {
-    // The builder canvas is shown when a workflow is open/selected.
-    // With empty state the sidebar is visible; builder may not be visible yet.
-    await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
+  test("switching to Workflows view renders the edit canvas", async () => {
+    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await expect(page.getByTestId("workflows-view")).toBeVisible();
+    await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
+    await expect(page.locator(".react-flow")).toBeVisible();
   });
 
-  test("workflow builder renders when navigated to directly", async () => {
-    // If the builder view is accessible via a nav button, verify it loads.
-    const builder = page.locator('[data-testid="workflow-builder"]');
-    const builderVisible = await builder.isVisible().catch(() => false);
-    if (builderVisible) {
-      await expect(builder).toBeVisible();
-    } else {
-      // Builder requires a selected workflow — skip assertion, presence of sidebar is enough.
-      await expect(page.locator('[data-testid="workflow-sidebar"]')).toBeVisible();
-    }
+  test("workflow edit mode opens the node library", async () => {
+    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await page.getByTestId("workflows-view").getByRole("button", { name: "Add node" }).click();
+    await expect(page.getByTestId("node-library")).toBeVisible();
+    await page.getByTestId("node-library").getByRole("button", { name: "Close" }).click();
+    await expect(page.getByTestId("node-library")).toHaveCount(0);
   });
 
-  test("add-block button is visible when builder is open", async () => {
-    const builder = page.locator('[data-testid="workflow-builder"]');
-    const builderVisible = await builder.isVisible().catch(() => false);
-    if (builderVisible) {
-      await expect(page.locator('[data-testid="add-block-button"]')).toBeVisible();
-    } else {
-      test.skip(true, "Workflow builder not visible in empty state");
-    }
+  test("add-node button is visible in edit mode", async () => {
+    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await expect(page.getByTestId("workflows-view").getByRole("button", { name: "Add node" })).toBeVisible();
   });
 
-  test("run-workflow button is visible when builder is open", async () => {
-    const builder = page.locator('[data-testid="workflow-builder"]');
-    const builderVisible = await builder.isVisible().catch(() => false);
-    if (builderVisible) {
-      await expect(page.locator('[data-testid="run-workflow-button"]')).toBeVisible();
-    } else {
-      test.skip(true, "Workflow builder not visible in empty state");
-    }
+  test("run button is disabled for an unsaved empty workflow", async () => {
+    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await expect(page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ })).toBeDisabled();
   });
 });
 

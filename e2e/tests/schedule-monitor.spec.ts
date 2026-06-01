@@ -175,15 +175,15 @@ test("schedule a blueprint and pause it in Monitor", async ({ page }) => {
 
   await page.getByTestId("workflows-view").getByRole("button", { name: /^monitor$/i }).click();
   await expect(page.getByTestId("workflow-monitor")).toBeVisible();
-  await expect(page.getByText("E2E Nightly")).toBeVisible();
+  await expect(page.getByTestId("workflow-monitor").getByRole("button", { name: "Pause E2E Nightly" }).first()).toBeVisible();
 
-  await page.getByRole("button", { name: /^Edit$/ }).first().click();
+  await page.getByRole("button", { name: "Edit E2E Nightly" }).first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.screenshot({ path: "e2e/screenshots/schedule-monitor/monitor-schedule-form.png", fullPage: true });
   await page.getByRole("button", { name: /^Cancel$/ }).click();
 
-  await page.getByRole("button", { name: /^Pause$/ }).first().click();
-  await expect(page.getByRole("button", { name: /^Resume$/ }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Pause E2E Nightly" }).first().click();
+  await expect(page.getByRole("button", { name: "Resume E2E Nightly" }).first()).toBeVisible();
 
   const scheduleCall = await page.evaluate(() => (
     (window as Window & {

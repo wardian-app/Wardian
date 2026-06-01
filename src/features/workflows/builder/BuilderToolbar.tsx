@@ -6,8 +6,7 @@ export function BuilderToolbar() {
   const diagnostics = useBuilderStore((state) => state.diagnostics);
   const setBlueprint = useBuilderStore((state) => state.setBlueprint);
   const save = useBuilderStore((state) => state.save);
-  const hasErrors = useBuilderStore((state) => state.hasErrors);
-  const invalid = hasErrors();
+  const invalid = diagnostics.some((diagnostic) => diagnostic.severity === 'error');
 
   return (
     <div className="flex h-14 items-center justify-between border-b border-wardian-border bg-[var(--color-wardian-card)] px-4">
