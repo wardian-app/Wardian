@@ -376,32 +376,85 @@ pub(crate) fn apply_agent_event(
     init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
 ) {
-    match event {
+    apply_agent_event_with_policy(
+        app,
+        session_id,
+        event,
+        query_count,
+        init_timestamp,
+        current_status,
+        ProviderStatusEventPolicy::Normal,
+    );
+}
+
+pub(crate) fn apply_agent_event_with_policy(
+    app: &AppHandle,
+    session_id: &str,
+    event: AgentEvent,
+    query_count: &std::sync::Arc<std::sync::Mutex<usize>>,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    policy: ProviderStatusEventPolicy,
+) {
+    match &event {
         AgentEvent::UserQuery => {
             if let Ok(mut count) = query_count.lock() {
                 *count += 1;
             }
-            set_agent_status(app, session_id, current_status, "Processing...");
-        }
-        AgentEvent::Generating => {
-            set_agent_status(app, session_id, current_status, "Processing...");
         }
         AgentEvent::Init { timestamp, .. } => {
             if let Ok(mut ts) = init_timestamp.lock() {
-                *ts = timestamp;
+                *ts = timestamp.clone();
             }
         }
-        AgentEvent::ModelResponse => {
-            set_agent_status(app, session_id, current_status, "Idle");
+        _ => {}
+    }
+    apply_agent_status_event_with_policy(app, session_id, event, current_status, policy);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderStatusEventPolicy {
+    Normal,
+    PreserveActionRequired,
+}
+
+pub(crate) fn provider_status_from_event(
+    current_status: &str,
+    event: &AgentEvent,
+    policy: ProviderStatusEventPolicy,
+) -> Option<&'static str> {
+    match event {
+        AgentEvent::UserQuery | AgentEvent::Generating => {
+            if policy == ProviderStatusEventPolicy::PreserveActionRequired
+                && wardian_core::identity::normalize_status(current_status) == "action_required"
+            {
+                None
+            } else {
+                Some("Processing...")
+            }
         }
-        AgentEvent::TurnCompleted => {
-            set_agent_status(app, session_id, current_status, "Idle");
+        AgentEvent::ModelResponse | AgentEvent::TurnCompleted => Some("Idle"),
+        AgentEvent::ActionRequired { .. } => Some("Action Needed"),
+        AgentEvent::Init { .. } | AgentEvent::Unknown => None,
+    }
+}
+
+pub(crate) fn apply_agent_status_event_with_policy(
+    app: &AppHandle,
+    session_id: &str,
+    event: AgentEvent,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    policy: ProviderStatusEventPolicy,
+) {
+    let current = current_status
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default();
+    if let Some(next_status) = provider_status_from_event(&current, &event, policy) {
+        set_agent_status(app, session_id, current_status, next_status);
+        if matches!(event, AgentEvent::TurnCompleted) {
             emit_agent_turn_completed(app, session_id);
         }
-        AgentEvent::ActionRequired { .. } => {
-            set_agent_status(app, session_id, current_status, "Action Needed");
-        }
-        AgentEvent::Unknown => {}
     }
 }
 
@@ -411,22 +464,13 @@ pub(crate) fn apply_agent_status_event(
     event: AgentEvent,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
 ) {
-    match event {
-        AgentEvent::UserQuery | AgentEvent::Generating => {
-            set_agent_status(app, session_id, current_status, "Processing...");
-        }
-        AgentEvent::ModelResponse => {
-            set_agent_status(app, session_id, current_status, "Idle");
-        }
-        AgentEvent::TurnCompleted => {
-            set_agent_status(app, session_id, current_status, "Idle");
-            emit_agent_turn_completed(app, session_id);
-        }
-        AgentEvent::ActionRequired { .. } => {
-            set_agent_status(app, session_id, current_status, "Action Needed");
-        }
-        AgentEvent::Init { .. } | AgentEvent::Unknown => {}
-    }
+    apply_agent_status_event_with_policy(
+        app,
+        session_id,
+        event,
+        current_status,
+        ProviderStatusEventPolicy::Normal,
+    );
 }
 
 /// On macOS, GUI apps inherit a minimal PATH that excludes Homebrew, npm globals,
@@ -1113,6 +1157,27 @@ mod tests {
             "Action Needed"
         );
         assert_eq!(*agent.query_count.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn status_event_policy_preserves_action_needed_until_explicit_completion() {
+        assert_eq!(
+            provider_status_from_event(
+                "Action Needed",
+                &AgentEvent::Generating,
+                ProviderStatusEventPolicy::PreserveActionRequired,
+            ),
+            None
+        );
+
+        assert_eq!(
+            provider_status_from_event(
+                "Action Needed",
+                &AgentEvent::ModelResponse,
+                ProviderStatusEventPolicy::PreserveActionRequired,
+            ),
+            Some("Idle")
+        );
     }
 
     #[tokio::test]
