@@ -30,6 +30,8 @@ type AgentChatViewProps = AgentChatViewBaseProps & AgentChatDraftControlProps;
 
 type LoadState = "loading" | "ready" | "error";
 const CHAT_REFRESH_INTERVAL_MS = 3000;
+const CHAT_INITIAL_PROVIDER_LOG_TAIL_BYTES = 128 * 1024;
+const CHAT_BACKFILL_PROVIDER_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 
 const ROLE_CLASSES: Record<AgentChatRole, string> = {
   assistant: "border-wardian-light bg-[var(--color-wardian-card)]",
@@ -58,6 +60,7 @@ type ChatRow =
 
 type CopyState = "idle" | "copied" | "error";
 type ApprovalChoice = { value: string; label: string };
+type TranscriptLoadMode = "initial" | "backfill" | "refresh";
 
 export function AgentChatView({
   sessionId,
@@ -83,6 +86,7 @@ export function AgentChatView({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const transcriptRequestRef = useRef(0);
+  const transcriptGenerationRef = useRef(0);
   const activeDraft = draft ?? internalDraft;
   const setActiveDraft = onDraftChange ?? setInternalDraft;
 
@@ -118,38 +122,79 @@ export function AgentChatView({
   useEffect(() => {
     let cancelled = false;
     let intervalId: number | null = null;
+    let backfillTimeoutId: number | null = null;
+    let hasBackfilled = false;
+    let backfillStarted = false;
+    const generation = ++transcriptGenerationRef.current;
 
-    const loadTranscript = (showLoading: boolean) => {
+    const loadTranscript = (mode: TranscriptLoadMode, showLoading: boolean) => {
       if (!showLoading && document.visibilityState === "hidden") return;
-      const requestId = ++transcriptRequestRef.current;
+      const requestId = mode === "backfill" ? transcriptRequestRef.current : ++transcriptRequestRef.current;
       if (showLoading) {
         setLoadState("loading");
         setError(null);
       }
 
-      invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
+      invoke<AgentChatEvent[]>("load_agent_chat_transcript", {
+        sessionId,
+        options: {
+          provider_log_tail_bytes:
+            mode === "backfill"
+              ? CHAT_BACKFILL_PROVIDER_LOG_TAIL_BYTES
+              : CHAT_INITIAL_PROVIDER_LOG_TAIL_BYTES,
+        },
+      })
         .then((transcript) => {
-          if (cancelled || requestId !== transcriptRequestRef.current) return;
+          if (cancelled || generation !== transcriptGenerationRef.current || requestId !== transcriptRequestRef.current) return;
           const nextEvents = Array.isArray(transcript) ? transcript : [];
-          setEvents(nextEvents);
-          setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
+          let resolvedEvents = nextEvents;
+          setEvents((currentEvents) => {
+            if (mode === "refresh") {
+              resolvedEvents = mergeTranscriptEvents(currentEvents, nextEvents);
+            } else if (mode === "backfill" && nextEvents.length === 0) {
+              resolvedEvents = currentEvents;
+            } else {
+              resolvedEvents = nextEvents;
+            }
+            return resolvedEvents;
+          });
+          setPendingMessages((pending) => unconfirmedPendingMessages(resolvedEvents, pending));
           setLoadState("ready");
           setError(null);
+          if (mode === "backfill") hasBackfilled = true;
+          if (mode === "initial" && !backfillStarted) {
+            backfillStarted = true;
+            backfillTimeoutId = window.setTimeout(() => {
+              backfillTimeoutId = null;
+              void loadTranscript("backfill", false);
+            }, 0);
+          }
         })
         .catch((reason: unknown) => {
-          if (cancelled || requestId !== transcriptRequestRef.current || !showLoading) return;
+          if (
+            cancelled ||
+            generation !== transcriptGenerationRef.current ||
+            requestId !== transcriptRequestRef.current ||
+            !showLoading
+          ) {
+            return;
+          }
           setEvents([]);
           setError(errorMessage(reason));
           setLoadState("error");
         });
     };
 
-    loadTranscript(true);
-    intervalId = window.setInterval(() => loadTranscript(false), refreshIntervalMs);
+    loadTranscript("initial", true);
+    intervalId = window.setInterval(
+      () => loadTranscript(hasBackfilled ? "refresh" : "initial", false),
+      refreshIntervalMs,
+    );
 
     return () => {
       cancelled = true;
       if (intervalId !== null) window.clearInterval(intervalId);
+      if (backfillTimeoutId !== null) window.clearTimeout(backfillTimeoutId);
     };
   }, [sessionId, reloadKey, refreshIntervalMs]);
 
@@ -171,7 +216,6 @@ export function AgentChatView({
         ...pending,
         createPendingUserMessage(sessionId, agent?.provider ?? provider ?? providerFromEvents(events), prompt, maxSequence(events)),
       ]);
-      setReloadKey((key) => key + 1);
     } catch (reason) {
       setSubmitError(errorMessage(reason));
     } finally {
@@ -734,6 +778,34 @@ function mergePendingMessages(events: AgentChatEvent[], pendingMessages: AgentCh
   if (pendingMessages.length === 0) return events;
   const unconfirmed = unconfirmedPendingMessages(events, pendingMessages);
   return [...events, ...unconfirmed.map((message, index) => ({ ...message, sequence: pendingSequence(events, index) }))];
+}
+
+function mergeTranscriptEvents(existingEvents: AgentChatEvent[], nextEvents: AgentChatEvent[]): AgentChatEvent[] {
+  if (existingEvents.length === 0) return nextEvents;
+  if (nextEvents.length === 0) return existingEvents;
+
+  const seen = new Set<string>();
+  const merged: AgentChatEvent[] = [];
+  for (const event of [...existingEvents, ...nextEvents]) {
+    const key = transcriptEventKey(event);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ ...event, sequence: merged.length + 1 });
+  }
+  return merged;
+}
+
+function transcriptEventKey(event: AgentChatEvent): string {
+  return [
+    event.kind,
+    event.role ?? "",
+    event.turn_id ?? "",
+    event.source ?? "",
+    event.status ?? "",
+    event.title ?? "",
+    event.command ?? "",
+    event.text ?? "",
+  ].join("\u001f");
 }
 
 function unconfirmedPendingMessages(events: AgentChatEvent[], pendingMessages: AgentChatEvent[]): AgentChatEvent[] {

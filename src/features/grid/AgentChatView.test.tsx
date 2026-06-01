@@ -89,10 +89,32 @@ describe("AgentChatView", () => {
     expect(screen.queryByText("Assistant")).not.toBeInTheDocument();
     expect(screen.getByText("Read test output")).toBeInTheDocument();
     expect(container.querySelector('code[data-language="shell"]')?.textContent).toContain("$ npm run test");
-    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_transcript", { sessionId: "agent-1" });
+    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_transcript", {
+      sessionId: "agent-1",
+      options: { provider_log_tail_bytes: 131_072 },
+    });
     expect(screen.queryByText("codex")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
+  });
+
+  it("loads a small transcript tail first and automatically backfills retained history", async () => {
+    invokeMock.mockResolvedValue([]);
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" refreshIntervalMs={60_000} />);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_transcript", {
+        sessionId: "agent-1",
+        options: { provider_log_tail_bytes: 131_072 },
+      });
+    });
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_transcript", {
+        sessionId: "agent-1",
+        options: { provider_log_tail_bytes: 2_097_152 },
+      });
+    });
   });
 
   it("clears rendered transcript rows when the backend clears the agent terminal", async () => {
@@ -627,7 +649,8 @@ describe("AgentChatView", () => {
           role: "assistant",
           text: "Recovered transcript",
         }),
-      ]);
+      ])
+      .mockResolvedValue([]);
 
     render(<AgentChatView sessionId="agent-1" />);
 
@@ -637,7 +660,7 @@ describe("AgentChatView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(await screen.findByText("Recovered transcript")).toBeInTheDocument();
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
   });
 
   it("submits chat input through the provider submit command and renders an optimistic user message", async () => {
@@ -808,6 +831,15 @@ describe("AgentChatView", () => {
   it("refreshes the transcript while chat mode remains mounted", async () => {
     vi.useFakeTimers();
     invokeMock
+      .mockResolvedValueOnce([
+        event({
+          id: "message-initial",
+          kind: "message",
+          role: "assistant",
+          text: "Initial transcript",
+          sequence: 1,
+        }),
+      ])
       .mockResolvedValueOnce([
         event({
           id: "message-initial",

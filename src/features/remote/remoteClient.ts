@@ -110,9 +110,14 @@ export const remoteClient = {
     const result = await remoteJson<{ agents: RemoteAgentSummary[] }>("/remote/api/agents");
     return result.agents;
   },
-  async loadAgentChat(sessionId: string) {
+  async loadAgentChat(sessionId: string, options?: { tailBytes?: number }) {
+    const tailBytes = options?.tailBytes;
+    const query =
+      typeof tailBytes === "number" && Number.isFinite(tailBytes) && tailBytes > 0
+        ? `?tail_bytes=${Math.floor(tailBytes)}`
+        : "";
     const result = await remoteJson<{ events: AgentChatEvent[] }>(
-      `/remote/api/agents/${encodeURIComponent(sessionId)}/chat`,
+      `/remote/api/agents/${encodeURIComponent(sessionId)}/chat${query}`,
     );
     return result.events;
   },

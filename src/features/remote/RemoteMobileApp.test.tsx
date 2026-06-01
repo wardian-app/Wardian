@@ -491,7 +491,7 @@ describe("RemoteMobileApp", () => {
           ),
         );
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (url.startsWith("/remote/api/agents/agent-1/chat")) {
         chatCalls += 1;
         return Promise.resolve(
           new Response(
@@ -610,7 +610,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Send prompt" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Chat" }));
     expect(await screen.findByText("I can see the selected conversation.")).toBeVisible();
-    expect(chatCalls).toBe(1);
+    expect(chatCalls).toBe(2);
     expect(screen.getByLabelText("Prompt Coder")).toBeVisible();
     await userEvent.type(screen.getByLabelText("Prompt Coder"), "what changed?");
     await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
@@ -630,6 +630,92 @@ describe("RemoteMobileApp", () => {
       action: "send_prompt",
       target: "agent-1",
       prompt: "what changed?",
+    });
+  });
+
+  it("loads remote chat with a small tail first and automatically backfills retained history", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ csrf_nonce: "csrf-1", expires_at: null, absolute_expires_at: null }), { status: 200 }),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: "Ready",
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.startsWith("/remote/api/agents/agent-1/chat")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              events: [
+                {
+                  id: "agent-1:1",
+                  session_id: "agent-1",
+                  provider: "codex",
+                  kind: "message",
+                  role: "assistant",
+                  text: "Recent remote answer",
+                  title: null,
+                  status: null,
+                  turn_id: "turn-1",
+                  source: "provider_log",
+                  command: null,
+                  exit_code: null,
+                  path: null,
+                  language: null,
+                  created_at: null,
+                  sequence: 1,
+                  metadata: {},
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: null }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Chat" }));
+    expect(await screen.findByText("Recent remote answer")).toBeVisible();
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/remote/api/agents/agent-1/chat?tail_bytes=131072",
+        expect.objectContaining({ method: "GET" }),
+      );
+    });
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/remote/api/agents/agent-1/chat?tail_bytes=2097152",
+        expect.objectContaining({ method: "GET" }),
+      );
     });
   });
 
@@ -2039,7 +2125,7 @@ describe("RemoteMobileApp", () => {
           }),
         );
       }
-      if (url === "/remote/api/agents/agent-1/chat" || url === "/remote/api/agents/agent-2/chat") {
+      if (url.startsWith("/remote/api/agents/agent-1/chat") || url.startsWith("/remote/api/agents/agent-2/chat")) {
         return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
       }
       return Promise.resolve(new Response("{}", { status: 404 }));
@@ -2118,7 +2204,7 @@ describe("RemoteMobileApp", () => {
       if (url === "/remote/api/agents/action" && init?.method === "POST") {
         return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (url.startsWith("/remote/api/agents/agent-1/chat")) {
         chatCalls += 1;
         return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
       }

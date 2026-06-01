@@ -40,7 +40,7 @@ interface RemoteState {
   closeAgent: () => void;
   setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
   refreshActiveAgentTerminal: (options?: { background?: boolean }) => Promise<void>;
-  refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
+  refreshActiveAgentChat: (options?: { background?: boolean; backfill?: boolean }) => Promise<void>;
   sendPromptToActiveAgent: (prompt: string) => Promise<void>;
   broadcastPrompt: (prompt: string) => Promise<void>;
   runAgentAction: (action: string, target: string) => Promise<void>;
@@ -56,6 +56,8 @@ const statusFromError = (error: unknown): RemoteStatus =>
   error instanceof RemoteRequestError && error.status === 401 ? "session_expired" : "unreachable";
 
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
+const REMOTE_CHAT_INITIAL_PROVIDER_LOG_TAIL_BYTES = 128 * 1024;
+const REMOTE_CHAT_BACKFILL_PROVIDER_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
 const STATUS_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 
@@ -77,6 +79,33 @@ const chatEventFingerprint = (event: AgentChatEvent) =>
 const chatEventsEqual = (left: AgentChatEvent[], right: AgentChatEvent[]) => {
   if (left.length !== right.length) return false;
   return left.every((event, index) => chatEventFingerprint(event) === chatEventFingerprint(right[index]));
+};
+
+const chatEventMergeKey = (event: AgentChatEvent) =>
+  [
+    event.kind,
+    event.role ?? "",
+    event.turn_id ?? "",
+    event.source ?? "",
+    event.text ?? "",
+    event.title ?? "",
+    event.status ?? "",
+    event.command ?? "",
+  ].join("\u0001");
+
+const mergeChatEvents = (existingEvents: AgentChatEvent[], nextEvents: AgentChatEvent[]) => {
+  if (existingEvents.length === 0) return nextEvents;
+  if (nextEvents.length === 0) return existingEvents;
+
+  const seen = new Set<string>();
+  const merged: AgentChatEvent[] = [];
+  for (const event of [...existingEvents, ...nextEvents]) {
+    const key = chatEventMergeKey(event);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ ...event, sequence: merged.length + 1 });
+  }
+  return merged;
 };
 
 class RemotePairingExpiredError extends Error {}
@@ -481,12 +510,25 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       set({ chatLoading: true, chatError: "" });
     }
     try {
-      const chatEvents = await remoteClient.loadAgentChat(activeAgentId);
+      const chatEvents = await remoteClient.loadAgentChat(activeAgentId, {
+        tailBytes: options?.backfill
+          ? REMOTE_CHAT_BACKFILL_PROVIDER_LOG_TAIL_BYTES
+          : REMOTE_CHAT_INITIAL_PROVIDER_LOG_TAIL_BYTES,
+      });
       set((state) => {
         if (state.activeAgentId !== activeAgentId) return { chatLoading: false };
-        if (chatEventsEqual(state.chatEvents, chatEvents)) return { chatLoading: false, chatError: "" };
-        return { chatEvents, chatLoading: false, chatError: "" };
+        const nextEvents =
+          options?.background && !options.backfill
+            ? mergeChatEvents(state.chatEvents, chatEvents)
+            : options?.backfill && chatEvents.length === 0
+              ? state.chatEvents
+            : chatEvents;
+        if (chatEventsEqual(state.chatEvents, nextEvents)) return { chatLoading: false, chatError: "" };
+        return { chatEvents: nextEvents, chatLoading: false, chatError: "" };
       });
+      if (!options?.backfill) {
+        void get().refreshActiveAgentChat({ background: true, backfill: true });
+      }
     } catch (error) {
       set({
         chatLoading: false,

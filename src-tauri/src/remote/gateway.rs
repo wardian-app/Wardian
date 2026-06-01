@@ -32,6 +32,7 @@ const TERMINAL_ATTACH_SESSION_CHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2);
 const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
+const REMOTE_CHAT_MAX_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 const REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_INPUT_FRAME_BASE64_BYTES: usize =
     REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES.div_ceil(3) * 4;
@@ -133,6 +134,11 @@ struct RemoteGatewayContext {
 struct RemoteTerminalQuery {
     since: Option<String>,
     tail_bytes: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteChatQuery {
+    tail_bytes: Option<u64>,
 }
 
 async fn remote_health() -> axum::Json<serde_json::Value> {
@@ -625,15 +631,21 @@ async fn load_remote_agent_chat(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<RemoteChatQuery>,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
     let origin = require_audited_request_boundary(&ctx.config, &headers, false, "load_agent_chat")?;
     let session =
         require_audited_remote_session(&ctx, &headers, &origin, "chat_read", "load_agent_chat")
             .await?;
     let state = ctx.app.state::<crate::state::AppState>();
-    let events = crate::remote::operations::remote_agent_chat_transcript(&state, &session_id)
-        .await
-        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_failed"))?;
+    let tail_bytes = query
+        .tail_bytes
+        .filter(|tail_bytes| *tail_bytes > 0)
+        .map(|tail_bytes| tail_bytes.min(REMOTE_CHAT_MAX_TAIL_BYTES));
+    let events =
+        crate::remote::operations::remote_agent_chat_transcript(&state, &session_id, tail_bytes)
+            .await
+            .map_err(|_| RemoteGatewayError::bad_request("agent_chat_failed"))?;
     audit_gateway_event(
         &session,
         &origin,

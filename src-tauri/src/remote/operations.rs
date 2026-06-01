@@ -48,8 +48,16 @@ pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
 pub async fn remote_agent_chat_transcript(
     state: &AppState,
     session_id: &str,
+    provider_log_tail_bytes: Option<u64>,
 ) -> Result<Vec<AgentChatEvent>, String> {
-    crate::commands::chat::load_agent_chat_transcript_for_state(state, session_id.to_string()).await
+    crate::commands::chat::load_agent_chat_transcript_for_state_with_options(
+        state,
+        session_id.to_string(),
+        Some(crate::commands::chat::AgentChatTranscriptOptions {
+            provider_log_tail_bytes,
+        }),
+    )
+    .await
 }
 
 pub async fn remote_agent_terminal_snapshot(
@@ -288,7 +296,7 @@ mod tests {
         }
         insert_agent(&state, agent).await;
 
-        let transcript = remote_agent_chat_transcript(&state, "agent-1")
+        let transcript = remote_agent_chat_transcript(&state, "agent-1", None)
             .await
             .expect("remote chat transcript");
 
