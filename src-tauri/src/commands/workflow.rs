@@ -494,7 +494,7 @@ pub async fn schedule_run_now(app: AppHandle, id: String) -> Result<(), String> 
 fn parse_blueprint_for_run(blueprint_id: &str, blueprint_path: &str) -> Result<Blueprint, String> {
     let provided = std::path::Path::new(blueprint_path);
     if !blueprint_path.trim().is_empty() && provided.is_file() {
-        return wardian_core::workflow::parse_file(provided).map_err(|e| e.to_string());
+        return parse_blueprint_file_for_id(provided, blueprint_id);
     }
     let resolved = resolve_blueprint_path(blueprint_id).ok_or_else(|| {
         if blueprint_path.trim().is_empty() {
@@ -505,7 +505,21 @@ fn parse_blueprint_for_run(blueprint_id: &str, blueprint_path: &str) -> Result<B
             )
         }
     })?;
-    wardian_core::workflow::parse_file(&resolved).map_err(|e| e.to_string())
+    parse_blueprint_file_for_id(&resolved, blueprint_id)
+}
+
+fn parse_blueprint_file_for_id(
+    path: &std::path::Path,
+    blueprint_id: &str,
+) -> Result<Blueprint, String> {
+    let blueprint = wardian_core::workflow::parse_file(path).map_err(|e| e.to_string())?;
+    if blueprint.id != blueprint_id {
+        return Err(format!(
+            "blueprint path id mismatch: expected {blueprint_id}, found {}",
+            blueprint.id
+        ));
+    }
+    Ok(blueprint)
 }
 
 fn resolve_blueprint_path(id: &str) -> Option<std::path::PathBuf> {
@@ -697,6 +711,23 @@ edges: []
         let blueprint = parse_blueprint_for_run("wf", &stale_run_dir.to_string_lossy()).unwrap();
 
         assert_eq!(blueprint.id, "wf");
+    }
+
+    #[test]
+    fn parse_blueprint_for_run_rejects_mismatched_provided_file() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(dir.path());
+        let other_path = dir.path().join("other.md");
+        std::fs::write(
+            &other_path,
+            WORKFLOW_BLUEPRINT.replace("id: wf", "id: other"),
+        )
+        .unwrap();
+
+        let error = parse_blueprint_for_run("wf", &other_path.to_string_lossy()).unwrap_err();
+
+        assert!(error.contains("blueprint path id mismatch"));
     }
 
     #[tokio::test]

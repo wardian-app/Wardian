@@ -5002,6 +5002,11 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_reports_agent_without_input_channel() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp wardian home");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -5034,6 +5039,11 @@ mod tests {
             error.details().unwrap()["delivery"][0]["error"]["code"],
             "no_input_channel"
         );
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 
     #[tokio::test]
