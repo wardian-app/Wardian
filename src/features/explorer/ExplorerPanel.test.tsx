@@ -1,23 +1,33 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type React from 'react';
 import { ExplorerPanel } from './ExplorerPanel';
 import type { AgentConfig } from '../../types';
 import { useSettingsStore } from '../../store/useSettingsStore';
+import { ConfirmProvider } from '../../components/ConfirmDialog';
+
+const mockListen = vi.mocked(listen);
 
 vi.mock('./FileTree', () => ({
   FileTree: ({
     path,
     onContextMenu,
     onSelect,
+    refreshToken,
+    changedPaths,
   }: {
     path: string;
     onContextMenu?: (event: React.MouseEvent, node: unknown) => void;
     onSelect?: (path: string, isDir: boolean) => void;
+    refreshToken?: number;
+    changedPaths?: string[];
   }) => (
     <div data-testid="file-tree">
+      <output data-testid="file-tree-refresh-token">{refreshToken ?? 0}</output>
+      <output data-testid="file-tree-changed-paths">{(changedPaths ?? []).join('|')}</output>
       <button
         type="button"
         data-testid="mock-file-row"
@@ -45,6 +55,7 @@ vi.mock('./FileTree', () => ({
 describe('ExplorerPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListen.mockResolvedValue(vi.fn());
     useSettingsStore.setState({
       externalEditor: 'system',
       externalEditorCustomExecutable: '',
@@ -240,5 +251,169 @@ describe('ExplorerPanel', () => {
       expect(vi.mocked(invoke).mock.calls.length).toBeGreaterThan(callsBeforeRerender);
       expect(invoke).toHaveBeenCalledWith('get_explorer_root', { sessionId: 'agent-1' });
     });
+  });
+
+  it('starts the explorer watcher only after the change listener is ready', async () => {
+    const unlisten = vi.fn();
+    let resolveListen: ((value: typeof unlisten) => void) | undefined;
+    mockListen.mockReturnValue(new Promise((resolve) => {
+      resolveListen = resolve;
+    }));
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    expect(await screen.findByTestId('file-tree')).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith('explorer_watch', { rootPath: 'C:\\Users\\test\\repo' });
+
+    resolveListen?.(unlisten);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('explorer_watch', { rootPath: 'C:\\Users\\test\\repo' });
+    });
+  });
+
+  it('passes matching explorer change events to FileTree refresh props', async () => {
+    let handler: ((event: { payload: { root_path: string; changed_paths: string[] } }) => void) | undefined;
+    mockListen.mockImplementation(async (_event, callback) => {
+      handler = callback as typeof handler;
+      return () => {};
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          root_path: 'C:\\Users\\test\\repo',
+          changed_paths: ['C:\\Users\\test\\repo\\src\\new-file.ts'],
+        },
+      });
+    });
+
+    expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('1');
+    expect(screen.getByTestId('file-tree-changed-paths')).toHaveTextContent('C:\\Users\\test\\repo\\src\\new-file.ts');
+  });
+
+  it('ignores explorer change events from other roots', async () => {
+    let handler: ((event: { payload: { root_path: string; changed_paths: string[] } }) => void) | undefined;
+    mockListen.mockImplementation(async (_event, callback) => {
+      handler = callback as typeof handler;
+      return () => {};
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          root_path: 'D:\\Other\\repo',
+          changed_paths: ['D:\\Other\\repo\\src\\new-file.ts'],
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+    });
+  });
+
+  it('stops the explorer watcher and listener on unmount', async () => {
+    const unlisten = vi.fn();
+    mockListen.mockResolvedValue(unlisten);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    const { unmount } = render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('explorer_watch', { rootPath: 'C:\\Users\\test\\repo' });
+    });
+
+    unmount();
+
+    await waitFor(() => {
+      expect(unlisten).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledWith('explorer_unwatch', { rootPath: 'C:\\Users\\test\\repo' });
+    });
+  });
+
+  it('unwatches after a pending explorer watcher resolves if unmounted first', async () => {
+    const unlisten = vi.fn();
+    let resolveWatch: (() => void) | undefined;
+    mockListen.mockResolvedValue(unlisten);
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_explorer_root') return Promise.resolve('C:\\Users\\test\\repo');
+      if (command === 'git_status') return Promise.resolve({ files: [] });
+      if (command === 'explorer_watch') {
+        return new Promise((resolve) => {
+          resolveWatch = () => resolve(null);
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const { unmount } = render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('explorer_watch', { rootPath: 'C:\\Users\\test\\repo' });
+    });
+
+    unmount();
+
+    expect(invoke).not.toHaveBeenCalledWith('explorer_unwatch', { rootPath: 'C:\\Users\\test\\repo' });
+
+    await act(async () => {
+      resolveWatch?.();
+    });
+
+    await waitFor(() => {
+      expect(unlisten).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledWith('explorer_unwatch', { rootPath: 'C:\\Users\\test\\repo' });
+    });
+  });
+
+  it('refreshes the tree after deleting a file without remounting FileTree', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      if (command === 'delete_file') return null;
+      return null;
+    });
+
+    render(
+      <ConfirmProvider>
+        <ExplorerPanel selectedAgentIds={new Set()} agents={[]} />
+      </ConfirmProvider>,
+    );
+
+    const tree = await screen.findByTestId('mock-file-row');
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+
+    expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('1');
+    expect(screen.getByTestId('file-tree-changed-paths')).toHaveTextContent('C:\\Users\\test\\repo\\notes.md');
   });
 });

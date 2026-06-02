@@ -411,6 +411,8 @@ pub fn run() {
             commands::fs::validate_directory_path,
             commands::fs::get_explorer_root,
             commands::fs::get_directory_tree,
+            commands::fs::explorer_watch,
+            commands::fs::explorer_unwatch,
             commands::fs::delete_file,
             commands::fs::reveal_in_explorer,
             commands::fs::open_in_external_editor,

@@ -1,8 +1,19 @@
-use serde::Deserialize;
+use crate::state::{AppState, ExplorerWatchRegistration};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Emitter};
 use wardian_core::models::AgentConfig;
 use wardian_core::models::FileNode;
+
+const EXPLORER_WATCH_DEBOUNCE_MS: u64 = 150;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplorerChangedPayload {
+    pub root_path: String,
+    pub changed_paths: Vec<String>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExternalEditorLaunchSettings {
@@ -14,6 +25,69 @@ pub struct ExternalEditorLaunchSettings {
 struct ExternalEditorLaunchSpec {
     program: String,
     args: Vec<String>,
+}
+
+fn normalize_explorer_watch_key(path: &Path) -> Result<String, String> {
+    let absolute = match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) if path.is_absolute() => path.to_path_buf(),
+        Err(error) => {
+            let current_dir = std::env::current_dir().map_err(|cwd_error| {
+                format!(
+                    "Failed to resolve explorer watch root {}: {}; current_dir failed: {}",
+                    path.display(),
+                    error,
+                    cwd_error
+                )
+            })?;
+            current_dir.join(path)
+        }
+    };
+    let normalized = absolute.to_string_lossy().replace('\\', "/");
+    Ok(if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    })
+}
+
+fn is_explorer_watch_excluded(path: &Path) -> bool {
+    let mut previous: Option<String> = None;
+    for segment in path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+    {
+        let lower = segment.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            ".git"
+                | "node_modules"
+                | "target"
+                | ".venv"
+                | "dist"
+                | "build"
+                | ".next"
+                | ".turbo"
+                | ".cache"
+        ) {
+            return true;
+        }
+        if previous.as_deref() == Some(".wardian") && lower == "tmp" {
+            return true;
+        }
+        previous = Some(lower);
+    }
+    false
+}
+
+fn event_paths(event: notify::Event) -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for path in event.paths {
+        if !is_explorer_watch_excluded(&path) {
+            paths.insert(path);
+        }
+    }
+    paths.into_iter().collect()
 }
 
 fn resolve_agent_visible_workspace(config: &AgentConfig) -> String {
@@ -92,6 +166,122 @@ pub async fn get_directory_tree(path: String) -> Result<Vec<FileNode>, String> {
     nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
 
     Ok(nodes)
+}
+
+#[tauri::command]
+pub async fn explorer_watch(
+    root_path: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let root = PathBuf::from(&root_path);
+    if !root.is_dir() {
+        return Err(format!(
+            "Explorer watch root does not exist or is not a directory: {}",
+            root_path
+        ));
+    }
+
+    let watch_key = normalize_explorer_watch_key(&root)?;
+    let mut registrations = state.explorer_watchers.lock().await;
+    if let Some(registration) = registrations.get_mut(&watch_key) {
+        registration.ref_count += 1;
+        return Ok(());
+    }
+
+    let canonical_root = root.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve explorer watch root {}: {}",
+            root.display(),
+            e
+        )
+    })?;
+    let emitted_root = root_path.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            let paths = event_paths(event);
+            if !paths.is_empty() {
+                let _ = tx.send(paths);
+            }
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    notify::Watcher::watch(
+        &mut watcher,
+        &canonical_root,
+        notify::RecursiveMode::Recursive,
+    )
+    .map_err(|e| e.to_string())?;
+
+    registrations.insert(
+        watch_key,
+        ExplorerWatchRegistration {
+            watcher,
+            ref_count: 1,
+        },
+    );
+    drop(registrations);
+
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        loop {
+            let Some(first_paths) = rx.recv().await else {
+                break;
+            };
+            let mut changed_paths = BTreeSet::new();
+            changed_paths.extend(first_paths);
+
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(EXPLORER_WATCH_DEBOUNCE_MS),
+                    rx.recv(),
+                )
+                .await
+                {
+                    Ok(Some(paths)) => {
+                        changed_paths.extend(paths);
+                    }
+                    Ok(None) => return,
+                    Err(_) => break,
+                }
+            }
+
+            let payload = ExplorerChangedPayload {
+                root_path: emitted_root.clone(),
+                changed_paths: changed_paths
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+            };
+            let _ = app_handle.emit("explorer-changed", payload);
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn explorer_unwatch(
+    root_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let root = PathBuf::from(&root_path);
+    let watch_key = normalize_explorer_watch_key(&root)?;
+    let mut registrations = state.explorer_watchers.lock().await;
+    let Some(registration) = registrations.get_mut(&watch_key) else {
+        return Ok(());
+    };
+
+    if registration.ref_count > 1 {
+        registration.ref_count -= 1;
+    } else {
+        registrations.remove(&watch_key);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -428,5 +618,39 @@ mod tests {
         assert!(!terminal_link_target_exists(
             missing_path.to_string_lossy().into_owned()
         ));
+    }
+
+    #[test]
+    fn explorer_watch_excludes_high_churn_paths() {
+        assert!(is_explorer_watch_excluded(Path::new("/repo/.git/index")));
+        assert!(is_explorer_watch_excluded(Path::new(
+            "/repo/node_modules/pkg/index.js"
+        )));
+        assert!(is_explorer_watch_excluded(Path::new(
+            "/repo/target/debug/app"
+        )));
+        assert!(is_explorer_watch_excluded(Path::new(
+            "/repo/.wardian/tmp/cache"
+        )));
+        assert!(!is_explorer_watch_excluded(Path::new("/repo/src/main.ts")));
+    }
+
+    #[test]
+    fn explorer_watch_key_normalizes_existing_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = normalize_explorer_watch_key(temp.path()).expect("watch key");
+
+        assert!(!key.contains('\\'));
+        assert!(key.contains('/'));
+    }
+
+    #[test]
+    fn explorer_watch_key_normalizes_missing_absolute_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let missing = temp.path().join("deleted-before-unwatch");
+        let key = normalize_explorer_watch_key(&missing).expect("watch key");
+
+        assert!(!key.contains('\\'));
+        assert!(key.ends_with("/deleted-before-unwatch"));
     }
 }

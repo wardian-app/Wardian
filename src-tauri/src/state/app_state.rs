@@ -15,6 +15,11 @@ pub struct LibraryWatchRegistration {
     pub watched_paths: Vec<PathBuf>,
 }
 
+pub struct ExplorerWatchRegistration {
+    pub watcher: notify::RecommendedWatcher,
+    pub ref_count: usize,
+}
+
 pub struct AppState {
     // Map of session_id to ActiveAgent
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
@@ -40,6 +45,8 @@ pub struct AppState {
     pub git_watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     // Active library watchers keyed by library type, shared by mounted UI consumers
     pub library_watchers: Mutex<HashMap<String, LibraryWatchRegistration>>,
+    // Active explorer root watchers keyed by normalized root path
+    pub explorer_watchers: Mutex<HashMap<String, ExplorerWatchRegistration>>,
     // Single standalone terminal session for the human user.
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
@@ -123,6 +130,7 @@ impl Default for AppState {
             workflow_schedules_paused: std::sync::atomic::AtomicBool::new(false),
             git_watchers: Mutex::new(HashMap::new()),
             library_watchers: Mutex::new(HashMap::new()),
+            explorer_watchers: Mutex::new(HashMap::new()),
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
             interactions: InteractionState::default(),

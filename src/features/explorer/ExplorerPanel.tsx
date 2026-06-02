@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { FolderOpen } from 'lucide-react';
 import { FileTree, FileNode } from './FileTree';
@@ -11,6 +12,16 @@ interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
 }
+
+interface ExplorerChangedEvent {
+  root_path: string;
+  changed_paths: string[];
+}
+
+const normalizeComparablePath = (path: string): string => {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+};
 
 const externalEditorLabel = (editor: string) => {
   switch (editor) {
@@ -53,7 +64,8 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   // Preview Modal State
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [previewTitle, setPreviewTitle] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [changedPaths, setChangedPaths] = useState<string[]>([]);
   const [externalOpenError, setExternalOpenError] = useState<string | null>(null);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
@@ -97,6 +109,43 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     poll();
     const id = setInterval(poll, 3000);
     return () => { isMounted = false; clearInterval(id); };
+  }, [rootPath]);
+
+  useEffect(() => {
+    if (!rootPath) return;
+
+    let disposed = false;
+    let watchActive = false;
+    const unlistenPromise = listen<ExplorerChangedEvent>('explorer-changed', (event) => {
+      if (normalizeComparablePath(event.payload.root_path) !== normalizeComparablePath(rootPath)) {
+        return;
+      }
+      setChangedPaths(event.payload.changed_paths);
+      setRefreshToken((current) => current + 1);
+    });
+
+    void unlistenPromise
+      .then(async () => {
+        if (disposed) return;
+        await invoke('explorer_watch', { rootPath });
+        watchActive = true;
+        if (disposed) {
+          watchActive = false;
+          invoke('explorer_unwatch', { rootPath }).catch(() => {});
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to watch explorer root:', err);
+      });
+
+    return () => {
+      disposed = true;
+      if (watchActive) {
+        watchActive = false;
+        invoke('explorer_unwatch', { rootPath }).catch(() => {});
+      }
+      unlistenPromise.then((fn) => fn()).catch(() => {});
+    };
   }, [rootPath]);
 
   useEffect(() => {
@@ -206,7 +255,8 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
       if (await confirm(`Are you sure you want to delete ${activeNode.name}?`)) {
         try {
           await invoke('delete_file', { path: activeNode.path });
-          setRefreshKey(prev => prev + 1); // trigger remount of root FileTree
+          setChangedPaths([activeNode.path]);
+          setRefreshToken((current) => current + 1);
         } catch (err) {
           console.error("Delete failed:", err);
           alert(`Failed to delete: ${err}`);
@@ -251,13 +301,14 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
       <div className="flex-1 overflow-auto w-full relative min-h-0 -mx-3 px-3">
         {rootPath ? (
           <FileTree
-            key={refreshKey}
             path={rootPath}
             onContextMenu={handleContextMenu}
             onSelect={handleFileSelect}
             gitStatusMap={gitStatusMap}
             changedDirectories={changedDirectories}
             explorerRoot={rootPath}
+            refreshToken={refreshToken}
+            changedPaths={changedPaths}
           />
         ) : (
           <div className="text-sm text-wardian-text-muted animate-pulse border border-transparent">Mapping directory...</div>
