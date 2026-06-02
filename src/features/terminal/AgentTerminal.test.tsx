@@ -68,6 +68,8 @@ describe("AgentTerminal scrollback", () => {
           return readCount++ === 0 ? "hello from codex\n" : null;
         case "resize_agent_terminal":
           return null;
+        case "terminal_link_target_exists":
+          return true;
         default:
           return null;
       }
