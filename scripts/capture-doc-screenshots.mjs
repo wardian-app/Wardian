@@ -95,6 +95,16 @@ const terminalOutput = {
   "docs-designer": "\x1b]0;Action Required\x07Approval needed before replacing the current hero capture.\n",
 };
 
+const terminalLinkOutput = {
+  ...terminalOutput,
+  "docs-codex":
+    "\x1b]0;Working\x07$ wardian terminal-link smoke\r\n" +
+    "URL: https://wardian.dev\r\n" +
+    "File: src/App.tsx:12\r\n" +
+    "Ignored command: /model\r\n" +
+    "Ignored heading: stage/reason/risk\r\n",
+};
+
 const repoRoot = "<absolute-workspace-path>";
 
 const directoryTree = {
@@ -376,7 +386,8 @@ async function assertShellHasNoHorizontalOverlap(page, relativePath) {
   }
 }
 
-async function installTauriDocsMock(page) {
+async function installTauriDocsMock(page, options = {}) {
+  const effectiveTerminalOutput = options.terminalOutput ?? terminalOutput;
   await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds }) => {
     const fixedNow = 1778590800000;
     const RealDate = Date;
@@ -519,6 +530,29 @@ async function installTauriDocsMock(page) {
           };
         }
         if (command === "list_workflows") return workflows;
+        if (command === "workflow_list_runs") return [];
+        if (command === "schedule_list") return [];
+        if (command === "workflow_list_blueprints") {
+          return workflows.map((workflow) => ({
+            id: workflow.id,
+            name: workflow.name,
+            path: `${repoRoot}/library/workflows/${workflow.id}.md`,
+          }));
+        }
+        if (command === "workflow_parse") {
+          const workflow = workflows[0];
+          return {
+            blueprint: {
+              schema: 2,
+              id: workflow.id,
+              name: workflow.name,
+              nodes: workflow.nodes,
+              edges: [],
+            },
+            diagnostics: [],
+          };
+        }
+        if (command === "workflow_validate") return { ok: true, diagnostics: [] };
         if (command === "load_workflow_library") {
           return {
             folders: [
@@ -543,6 +577,10 @@ async function installTauriDocsMock(page) {
           if (!sessionId || terminalReads[sessionId]) return null;
           terminalReads[sessionId] = true;
           return terminalOutput[sessionId] || null;
+        }
+        if (command === "terminal_link_target_exists") {
+          const target = String(args.path ?? "").replace(/\\/g, "/");
+          return target.endsWith("/src/App.tsx");
         }
         if (
           command === "resize_agent_terminal" ||
@@ -569,7 +607,43 @@ async function installTauriDocsMock(page) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds });
+  }, { agents, agentClasses, telemetry, terminalOutput: effectiveTerminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds });
+}
+
+function collectPageDiagnostics(page, browserErrors) {
+  page.on("pageerror", (error) => {
+    browserErrors.push(`page error: ${error.stack || error.message}`);
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      browserErrors.push(`browser console: ${message.text()}`);
+    }
+  });
+}
+
+async function openDocsPage(browser, browserErrors, mockOptions = {}) {
+  const page = await browser.newPage({ viewport: { width: 1680, height: 960 }, deviceScaleFactor: 1 });
+  collectPageDiagnostics(page, browserErrors);
+  await installTauriDocsMock(page, mockOptions);
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+  await stabilizeVisuals(page);
+  await page.waitForTimeout(1_500);
+  return page;
+}
+
+async function captureTerminalLinkEvidence(browser, browserErrors) {
+  const page = await openDocsPage(browser, browserErrors, { terminalOutput: terminalLinkOutput });
+  try {
+    await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
+    await page.locator('#agent-card-docs-codex [data-testid="agent-terminal-host"]').waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await page.locator('#agent-card-docs-codex [data-testid="agent-terminal-host"]').hover({ position: { x: 110, y: 42 } });
+    await page.waitForTimeout(300);
+    await capture(page, "terminal/clickable-links.png", page.locator("#agent-card-docs-codex"));
+  } finally {
+    await page.close();
+  }
 }
 
 async function main() {
@@ -584,23 +658,12 @@ async function main() {
   }
 
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1680, height: 960 }, deviceScaleFactor: 1 });
   const browserErrors = [];
-  page.on("pageerror", (error) => {
-    browserErrors.push(`page error: ${error.stack || error.message}`);
-  });
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      browserErrors.push(`browser console: ${message.text()}`);
-    }
-  });
 
   try {
-    await installTauriDocsMock(page);
-    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
-    await stabilizeVisuals(page);
-    await page.waitForTimeout(1_500);
+    await captureTerminalLinkEvidence(browser, browserErrors);
+
+    const page = await openDocsPage(browser, browserErrors);
 
     await page.locator('[data-testid="agent-grid"]').waitFor({ timeout: 10_000 });
     await capture(page, "grid/app-shell.png");
@@ -632,11 +695,12 @@ async function main() {
     await capture(page, "command-panel/broadcast-prompt.png");
 
     await page.locator('[data-testid="sidebar-tab-settings"]').click();
+    await page.getByRole("button", { name: "Agent Runtime" }).click();
     await page.getByRole("heading", { name: "Agent Runtime" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(500);
-    await page.locator('[data-testid="shell-select"]').scrollIntoViewIfNeeded();
-    await page.waitForTimeout(300);
-    await capture(page, "settings/runtime-settings.png", page.locator('[data-testid="settings-panel"]'));
+    await capture(page, "settings/runtime-settings.png", page.getByRole("dialog", { name: "Settings" }));
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await page.getByRole("dialog", { name: "Settings" }).waitFor({ state: "hidden", timeout: 10_000 });
 
     await setSidebarContentWidth(page, defaultSidebarContentWidth);
 
@@ -671,8 +735,7 @@ async function main() {
     await capture(page, "library/library-view.png");
 
     await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
-    await page.locator('[data-testid="sidebar-tab-workflows"]').click();
-    await page.getByRole("heading", { name: "Docs Screenshot Refresh" }).waitFor({ timeout: 10_000 });
+    await page.getByTestId("workflows-view").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "workflows/builder-canvas.png");
 

@@ -414,6 +414,7 @@ pub fn run() {
             commands::fs::delete_file,
             commands::fs::reveal_in_explorer,
             commands::fs::open_in_external_editor,
+            commands::fs::terminal_link_target_exists,
             commands::fs::read_file_preview,
             commands::git::git_status,
             commands::git::git_current_branch,

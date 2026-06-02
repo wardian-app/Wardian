@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { findTerminalLinks, installTerminalLinkProvider } from "./terminalLinks";
+import { findTerminalLinks, findValidatedTerminalLinks, installTerminalLinkProvider } from "./terminalLinks";
 
 describe("findTerminalLinks", () => {
   it("detects URLs and file paths with line suffixes", () => {
@@ -31,6 +31,45 @@ describe("findTerminalLinks", () => {
       "src/App.tsx",
     ]);
   });
+
+  it("does not treat slash-delimited prose as a file path without validation", () => {
+    expect(findTerminalLinks("risk fields: stage/reason/risk")).toEqual([]);
+  });
+
+  it("does not treat slash-prefixed command names as file paths without validation", () => {
+    expect(findTerminalLinks("try /model to change the provider model")).toEqual([]);
+  });
+
+  it("detects Visual Studio style line suffixes for known file paths", () => {
+    const links = findTerminalLinks("src/App.tsx(12,3): error TS1005");
+
+    expect(links.map((link) => ({ kind: link.kind, text: link.text, target: link.target }))).toEqual([
+      { kind: "file", text: "src/App.tsx(12,3)", target: "src/App.tsx" },
+    ]);
+  });
+
+  it("links extensionless slash paths only when the resolved target exists", async () => {
+    const validateFile = vi.fn(async (path: string) => path === "C:\\repo\\bin\\wardian");
+
+    const links = await findValidatedTerminalLinks("built bin/wardian", "C:\\repo", validateFile);
+
+    expect(validateFile).toHaveBeenCalledWith("C:\\repo\\bin\\wardian");
+    expect(links.map((link) => ({ kind: link.kind, text: link.text, target: link.target }))).toEqual([
+      { kind: "file", text: "bin/wardian", target: "C:\\repo\\bin\\wardian" },
+    ]);
+  });
+
+  it("removes known-extension file links when validation fails", async () => {
+    const links = await findValidatedTerminalLinks("see src/App.tsx:12", "C:\\repo", vi.fn(async () => false));
+
+    expect(links).toEqual([]);
+  });
+
+  it("does not link extensionless slash paths when validation fails", async () => {
+    const links = await findValidatedTerminalLinks("risk fields: stage/reason/risk", "C:\\repo", vi.fn(async () => false));
+
+    expect(links).toEqual([]);
+  });
 });
 
 describe("installTerminalLinkProvider", () => {
@@ -58,6 +97,7 @@ describe("installTerminalLinkProvider", () => {
         external_editor: "vscode",
         external_editor_custom_executable: null,
       }),
+      validateFile: vi.fn(async () => true),
       openFile,
       openUrl,
     });

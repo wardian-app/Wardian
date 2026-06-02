@@ -86,6 +86,9 @@ describe("UserTerminalPanel", () => {
       if (command === "ensure_user_terminal" || command === "restart_user_terminal") {
         return Promise.resolve("test-user-terminal-session");
       }
+      if (command === "terminal_link_target_exists") {
+        return Promise.resolve(true);
+      }
       return Promise.resolve(null);
     });
     mockListen.mockResolvedValue(() => {});

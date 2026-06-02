@@ -151,6 +151,11 @@ pub async fn open_in_external_editor(
     Ok(())
 }
 
+#[tauri::command]
+pub fn terminal_link_target_exists(path: String) -> bool {
+    Path::new(&path).exists()
+}
+
 fn external_editor_launch(
     path: &Path,
     editor: &ExternalEditorLaunchSettings,
@@ -401,5 +406,27 @@ mod tests {
         .expect_err("custom editor should require executable");
 
         assert_eq!(error, "Custom editor executable is not configured.");
+    }
+
+    #[test]
+    fn terminal_link_target_exists_returns_true_for_files_and_directories() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file_path = temp.path().join("notes");
+        fs::write(&file_path, "test").expect("write file");
+
+        assert!(terminal_link_target_exists(file_path.to_string_lossy().into_owned()));
+        assert!(terminal_link_target_exists(
+            temp.path().to_string_lossy().into_owned()
+        ));
+    }
+
+    #[test]
+    fn terminal_link_target_exists_returns_false_for_missing_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let missing_path = temp.path().join("missing");
+
+        assert!(!terminal_link_target_exists(
+            missing_path.to_string_lossy().into_owned()
+        ));
     }
 }
