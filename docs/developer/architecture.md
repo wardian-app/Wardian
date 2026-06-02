@@ -2,6 +2,27 @@
 
 Wardian is built as a **High-Performance Hybrid Environment**, using **Rust (Tauri)** for the physical/logical system layer and **React (TypeScript)** for the high-fidelity user interface.
 
+## Design Principles
+
+Wardian is a malleable agent environment. New architecture should preserve these
+invariants:
+
+- **Canonical state has an owner.** The backend owns live agent runtime truth;
+  workflow files own workflow templates; workflow run logs own run evidence;
+  library files own reusable prompts and skills; watchlist/team records own
+  roster organization until a broader project-scope model exists.
+- **Views are lenses, not state silos.** Grid, Dashboard, Graph, future spatial
+  views, Library, Workflows, Explorer, Queue, and the CLI should resolve and
+  mutate canonical Wardian records through shared commands or file contracts.
+- **Artifacts stay inspectable where practical.** User-shapable prompts,
+  classes, skills, workflows, evidence, and memory-ready context should remain
+  discoverable on disk or through stable CLI/backend queries.
+- **Scope is explicit.** Features should name whether they operate globally, by
+  class, by agent, by team/project, by workspace/folder, or by workflow run.
+- **AI changes remain reviewable.** Agent-generated edits to prompts, skills,
+  workflows, memory, or project context should preserve provenance and expose a
+  diff or proposal path before mutating durable shared state.
+
 ## 🏛️ System Layers
 
 ### 1. The Physical Layer (Rust Backend)

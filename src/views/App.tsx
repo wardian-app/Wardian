@@ -232,7 +232,7 @@ function AppBody() {
   }, [flushAgentCompletion]);
 
   const maybeAddActionNeededQueueItem = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
-    if (currentStatus !== "Action Needed" || !previousStatus || previousStatus === "Action Needed") return;
+    if (currentStatus !== "Action Needed" || previousStatus === "Action Needed") return;
     const agent = agentsRef.current.find((a) => a.session_id === sessionId);
     addActionNeeded(
       sessionId,

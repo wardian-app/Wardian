@@ -4,7 +4,7 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**Local command center for multi-agent CLI workflows** — see every session, collect completed work in a queue, and give agents a CLI surface for coordinating and controlling Wardian.
+**A local desktop command center for supervising and shaping AI agent teams.**
 
 [![tests](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg)](https://codecov.io/gh/wardian-app/Wardian)
@@ -20,7 +20,11 @@
 
 > 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/wardian-app/Wardian/issues) when something breaks.
 
-Wardian is an **Integrated Agent Environment** — a local, app-first governance layer for AI orchestration. It centralizes PTY management, live telemetry, completion queues, workflow execution, and shared context into a unified desktop Command Center for developers managing many long-running agent sessions across multiple projects. The bundled `wardian` CLI gives agents a textual control surface for discovering their own identity, coordinating peers, and controlling Wardian without driving the graphical app.
+Wardian gives real AI CLI agents durable identity, live terminals, scoped skills, workflow runs, queue evidence, and workspace context in one GUI-first habitat.
+
+Use it to spawn specialized agents, monitor their progress, hand work between them, collect completed output, and automate repeatable flows across providers such as Codex, Claude, Gemini, Antigravity, and OpenCode. The bundled `wardian` CLI gives agents and scripts a textual control surface for discovering identity, coordinating peers, and controlling Wardian without driving the graphical app.
+
+Wardian is built for malleable agent work. Prompts, classes, skills, workflows, queues, and memory-ready evidence are treated as visible, reusable artifacts rather than opaque app state. You can start by supervising live agents, then gradually turn repeated instructions into prompts, reusable roles, deployable skills, workflow templates, and durable project context.
 
 ---
 
@@ -113,13 +117,28 @@ Wardian supports five provider CLIs today and adapts each runtime into the same 
 
 ## Why Wardian?
 
-Unlike generic terminal wrappers or monolithic prompt orchestrators, Wardian focuses on the **physicality of agent operations**.
+Most agent orchestrators still live primarily in terminals, config files, or
+headless framework code. Wardian is built around a different center of gravity:
+a desktop command center where humans can see, steer, and reshape many real
+local CLI agents without losing the terminal truth underneath.
 
-- **Scoped Skill Management**: Wardian doesn't just send system prompts. It uses filesystem-based junctions to inject or strip real capabilities (scripts, tools, configs) from an agent's workspace in real-time.
-- **Deterministic-Agentic Hybrid**: Wardian's pulse-based workflow engine pairs strict, deterministic execution with agentic flexibility. Instead of opaque, API-driven chains, you build complex automation **locally**—retaining full control over the execution flow while allowing agents to handle the creative problem-solving within each node.
-- **Agent-Facing Control Plane**: The `wardian` CLI shares state and live-control protocols with the desktop app, so agents can inspect rosters, spawn reviewers, send prompts, wait for status changes, watch output, and run workflows without scraping or automating the GUI.
-- **Completion Queue**: Wardian captures agent completions and workflow outcomes into a durable Queue view so finished work does not disappear into terminal scrollback.
-- **High-Fidelity Status Tracking**: Wardian actively parses raw PTY streams to detect complex occupancy states (`Idle`, `Processing`, `Action Needed`) while monitoring per-process CPU and memory usage.
+- **GUI-first, terminal-real.** Wardian gives each managed provider a real PTY
+  while projecting status, telemetry, output, queue evidence, workflows, and
+  source control into a desktop interface.
+- **Persistent agent habitat.** Agents have durable roster identity, class,
+  provider, workspace, scoped skills, worktree state, and completion history
+  instead of being disposable terminal tabs.
+- **Coordinate without babysitting terminals.** Send prompts, structured asks,
+  broadcasts, lifecycle commands, and workflow runs through shared app and CLI
+  control surfaces.
+- **Keep finished work visible.** Queue and workflow evidence preserve completed
+  agent output so results do not disappear into scrollback.
+- **Turn repetition into reusable capability.** Save prompts, tune classes,
+  deploy skills, schedule workflows, and promote useful evidence into durable
+  context over time.
+- **Stay local and inspectable.** Wardian adapts real CLI providers, real
+  workspaces, filesystem-backed libraries, and local workflow records instead of
+  hiding orchestration behind a remote black box.
 
 > Explore our [Key Features guide](docs/features.md) for more technical comparisons.
 
@@ -127,29 +146,48 @@ Unlike generic terminal wrappers or monolithic prompt orchestrators, Wardian foc
 
 ## Core Features
 
-### The Command Center
+### Live Agent Operations
 
-Wardian provides a dense, tactile desktop interface designed for high-bandwidth orchestration.
+- Spawn and supervise provider CLI agents from one desktop app.
+- Keep each agent in a real PTY-backed terminal with live status, telemetry,
+  process control, and retained output.
+- Use Grid, Dashboard, Graph, Watchlists, and Queue as different views over the
+  same managed sessions.
 
-- **Dual-Sidebar Layout**: The Left Rail houses fast-access controls for Agent Configuration, Command Broadcasting, and Library Management. The Right Sidebar provides a searchable, collapsible agent roster with custom watchlists and drag-and-drop prioritization.
-- **Context-Aware Dashboard**: A primary view displaying high-level telemetry (CPU, Memory, Uptime) alongside an action matrix that allows for surgical agent control (Pause, Restart, Query, Delete).
-- **Dynamic Terminal Grid**: For deeper debugging, switch to the multi-slot PTY grid to monitor live raw outputs from your agents. Support includes 1x1, 2x2, or focused 1+2 layouts.
+### Coordination and Control
 
-### Multi-Agent Orchestration
+- Send prompts, broadcasts, lifecycle commands, and structured peer handoffs to
+  selected agents.
+- Use teams, watchlists, and workspaces to track project/workstream context
+  without assuming one folder equals one project.
+- Let agents and scripts coordinate through the bundled `wardian` CLI: inspect
+  rosters, send work, wait for status changes, watch output, and run workflows.
 
-Scale your workflows by coordinating independent, specialized agents rather than relying on a single monolithic prompt.
+### Reusable Context and Capabilities
 
-- **Persona Class System**: Spawn new agents from pre-configured default classes (e.g., Coder, Architect, Researcher) or define custom personas tailored exactly to your repository's conventions.
-- **Broadcast & Bulk Actions**: Dispatch unified instructions, project context, or terminal commands to all agents or a filtered subset simultaneously via the global Command Panel.
-- **Queue View**: Review unread completions from agents and workflow runs, expand long summaries, and clear completed items after triage.
+- Define class blueprints for repeatable roles such as Coder, Reviewer,
+  Architect, Researcher, or project-specific specialists.
+- Save reusable prompts and deploy skills globally, by class, or to a single
+  agent instance.
+- Keep prompts, skills, classes, and provider-specific habitat material
+  inspectable and scoped instead of burying them in one monolithic prompt.
 
-### Wardian CLI
+### Workflows and Durable Evidence
 
-The desktop app installs a `wardian` command into the user Wardian bin directory for agents and automation. Agents use it to inspect active or persisted peers, spawn and clone sessions, manage Wardian worktrees, send prompts, wait for status transitions, watch retained output, and run saved workflows through the app-owned backend. See the [CLI guide](docs/guide/cli.md) for command examples, output fields, filters, environment variables, live-control requirements, and exit codes.
+- Build local workflow templates with agent nodes, branch/loop/wait control,
+  shared storage, manual runs, schedules, and listener-style triggers.
+- Run workflows through the Rust engine while preserving run state, node output,
+  and completion evidence.
+- Review agent completions and workflow outcomes in Queue before turning useful
+  results into reusable prompts, skills, workflows, or durable memory context.
 
-### Workflow Engine
+### Local Project Control
 
-Wardian workflows combine a visual builder with a Rust execution engine. Manual triggers, scheduled triggers, file listeners, agent nodes, branch/loop/wait control, shared storage, and run telemetry all flow through the same deterministic runtime model.
+- Work across multiple providers and multiple workspaces without leaving the
+  local app.
+- Assign Wardian-managed Git worktrees to agents for branch isolation.
+- Use Explorer and Source Control surfaces to inspect files, diffs, commits, and
+  workspace state around the agents doing the work.
 
 ---
 
@@ -169,7 +207,7 @@ Wardian leverages native OS capabilities for high-performance terminal emulation
 
 ## Project Roadmap
 
-Wardian is evolving toward a fully autonomous home for your agents.
+Wardian is evolving toward a malleable home for your agents: a local environment where agent capabilities, workflows, evidence, and project context can be inspected, rearranged, and extended over time.
 
 - **Phase 1-2**: Dual-Sidebar UI, PTY Grid, Shared Habitat, CLI Utility, live CLI control, agent cloning, worktrees, and scheduled workflow foundations. [DONE]
 - **Phase 3-4**: Agent-to-Agent IPC, HITL approval queue expansion, workflow hardening, and cross-platform runtime polish. [ACTIVE]

@@ -8,7 +8,7 @@ Queue v2 turns the Queue from a passive completion inbox into a triage surface f
 
 Queue cards are grouped by these event types:
 
-- `action_needed`: an agent changed from another known status into `Action Needed`.
+- `action_needed`: an agent is observed entering `Action Needed`, including the first live status event seen by the app for that agent.
 - `agent_completed`: an agent changed from an active status back to `Idle`.
 - `workflow_completed`: a workflow run finished successfully.
 - `workflow_failed`: a workflow run finished with failed status.
@@ -36,7 +36,7 @@ Visibility filters live in the Queue header because they affect the current tria
 
 ## Runtime Behavior
 
-The frontend listens to the same agent status streams that already drive completion queue items. A new `action_needed` card is created only when Wardian has a previous status for the agent and then observes `Action Needed`, avoiding stale startup hydration cards.
+The frontend listens to the same agent status streams that already drive completion queue items. A new `action_needed` card is created when Wardian observes `Action Needed` and the immediately previous observed status was not already `Action Needed`. This includes the first live status event seen by the app for that agent, because provider approval gates can be the first status detected after spawn.
 
 Action-needed cards use the amber warning treatment used elsewhere for action-required status. Agent cards can focus the related agent terminal from Queue. When the action-needed summary contains recognizable provider choices, such as numbered options, the card renders those choices as compact buttons and submits the provider token directly. Wardian does not infer generic yes/no buttons from approval-looking text and does not keep a generic freeform Queue response box because approval intent should come from an explicit provider option or from the live terminal.
 
@@ -53,4 +53,5 @@ Unit and component tests cover:
 - workflow failure filter classification
 - Queue rendering, header filtering, Settings notification rules, terminal open action, and clickable action choices
 - App status-transition integration from `Processing...` to `Action Needed`
+- App first-observed status integration for agents that enter `Action Needed` before any prior status has been recorded
 - notification dispatch defaults, native-notification fallback behavior, and sound volume scaling for action-needed events

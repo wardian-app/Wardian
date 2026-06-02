@@ -4,6 +4,11 @@ Wardian includes a standalone `wardian` command for agents and automation to ins
 
 Use it when an agent, script, or terminal workflow needs repeatable access to Wardian state without clicking through the desktop UI.
 
+The CLI is also Wardian's composability layer. It lets agents, scripts, and
+future tools operate against the same app-owned state as the desktop UI without
+screen scraping or duplicating private state. Prefer CLI/backend commands when
+building repeatable automation around Wardian.
+
 ## When to Use It
 
 - Let a managed agent identify itself with `wardian agent`.

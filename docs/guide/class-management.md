@@ -4,6 +4,10 @@ In Wardian, a **Class** is more than just a label—it is a functional blueprint
 
 Use Class Management when you want future agents to start with consistent instructions, provider-ready skills, and a recognizable role.
 
+Classes are Wardian's reusable agent blueprints. They turn repeated setup
+choices into editable, inspectable context so you can evolve an agent role over
+time instead of copying the same instructions into every new session.
+
 ![Wardian Classes panel showing class creation, available classes, and class-level skill management](../assets/screenshots/classes/class-management.png)
 
 ## When to Use It
@@ -50,6 +54,9 @@ The agent will inherit the selected class instructions and class-level skill ass
 - Editing a class changes future spawns; it does not rewrite instructions inside already-running provider sessions.
 - Class skills are adapted to each provider's discovery model. Check [Provider Runtimes](../providers.md) when a provider does not expose a skill as expected.
 - Keep class instructions durable and general. Put task-specific instructions in prompts, broadcasts, workflows, or direct terminal messages.
+- Treat class edits as shared capability changes. When an instruction is only
+  useful for one project, agent, or workflow run, keep it in that narrower scope
+  until it proves reusable.
 
 ## Related Links
 

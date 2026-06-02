@@ -30,6 +30,21 @@ Choose the smallest docs surface that matches the change:
 
 Keep cross-platform examples POSIX-first with a labeled PowerShell variant when commands differ. Use placeholders such as `<absolute-workspace-path>` instead of personal paths.
 
+## Malleability Review
+
+When documenting a feature that stores, transforms, or displays Wardian state,
+make the malleability model clear enough for future contributors:
+
+- name the canonical owner of the state;
+- say whether the surface is a source of truth or a lens over another record;
+- describe which scope owns the behavior: global, class, agent, team/project,
+  workspace/folder, workflow, workflow run, or user preference;
+- mention where user-shapable artifacts live when they are inspectable on disk;
+- describe any promotion path from one-off output to reusable prompt, skill,
+  workflow, memory, or team/project context;
+- keep AI-generated or agent-generated durable changes reviewable and
+  provenance-backed.
+
 ## Screenshot Refresh Rules
 
 Refresh screenshots when a PR changes a user-visible state that an existing screenshot documents, or when a new guide needs visual evidence to be understandable.
