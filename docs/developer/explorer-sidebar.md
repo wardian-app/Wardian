@@ -11,12 +11,14 @@ The Explorer Sidebar is a dedicated panel found in the Wardian sidebar (`Sidebar
 This is the main container component for the file explorer tab.
 - **Root Resolution**: It queries the backend command `get_explorer_root(sessionId)` to identify which path to render.
 - **File Click Action**: It receives file selections from `FileTree` and routes them through the Settings-backed `explorerFileClickAction` preference. Preview mode uses `read_file_preview`; external mode reuses `open_in_external_editor`.
+- **Filesystem Watch Refresh**: While mounted, the panel subscribes to `explorer-changed`, starts `explorer_watch` for the current root after the listener is ready, and calls `explorer_unwatch` on cleanup. Matching events increment a refresh token and carry changed paths down to `FileTree`.
 - **Context Menu Context**: Provides right-click operations tailored to `FileTree` items (Open Preview, Open in External App, Reveal in OS, Copy Absolute Path, Delete).
 - **Preview Modal**: Implements a themed modal overlay to securely display raw text file contents queried from the OS.
 
 ### 2. `FileTree.tsx`
 A recursive, lazy-loading component responsible for accurately representing nested directory structures.
 - **Lazy Loading**: Instead of indexing the entire workspace at once, it fetches child nodes only when a directory is expanded, ensuring optimal performance for large projects.
+- **Targeted Refresh**: Each mounted tree refetches its directory when the refresh token changes and one of the changed paths directly affects that directory. Expanded state stays local to the component, so refreshes do not collapse the visible tree.
 - **Theming**: Integrates seamlessly with Wardian typography and spacing. Nested items have fixed padding metrics to align correctly underneath parent elements without succumbing to horizontal flex contraction (`shrink-0`). Directory rows use only their expansion chevron; file rows use `lucide-react` icons with colors mapped explicitly to `wardian-*` CSS variables based on file extensions.
 
 ### 3. Backend Commands (`src-tauri/src/commands/fs.rs`)
@@ -27,6 +29,7 @@ The file system operations strictly enforce security and platform agnosticism:
 - `reveal_in_explorer`: OS-specific `std::process::Command` routing to invoke `explorer`, `open`, or `xdg-open`.
 - `open_in_external_editor`: Opens a path with the Settings-selected external app mode (`system`, `vscode`, or `custom`) by spawning the platform command in Rust.
 - `delete_file`: Recursively deletes a directory or permanently removes a file string.
+- `explorer_watch` / `explorer_unwatch`: Manage debounced recursive filesystem watchers for active explorer roots. Watchers are reference-counted by root and exclude high-churn folders such as `.git`, `node_modules`, `target`, `.venv`, `dist`, `build`, `.next`, `.turbo`, `.cache`, and `.wardian/tmp`.
 
 ## Technical Decisions
 - **`Option<String>` vs Strict Strings**: Using `null` / `Option` for Session IDs enables elegant toggling between global and localized modes without parallel commands.

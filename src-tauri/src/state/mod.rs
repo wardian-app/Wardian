@@ -9,7 +9,7 @@ pub mod user_terminal;
 
 pub use active_agent::ActiveAgent;
 pub use agent_watch::AgentWatchState;
-pub use app_state::{AppState, LibraryWatchRegistration};
+pub use app_state::{AppState, ExplorerWatchRegistration, LibraryWatchRegistration};
 pub use interactions::InteractionState;
 pub use mailbox::{
     MailboxDeliveryPhase, MailboxMessageDraft, MailboxMessageRecord, MailboxMessageStatus,

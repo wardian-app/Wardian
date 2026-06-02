@@ -87,4 +87,94 @@ describe('FileTree Component', () => {
     expect(directoryRow?.querySelectorAll('svg')).toHaveLength(1);
     expect(fileRow?.querySelectorAll('svg')).toHaveLength(1);
   });
+
+  it('refetches an expanded directory when a refresh event affects that directory', async () => {
+    const rootNodes = [
+      { name: 'src', path: '/test/src', is_dir: true, extension: null },
+    ];
+    const initialSrcNodes = [
+      { name: 'before.ts', path: '/test/src/before.ts', is_dir: false, extension: 'ts' },
+    ];
+    const refreshedSrcNodes = [
+      { name: 'after.ts', path: '/test/src/after.ts', is_dir: false, extension: 'ts' },
+    ];
+    let srcReads = 0;
+
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const path = (args as { path: string }).path;
+      if (path === '/test') return rootNodes;
+      if (path === '/test/src') {
+        srcReads += 1;
+        return srcReads === 1 ? initialSrcNodes : refreshedSrcNodes;
+      }
+      return [];
+    });
+
+    const { rerender } = render(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={0}
+        changedPaths={[]}
+      />,
+    );
+
+    await userEvent.click(await screen.findByText('src'));
+    expect(await screen.findByText('before.ts')).toBeInTheDocument();
+
+    rerender(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={1}
+        changedPaths={['/test/src/after.ts']}
+      />,
+    );
+
+    expect(await screen.findByText('after.ts')).toBeInTheDocument();
+    expect(screen.queryByText('before.ts')).not.toBeInTheDocument();
+    expect(screen.getByText('src')).toBeInTheDocument();
+  });
+
+  it('does not refetch an expanded directory when a refresh event is unrelated', async () => {
+    const rootNodes = [
+      { name: 'src', path: '/test/src', is_dir: true, extension: null },
+    ];
+    const srcNodes = [
+      { name: 'before.ts', path: '/test/src/before.ts', is_dir: false, extension: 'ts' },
+    ];
+
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const path = (args as { path: string }).path;
+      if (path === '/test') return rootNodes;
+      if (path === '/test/src') return srcNodes;
+      return [];
+    });
+
+    const { rerender } = render(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={0}
+        changedPaths={[]}
+      />,
+    );
+
+    await userEvent.click(await screen.findByText('src'));
+    expect(await screen.findByText('before.ts')).toBeInTheDocument();
+
+    const callsBeforeRefresh = vi.mocked(invoke).mock.calls.length;
+    rerender(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={1}
+        changedPaths={['/test/docs/readme.md']}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.length).toBe(callsBeforeRefresh);
+    });
+  });
 });

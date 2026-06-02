@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronRight, ChevronDown, File, FileText, Image, Code } from 'lucide-react';
 
@@ -17,6 +17,8 @@ export interface FileTreeProps {
   gitStatusMap?: Record<string, string>;
   changedDirectories?: Set<string>;
   explorerRoot?: string;
+  refreshToken?: number;
+  changedPaths?: string[];
 }
 
 const GIT_STATUS_COLORS: Record<string, string> = {
@@ -34,6 +36,18 @@ function toRelativePath(nodePath: string, root: string): string {
   return n.startsWith(r) ? n.slice(r.length).replace(/^\//, '') : n;
 }
 
+function normalizePathForCompare(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function pathAffectsDirectory(changedPath: string, directoryPath: string): boolean {
+  const changed = normalizePathForCompare(changedPath);
+  const directory = normalizePathForCompare(directoryPath);
+  const changedParent = changed.includes('/') ? changed.slice(0, changed.lastIndexOf('/')) : '';
+  return changed === directory || changedParent === directory;
+}
+
 const getFileIcon = (extension: string | null) => {
   if (!extension) return <File className="w-4 h-4 text-wardian-text-muted shrink-0" />;
   const ext = extension.toLowerCase();
@@ -46,34 +60,58 @@ const getFileIcon = (extension: string | null) => {
   return <FileText className="w-4 h-4 text-wardian-text-muted shrink-0" />;
 }
 
-export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMenu, depth = 0, gitStatusMap, changedDirectories, explorerRoot }) => {
+export const FileTree: React.FC<FileTreeProps> = ({
+  path,
+  onSelect,
+  onContextMenu,
+  depth = 0,
+  gitStatusMap,
+  changedDirectories,
+  explorerRoot,
+  refreshToken = 0,
+  changedPaths = [],
+}) => {
   const [nodes, setNodes] = useState<FileNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const fetchTree = useCallback(async (isMounted: () => boolean, showLoading: boolean) => {
+    if (showLoading) {
+      setLoading(true);
+    }
+    try {
+      const result = await invoke<FileNode[]>('get_directory_tree', { path });
+      if (isMounted()) {
+        setNodes(result);
+        setError(null);
+      }
+    } catch (err) {
+      if (isMounted()) {
+        setError(String(err));
+        console.error("Failed to load directory tree for", path, err);
+      }
+    } finally {
+      if (isMounted() && showLoading) setLoading(false);
+    }
+  }, [path]);
+
   useEffect(() => {
     let isMounted = true;
-    const fetchTree = async () => {
-      setLoading(true);
-      try {
-        const result = await invoke<FileNode[]>('get_directory_tree', { path });
-        if (isMounted) {
-          setNodes(result);
-          setError(null);
-        }
-      } catch (err) {
-        if (isMounted) {
-          setError(String(err));
-          console.error("Failed to load directory tree for", path, err);
-        }
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-    fetchTree();
+    void fetchTree(() => isMounted, true);
     return () => { isMounted = false; };
-  }, [path]);
+  }, [fetchTree]);
+
+  useEffect(() => {
+    if (refreshToken === 0) return;
+    if (!changedPaths.some((changedPath) => pathAffectsDirectory(changedPath, path))) {
+      return;
+    }
+
+    let isMounted = true;
+    void fetchTree(() => isMounted, false);
+    return () => { isMounted = false; };
+  }, [changedPaths, fetchTree, path, refreshToken]);
 
   const toggleFolder = (nodePath: string) => {
     setExpanded(prev => ({ ...prev, [nodePath]: !prev[nodePath] }));
@@ -152,6 +190,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ path, onSelect, onContextMen
                 gitStatusMap={gitStatusMap}
                 changedDirectories={changedDirectories}
                 explorerRoot={explorerRoot}
+                refreshToken={refreshToken}
+                changedPaths={changedPaths}
               />
             )}
           </React.Fragment>
