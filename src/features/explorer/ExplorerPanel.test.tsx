@@ -281,7 +281,7 @@ describe('ExplorerPanel', () => {
     let handler: ((event: { payload: { root_path: string; changed_paths: string[] } }) => void) | undefined;
     mockListen.mockImplementation(async (_event, callback) => {
       handler = callback as typeof handler;
-      return vi.fn();
+      return () => {};
     });
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
@@ -310,7 +310,7 @@ describe('ExplorerPanel', () => {
     let handler: ((event: { payload: { root_path: string; changed_paths: string[] } }) => void) | undefined;
     mockListen.mockImplementation(async (_event, callback) => {
       handler = callback as typeof handler;
-      return vi.fn();
+      return () => {};
     });
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
