@@ -6,6 +6,8 @@ The implementation should use xterm's link provider API so hover, underline, poi
 
 URLs open as URLs through the existing Tauri opener plugin. File paths open through Wardian's existing `open_in_external_editor` command with the current Settings-backed Explorer external editor configuration (`external_editor` and `external_editor_custom_executable`). Terminal file clicks do not use `explorer_file_click_action`; that setting controls Explorer row click behavior, while terminal file links map to Explorer's explicit **Open in External App** action.
 
+Local file links should follow VS Code's fail-closed model: parsing produces candidates, but the xterm provider only exposes file links after the resolved target exists on disk. Strong file-shaped text can still be parsed synchronously for tests and range calculation, but provider output must validate it with the backend before underlining it. Slash-delimited prose and command names such as `stage/reason/risk` or `/model` should not become file links unless they resolve to a real file or directory.
+
 The detector should support common terminal output forms:
 
 - `https://example.com/path`
@@ -13,6 +15,7 @@ The detector should support common terminal output forms:
 - `C:/repo/src/App.tsx`
 - `/home/user/repo/src/app.ts`
 - `src/app.ts:12`
+- `src/app.ts(12,3)`
 - `./src/app.ts`
 - `../README.md`
 

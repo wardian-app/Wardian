@@ -153,7 +153,9 @@ executable to point directly at your editor.
 
 Terminal URLs open as URLs. Terminal file paths use this External editor
 preference so agent terminals and the bottom user terminal match Explorer's
-external-open behavior.
+external-open behavior. Terminal file paths are validated before they become
+clickable, which keeps command names such as `/model` from being treated as
+files unless they resolve to a real target.
 
 ## Watchlist
 
