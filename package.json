@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.4.0",
   "type": "module",
-  "description": "Local command center for multi-agent CLI workflows — see every session, swap skills on the fly, and chain agents into deterministic pipelines.",
+  "description": "A local desktop command center for supervising and shaping AI agent teams.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -30,7 +30,8 @@
     "docs:check-llms": "node scripts/verify-llms-txt.mjs",
     "docs:preview": "vitepress preview docs",
     "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
-    "docs:demo-gif": "node scripts/capture-readme-demo.mjs",
+    "docs:demo-gif": "node scripts/capture-readme-demo-real.mjs",
+    "docs:demo-gif:real": "node scripts/capture-readme-demo-real.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",

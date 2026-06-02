@@ -10,6 +10,14 @@ Wardian already supports multi-select in the Watchlist through Ctrl-click and Sh
 
 Issue 76 requests a global Team primitive with visual grouping, unified movement, team-level bulk actions, named teams, dynamic membership, and persistence in watchlist state. The key design constraint is that teams are global, and their member sequence should stay synchronized across watchlists rather than becoming local per watchlist.
 
+2026-06-02 interpretation note: future Garden and scope work should treat `team`
+as a durable project or workstream intent scope, not only as a roster grouping.
+A team may span multiple workspaces or folders, and a single workspace may
+contain several active teams. The watchlist-backed team record remains the phase
+1 storage and rendering primitive, but product semantics should leave room for
+teams to gather workflows, memories, skills, artifacts, and evidence as Garden
+evolves.
+
 ## Proposed Decision
 
 Wardian will model teams as global records persisted with watchlist state. Watchlists will store ordered entries that can point either to a solo agent or to a team. Existing flat watchlists will be migrated in memory and saved back in the new shape after the first change.

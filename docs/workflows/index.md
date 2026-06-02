@@ -2,6 +2,13 @@
 
 Wardian workflows are reusable automations built from nodes, connections, and runtime assignment data. A visual builder defines the graph, while the Rust workflow engine executes it through a deterministic candidate-node loop with pulses, registry updates, and telemetry events. This section is the main user-facing reference for building workflows, understanding how they launch, and managing scheduled or live workflow behavior over time.
 
+Workflows are editable process artifacts, not sealed automations. The saved
+template describes the reusable process, while each run produces durable
+evidence that can be reviewed, compared, attached to a team/project context, or
+preserved as memory-ready context. This keeps automation malleable: users can
+start with a manual sequence, turn it into a workflow, then refine the graph and
+runtime assignments as the work changes.
+
 ## Workflow Mental Model
 
 A workflow has four layers:

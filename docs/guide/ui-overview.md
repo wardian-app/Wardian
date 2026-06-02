@@ -1,6 +1,6 @@
 # User Interface Overview
 
-Wardian features a high-fidelity, professional interface designed for dense information monitoring and rapid multi-agent orchestration. The layout is optimized for a "Integrated Agent Environment" experience, inspired by productivity tools like Obsidian and VS Code.
+Wardian features a high-fidelity, professional interface designed for dense information monitoring and rapid multi-agent orchestration. The layout is optimized as a GUI-first command center for supervising real local AI CLI agents, inspired by productivity tools like Obsidian and VS Code.
 
 ## 🧱 The Layout Architecture
 
@@ -22,6 +22,12 @@ The fixed header at the top of the application acts as the global navigation and
 ![Wardian Dashboard view showing compact agent status rows and quick controls](../assets/screenshots/dashboard/system-summary.png)
 
 The **Graph** mode maps agents as status-colored nodes with relationship edges for same team, shared workspace, and same worktree. Use the centered relationship lenses to focus the map, and open the inspector or context menu from any node to use the same agent actions available in the roster.
+
+The future **Garden** mode is Wardian's planned malleability surface: a spatial
+habitat for arranging agents, teams, workflows, skills, memories, files, and
+runtime evidence around the work itself. Garden should treat teams as
+project/workstream scopes that can cross workspace boundaries, while workspaces
+and folders remain the filesystem and execution boundaries.
 
 ### 2. Left Sidebar (Control & Context)
 

@@ -4,6 +4,11 @@ The Library is the centralized repository for reusable prompts and skills in War
 
 Use it when you want to save repeatable prompts, manage reusable skills, or prepare assets that classes and agents can reuse.
 
+The Library is also the first step on Wardian's gentle slope from use to
+creation. A one-off instruction can become a saved prompt; a repeated procedure
+can become a skill; a skill can be deployed globally, by class, or to one agent
+without turning the whole app into a custom plugin project.
+
 ![Wardian Library view showing folders, reusable prompts, starred prompts, and search controls](../assets/screenshots/library/library-view.png)
 
 ## When to Use It
@@ -41,6 +46,10 @@ Skills are modular capabilities (extensions) that can be deployed to your agents
   - **Global**: Deploys the skill to all agents.
   - **Class**: Deploys the skill to a specific blueprint (e.g., all future `Coder` agents).
   - **Instance**: Deploys the skill only to one specific, active agent session.
+
+These scopes let you reshape Wardian incrementally. Keep an experimental skill
+on one agent, promote it to a class when it becomes routine, or deploy it
+globally only when it is ready for every agent.
 
 ### Class Relationship
 

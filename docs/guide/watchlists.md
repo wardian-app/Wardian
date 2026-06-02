@@ -9,7 +9,7 @@ Use it when you need persistent awareness of all agents while working in Grid, D
 ## When to Use It
 
 - Select one or more agents before using Command, Library prompt runs, Explorer, or Source Control.
-- Group agents by project, role, or review lane.
+- Group agents by project, workstream, role, or review lane.
 - Spot agents that are idle, processing, blocked, off, or errored without opening every terminal.
 - Jump back to a specific terminal in the [Grid](./grid.md).
 
@@ -87,6 +87,12 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 Click the chevron in a team header to hide or reveal that team's members. The team header stays visible with its member count, and context-menu actions still apply to the full team. Collapsed teams are saved with the rest of the watchlist display preferences and restored on next launch.
 
 ![Wardian watchlist showing one collapsed team and one expanded team](../assets/screenshots/watchlists/team-collapse.png)
+
+Teams are also Wardian's project/workstream grouping concept. They are useful
+when a line of work spans more than one workspace or folder, or when one
+workspace contains several parallel efforts. Watchlists decide what is visible
+and targetable now; teams describe the durable work context those agents are
+cooperating inside.
 
 ## Remote Management
 Hover over any agent in the Roster to access instant control icons:

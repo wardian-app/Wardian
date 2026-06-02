@@ -1038,6 +1038,38 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
+  it("adds an action-needed queue item when Action Needed is the first observed status", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitStatus } = captureQueueAgentListeners();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Action Needed" });
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "save_queue_items",
+        expect.objectContaining({
+          items: [
+            expect.objectContaining({
+              type: "action_needed",
+              agent_session_id: "agent-1",
+              agent_name: "Alpha",
+              summary: "Action needed",
+              read: false,
+            }),
+          ],
+        }),
+      );
+    });
+  });
+
   it("allows later status-derived action-needed cards after the short dedupe window", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     const { emitStatus } = captureQueueAgentListeners();
