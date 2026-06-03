@@ -74,10 +74,20 @@ Submit through the normal `microsoft/winget-pkgs` PR flow or with
 
 ## Homebrew
 
-Copy `dist/package-managers/v0.3.6/homebrew/wardian.rb` into the Wardian tap or
-the target Cask repository.
+The `wardian-app/homebrew-tap` repository owns the published Homebrew Cask.
+After a stable release, its **Update Wardian Cask** workflow can be run with a
+release tag such as `v0.3.6`. The main Wardian release workflow also dispatches
+that tap workflow after stable publication when the Wardian repository has a
+`HOMEBREW_TAP_DISPATCH_TOKEN` secret with access to create dispatch events in
+the tap repository.
 
-Validate locally:
+The tap workflow reads the published Wardian release assets, rewrites
+`Casks/wardian.rb`, runs Homebrew audit, and opens a pull request in the tap.
+The generated `dist/package-managers/v0.3.6/homebrew/wardian.rb` file remains a
+local fallback and a useful comparison artifact, but maintainers should prefer
+the tap workflow for published cask updates.
+
+Validate local cask changes on macOS:
 
 ```bash
 brew audit --cask wardian
