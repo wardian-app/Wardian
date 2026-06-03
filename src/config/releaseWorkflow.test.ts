@@ -130,6 +130,20 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, cleanup-updater-signatures, validate-updater-metadata]");
   });
 
+  it("dispatches Homebrew tap updates after stable releases publish", () => {
+    expect(releaseWorkflow).toContain("update-homebrew-cask:");
+    expect(releaseWorkflow).toContain("Update Homebrew cask");
+    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, publish]");
+    expect(releaseWorkflow).toContain("needs.publish.result == 'success'");
+    expect(releaseWorkflow).toContain("needs.create-release.outputs.is_prerelease == 'false'");
+    expect(releaseWorkflow).toContain("needs.resolve-release.outputs.is_prerelease == 'false'");
+    expect(releaseWorkflow).toContain("HOMEBREW_TAP_DISPATCH_TOKEN");
+    expect(releaseWorkflow).toContain("wardian-release-published");
+    expect(releaseWorkflow).toContain("owner: 'wardian-app'");
+    expect(releaseWorkflow).toContain("repo: 'homebrew-tap'");
+    expect(releaseWorkflow).toContain("tag: process.env.RELEASE_TAG");
+  });
+
   it("publishes unified installers that carry the staged CLI", () => {
     expect(releaseWorkflow).not.toContain("Build CLI");
     expect(releaseWorkflow).not.toContain("cargo build --release -p wardian-cli --target");

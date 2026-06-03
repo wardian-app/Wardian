@@ -28,6 +28,7 @@ Configure GitHub Actions secrets:
 
 - `TAURI_SIGNING_PRIVATE_KEY`: the private key content, or use `TAURI_SIGNING_PRIVATE_KEY_PATH` in a controlled runner environment.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional, only when the private key was generated with a password.
+- `HOMEBREW_TAP_DISPATCH_TOKEN`: optional fine-grained GitHub token or GitHub App token that can create `repository_dispatch` events in `wardian-app/homebrew-tap`. When present, stable releases trigger the tap cask update workflow after publication. When absent, the release workflow logs a notice and leaves the tap update as a manual post-release step.
 
 For this repository's GitHub Actions workflow, store the private key file content in `TAURI_SIGNING_PRIVATE_KEY`. Do not store the public `.pub` file, the committed `plugins.updater.pubkey`, or a local filesystem path. The generated private key file is base64 text; when decoded it starts with `untrusted comment:` and contains `secret key`.
 
@@ -59,8 +60,10 @@ Local `npm run tauri build` creates an installable bundle without updater artifa
 
 Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=stable` before invoking `tauri-apps/tauri-action`. Prerelease builds intentionally omit the marker and do not upload stable updater metadata. Do not set that marker for ordinary local builds unless you are deliberately producing an official stable release artifact.
 
-After a stable release is published, generate winget, Homebrew, and Linux
-direct-install metadata from the published release assets. See
+After a stable release is published, generate winget and Linux direct-install
+metadata from the published release assets. Stable releases also dispatch the
+`wardian-app/homebrew-tap` cask update workflow when
+`HOMEBREW_TAP_DISPATCH_TOKEN` is configured. See
 [Package Manager Distribution](./package-manager-distribution.md) for the
 post-release package-manager workflow. Package-manager metadata must consume the
 published release asset URLs and SHA-256 digests; it must not depend on release

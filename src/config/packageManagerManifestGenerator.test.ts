@@ -78,8 +78,15 @@ describe("package-manager manifest generator", () => {
       expect(cask).toContain('cask "wardian" do');
       expect(cask).toContain('version "0.3.6"');
       expect(cask).toContain("on_arm do");
+      expect(cask).toContain(
+        'url "https://github.com/wardian-app/Wardian/releases/download/v#{version}/Wardian_#{version}_aarch64.dmg",',
+      );
+      expect(cask).toContain('verified: "github.com/wardian-app/Wardian/"');
       expect(cask).toContain(`sha256 "${hash("b")}"`);
       expect(cask).toContain("on_intel do");
+      expect(cask).toContain(
+        'url "https://github.com/wardian-app/Wardian/releases/download/v#{version}/Wardian_#{version}_x64.dmg",',
+      );
       expect(cask).toContain(`sha256 "${hash("c")}"`);
       expect(cask).toContain('app "Wardian.app"');
       expect(cask).toContain("auto_updates true");

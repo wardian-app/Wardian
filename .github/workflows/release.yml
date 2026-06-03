@@ -384,3 +384,34 @@ jobs:
               release_id: ${{ github.event_name == 'push' && needs.create-release.outputs.release_id || needs.resolve-release.outputs.release_id }},
               draft: false,
             });
+
+  update-homebrew-cask:
+    name: Update Homebrew cask
+    needs: [create-release, resolve-release, publish]
+    if: always() && needs.publish.result == 'success' && ((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && needs.resolve-release.outputs.is_prerelease == 'false'))
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      TAP_DISPATCH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+    steps:
+      - name: Skip tap dispatch when token is unavailable
+        if: env.TAP_DISPATCH_TOKEN == ''
+        run: |
+          echo "::notice::HOMEBREW_TAP_DISPATCH_TOKEN is not configured; skipping homebrew-tap update dispatch."
+
+      - name: Dispatch tap cask update
+        if: env.TAP_DISPATCH_TOKEN != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: 'wardian-app',
+              repo: 'homebrew-tap',
+              event_type: 'wardian-release-published',
+              client_payload: {
+                tag: process.env.RELEASE_TAG,
+                source_repo: context.repo.repo,
+                source_run_id: String(context.runId),
+              },
+            });
