@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import type { AgentChatEvent, RemoteAgentSummary, RemoteTerminalSnapshot, RemoteWorkflowSummary } from "../../types";
 import {
+  DEFAULT_WATCHLIST_PREFS,
+  type AgentTeam,
+  type Watchlist,
+  type WatchlistPrefs,
+} from "../../layout/watchlist/types";
+import { normalizeWatchlistState } from "../../layout/watchlist/watchlistUtils";
+import {
   clearStoredRemoteIdentity,
   createRemoteDeviceKeyPair,
   defaultRemoteDeviceLabel,
@@ -21,9 +28,17 @@ type RemoteStatus =
   | "gateway_identity_changed"
   | "device_revoked";
 
+type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "graph" | "library";
+
 interface RemoteState {
   agents: RemoteAgentSummary[];
   workflows: RemoteWorkflowSummary[];
+  watchlists: Watchlist[];
+  teams: AgentTeam[];
+  watchlistPrefs: WatchlistPrefs;
+  activeWatchlistId: string;
+  activeRemoteTab: ActiveRemoteTab;
+  mobileCollapsedTeamIds: string[];
   status: RemoteStatus;
   activeAgentId: string | null;
   activeAgentViewMode: "terminal" | "chat";
@@ -36,6 +51,9 @@ interface RemoteState {
   sending: boolean;
   load: () => Promise<void>;
   disconnectStatusStream: () => void;
+  setActiveWatchlistId: (id: string) => void;
+  setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
+  toggleMobileTeamCollapsed: (teamId: string) => void;
   openAgent: (id: string) => Promise<void>;
   closeAgent: () => void;
   setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
@@ -55,9 +73,18 @@ type RemoteGet = () => RemoteState;
 const statusFromError = (error: unknown): RemoteStatus =>
   error instanceof RemoteRequestError && error.status === 401 ? "session_expired" : "unreachable";
 
+const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
 const STATUS_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
+
+const storedActiveWatchlistId = () => {
+  try {
+    return window.localStorage.getItem(REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY) || "all";
+  } catch {
+    return "all";
+  }
+};
 
 const chatEventFingerprint = (event: AgentChatEvent) =>
   [
@@ -361,19 +388,45 @@ const ensureAuthenticatedSession = async (set: RemoteSet) => {
 };
 
 const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
-  const [agents, workflows] = await Promise.all([
+  const [agents, workflows, remoteWatchlists] = await Promise.all([
     remoteClient.listAgents(),
     remoteClient.listWorkflows().catch((error: unknown) => {
       if (error instanceof RemoteRequestError && error.status === 404) return [];
       throw error;
     }),
+    remoteClient.loadWatchlists().catch((error: unknown) => {
+      if (error instanceof RemoteRequestError && error.status === 404) {
+        return { watchlists: [], teams: [], prefs: null };
+      }
+      throw error;
+    }),
   ]);
+  const watchlistState = normalizeWatchlistState({
+    version: 2,
+    watchlists: remoteWatchlists.watchlists,
+    teams: remoteWatchlists.teams,
+  });
+  const watchlistIds = new Set(watchlistState.watchlists.map((list) => list.id));
+  const storedId = storedActiveWatchlistId();
+  const activeWatchlistId = storedId === "all" || watchlistIds.has(storedId) ? storedId : "all";
+  const watchlistPrefs = {
+    ...DEFAULT_WATCHLIST_PREFS,
+    ...(remoteWatchlists.prefs ?? {}),
+    collapsed_team_ids: Array.isArray(remoteWatchlists.prefs?.collapsed_team_ids)
+      ? remoteWatchlists.prefs.collapsed_team_ids
+      : [],
+  };
   set((state) => {
     const liveAgentIds = new Set(agents.map((agent) => agent.session_id));
     const activeAgentId = state.activeAgentId && liveAgentIds.has(state.activeAgentId) ? state.activeAgentId : null;
     return {
       agents,
       workflows,
+      watchlists: watchlistState.watchlists,
+      teams: watchlistState.teams,
+      watchlistPrefs,
+      activeWatchlistId,
+      mobileCollapsedTeamIds: watchlistPrefs.collapsed_team_ids,
       status: "ready",
       activeAgentId,
       ...(activeAgentId
@@ -394,6 +447,12 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
 export const useRemoteStore = create<RemoteState>((set, get) => ({
   agents: [],
   workflows: [],
+  watchlists: [],
+  teams: [],
+  watchlistPrefs: DEFAULT_WATCHLIST_PREFS,
+  activeWatchlistId: "all",
+  activeRemoteTab: "watchlist",
+  mobileCollapsedTeamIds: [],
   status: "loading",
   activeAgentId: null,
   activeAgentViewMode: "terminal",
@@ -430,6 +489,24 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   },
   disconnectStatusStream() {
     closeStatusStream();
+  },
+  setActiveWatchlistId(id) {
+    set({ activeWatchlistId: id });
+    try {
+      window.localStorage.setItem(REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY, id);
+    } catch {
+      // Browser storage may be unavailable in locked-down contexts.
+    }
+  },
+  setActiveRemoteTab(tab) {
+    set({ activeRemoteTab: tab });
+  },
+  toggleMobileTeamCollapsed(teamId) {
+    set((state) => ({
+      mobileCollapsedTeamIds: state.mobileCollapsedTeamIds.includes(teamId)
+        ? state.mobileCollapsedTeamIds.filter((id) => id !== teamId)
+        : [...state.mobileCollapsedTeamIds, teamId],
+    }));
   },
   async openAgent(id) {
     clearBackgroundChatRefresh();

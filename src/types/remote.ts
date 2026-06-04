@@ -1,3 +1,5 @@
+import type { AgentTeam, Watchlist, WatchlistPrefs } from "../layout/watchlist/types";
+
 export type RemoteAccessStatus = "disabled" | "enabled" | "needs_repair";
 
 export interface RemoteGatewayConfig {
@@ -132,6 +134,12 @@ export interface RemoteWorkflowSummary {
   id: string;
   name: string;
   node_count: number;
+}
+
+export interface RemoteWatchlistResponse {
+  watchlists: Watchlist[];
+  teams: AgentTeam[];
+  prefs: WatchlistPrefs | null;
 }
 
 export interface RemoteWorkflowRunRequest {
