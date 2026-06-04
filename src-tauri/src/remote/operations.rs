@@ -1,4 +1,6 @@
-use crate::remote::models::{RemoteAgentActionRequest, RemoteAgentSummary, RemoteTerminalSnapshot};
+use crate::remote::models::{
+    RemoteAgentActionRequest, RemoteAgentSummary, RemoteTerminalSnapshot, RemoteWatchlistResponse,
+};
 use crate::state::AppState;
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
@@ -43,6 +45,48 @@ pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
     });
     ordered.extend(remaining);
     ordered
+}
+
+pub fn remote_watchlist_state() -> Result<RemoteWatchlistResponse, String> {
+    let Some(home) = crate::utils::fs::get_wardian_home() else {
+        return Ok(RemoteWatchlistResponse {
+            watchlists: serde_json::json!([]),
+            teams: serde_json::json!([]),
+            prefs: None,
+        });
+    };
+
+    let persisted_state = std::fs::read_to_string(home.join("watchlists").join("index.json"))
+        .ok()
+        .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
+    let (watchlists, teams) = if let Some(state) = persisted_state.as_object() {
+        (
+            state
+                .get("watchlists")
+                .filter(|value| value.is_array())
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+            state
+                .get("teams")
+                .filter(|value| value.is_array())
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+    } else if persisted_state.is_array() {
+        (persisted_state, serde_json::json!([]))
+    } else {
+        (serde_json::json!([]), serde_json::json!([]))
+    };
+    let prefs = std::fs::read_to_string(home.join("watchlists").join("prefs.json"))
+        .ok()
+        .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok());
+
+    Ok(RemoteWatchlistResponse {
+        watchlists,
+        teams,
+        prefs,
+    })
 }
 
 pub async fn remote_agent_chat_transcript(
@@ -270,6 +314,63 @@ mod tests {
         let roster = remote_agent_roster(&state).await;
 
         assert_eq!(roster[0].latest_text, None);
+    }
+
+    #[tokio::test]
+    async fn remote_watchlist_state_reads_persisted_state_and_prefs() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp home");
+        let watchlists_dir = temp.path().join("watchlists");
+        std::fs::create_dir_all(&watchlists_dir).expect("watchlists dir");
+        std::fs::write(
+            watchlists_dir.join("index.json"),
+            serde_json::json!({
+                "version": 2,
+                "teams": [{ "id": "team-1", "name": "Core", "agentIds": ["agent-2", "agent-1"] }],
+                "watchlists": [{ "id": "main", "name": "Main", "entries": [{ "type": "team", "teamId": "team-1" }] }]
+            })
+            .to_string(),
+        )
+        .expect("watchlist json");
+        std::fs::write(
+            watchlists_dir.join("prefs.json"),
+            serde_json::json!({
+                "columns": [],
+                "sort": null,
+                "preserve_team_grouping_when_sorted": false,
+                "collapsed_team_ids": ["team-1"]
+            })
+            .to_string(),
+        )
+        .expect("prefs json");
+
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let response = remote_watchlist_state().expect("watchlist response");
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        assert_eq!(response.watchlists[0]["id"], "main");
+        assert_eq!(response.teams[0]["agentIds"][0], "agent-2");
+        assert_eq!(
+            response.prefs.as_ref().expect("prefs")["collapsed_team_ids"][0],
+            "team-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_watchlist_state_uses_empty_defaults_for_missing_or_bad_files() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp home");
+        std::fs::create_dir_all(temp.path().join("watchlists")).expect("watchlists dir");
+        std::fs::write(temp.path().join("watchlists/index.json"), "{").expect("bad index");
+        std::fs::write(temp.path().join("watchlists/prefs.json"), "{").expect("bad prefs");
+
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let response = remote_watchlist_state().expect("watchlist response");
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+
+        assert_eq!(response.watchlists, serde_json::json!([]));
+        assert_eq!(response.teams, serde_json::json!([]));
+        assert!(response.prefs.is_none());
     }
 
     #[tokio::test]

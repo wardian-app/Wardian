@@ -103,6 +103,7 @@ fn remote_router(app: AppHandle, config: RemoteGatewayConfig) -> Router {
         .route("/remote/api/auth/challenge", post(create_auth_challenge))
         .route("/remote/api/auth/session", post(create_auth_session))
         .route("/remote/api/agents", get(list_remote_agents))
+        .route("/remote/api/watchlists", get(load_remote_watchlists))
         .route("/remote/api/workflows", get(list_remote_workflows))
         .route(
             "/remote/api/agents/{session_id}/chat",
@@ -594,6 +595,24 @@ async fn list_remote_agents(
         GatewayAuditEvent::accepted("roster_read", "list_agents"),
     );
     Ok(Json(serde_json::json!({ "agents": agents })))
+}
+
+async fn load_remote_watchlists(
+    State(ctx): State<RemoteGatewayContext>,
+    headers: HeaderMap,
+) -> Result<Json<crate::remote::models::RemoteWatchlistResponse>, RemoteGatewayError> {
+    let origin = require_audited_request_boundary(&ctx.config, &headers, false, "load_watchlists")?;
+    let session =
+        require_audited_remote_session(&ctx, &headers, &origin, "roster_read", "load_watchlists")
+            .await?;
+    let response = crate::remote::operations::remote_watchlist_state()
+        .map_err(|_| RemoteGatewayError::service_unavailable("watchlists_unavailable"))?;
+    audit_gateway_event(
+        &session,
+        &origin,
+        GatewayAuditEvent::accepted("roster_read", "load_watchlists"),
+    );
+    Ok(Json(response))
 }
 
 async fn list_remote_workflows(

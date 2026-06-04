@@ -258,6 +258,13 @@ pub struct RemoteAgentSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteWatchlistResponse {
+    pub watchlists: serde_json::Value,
+    pub teams: serde_json::Value,
+    pub prefs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteTerminalSnapshot {
     pub cursor: String,
     pub text: String,
