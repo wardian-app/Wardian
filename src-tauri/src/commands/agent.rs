@@ -1082,7 +1082,23 @@ fn resolve_registered_session_name(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentOrderPlacement<'a> {
     Top,
+    Bottom,
     After(&'a str),
+}
+
+fn new_agent_order_placement_for_setting(value: &str) -> AgentOrderPlacement<'static> {
+    match value.trim() {
+        "bottom" => AgentOrderPlacement::Bottom,
+        _ => AgentOrderPlacement::Top,
+    }
+}
+
+fn configured_new_agent_order_placement() -> AgentOrderPlacement<'static> {
+    crate::utils::load_app_settings()
+        .map(|settings| {
+            new_agent_order_placement_for_setting(&settings.watchlist_new_agent_position)
+        })
+        .unwrap_or(AgentOrderPlacement::Top)
 }
 
 fn insert_new_agent_order(
@@ -1093,6 +1109,7 @@ fn insert_new_agent_order(
     order.retain(|id| id != session_id);
     match placement {
         AgentOrderPlacement::Top => order.insert(0, session_id.to_string()),
+        AgentOrderPlacement::Bottom => order.push(session_id.to_string()),
         AgentOrderPlacement::After(source_session_id) => {
             let index = order
                 .iter()
@@ -1997,7 +2014,7 @@ pub async fn spawn_agent(
         &app,
         None,
         Some(&session_name),
-        AgentOrderPlacement::Top,
+        configured_new_agent_order_placement(),
     )
     .await;
     if registered.is_err() {
@@ -3228,24 +3245,24 @@ mod tests {
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
-        collect_agent_worktrees, collect_agent_worktrees_with_discovered, detach_agent_for_kill,
-        disable_worktree_config, discover_git_worktrees_for_configs,
-        discover_git_worktrees_for_sources_with, enable_worktree_config,
-        ensure_existing_worktree_is_git_registered,
+        collect_agent_worktrees, collect_agent_worktrees_with_discovered,
+        configured_new_agent_order_placement, detach_agent_for_kill, disable_worktree_config,
+        discover_git_worktrees_for_configs, discover_git_worktrees_for_sources_with,
+        enable_worktree_config, ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_managed_agent_worktree_root, is_under_wardian_agent_worktree_root,
-        lock_agent_lifecycle, mark_agent_paused_off, normalize_clone_folder_override,
-        normalize_discovered_git_worktree_path, normalize_existing_workspace_record_path,
-        normalize_spawn_folder, normalize_workspace_record_path,
-        persisted_resume_session_for_provider, prepare_agent_for_clear, prepare_clear_config,
-        prepare_restored_config_for_spawn, prepare_resume_config,
-        prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
-        provider_needs_obtain_session_id_on_clear, provider_uses_generated_session_id,
-        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
-        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
-        restore_runtime_state_snapshot_after_resume, sync_resumed_input_sender,
-        take_agent_runtime_for_termination, terminal_cleared_payload,
+        lock_agent_lifecycle, mark_agent_paused_off, new_agent_order_placement_for_setting,
+        normalize_clone_folder_override, normalize_discovered_git_worktree_path,
+        normalize_existing_workspace_record_path, normalize_spawn_folder,
+        normalize_workspace_record_path, persisted_resume_session_for_provider,
+        prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
+        prepare_resume_config, prepare_resume_config_for_runtime,
+        promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
+        provider_uses_generated_session_id, reserve_spawn_session_name,
+        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
+        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
+        sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DiscoveredGitWorktree, GIT_WORKTREE_DISCOVERY_CONCURRENCY,
@@ -4149,6 +4166,67 @@ mod tests {
         insert_new_agent_order(&mut order, "gamma", AgentOrderPlacement::Top);
 
         assert_eq!(order, vec!["gamma", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn fresh_spawn_order_inserts_new_agent_at_bottom() {
+        let mut order = vec!["alpha".to_string(), "beta".to_string()];
+
+        insert_new_agent_order(&mut order, "gamma", AgentOrderPlacement::Bottom);
+
+        assert_eq!(order, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn new_agent_order_placement_uses_bottom_setting() {
+        assert_eq!(
+            new_agent_order_placement_for_setting("bottom"),
+            AgentOrderPlacement::Bottom
+        );
+        assert_eq!(
+            new_agent_order_placement_for_setting(" bottom "),
+            AgentOrderPlacement::Bottom
+        );
+    }
+
+    #[test]
+    fn configured_new_agent_order_placement_uses_persisted_bottom_setting() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let settings_path = temp.path().join("settings").join("app.json");
+        std::fs::create_dir_all(settings_path.parent().expect("parent")).expect("settings dir");
+        std::fs::write(
+            &settings_path,
+            r#"{
+              "schema_version": 2,
+              "overrides": {
+                "watchlist_new_agent_position": "bottom"
+              }
+            }"#,
+        )
+        .expect("write settings");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _home_guard = WardianHomeGuard;
+
+        let placement = configured_new_agent_order_placement();
+
+        assert_eq!(placement, AgentOrderPlacement::Bottom);
+    }
+
+    #[test]
+    fn new_agent_order_placement_defaults_to_top_for_non_bottom_values() {
+        assert_eq!(
+            new_agent_order_placement_for_setting("top"),
+            AgentOrderPlacement::Top
+        );
+        assert_eq!(
+            new_agent_order_placement_for_setting(""),
+            AgentOrderPlacement::Top
+        );
+        assert_eq!(
+            new_agent_order_placement_for_setting("middle"),
+            AgentOrderPlacement::Top
+        );
     }
 
     #[test]

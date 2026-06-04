@@ -167,9 +167,11 @@ in the right-side roster:
 - **Bottom** appends the newly spawned agent to the end of the global roster
   order.
 
-This setting applies to new visible agents spawned from the Agent Config pane.
-It does not re-sort existing agents on startup, reinterpret manual drag order,
-or override clone/team placement behavior.
+This setting applies to new visible agents spawned from the Agent Config pane
+and to agents created with `wardian agent spawn` while the desktop app is
+running for the same `WARDIAN_HOME`. It does not re-sort existing agents on
+startup, reinterpret manual drag order, or override clone/team placement
+behavior.
 
 ## Terminal
 
