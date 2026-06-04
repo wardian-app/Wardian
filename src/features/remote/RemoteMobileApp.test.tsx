@@ -11,7 +11,9 @@ import {
   signRemoteAuthChallenge,
 } from "./remoteIdentity";
 import { remoteClient } from "./remoteClient";
+import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemoteMobileApp } from "./RemoteMobileApp";
+import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
 
 vi.mock("./remoteIdentity", () => ({
@@ -130,6 +132,87 @@ describe("RemoteMobileApp", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     remoteClient.setCsrfNonce(null);
+  });
+
+  it("collapses team members locally from the mobile watchlist chevron", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+        {
+          session_id: "agent-2",
+          session_name: "Beta",
+          agent_class: "Reviewer",
+          provider: "claude",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [{ id: "team-1", name: "Core Team", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteWatchlistView />);
+
+    expect(screen.getByText("Alpha")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Core Team" }));
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+    expect(screen.queryByText("Beta")).not.toBeInTheDocument();
+    expect(screen.getByText("Core Team")).toBeVisible();
+  });
+
+  it("opens agent detail when a mobile watchlist row is tapped", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteWatchlistView />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
+    expect(useRemoteStore.getState().activeAgentId).toBe("agent-1");
+  });
+
+  it("updates the active remote tab from the compact mobile bottom nav", async () => {
+    useRemoteStore.setState({
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteBottomNav />);
+
+    expect(screen.getByRole("button", { name: /Watchlist/i })).toHaveAttribute("aria-current", "page");
+    await userEvent.click(screen.getByRole("button", { name: /Graph/i }));
+    expect(useRemoteStore.getState().activeRemoteTab).toBe("graph");
   });
 
   it("pairs from a QR URL, waits for desktop approval, then authenticates the phone", async () => {
