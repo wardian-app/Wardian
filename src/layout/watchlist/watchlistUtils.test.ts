@@ -122,6 +122,27 @@ describe("normalizeWatchlistState", () => {
     expect(getWatchlistEntries(state.watchlists[0])).toEqual([{ type: "team", teamId: "team-1" }]);
   });
 
+  it("drops malformed persisted watchlist records", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [],
+      watchlists: [
+        null,
+        { id: "valid", name: "Valid", entries: [{ type: "agent", agentId: "a" }] },
+        { id: 123, name: "Bad id", entries: [{ type: "agent", agentId: "b" }] },
+        { id: "bad-name", name: null, entries: [{ type: "agent", agentId: "c" }] },
+      ],
+    });
+
+    expect(state.watchlists).toEqual([
+      {
+        id: "valid",
+        name: "Valid",
+        entries: [{ type: "agent", agentId: "a" }],
+      },
+    ]);
+  });
+
   it("normalizes legacy snake_case agent_ids lists", () => {
     const state = normalizeWatchlistState([
       { id: "l1", name: "List 1", agent_ids: ["a", "b"] },

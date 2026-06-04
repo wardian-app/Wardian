@@ -36,6 +36,17 @@ function normalizeTeam(value: unknown): AgentTeam | null {
   };
 }
 
+function normalizeWatchlist(value: unknown): Watchlist | null {
+  if (!value || typeof value !== "object") return null;
+  const list = value as { id?: unknown; name?: unknown };
+  if (typeof list.id !== "string" || typeof list.name !== "string") return null;
+  return {
+    id: list.id,
+    name: list.name,
+    entries: getWatchlistEntries(value as Watchlist),
+  };
+}
+
 function teamForAgent(teams: AgentTeam[], agentId: string): AgentTeam | undefined {
   return teams.find((team) => team.agentIds.includes(agentId));
 }
@@ -120,17 +131,15 @@ export function normalizeWatchlistState(input: unknown): WatchlistState {
     ? {
         version: 2,
         teams: input.teams.map(normalizeTeam).filter((team): team is AgentTeam => Boolean(team)),
-        watchlists: input.watchlists,
+        watchlists: input.watchlists
+          .map(normalizeWatchlist)
+          .filter((list): list is Watchlist => Boolean(list)),
       }
     : {
         version: 2,
         teams: [],
         watchlists: Array.isArray(input)
-          ? (input as Watchlist[]).map((list) => ({
-              id: list.id,
-              name: list.name,
-              entries: getWatchlistEntries(list),
-            }))
+          ? input.map(normalizeWatchlist).filter((list): list is Watchlist => Boolean(list))
           : [],
       };
 
