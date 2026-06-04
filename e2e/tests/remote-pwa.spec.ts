@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("remote mobile shell renders one-column agents and sends a CSRF-protected prompt", async ({
+test("remote mobile shell renders team-ordered watchlist and opens agent detail", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -23,6 +23,15 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
       body: JSON.stringify({
         agents: [
           {
+            session_id: "agent-2",
+            session_name: "Remote Reviewer",
+            agent_class: "Reviewer",
+            provider: "claude",
+            workspace: "<absolute-workspace-path>",
+            status: "Processing",
+            latest_text: null,
+          },
+          {
             session_id: "agent-1",
             session_name: "Remote Coder",
             agent_class: "Coder",
@@ -32,6 +41,16 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
             latest_text: "Ready",
           },
         ],
+      }),
+    });
+  });
+  await page.route("**/remote/api/watchlists", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        watchlists: [{ id: "main", name: "Main", entries: [{ type: "team", teamId: "team-1" }] }],
+        teams: [{ id: "team-1", name: "Remote Team", agentIds: ["agent-2", "agent-1"] }],
+        prefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
       }),
     });
   });
@@ -86,7 +105,14 @@ test("remote mobile shell renders one-column agents and sends a CSRF-protected p
   await page.goto("/remote", { waitUntil: "domcontentloaded" });
   await expect(page.locator('[data-testid="remote-mobile-app"]')).toBeVisible();
   await expect(page.getByText("Remote Coder")).toBeVisible();
-  await expect(page.locator('[data-testid="remote-agent-list"]')).toHaveClass(/grid-cols-1/);
+  await expect(page.locator('[data-testid="remote-watchlist-view"]')).toBeVisible();
+  await expect(page.getByText("Remote Team")).toBeVisible();
+  const rowNames = await page.locator('[data-testid="remote-watchlist-agent-row"]').allTextContents();
+  expect(rowNames).toEqual([
+    expect.stringContaining("Remote Reviewer"),
+    expect.stringContaining("Remote Coder"),
+  ]);
+  await expect(page.getByRole("navigation", { name: "Remote sections" })).toBeVisible();
 
   await page.getByRole("button", { name: "Open Remote Coder details" }).click();
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
