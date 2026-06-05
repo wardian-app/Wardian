@@ -232,15 +232,18 @@ device.
 
 ## Mobile Surface
 
-The v1 mobile shell is a simplified single-column control grid for small
-screens. It is focused on:
+The v1 mobile shell opens to a monitoring-only watchlist for small screens. It
+is focused on:
 
-- Viewing active agent status.
-- Selecting one or more agents.
+- Viewing active agent status in a compact list.
+- Mirroring desktop watchlist and team organization.
+- Collapsing noisy team sections locally on the phone.
 - Opening an agent into a terminal-first detail view with chat one tap away.
-- Sending prompts to selected agents.
-- Running basic lifecycle actions such as pause, resume, clear, and kill.
-- Launching saved workflows from the mobile workflow list.
+- Running lifecycle and prompt actions from the agent detail view.
+
+The watchlist itself does not expose inline actions. Tap an agent row to open
+the detail view before sending prompts, pausing, resuming, clearing, or killing
+an agent.
 
 When you tap an agent, Wardian opens a read-only terminal transcript by
 default. This transcript is a sanitized snapshot from the desktop-owned agent

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +11,9 @@ import {
   signRemoteAuthChallenge,
 } from "./remoteIdentity";
 import { remoteClient } from "./remoteClient";
+import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemoteMobileApp } from "./RemoteMobileApp";
+import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
 
 vi.mock("./remoteIdentity", () => ({
@@ -64,6 +66,8 @@ function bytesToBase64(bytes: number[]) {
   return btoa(String.fromCharCode(...bytes));
 }
 
+const initialRemoteStoreState = useRemoteStore.getState();
+
 describe("RemoteMobileApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -113,6 +117,12 @@ describe("RemoteMobileApp", () => {
     useRemoteStore.setState({
       agents: [],
       workflows: [],
+      watchlists: [],
+      teams: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      mobileCollapsedTeamIds: [],
       status: "loading",
       activeAgentId: null,
       activeAgentViewMode: "terminal",
@@ -123,6 +133,7 @@ describe("RemoteMobileApp", () => {
       chatLoading: false,
       chatError: "",
       sending: false,
+      load: initialRemoteStoreState.load,
     });
   });
 
@@ -130,6 +141,124 @@ describe("RemoteMobileApp", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     remoteClient.setCsrfNonce(null);
+  });
+
+  it("collapses team members locally from the mobile watchlist chevron", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+        {
+          session_id: "agent-2",
+          session_name: "Beta",
+          agent_class: "Reviewer",
+          provider: "claude",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [{ id: "team-1", name: "Core Team", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteWatchlistView />);
+
+    expect(screen.getByText("Alpha")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Core Team" }));
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+    expect(screen.queryByText("Beta")).not.toBeInTheDocument();
+    expect(screen.getByText("Core Team")).toBeVisible();
+  });
+
+  it("opens agent detail when a mobile watchlist row is tapped", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteWatchlistView />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
+    expect(useRemoteStore.getState().activeAgentId).toBe("agent-1");
+  });
+
+  it("updates the active remote tab from the compact mobile bottom nav", async () => {
+    useRemoteStore.setState({
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteBottomNav />);
+
+    expect(screen.getByRole("button", { name: "Watchlist" })).toHaveAttribute("aria-current", "page");
+    await userEvent.click(screen.getByRole("button", { name: "Graph" }));
+    expect(useRemoteStore.getState().activeRemoteTab).toBe("graph");
+  });
+
+  it("shows bottom navigation placeholders without exposing watchlist actions", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      workflows: [],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      mobileCollapsedTeamIds: [],
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    expect(screen.getByRole("navigation", { name: "Remote sections" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Watchlist" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open Alpha details" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Prompt")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Graph" }));
+    expect(screen.getByText("Graph is not available in the mobile PWA yet.")).toBeVisible();
   });
 
   it("pairs from a QR URL, waits for desktop approval, then authenticates the phone", async () => {
@@ -276,7 +405,7 @@ describe("RemoteMobileApp", () => {
     });
   });
 
-  it("bootstraps the session nonce, shows the roster, and opens the status stream", async () => {
+  it("bootstraps the session nonce, shows the watchlist, and opens the status stream", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -330,8 +459,11 @@ describe("RemoteMobileApp", () => {
 
     await screen.findByText("Coder");
     expect(screen.getByTestId("remote-mobile-app")).toHaveClass("h-dvh", "overflow-hidden");
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
     expect(screen.getByTestId("remote-scroll-region")).toHaveClass("min-h-0", "overflow-y-auto");
-    expect(screen.getByTestId("remote-agent-list")).toHaveClass("grid-cols-1");
+    expect(screen.getByTestId("remote-agent-list")).not.toHaveClass("grid-cols-1");
+    expect(screen.getByTestId("remote-watchlist-agent-row")).toHaveTextContent("Coder");
+    expect(screen.queryByRole("article", { name: /Coder/i })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/remote/api/session", expect.objectContaining({ method: "GET" }));
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -343,8 +475,8 @@ describe("RemoteMobileApp", () => {
     MockWebSocket.instances[0]?.emit("open");
     expect(JSON.parse(MockWebSocket.instances[0]?.sent[0] ?? "{}")).toEqual({ ticket: "ws-ticket-1" });
 
-    await userEvent.type(screen.getByLabelText("Prompt"), "status please");
-    expect(screen.getByRole("button", { name: "Broadcast" })).toBeEnabled();
+    expect(screen.queryByLabelText("Prompt")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([url]) => url === "/remote/api/agents/action")).toBe(false);
   });
 
@@ -399,7 +531,8 @@ describe("RemoteMobileApp", () => {
 
     expect(await screen.findByText("Coder")).toBeVisible();
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
-    expect(screen.getByText("No workflows available.")).toBeVisible();
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "Remote sections" })).toBeVisible();
   });
 
   it("keeps the loaded roster visible when the live status stream is unavailable", async () => {
@@ -1988,7 +2121,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
   });
 
-  it("shows lifecycle actions in agent detail while keeping roster cards action-free", async () => {
+  it("shows lifecycle actions in agent detail while keeping watchlist rows action-free", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -2049,22 +2182,22 @@ describe("RemoteMobileApp", () => {
 
     render(<RemoteMobileApp />);
 
-    const runningCard = await screen.findByRole("article", { name: /Running Coder/i });
-    expect(within(runningCard).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    expect(within(runningCard).queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
-    expect(within(runningCard).queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
-    expect(within(runningCard).queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
-    await userEvent.click(within(runningCard).getByRole("button", { name: /Open Running Coder details/i }));
+    const runningRow = await screen.findByRole("button", { name: /Open Running Coder details/i });
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    await userEvent.click(runningRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
     expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /Back to remote agents/i }));
 
-    const offlineCard = screen.getByRole("article", { name: /Offline Coder/i });
-    expect(within(offlineCard).queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
-    expect(within(offlineCard).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    await userEvent.click(within(offlineCard).getByRole("button", { name: /Open Offline Coder details/i }));
+    const offlineRow = screen.getByRole("button", { name: /Open Offline Coder details/i });
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    await userEvent.click(offlineRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
     expect(screen.getByRole("button", { name: "Resume" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
@@ -2129,9 +2262,9 @@ describe("RemoteMobileApp", () => {
 
     render(<RemoteMobileApp />);
 
-    const card = await screen.findByRole("article", { name: /Coder/i });
-    expect(within(card).queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    await userEvent.click(within(card).getByRole("button", { name: /Open Coder details/i }));
+    const row = await screen.findByRole("button", { name: /Open Coder details/i });
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    await userEvent.click(row);
     await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
 
     await waitFor(() => {

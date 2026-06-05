@@ -1,19 +1,17 @@
 import React, { useEffect } from "react";
 import "../../styles/App.css";
-import { RefreshCw, Smartphone } from "lucide-react";
-import { RemoteAgentCard } from "./RemoteAgentCard";
+import { RefreshCw } from "lucide-react";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
-import { RemoteCommandBar } from "./RemoteCommandBar";
+import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemotePairingView } from "./RemotePairingView";
-import { RemoteQueueView } from "./RemoteQueueView";
-import { RemoteWorkflowList } from "./RemoteWorkflowList";
+import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
 
 export const RemoteMobileApp: React.FC = () => {
   const agents = useRemoteStore((state) => state.agents);
-  const workflows = useRemoteStore((state) => state.workflows);
   const status = useRemoteStore((state) => state.status);
   const activeAgentId = useRemoteStore((state) => state.activeAgentId);
+  const activeRemoteTab = useRemoteStore((state) => state.activeRemoteTab);
   const load = useRemoteStore((state) => state.load);
   const disconnectStatusStream = useRemoteStore((state) => state.disconnectStatusStream);
 
@@ -67,46 +65,24 @@ export const RemoteMobileApp: React.FC = () => {
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-wardian-bg text-primary" data-testid="remote-mobile-app">
-      <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-4 py-3 backdrop-blur">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <Smartphone className="h-4 w-4 shrink-0 text-muted-neutral" aria-hidden="true" />
-            <h1 className="truncate text-base font-semibold">Wardian</h1>
-          </div>
-          <button
-            type="button"
-            aria-label="Refresh remote roster"
-            onClick={() => void load()}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary"
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto pb-3" data-testid="remote-scroll-region">
-        <section className="p-3">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h2 className="text-xs font-semibold uppercase text-muted-neutral">Agents</h2>
-            <span className="text-[11px] text-muted-neutral">{agents.length}</span>
-          </div>
-          {agents.length === 0 ? (
-            <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
-              No remote agents available.
-            </div>
-          ) : (
-            <div data-testid="remote-agent-list" className="grid grid-cols-1 gap-3">
-              {agents.map((agent) => (
-                <RemoteAgentCard key={agent.session_id} agent={agent} />
-              ))}
-            </div>
-          )}
-        </section>
-
-        <RemoteQueueView />
-        <RemoteWorkflowList workflows={workflows} />
-      </div>
-      <RemoteCommandBar />
+      {activeRemoteTab === "watchlist" ? <RemoteWatchlistView /> : <RemotePlaceholderPanel tab={activeRemoteTab} />}
+      <RemoteBottomNav />
     </main>
   );
 };
+
+function RemotePlaceholderPanel({ tab }: { tab: "workflows" | "queue" | "graph" | "library" }) {
+  const label =
+    tab === "workflows" ? "Workflows" : tab === "queue" ? "Queue" : tab === "graph" ? "Graph" : "Library";
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col">
+      <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-4 py-3 backdrop-blur">
+        <h1 className="truncate text-base font-semibold text-primary">{label}</h1>
+      </header>
+      <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-neutral">
+        {label} is not available in the mobile PWA yet.
+      </div>
+    </section>
+  );
+}

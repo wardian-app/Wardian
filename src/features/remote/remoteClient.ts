@@ -8,6 +8,7 @@ import type {
   RemoteTerminalSnapshot,
   RemoteTerminalStreamMessage,
   RemoteWebSocketTicketResponse,
+  RemoteWatchlistResponse,
   RemoteWorkflowRunRequest,
   RemoteWorkflowStopRequest,
   RemoteWorkflowSummary,
@@ -139,6 +140,9 @@ export const remoteClient = {
   async listWorkflows() {
     const result = await remoteJson<{ workflows: RemoteWorkflowSummary[] }>("/remote/api/workflows");
     return result.workflows;
+  },
+  async loadWatchlists() {
+    return remoteJson<RemoteWatchlistResponse>("/remote/api/watchlists");
   },
   async runWorkflow(workflow_id: string, payload?: unknown) {
     const request: RemoteWorkflowRunRequest = { workflow_id, payload };
