@@ -1,4 +1,5 @@
 use crate::providers::antigravity::AntigravityProvider;
+use crate::providers::codex::CodexProvider;
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
 use crate::utils::fs::*;
@@ -25,14 +26,26 @@ pub(crate) fn headless_provider_launch(
     provider_args: &[String],
 ) -> Result<crate::utils::shell::ShellLaunchSpec, String> {
     #[cfg(windows)]
-    if provider_name == "opencode" {
-        let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
-        let mut fragments = vec![quote_cmd_arg(bin)];
-        fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
-        return Ok(crate::utils::shell::ShellLaunchSpec {
-            executable: cmd_host,
-            args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
-        });
+    {
+        let lower_bin = bin.to_ascii_lowercase();
+        if provider_name == "opencode" && !lower_bin.ends_with(".exe") {
+            let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let mut fragments = vec![quote_cmd_arg(bin)];
+            fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
+            return Ok(crate::utils::shell::ShellLaunchSpec {
+                executable: cmd_host,
+                args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
+            });
+        }
+        if !lower_bin.ends_with(".cmd")
+            && !lower_bin.ends_with(".bat")
+            && !lower_bin.ends_with(".ps1")
+        {
+            return Ok(crate::utils::shell::ShellLaunchSpec {
+                executable: bin.to_string(),
+                args: provider_args.to_vec(),
+            });
+        }
     }
 
     #[cfg(not(windows))]
@@ -103,6 +116,14 @@ pub(crate) fn headless_provider_args(
         "codex" => {
             provider_args.push("--cd".to_string());
             provider_args.push(provider_cwd.to_string_lossy().to_string());
+            if let Some(config) = config_override {
+                CodexProvider::new().append_common_args(&mut provider_args, config, true);
+                if let Some(custom) = config.custom_args.as_ref() {
+                    if let Some(parsed) = shlex::split(custom) {
+                        provider_args.extend(parsed);
+                    }
+                }
+            }
             provider_args.push("exec".to_string());
             if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
                 provider_args.push("resume".to_string());
@@ -112,6 +133,22 @@ pub(crate) fn headless_provider_args(
             provider_args.push(prompt.to_string());
         }
         "claude" => {
+            if let Some(config) = config_override {
+                let mut config = config.clone();
+                config.resume_session = resume_session.map(str::to_string);
+                let spawn_args = strip_flag_value_pairs(
+                    strip_flag_value_pairs(
+                        strip_flag_value_pairs(
+                            provider.get_spawn_args(&config, resume_session.is_some()),
+                            "--session-id",
+                        ),
+                        "--resume",
+                    ),
+                    "--input-format",
+                );
+                let spawn_args = strip_flag_value_pairs(spawn_args, "--output-format");
+                provider_args.extend(spawn_args);
+            }
             provider_args.push("--print".to_string());
             provider_args.push("--output-format".to_string());
             provider_args.push(output_format.to_string());
@@ -248,14 +285,9 @@ pub async fn run_headless_with_options(
         config_override,
         persisted_config.as_ref(),
     )?;
-    let persisted_provider_config =
-        if matches!(provider_name, "gemini" | "opencode" | "antigravity") {
-            config_override
-                .cloned()
-                .or_else(|| persisted_config.clone())
-        } else {
-            None
-        };
+    let effective_provider_config = config_override
+        .cloned()
+        .or_else(|| persisted_config.clone());
     let (bin, _) = provider.get_executable();
     let claude_hook = if provider_name == "claude" {
         ensure_claude_permission_hook(wardian_session_id).ok()
@@ -270,7 +302,7 @@ pub async fn run_headless_with_options(
         prompt,
         output_format,
         resume_session,
-        persisted_provider_config.as_ref(),
+        effective_provider_config.as_ref(),
     );
     if let Some(hook) = claude_hook.as_ref() {
         if provider_name == "claude" {
@@ -286,7 +318,7 @@ pub async fn run_headless_with_options(
     }
     apply_headless_identity_env(&mut cmd, wardian_session_id);
     super::apply_managed_cli_path_to_process(&mut cmd);
-    if let Some(config) = persisted_config.as_ref() {
+    if let Some(config) = effective_provider_config.as_ref() {
         for (key, value) in super::worktree_build_env(config) {
             cmd.env(key, value);
         }
@@ -307,7 +339,7 @@ pub async fn run_headless_with_options(
             cwd,
             &provider_context.class_name,
             opencode_scope_session,
-            persisted_provider_config.as_ref(),
+            effective_provider_config.as_ref(),
         )? {
             cmd.env(key, value);
         }
@@ -827,6 +859,58 @@ mod tests {
         assert!(!args.contains(&"ses_source".to_string()));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn node_headless_launch_uses_direct_process_args() {
+        let args = vec![
+            "provider.js".to_string(),
+            "--cd".to_string(),
+            "D:/Development/Wardian".to_string(),
+            "exec".to_string(),
+            "--json".to_string(),
+            "first line\nsecond line".to_string(),
+        ];
+
+        let spec = headless_provider_launch("gemini", "node", &args).unwrap();
+
+        assert_eq!(spec.executable, "node");
+        assert_eq!(spec.args, args);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opencode_exe_headless_launch_uses_direct_process_args() {
+        let args = vec![
+            "run".to_string(),
+            "--print-logs".to_string(),
+            "first line\nsecond line".to_string(),
+        ];
+
+        let spec = headless_provider_launch("opencode", "C:/tools/opencode.exe", &args).unwrap();
+
+        assert_eq!(spec.executable, "C:/tools/opencode.exe");
+        assert_eq!(spec.args, args);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opencode_extensionless_headless_launch_uses_cmd_host_on_windows() {
+        let args = vec![
+            "run".to_string(),
+            "--print-logs".to_string(),
+            "first line\nsecond line".to_string(),
+        ];
+
+        let spec = headless_provider_launch("opencode", "C:/nvm4w/nodejs/opencode", &args)
+            .expect("launch spec");
+
+        assert!(spec.executable.ends_with("cmd.exe") || spec.executable == "cmd.exe");
+        assert_eq!(spec.args[0], "/d");
+        assert_eq!(spec.args[1], "/c");
+        assert!(spec.args[2].contains("C:/nvm4w/nodejs/opencode"));
+        assert!(spec.args[2].contains("first line\nsecond line"));
+    }
+
     #[test]
     fn claude_fresh_headless_args_omit_resume_flag() {
         let provider = crate::providers::ProviderFactory::resolve("claude").unwrap();
@@ -842,6 +926,90 @@ mod tests {
 
         assert!(args.contains(&"--print".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn codex_headless_args_include_assigned_profile_config() {
+        let provider = crate::providers::ProviderFactory::resolve("codex").unwrap();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            model: Some("gpt-test".into()),
+            include_directories: Some(vec!["/workspace/docs".into()]),
+            provider_config: wardian_core::models::ProviderConfig::Codex(
+                wardian_core::models::CodexProviderConfig {
+                    sandbox_mode: Some("workspace-write".into()),
+                    approval_policy: Some("on-request".into()),
+                    profile: Some("review".into()),
+                    full_auto: Some(false),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+
+        let args = headless_provider_args(
+            "codex",
+            provider.as_ref(),
+            Path::new("/workspace"),
+            "task",
+            "json",
+            None,
+            Some(&config),
+        );
+
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"gpt-test".to_string()));
+        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args.contains(&"workspace-write".to_string()));
+        assert!(args.contains(&"--ask-for-approval".to_string()));
+        assert!(args.contains(&"on-request".to_string()));
+        assert!(args.contains(&"--profile".to_string()));
+        assert!(args.contains(&"review".to_string()));
+        assert!(args.contains(&"--add-dir".to_string()));
+        assert!(args.contains(&"/workspace/docs".to_string()));
+        assert!(args.contains(&"exec".to_string()));
+        assert!(args.contains(&"--json".to_string()));
+    }
+
+    #[test]
+    fn claude_headless_args_include_assigned_profile_config_without_session_reuse() {
+        let provider = crate::providers::ProviderFactory::resolve("claude").unwrap();
+        let config = AgentConfig {
+            session_id: "visible-agent".into(),
+            provider: "claude".into(),
+            model: Some("claude-test".into()),
+            include_directories: Some(vec!["/workspace/docs".into()]),
+            provider_config: wardian_core::models::ProviderConfig::Claude(
+                wardian_core::models::ClaudeProviderConfig {
+                    permission_mode: Some("acceptEdits".into()),
+                    max_turns: Some(4),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+
+        let args = headless_provider_args(
+            "claude",
+            provider.as_ref(),
+            Path::new("/workspace"),
+            "task",
+            "text",
+            None,
+            Some(&config),
+        );
+
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"claude-test".to_string()));
+        assert!(args.contains(&"--add-dir".to_string()));
+        assert!(args.contains(&"/workspace/docs".to_string()));
+        assert!(args.contains(&"--permission-mode".to_string()));
+        assert!(args.contains(&"acceptEdits".to_string()));
+        assert!(args.contains(&"--max-turns".to_string()));
+        assert!(args.contains(&"4".to_string()));
+        assert!(args.contains(&"--print".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"visible-agent".to_string()));
     }
 
     #[test]

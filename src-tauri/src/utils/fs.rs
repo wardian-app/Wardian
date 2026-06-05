@@ -173,7 +173,7 @@ pub fn ensure_claude_permission_hook(
 pub fn resolve_system_include_directories(class_name: &str, session_id: &str) -> Vec<String> {
     let mut dirs = Vec::new();
     if let Some(app_dir) = get_wardian_home() {
-        let class_path = app_dir.join("classes").join(class_name);
+        let class_path = safe_class_dir(&app_dir, class_name);
         let common_path = app_dir.join("common");
         let agent_path = app_dir.join("agents").join(session_id);
 
@@ -187,7 +187,7 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
         if common_path.exists() {
             dirs.push(common_path.to_string_lossy().to_string());
         }
-        if class_path.exists() {
+        if let Some(class_path) = class_path.filter(|path| path.exists()) {
             dirs.push(class_path.to_string_lossy().to_string());
         }
         if agent_path.exists() {
@@ -195,6 +195,20 @@ pub fn resolve_system_include_directories(class_name: &str, session_id: &str) ->
         }
     }
     dirs
+}
+
+fn safe_class_dir(wardian_home: &std::path::Path, class_name: &str) -> Option<std::path::PathBuf> {
+    let trimmed = class_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut components = std::path::Path::new(trimmed).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => {
+            Some(wardian_home.join("classes").join(name))
+        }
+        _ => None,
+    }
 }
 
 pub fn project_antigravity_include_directories(session_id: &str, dirs: Vec<String>) -> Vec<String> {
@@ -400,9 +414,7 @@ pub fn resolve_opencode_runtime_roots(
             push_unique(common_dir);
         }
 
-        let trimmed_class = class_name.trim();
-        if !trimmed_class.is_empty() {
-            let class_dir = wardian_home.join("classes").join(trimmed_class);
+        if let Some(class_dir) = safe_class_dir(&wardian_home, class_name) {
             if class_dir.exists() {
                 push_unique(class_dir);
             }
@@ -706,16 +718,16 @@ fn write_habitat_instruction_files(
     session_id: Option<&str>,
 ) -> Result<(), String> {
     let common_agents = wardian_home.join("common").join("AGENTS.md");
-    let class_agents = wardian_home
-        .join("classes")
-        .join(class_name)
-        .join("AGENTS.md");
+    let class_agents = safe_class_dir(wardian_home, class_name).map(|path| path.join("AGENTS.md"));
     let agent_agents = session_id
         .filter(|sid| !sid.trim().is_empty())
         .map(|sid| wardian_home.join("agents").join(sid).join("AGENTS.md"));
 
     let mut sections = Vec::new();
-    let mut candidates = vec![("Common", common_agents), ("Class", class_agents)];
+    let mut candidates = vec![("Common", common_agents)];
+    if let Some(class_agents) = class_agents {
+        candidates.push(("Class", class_agents));
+    }
     if let Some(agent_agents) = agent_agents {
         candidates.push(("Agent", agent_agents));
     }
@@ -724,8 +736,7 @@ fn write_habitat_instruction_files(
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if !content.trim().is_empty() {
                     sections.push(format!(
-                        "## {label}\nSource: {}\n\n{}\n",
-                        path.to_string_lossy(),
+                        "## {label}\nSource: {label}\n\n{}\n",
                         content.trim()
                     ));
                 }
@@ -763,14 +774,12 @@ fn build_habitat_skill_projection(
     }
     std::fs::create_dir_all(&merged_skills).map_err(|e| e.to_string())?;
 
-    let mut sources = vec![
-        wardian_home.join("common").join(".agents").join("skills"),
-        wardian_home
-            .join("classes")
-            .join(class_name)
-            .join(".agents")
-            .join("skills"),
-    ];
+    let mut sources = vec![wardian_home.join("common").join(".agents").join("skills")];
+    if let Some(class_skills) =
+        safe_class_dir(wardian_home, class_name).map(|path| path.join(".agents").join("skills"))
+    {
+        sources.push(class_skills);
+    }
     if let Some(session_id) = session_id.filter(|sid| !sid.trim().is_empty()) {
         sources.push(
             wardian_home
@@ -1043,10 +1052,12 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        build_opencode_runtime_config, create_directory_link, ensure_claude_permission_hook,
-        habitat_root_for_session, project_antigravity_include_directories,
-        projected_link_matches_target, provider_uses_projected_workspace,
-        resolve_opencode_runtime_roots, sync_codex_agent_home, sync_opencode_config_dir,
+        build_habitat_skill_projection, build_opencode_runtime_config, create_directory_link,
+        ensure_claude_permission_hook, habitat_root_for_session,
+        project_antigravity_include_directories, projected_link_matches_target,
+        provider_uses_projected_workspace, resolve_opencode_runtime_roots,
+        resolve_system_include_directories, sync_codex_agent_home, sync_opencode_config_dir,
+        write_habitat_instruction_files,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1088,6 +1099,40 @@ mod tests {
         assert!(provider_uses_projected_workspace("codex"));
         assert!(provider_uses_projected_workspace("gemini"));
         assert!(provider_uses_projected_workspace("opencode"));
+    }
+
+    #[test]
+    fn habitat_instruction_files_use_stable_source_labels() {
+        let wardian_home = unique_temp_dir("habitat-source-labels-home");
+        let habitat_root = unique_temp_dir("habitat-source-labels-root");
+        let common = wardian_home.join("common");
+        let class = wardian_home.join("classes").join("Builder");
+        let agent = wardian_home.join("agents").join("agent-1");
+        std::fs::create_dir_all(&common).expect("create common");
+        std::fs::create_dir_all(&class).expect("create class");
+        std::fs::create_dir_all(&agent).expect("create agent");
+        std::fs::create_dir_all(&habitat_root).expect("create habitat");
+        std::fs::write(common.join("AGENTS.md"), "common instructions").expect("write common");
+        std::fs::write(class.join("AGENTS.md"), "class instructions").expect("write class");
+        std::fs::write(agent.join("AGENTS.md"), "agent instructions").expect("write agent");
+
+        write_habitat_instruction_files(&wardian_home, &habitat_root, "Builder", Some("agent-1"))
+            .expect("write habitat instructions");
+
+        let agents_md =
+            std::fs::read_to_string(habitat_root.join("AGENTS.md")).expect("read AGENTS.md");
+        assert!(agents_md.contains("Source: Common"));
+        assert!(agents_md.contains("Source: Class"));
+        assert!(agents_md.contains("Source: Agent"));
+        assert!(!agents_md.contains(&wardian_home.to_string_lossy().to_string()));
+        assert!(!agents_md.contains("agent-1/AGENTS.md"));
+        assert_eq!(
+            std::fs::read_to_string(habitat_root.join("GEMINI.md")).expect("read GEMINI.md"),
+            "@AGENTS.md\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&wardian_home);
+        let _ = std::fs::remove_dir_all(&habitat_root);
     }
 
     #[test]
@@ -1547,6 +1592,60 @@ mod tests {
         unsafe { std::env::remove_var("WARDIAN_HOME") };
 
         assert_eq!(roots, vec![common, class_dir, agent_dir]);
+
+        let _ = std::fs::remove_dir_all(&wardian_home);
+    }
+
+    #[test]
+    fn class_projection_rejects_path_traversal_components() {
+        let wardian_home = unique_temp_dir("class-projection-traversal");
+        let outside = wardian_home.join("outside-class");
+        let habitat_root = wardian_home.join("agents").join("ses_123").join("habitat");
+
+        std::fs::create_dir_all(outside.join(".agents").join("skills").join("outside-skill"))
+            .expect("create outside skill");
+        std::fs::write(outside.join("AGENTS.md"), "outside class instructions")
+            .expect("write outside agents");
+        std::fs::create_dir_all(&habitat_root).expect("create habitat");
+
+        write_habitat_instruction_files(
+            &wardian_home,
+            &habitat_root,
+            "../outside-class",
+            Some("ses_123"),
+        )
+        .expect("write habitat instructions");
+        build_habitat_skill_projection(
+            &wardian_home,
+            &habitat_root,
+            "../outside-class",
+            Some("ses_123"),
+        )
+        .expect("build skill projection");
+
+        let agents_md =
+            std::fs::read_to_string(habitat_root.join("AGENTS.md")).expect("read agents");
+        assert!(!agents_md.contains("outside class instructions"));
+        assert!(!habitat_root
+            .join(".agents")
+            .join("skills")
+            .join("outside-skill")
+            .exists());
+
+        let _ = std::fs::remove_dir_all(&wardian_home);
+    }
+
+    #[test]
+    fn system_include_directories_ignore_traversal_class_names() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let wardian_home = unique_temp_dir("system-include-traversal");
+        std::fs::create_dir_all(wardian_home.join("outside-class")).expect("create outside class");
+        unsafe { std::env::set_var("WARDIAN_HOME", wardian_home.to_string_lossy().to_string()) };
+
+        let dirs = resolve_system_include_directories("../outside-class", "ses_123");
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+        assert!(!dirs.iter().any(|dir| dir.contains("outside-class")));
 
         let _ = std::fs::remove_dir_all(&wardian_home);
     }

@@ -133,6 +133,7 @@ impl LiveStepExecutor {
                 resume_session: resolved.resume_session.clone(),
                 is_live: resolved.is_live,
                 is_input_ready: resolved.is_input_ready,
+                config: resolved.config.clone(),
             };
             return self
                 .run_agent_binding_prompt(
@@ -158,6 +159,7 @@ impl LiveStepExecutor {
                 prompt,
                 session_id: resolved.session_id,
                 resume_session: resolved.resume_session,
+                config_override: resolved.config,
             })
             .await
             .map_err(StepError::new)
@@ -188,6 +190,7 @@ impl LiveStepExecutor {
                         prompt,
                         session_id: String::new(),
                         resume_session: None,
+                        config_override: None,
                     })
                     .await
                     .map_err(StepError::new)
@@ -274,8 +277,9 @@ impl LiveStepExecutor {
                         provider: agent.provider.clone(),
                         cwd: agent.cwd.clone(),
                         prompt,
-                        session_id: agent.session_id.clone(),
+                        session_id: fresh_background_session_id(&self.owner_id, node),
                         resume_session: None,
+                        config_override: agent.config.clone(),
                     })
                     .await
                     .map_err(StepError::new)
@@ -328,16 +332,20 @@ impl LiveStepExecutor {
                 prompt,
                 session_id: agent.session_id.clone(),
                 resume_session: Some(resume_session),
+                config_override: agent.config.clone(),
             })
             .await;
 
-        if let Err(error) = release_background_resume_lease(&lease.owner_kind, &lease.owner_id) {
-            crate::utils::logging::log_debug(&format!(
-                "[workflow] failed to release background resume lease: {error}"
-            ));
+        let release_result = release_background_resume_lease(&lease.owner_kind, &lease.owner_id);
+        match (result, release_result) {
+            (Ok(_), Err(error)) => Err(StepError::new(format!(
+                "background resume completed but failed to release conversation lease: {error}"
+            ))),
+            (Err(run_error), Err(release_error)) => Err(StepError::new(format!(
+                "{run_error}; additionally failed to release conversation lease: {release_error}"
+            ))),
+            (result, Ok(())) => result.map_err(StepError::new),
         }
-
-        result.map_err(StepError::new)
     }
 }
 
@@ -359,6 +367,33 @@ fn prompt_for_agent_task(prompt: String, output_schema: Option<&str>) -> String 
     format!(
         "{prompt}\n\nWorkflow output contract:\nRespond with valid JSON that satisfies this output_schema. Return only the JSON object, or put the final JSON object in a trailing fenced ```json block.\noutput_schema:\n{schema}"
     )
+}
+
+fn fresh_background_session_id(owner_id: &str, node: &str) -> String {
+    format!(
+        "workflow-bg-{}-{}",
+        sanitize_session_component(owner_id),
+        sanitize_session_component(node)
+    )
+}
+
+fn sanitize_session_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn acquire_background_resume_lease(
@@ -503,7 +538,7 @@ mod tests {
     use std::sync::Mutex;
     use wardian_core::engine::executor::{AgentTaskRequest, DecisionRequest, StepExecutor};
     use wardian_core::models::{
-        AgentConversationMode, BusyPolicy, WorkflowAssignments, WorkflowRoleAssignment,
+        AgentConfig, AgentConversationMode, BusyPolicy, WorkflowAssignments, WorkflowRoleAssignment,
     };
 
     fn exec_with(runner: FakeAgentRunner) -> LiveStepExecutor {
@@ -652,6 +687,7 @@ mod tests {
                 resume_session: Some("provider-session".to_string()),
                 is_live: true,
                 is_input_ready: true,
+                config: None,
             },
         );
 
@@ -703,6 +739,7 @@ mod tests {
                 resume_session: Some("provider-session".to_string()),
                 is_live: false,
                 is_input_ready: false,
+                config: None,
             },
         );
 
@@ -733,6 +770,91 @@ mod tests {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),
             None => std::env::remove_var("WARDIAN_HOME"),
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_background_assigned_agent_does_not_reuse_live_session_identity() {
+        struct IdentityCheckingRunner;
+
+        impl AgentRunner for IdentityCheckingRunner {
+            fn run(
+                &self,
+                spec: AgentRunSpec,
+            ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+                Box::pin(async move {
+                    assert_ne!(
+                        spec.session_id, "agent-123",
+                        "fresh background runs must not reuse the visible agent identity"
+                    );
+                    assert!(
+                        spec.session_id.contains("workflow-bg"),
+                        "fresh background runs should get a workflow-scoped identity"
+                    );
+                    assert!(
+                        spec.resume_session.is_none(),
+                        "fresh background runs must not resume the visible provider conversation"
+                    );
+                    let config = spec
+                        .config_override
+                        .expect("fresh background should keep the assigned agent profile");
+                    assert_eq!(config.session_id, "agent-123");
+                    assert_eq!(config.provider, "gemini");
+                    Ok("{\"ok\":true}".to_string())
+                })
+            }
+        }
+
+        let mut assignments = WorkflowAssignments::new();
+        assignments.insert(
+            "Coder".to_string(),
+            WorkflowRoleAssignment::Agent {
+                agent_id: "agent-123".to_string(),
+                conversation: AgentConversationMode::FreshBackground,
+                busy_policy: BusyPolicy::Fail,
+            },
+        );
+
+        let mut agent_catalog = HashMap::new();
+        agent_catalog.insert(
+            "agent-123".to_string(),
+            AgentBinding {
+                session_id: "agent-123".to_string(),
+                provider: "gemini".to_string(),
+                cwd: PathBuf::from("/agent-workspace"),
+                resume_session: Some("provider-session".to_string()),
+                is_live: true,
+                is_input_ready: true,
+                config: Some(AgentConfig {
+                    session_id: "agent-123".to_string(),
+                    provider: "gemini".to_string(),
+                    folder: "/agent-workspace".to_string(),
+                    ..AgentConfig::default()
+                }),
+            },
+        );
+
+        let exec = LiveStepExecutor::new_with_assignments_and_live_runner(
+            Arc::new(IdentityCheckingRunner),
+            None,
+            PathBuf::from("/run-workspace"),
+            "codex".into(),
+            HashMap::new(),
+            assignments,
+            agent_catalog,
+        )
+        .with_owner_id("run-456".to_string());
+
+        let out = exec
+            .run_agent_task(AgentTaskRequest {
+                node: "plan".into(),
+                agent: "role:Coder".into(),
+                prompt: "return json".into(),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(out.0["ok"], true);
     }
 
     #[tokio::test]
@@ -783,6 +905,7 @@ mod tests {
                 resume_session: Some("provider-session".to_string()),
                 is_live: false,
                 is_input_ready: false,
+                config: None,
             },
         );
 
@@ -842,6 +965,7 @@ mod tests {
                 resume_session: None,
                 is_live: false,
                 is_input_ready: false,
+                config: None,
             },
         );
 
@@ -893,6 +1017,7 @@ mod tests {
                 resume_session: None,
                 is_live: false,
                 is_input_ready: false,
+                config: None,
             },
         );
 

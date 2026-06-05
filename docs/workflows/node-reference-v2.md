@@ -62,8 +62,11 @@ Container: repeats its body subgraph until a bound is hit.
 
 ### Fields
 
-- `max_iterations` — Max iterations [number]
-- `until` — Until condition [text]
+- `max_iterations` — Max iterations [number or `{{registry.path}}` template].
+  Runtime clamps the resolved value to at least `1`; malformed templates warn
+  during validation and fall back at runtime.
+- `until` — Registry dot path checked for truthiness before another body pulse,
+  for example `trigger.output.stop` or `nodes.review.output.done`.
 
 Outgoing ports: body, done
 
@@ -187,4 +190,3 @@ Entry point. Runs on demand or when an invoker fires it.
 - `input_schema` — Input schema [jsonschema]
 
 Outgoing ports: out
-

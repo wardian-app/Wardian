@@ -37,7 +37,7 @@ Switching Edit ↔ Observe does **not** reset the builder store (edit-in-progres
 
 - **Run button** → a **launch dialog**: a **provider** field defaulting to the agents' default provider — read `default_provider` from `useSettingsStore` and resolve via the same `resolveEffectiveProvider(providerReadiness, defaultProvider)` agent spawn uses (respects provider readiness), overridable per-run — plus an optional **workspace** field. On confirm, call `workflow_run(path, provider, workspace)`, switch to **Observe**, and open the returned run live.
 - **Live updates:** while the observed run's status is `Running`, the run store refreshes `workflow_read_run` on a short interval (poll) so the DAG/timeline update as the run progresses; polling stops at a terminal status.
-- **Lifecycle controls (Observe):** **Resume** (`workflow_resume`), **Approve / Reject** for an `awaiting_approval` node (`workflow_approve`), **Cancel** (`workflow_cancel`). A run with status `Running` but no active progress (the 5a startup-scan "interrupted" case) is shown with a **Resume** affordance.
+- **Lifecycle controls (Observe):** **Resume** (`workflow_resume`), **Approve / Reject** for an `awaiting_approval` node (`workflow_approve`), **Cancel** (`workflow_cancel`). Startup reconciliation now marks runs left `Running` by a previous app process as `Failed` with an interruption reason instead of presenting them as still active.
 
 ## 5. Components & files
 

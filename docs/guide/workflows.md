@@ -38,16 +38,22 @@ The **Run** button opens a launch dialog for the current blueprint. Use **Run no
 
 Manual input parameters appear in the dialog when the blueprint's entry trigger defines an input schema.
 
-## Monitoring Schedules
+## Monitoring Workflow Activity
 
-Monitor shows every saved schedule with inline controls:
+Monitor shows a unified activity feed for workflow schedules and runs. Use the
+tabs to switch between all activity, items needing attention, running work,
+scheduled work, and history.
+
+The top counters call out due-soon schedules and attention states. Schedule
+rows expose the current Monitor actions:
 
 - **Pause** or **Resume** changes whether the schedule fires on its cadence.
 - **Run now** launches the scheduled invoker immediately.
 - **Edit** reopens the schedule form.
-- **Remove** deletes the schedule without deleting the blueprint.
 
-Monitor also lists active and recent runs so you can jump directly into Observe.
+Active and recent runs appear in the same feed so you can jump directly into
+Observe. Older history is paged separately to keep the main feed focused on the
+latest run per blueprint.
 
 ## Important Limits
 

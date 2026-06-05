@@ -66,9 +66,13 @@ Template fields resolve against this registry before each node executes.
    state.
 5. Observe and Monitor refresh durable run state through `workflow_read_run`.
 
-Resume and human approval use the same durable run records:
+Resume, startup recovery, and human approval use the same durable run records:
 
-- `workflow_resume` resumes an interrupted run;
+- `workflow_resume` resumes an explicitly resumed durable run, such as one
+  parked before more work is dispatched;
+- app startup marks runs that were still `running` at process exit as `failed`
+  with an interruption reason, because their worker tasks and provider
+  processes are no longer owned by the new app process;
 - `workflow_approve` grants or rejects an approval gate;
 - `workflow_cancel` writes a cancellation marker for a live run.
 
@@ -85,6 +89,15 @@ resolver:
 
 Headless execution uses the provider adapters behind
 `run_headless_with_options`, with structured output parsed into node outputs.
+
+Active-agent execution uses the visible agent PTY, but completion is still an
+explicit structured contract. Wardian creates a task interaction for the
+workflow node, appends a `wardian reply <request-id> --status ... --stdin`
+instruction to the delivered prompt, and waits for that reply before completing
+the node. Terminal `idle` status alone is not completion; it only allows Wardian
+to check transcript-marker compatibility for agents that echoed the reply
+command instead of submitting it through the control endpoint. `blocked` and
+`failed` replies fail the node with the reply body as the diagnostic.
 
 ## Old Workflow System
 

@@ -44,6 +44,13 @@ impl AgentProvider for GeminiProvider {
         // 1. Try bare command in PATH
         if let Some(paths) = std::env::var_os("PATH") {
             for path in std::env::split_paths(&paths) {
+                #[cfg(target_os = "windows")]
+                if let Some(launch) =
+                    crate::providers::npm::node_launch_from_npm_cmd_shim(&path, "gemini")
+                {
+                    return launch;
+                }
+
                 let full_path = path.join(exe_name);
                 if full_path.exists() {
                     return (exe_name.to_string(), vec![]);
@@ -54,14 +61,20 @@ impl AgentProvider for GeminiProvider {
         // 2. Robust Fallback
         if cfg!(target_os = "windows") {
             if let Some(appdata) = dirs::data_dir() {
-                let npm_gemini = appdata.join("npm").join("gemini.cmd");
+                let npm_dir = appdata.join("npm");
+                if let Some(launch) =
+                    crate::providers::npm::node_launch_from_npm_cmd_shim(&npm_dir, "gemini")
+                {
+                    return launch;
+                }
+
+                let npm_gemini = npm_dir.join("gemini.cmd");
                 if npm_gemini.exists() {
                     return (npm_gemini.to_string_lossy().to_string(), vec![]);
                 }
 
                 // Legacy index.js lookup
-                let index_js = appdata
-                    .join("npm")
+                let index_js = npm_dir
                     .join("node_modules")
                     .join("@google")
                     .join("gemini-cli")
@@ -288,6 +301,45 @@ mod tests {
             assert!(bin == "node" || binary_name.eq_ignore_ascii_case("gemini.cmd"));
         } else {
             assert_eq!(bin, "gemini");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_resolution_prefers_node_entrypoint_over_cmd_shim() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().unwrap();
+        let gemini_js = temp
+            .path()
+            .join("node_modules")
+            .join("@google")
+            .join("gemini-cli")
+            .join("bundle")
+            .join("gemini.js");
+        std::fs::create_dir_all(gemini_js.parent().unwrap()).unwrap();
+        std::fs::write(
+            temp.path().join("gemini.cmd"),
+            r#"@ECHO off
+SET dp0=%~dp0
+"%dp0%\node.exe" "%dp0%\node_modules\@google\gemini-cli\bundle\gemini.js" %*
+"#,
+        )
+        .unwrap();
+        std::fs::write(&gemini_js, "console.log('gemini')").unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", temp.path());
+        }
+
+        let (executable, args) = GeminiProvider::new().get_executable();
+
+        assert_eq!(executable, "node");
+        assert_eq!(args, vec![gemini_js.to_string_lossy().to_string()]);
+
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
         }
     }
 

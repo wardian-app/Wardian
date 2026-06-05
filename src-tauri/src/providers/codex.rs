@@ -17,21 +17,33 @@ impl CodexProvider {
     }
 
     #[cfg(target_os = "windows")]
-    fn find_windows_codex_in_paths<I>(paths: I, path_exts: &[String]) -> Option<String>
+    fn windows_codex_node_launch(path: &std::path::Path) -> Option<(String, Vec<String>)> {
+        crate::providers::npm::node_launch_from_npm_cmd_shim(path, "codex")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn find_windows_codex_in_paths<I>(
+        paths: I,
+        path_exts: &[String],
+    ) -> Option<(String, Vec<String>)>
     where
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         for path in paths {
+            if let Some(launch) = Self::windows_codex_node_launch(&path) {
+                return Some(launch);
+            }
+
             for ext in path_exts {
                 let candidate = path.join(format!("codex{ext}"));
                 if candidate.exists() {
-                    return Some(candidate.to_string_lossy().to_string());
+                    return Some((candidate.to_string_lossy().to_string(), vec![]));
                 }
             }
 
             let powershell = path.join("codex.ps1");
             if powershell.exists() {
-                return Some(powershell.to_string_lossy().to_string());
+                return Some((powershell.to_string_lossy().to_string(), vec![]));
             }
         }
 
@@ -94,7 +106,12 @@ impl CodexProvider {
         Some("Approval required".to_string())
     }
 
-    fn append_common_args(&self, args: &mut Vec<String>, config: &AgentConfig, is_exec_mode: bool) {
+    pub(crate) fn append_common_args(
+        &self,
+        args: &mut Vec<String>,
+        config: &AgentConfig,
+        is_exec_mode: bool,
+    ) {
         let codex = config.codex_config();
         if let Some(ref model) = config.model {
             args.push("--model".into());
@@ -239,10 +256,10 @@ impl AgentProvider for CodexProvider {
                         vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()]
                     });
 
-                if let Some(executable) =
+                if let Some((executable, args)) =
                     Self::find_windows_codex_in_paths(std::env::split_paths(&paths), &path_exts)
                 {
-                    return (executable, vec![]);
+                    return (executable, args);
                 }
             }
 
@@ -626,7 +643,7 @@ mod tests {
         std::fs::write(temp.path().join("codex.ps1"), "echo test").unwrap();
 
         let path_exts = vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()];
-        let executable =
+        let (executable, args) =
             CodexProvider::find_windows_codex_in_paths([temp.path().to_path_buf()], &path_exts)
                 .unwrap();
 
@@ -634,6 +651,38 @@ mod tests {
             executable,
             temp.path().join("codex.ps1").to_string_lossy().to_string()
         );
+        assert!(args.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_resolution_prefers_node_codex_entrypoint_over_cmd_shim() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex_js = temp
+            .path()
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex.js");
+        std::fs::create_dir_all(codex_js.parent().unwrap()).unwrap();
+        std::fs::write(
+            temp.path().join("codex.cmd"),
+            r#"@ECHO off
+SET dp0=%~dp0
+"%dp0%\node.exe" "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
+"#,
+        )
+        .unwrap();
+        std::fs::write(&codex_js, "console.log('codex')").unwrap();
+
+        let path_exts = vec![".cmd".to_string()];
+        let (executable, args) =
+            CodexProvider::find_windows_codex_in_paths([temp.path().to_path_buf()], &path_exts)
+                .unwrap();
+
+        assert_eq!(executable, "node");
+        assert_eq!(args, vec![codex_js.to_string_lossy().to_string()]);
     }
 
     #[test]

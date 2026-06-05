@@ -170,12 +170,19 @@ Use it for repeated execution.
 Behavior:
 
 - supports `count` mode and `conditional` mode
+- accepts `max_iterations` as a positive integer or as a single registry
+  template such as `{{trigger.output.limit}}`
+- resolves `until` as a dot path against the run registry, such as
+  `nodes.review.output.done`
+- treats truthy `until` values as the signal to stop before another body pulse
 - emits `body` while continuing and `done` when finished
 - stores iterator state in workflow runtime data
 
 Common pitfall:
 
 - forgetting to bound the loop correctly, which can create confusing repeated behavior
+- malformed `max_iterations` templates warn during validation and fall back at
+  runtime instead of invalidating the whole blueprint
 
 ### Wait
 

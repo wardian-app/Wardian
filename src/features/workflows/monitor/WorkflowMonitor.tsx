@@ -19,6 +19,7 @@ type ActivitySection = Exclude<ActivityFilter, 'all'>;
 type ActivityTone = 'error' | 'active' | 'warning' | 'accent' | 'success' | 'muted';
 
 interface WorkflowActivity {
+  activityId: string;
   blueprintId: string;
   name: string;
   schedules: WorkflowSchedule[];
@@ -87,7 +88,10 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   useEffect(() => {
     void load();
     void loadRuns();
-    const timer = window.setInterval(() => void loadRuns(), 1500);
+    const timer = window.setInterval(() => {
+      void load();
+      void loadRuns();
+    }, 1500);
     return () => window.clearInterval(timer);
   }, [load, loadRuns]);
 
@@ -251,7 +255,7 @@ function ActivitySection({
       <div className="select-text overflow-hidden rounded border border-wardian-border">
         {activities.map((activity) => (
           <ActivityRow
-            key={activity.blueprintId}
+            key={activity.activityId}
             activity={activity}
             agentLabels={agentLabels}
             onOpenRun={onOpenRun}
@@ -325,6 +329,8 @@ function ActivityRow({
   const labels = schedule
     ? assignmentLabels(schedule.assignments, schedule.bindings, schedule.provider, agentLabels)
     : [];
+  const runTimestamp = activity.latestRun ? runTimestampValue(activity.latestRun) : null;
+  const runTimestampLabel = runTimestamp ? formatRunTimestamp(runTimestamp) : null;
 
   return (
     <div
@@ -353,6 +359,14 @@ function ActivityRow({
           </>
         ) : (
           <span className="text-[10px] text-muted">No runs yet</span>
+        )}
+      </div>
+      <div className="min-w-[150px] flex-[1_1_170px]">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Time</div>
+        {runTimestampLabel ? (
+          <div className="truncate text-[10px] text-muted" title={runTimestamp ?? undefined}>{runTimestampLabel}</div>
+        ) : (
+          <span className="text-[10px] text-muted">Unknown</span>
         )}
       </div>
       <div className="min-w-[150px] flex-[1_1_170px]">
@@ -426,39 +440,83 @@ function ActivityRow({
 }
 
 function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): WorkflowActivity[] {
-  const ids = new Set<string>();
-  for (const run of runs) ids.add(run.blueprint_id);
-  for (const schedule of schedules) ids.add(schedule.blueprint_id);
+  const activities: WorkflowActivity[] = [];
+  const activeRuns = runs
+    .filter((run) => run.status === 'running' || run.status === 'awaiting_approval')
+    .sort(compareRunRecency);
+  const activeBlueprintIds = new Set(activeRuns.map((run) => run.blueprint_id));
+  const scheduleBlueprintIds = new Set(schedules.map((schedule) => schedule.blueprint_id));
+  const scheduleCounts = schedules.reduce<Record<string, number>>((counts, schedule) => {
+    counts[schedule.blueprint_id] = (counts[schedule.blueprint_id] ?? 0) + 1;
+    return counts;
+  }, {});
 
-  return [...ids].map((blueprintId) => {
-    const workflowRuns = runs.filter((run) => run.blueprint_id === blueprintId);
+  for (const run of activeRuns) {
     const workflowSchedules = schedules
-      .filter((schedule) => schedule.blueprint_id === blueprintId)
+      .filter((schedule) => schedule.blueprint_id === run.blueprint_id)
       .sort(compareScheduleRecency);
-    const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
-    const activeRun = workflowRuns.find((run) => run.status === 'awaiting_approval')
-      ?? workflowRuns.find((run) => run.status === 'running')
-      ?? null;
-    const nextSchedule = workflowSchedules.find((schedule) => !schedule.is_paused && schedule.next_run_epoch_ms)
-      ?? workflowSchedules[0]
-      ?? null;
-    const name = workflowSchedules[0]?.name ?? blueprintId;
-    const state = activityState(latestRun, activeRun, workflowSchedules, nextSchedule);
+    const unambiguousSchedule = workflowSchedules.length === 1 ? workflowSchedules[0] : null;
+    activities.push(activityFromParts({
+      activityId: `run:${run.run_id}`,
+      blueprintId: run.blueprint_id,
+      name: unambiguousSchedule?.name ?? run.blueprint_id,
+      latestRun: run,
+      activeRun: run,
+      schedules: unambiguousSchedule ? [unambiguousSchedule] : [],
+      nextSchedule: unambiguousSchedule,
+    }));
+  }
 
-    return {
-      blueprintId,
-      name,
-      schedules: workflowSchedules,
+  for (const schedule of schedules) {
+    if (activeBlueprintIds.has(schedule.blueprint_id) && scheduleCounts[schedule.blueprint_id] === 1) continue;
+    const workflowRuns = runs.filter((run) => run.blueprint_id === schedule.blueprint_id);
+    const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
+    activities.push(activityFromParts({
+      activityId: `schedule:${schedule.id}`,
+      blueprintId: schedule.blueprint_id,
+      name: schedule.name,
       latestRun,
-      activeRun,
-      nextSchedule,
-      ...state,
-    };
-  }).sort(compareActivities);
+      activeRun: null,
+      schedules: [schedule],
+      nextSchedule: schedule,
+    }));
+  }
+
+  const manualBlueprintIds = new Set(runs.map((run) => run.blueprint_id));
+  for (const blueprintId of manualBlueprintIds) {
+    if (activeBlueprintIds.has(blueprintId) || scheduleBlueprintIds.has(blueprintId)) continue;
+    const workflowRuns = runs.filter((run) => run.blueprint_id === blueprintId);
+    const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
+    activities.push(activityFromParts({
+      activityId: `workflow:${blueprintId}`,
+      blueprintId,
+      name: blueprintId,
+      latestRun,
+      activeRun: null,
+      schedules: [],
+      nextSchedule: null,
+    }));
+  }
+
+  return activities.sort(compareActivities);
+}
+
+function activityFromParts(parts: {
+  activityId: string;
+  blueprintId: string;
+  name: string;
+  schedules: WorkflowSchedule[];
+  latestRun: RunSummary | null;
+  activeRun: RunSummary | null;
+  nextSchedule: WorkflowSchedule | null;
+}): WorkflowActivity {
+  const state = activityState(parts.latestRun, parts.activeRun, parts.schedules, parts.nextSchedule);
+  return { ...parts, ...state };
 }
 
 function historyActivityFromRun(run: RunSummary): WorkflowActivity {
   return {
+    activityId: `history:${run.run_id}`,
     blueprintId: run.blueprint_id,
     name: run.blueprint_id,
     schedules: [],
@@ -546,8 +604,7 @@ function compareActivities(left: WorkflowActivity, right: WorkflowActivity) {
 
 function activitySortTime(activity: WorkflowActivity) {
   if (activity.section === 'scheduled') return activity.nextSchedule?.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER;
-  const stamp = activity.latestRun?.updated_at ?? activity.latestRun?.completed_at ?? activity.latestRun?.started_at ?? '';
-  return stamp ? -Date.parse(stamp) : 0;
+  return activity.latestRun ? runSortTime(activity.latestRun) : 0;
 }
 
 function compareScheduleRecency(left: WorkflowSchedule, right: WorkflowSchedule) {
@@ -600,11 +657,28 @@ function olderHistoryRunsFor(runs: RunSummary[], latestRuns: RunSummary[]) {
 }
 
 function compareRunRecency(left: RunSummary, right: RunSummary) {
-  const leftStamp = left.updated_at ?? left.completed_at ?? left.started_at ?? '';
-  const rightStamp = right.updated_at ?? right.completed_at ?? right.started_at ?? '';
-  if (leftStamp !== rightStamp) return leftStamp > rightStamp ? -1 : 1;
+  const leftTime = runSortTime(left);
+  const rightTime = runSortTime(right);
+  if (leftTime !== rightTime) return leftTime - rightTime;
   if (left.run_id === right.run_id) return 0;
   return left.run_id > right.run_id ? -1 : 1;
+}
+
+function runSortTime(run: RunSummary) {
+  const timestamp = runTimestampValue(run);
+  if (!timestamp) return 0;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? -parsed : 0;
+}
+
+function runTimestampValue(run: RunSummary) {
+  return run.updated_at ?? run.completed_at ?? run.started_at ?? null;
+}
+
+function formatRunTimestamp(value: string) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Date(parsed).toLocaleString();
 }
 
 function historyTone(status: RunStatusKind): ActivityTone {

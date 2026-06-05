@@ -209,17 +209,19 @@ impl InteractionState {
         let (structured_reply, completed_task, reply_record) = {
             let mut records = self.records.lock().await;
             let task = records.get_mut(task_id).ok_or("not_found")?;
-            if task.status == InteractionStatus::Completed {
+            if task.status != InteractionStatus::AwaitingReply {
                 return Err("duplicate_reply");
             }
-            if let Some(source) = source_session_id {
-                if !task
-                    .target_session_ids
-                    .iter()
-                    .any(|target| target == source)
-                {
-                    return Err("unauthorized");
-                }
+            let source_session_id = source_session_id
+                .map(str::trim)
+                .filter(|source| !source.is_empty())
+                .ok_or("unauthorized")?;
+            if !task
+                .target_session_ids
+                .iter()
+                .any(|target| target == source_session_id)
+            {
+                return Err("unauthorized");
             }
             let target_session_id = task
                 .target_session_ids
@@ -233,7 +235,7 @@ impl InteractionState {
             let reply = InteractionRecord {
                 id: new_interaction_id(),
                 kind: InteractionKind::Reply,
-                sender_session_id: source_session_id.map(str::to_string),
+                sender_session_id: Some(source_session_id.to_string()),
                 target_session_ids: task.sender_session_id.iter().cloned().collect(),
                 status: InteractionStatus::Completed,
                 trigger_policy: InteractionTriggerPolicy::NotifyOnly,
@@ -250,7 +252,7 @@ impl InteractionState {
                 status,
                 body: body.to_string(),
                 target_session_id,
-                source_session_id: source_session_id.map(str::to_string),
+                source_session_id: Some(source_session_id.to_string()),
                 replied_at: now,
             };
             let completed_task = task.clone();
@@ -258,6 +260,68 @@ impl InteractionState {
             (structured_reply, completed_task, reply)
         };
         let _ = wardian_core::db::upsert_interaction_record(&completed_task);
+        let _ = wardian_core::db::upsert_interaction_record(&reply_record);
+        let _ = wardian_core::db::upsert_structured_reply(&structured_reply);
+        self.replies
+            .lock()
+            .await
+            .insert(task_id.to_string(), structured_reply.clone());
+        Ok(structured_reply)
+    }
+
+    pub async fn fail_task_with_reply(
+        &self,
+        task_id: &str,
+        target_session_id: &str,
+        body: &str,
+    ) -> Result<StructuredReply, &'static str> {
+        let now = now_rfc3339_millis();
+        let (structured_reply, failed_task, reply_record) = {
+            let mut records = self.records.lock().await;
+            let task = records.get_mut(task_id).ok_or("not_found")?;
+            if task.status != InteractionStatus::AwaitingReply {
+                return Err("duplicate_reply");
+            }
+            if !task
+                .target_session_ids
+                .iter()
+                .any(|target| target == target_session_id)
+            {
+                return Err("unauthorized");
+            }
+
+            task.status = InteractionStatus::Failed;
+            task.updated_at = now.clone();
+            task.completed_at = Some(now.clone());
+
+            let reply = InteractionRecord {
+                id: new_interaction_id(),
+                kind: InteractionKind::Reply,
+                sender_session_id: None,
+                target_session_ids: task.sender_session_id.iter().cloned().collect(),
+                status: InteractionStatus::Completed,
+                trigger_policy: InteractionTriggerPolicy::NotifyOnly,
+                body_ref: InteractionBodyRef::Inline {
+                    body: body.to_string(),
+                },
+                parent_interaction_id: Some(task_id.to_string()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                completed_at: Some(now.clone()),
+            };
+            let structured_reply = StructuredReply {
+                request_id: task_id.to_string(),
+                status: ReplyStatus::Failed,
+                body: body.to_string(),
+                target_session_id: target_session_id.to_string(),
+                source_session_id: None,
+                replied_at: now,
+            };
+            let failed_task = task.clone();
+            records.insert(reply.id.clone(), reply.clone());
+            (structured_reply, failed_task, reply)
+        };
+        let _ = wardian_core::db::upsert_interaction_record(&failed_task);
         let _ = wardian_core::db::upsert_interaction_record(&reply_record);
         let _ = wardian_core::db::upsert_structured_reply(&structured_reply);
         self.replies
@@ -558,5 +622,72 @@ mod reply_tests {
         assert_eq!(reply.body, "blocked");
         assert_eq!(reply.target_session_id, "agent-1");
         assert_eq!(reply.source_session_id.as_deref(), Some("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn reply_requires_target_source_session() {
+        let state = InteractionState::default();
+        let task = state
+            .create_task(
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "review".to_string(),
+                },
+            )
+            .await;
+
+        let originless = state
+            .complete_task_with_reply(&task.id, None, ReplyStatus::Done, "spoofed")
+            .await
+            .unwrap_err();
+        assert_eq!(originless, "unauthorized");
+
+        let foreign = state
+            .complete_task_with_reply(&task.id, Some("agent-2"), ReplyStatus::Done, "spoofed")
+            .await
+            .unwrap_err();
+        assert_eq!(foreign, "unauthorized");
+
+        assert_eq!(
+            state.interaction(&task.id).await.unwrap().status,
+            InteractionStatus::AwaitingReply
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_task_records_terminal_reply_and_rejects_late_reply() {
+        let state = InteractionState::default();
+        let task = state
+            .create_task(
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "review".to_string(),
+                },
+            )
+            .await;
+
+        let failed = state
+            .fail_task_with_reply(&task.id, "agent-1", "timed out")
+            .await
+            .unwrap();
+
+        assert_eq!(failed.status, ReplyStatus::Failed);
+        assert_eq!(failed.source_session_id, None);
+        assert_eq!(
+            state.interaction(&task.id).await.unwrap().status,
+            InteractionStatus::Failed
+        );
+        assert_eq!(
+            state.structured_reply(&task.id).await.unwrap().body,
+            "timed out"
+        );
+
+        let late = state
+            .complete_task_with_reply(&task.id, Some("agent-1"), ReplyStatus::Done, "late")
+            .await
+            .unwrap_err();
+        assert_eq!(late, "duplicate_reply");
     }
 }

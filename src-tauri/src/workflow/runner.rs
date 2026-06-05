@@ -5,7 +5,10 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Manager;
-use wardian_core::control::{InteractionBodyRef, ProviderInputReadiness, ReplyStatus};
+use wardian_core::control::{
+    InteractionBodyRef, ProviderInputReadiness, ProviderReadyEvidence, ReplyStatus,
+};
+use wardian_core::models::AgentConfig;
 
 type AgentRunFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 type LiveAgentRunFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
@@ -19,6 +22,7 @@ pub struct AgentRunSpec {
     pub prompt: String,
     pub session_id: String,
     pub resume_session: Option<String>,
+    pub config_override: Option<AgentConfig>,
 }
 
 /// What the executor needs to route one prompt into an already-running agent.
@@ -38,7 +42,9 @@ pub trait AgentRunner: Send + Sync {
 }
 
 /// Boundary for active-agent execution. Unlike headless runs, this uses the
-/// existing live PTY and waits for the agent's next terminal status transition.
+/// existing live PTY and completes only through the structured `wardian reply`
+/// contract. Idle terminal status is not completion; it is only a signal that
+/// transcript marker compatibility can be checked.
 pub trait LiveAgentRunner: Send + Sync {
     fn run_live(&self, spec: LiveAgentRunSpec) -> LiveAgentRunFuture<'_>;
 }
@@ -58,7 +64,7 @@ impl AgentRunner for HeadlessAgentRunner {
                     resume_session: spec.resume_session.as_deref(),
                     output_format: "json",
                     provider_name: &spec.provider,
-                    config_override: None,
+                    config_override: spec.config_override.as_ref(),
                 })
                 .await?;
 
@@ -140,7 +146,7 @@ async fn run_live_agent_prompt(
             },
         )
         .await;
-    {
+    if let Err(error) = (|| {
         let mut guard = watch_state
             .lock()
             .map_err(|_| format!("Agent {} watch state lock poisoned", spec.session_id))?;
@@ -154,32 +160,76 @@ async fn run_live_agent_prompt(
                 "workflow_node": &spec.node,
             }),
         );
+        Ok::<(), String>(())
+    })() {
+        fail_live_workflow_task(
+            &state,
+            &watch_state,
+            &task.id,
+            &spec.session_id,
+            &error,
+            false,
+        )
+        .await;
+        return Err(error);
     }
 
     if should_mark_processing {
         crate::manager::set_agent_status(app, &spec.session_id, &current_status, "Processing...");
     }
-    state
+    let provider_input = state
         .interactions
         .start_provider_input_generation(&spec.session_id, ProviderInputReadiness::Busy, None)
         .await;
 
     let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
-    crate::utils::terminal_input::submit_prompt_via_sender(&tx, &prompt, &provider_name)
-        .await
-        .map_err(|error| {
-            format!(
-                "failed to submit workflow node {} to live agent {}: {error}",
-                spec.node, spec.session_id
-            )
-        })?;
+    if let Err(error) =
+        crate::utils::terminal_input::submit_prompt_via_sender(&tx, &prompt, &provider_name).await
+    {
+        let message = format!(
+            "failed to submit workflow node {} to live agent {}: {error}",
+            spec.node, spec.session_id
+        );
+        fail_live_workflow_task(
+            &state,
+            &watch_state,
+            &task.id,
+            &spec.session_id,
+            &message,
+            true,
+        )
+        .await;
+        return Err(message);
+    }
 
-    let reply =
-        wait_for_live_agent_reply(&state, watch_state, initial_cursor, &task.id, spec.timeout)
-            .await?;
+    let reply = match wait_for_live_agent_reply(
+        &state,
+        watch_state.clone(),
+        initial_cursor,
+        &task.id,
+        &spec.session_id,
+        spec.timeout,
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(error) => {
+            fail_live_workflow_task(
+                &state,
+                &watch_state,
+                &task.id,
+                &spec.session_id,
+                &error,
+                true,
+            )
+            .await;
+            return Err(error);
+        }
+    };
     let response = match reply.status {
         ReplyStatus::Done => reply.body,
         ReplyStatus::Blocked | ReplyStatus::Failed => {
+            release_live_agent_provider_input(&state, &spec.session_id).await;
             return Err(format!(
                 "live agent {} returned {:?} for workflow node {}: {}",
                 spec.session_id, reply.status, spec.node, reply.body
@@ -187,10 +237,21 @@ async fn run_live_agent_prompt(
         }
     };
     if response.trim().is_empty() {
+        release_live_agent_provider_input(&state, &spec.session_id).await;
         Err(format!(
             "live agent {} completed workflow node {} without readable output",
             spec.session_id, spec.node
         ))
+    } else if let Err(error) = wait_for_live_agent_provider_ready(
+        &state,
+        &spec.session_id,
+        provider_input.generation,
+        Duration::from_secs(30),
+    )
+    .await
+    {
+        release_live_agent_provider_input(&state, &spec.session_id).await;
+        Err(error)
     } else {
         Ok(response)
     }
@@ -202,11 +263,108 @@ fn prompt_with_structured_reply_instruction(prompt: &str, request_id: &str) -> S
     )
 }
 
+async fn fail_live_workflow_task(
+    app_state: &crate::state::AppState,
+    watch_state: &std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
+    request_id: &str,
+    target_session_id: &str,
+    reason: &str,
+    release_provider_input: bool,
+) {
+    if release_provider_input {
+        release_live_agent_provider_input(app_state, target_session_id).await;
+    }
+
+    let Ok(reply) = app_state
+        .interactions
+        .fail_task_with_reply(request_id, target_session_id, reason)
+        .await
+    else {
+        return;
+    };
+
+    if let Ok(mut guard) = watch_state.lock() {
+        guard.push_event(
+            "reply",
+            serde_json::json!({
+                "request_id": reply.request_id,
+                "status": reply.status,
+                "target_session_id": reply.target_session_id,
+                "source_session_id": reply.source_session_id,
+                "replied_at": reply.replied_at,
+            }),
+        );
+    }
+}
+
+async fn release_live_agent_provider_input(
+    app_state: &crate::state::AppState,
+    target_session_id: &str,
+) {
+    if let Some(generation) = app_state
+        .interactions
+        .current_provider_input_generation(target_session_id)
+        .await
+    {
+        app_state
+            .interactions
+            .record_provider_input_state(
+                target_session_id,
+                generation,
+                ProviderInputReadiness::Unknown,
+                None,
+            )
+            .await;
+    }
+}
+
+async fn wait_for_live_agent_provider_ready(
+    app_state: &crate::state::AppState,
+    target_session_id: &str,
+    generation: u64,
+    timeout: Duration,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(input_state) = app_state
+            .interactions
+            .provider_input_state(target_session_id)
+            .await
+        {
+            if input_state.generation >= generation
+                && input_state.state == ProviderInputReadiness::Ready
+                && input_state.ready_evidence == Some(ProviderReadyEvidence::ProviderEvent)
+            {
+                return Ok(());
+            }
+            if input_state.generation >= generation
+                && matches!(
+                    input_state.state,
+                    ProviderInputReadiness::ActionRequired | ProviderInputReadiness::Unavailable
+                )
+            {
+                return Err(format!(
+                    "live agent {target_session_id} did not return to input-ready state after workflow reply"
+                ));
+            }
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(format!(
+                "timed out waiting for live agent {target_session_id} to return to input-ready state"
+            ));
+        }
+        tokio::time::sleep((timeout - elapsed).min(Duration::from_millis(25))).await;
+    }
+}
+
 async fn wait_for_live_agent_reply(
     app_state: &crate::state::AppState,
     watch_state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
     since: String,
     request_id: &str,
+    target_session_id: &str,
     timeout: Duration,
 ) -> Result<wardian_core::control::StructuredReply, String> {
     let started = std::time::Instant::now();
@@ -225,6 +383,17 @@ async fn wait_for_live_agent_reply(
         if let Some(error) = live_agent_terminal_failure(&snapshot) {
             return Err(error);
         }
+        if latest_terminal_status(&snapshot).as_deref() == Some("idle") {
+            if let Some((status, body)) = structured_reply_marker(&snapshot, request_id) {
+                return app_state
+                    .interactions
+                    .complete_task_with_reply(request_id, Some(target_session_id), status, &body)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to record live agent workflow reply {request_id}: {error}")
+                    });
+            }
+        }
         let elapsed = started.elapsed();
         if elapsed >= timeout {
             return Err(format!(
@@ -235,8 +404,54 @@ async fn wait_for_live_agent_reply(
     }
 }
 
+fn structured_reply_marker(
+    snapshot: &crate::state::agent_watch::WatchSnapshot,
+    request_id: &str,
+) -> Option<(ReplyStatus, String)> {
+    snapshot
+        .transcript
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| matches!(message.role.as_str(), "assistant" | "model"))
+        .find_map(|message| parse_structured_reply_marker(&message.text, request_id))
+}
+
+fn parse_structured_reply_marker(text: &str, request_id: &str) -> Option<(ReplyStatus, String)> {
+    let marker = format!("wardian reply {request_id}");
+    let lines = text.lines().collect::<Vec<_>>();
+    let marker_line_index = lines.iter().position(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with(&marker)
+            && trimmed
+                .get(marker.len()..)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
+    })?;
+    let command = lines[marker_line_index].trim();
+    if !command.contains("--stdin") {
+        return None;
+    }
+    let status = if command.contains("--status blocked") {
+        ReplyStatus::Blocked
+    } else if command.contains("--status failed") {
+        ReplyStatus::Failed
+    } else if command.contains("--status done") {
+        ReplyStatus::Done
+    } else {
+        return None;
+    };
+    let leading_body = lines[..marker_line_index].join("\n").trim().to_string();
+    let trailing_body = lines[marker_line_index + 1..].join("\n");
+    let body = if leading_body.is_empty() {
+        trailing_body.trim().to_string()
+    } else {
+        leading_body
+    };
+    (!body.is_empty()).then_some((status, body))
+}
+
 #[cfg(test)]
-async fn wait_for_live_agent_completion(
+async fn wait_for_live_agent_status_transition_for_regression(
     state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
     since: String,
     timeout: Duration,
@@ -391,6 +606,7 @@ mod tests {
             prompt: "do".into(),
             session_id: String::new(),
             resume_session: None,
+            config_override: None,
         };
         let out = runner.run(spec).await.unwrap();
         assert!(out.contains("ok"));
@@ -411,7 +627,12 @@ mod tests {
             guard.push_event("status", serde_json::json!({ "status": "idle" }));
         }
 
-        let result = wait_for_live_agent_completion(state, since, Duration::from_millis(10)).await;
+        let result = wait_for_live_agent_status_transition_for_regression(
+            state,
+            since,
+            Duration::from_millis(10),
+        )
+        .await;
 
         assert_eq!(
             result.expect_err("idle status alone must not complete a live workflow node"),
@@ -454,6 +675,7 @@ mod tests {
             watch_state,
             since,
             &task_id,
+            "agent-1",
             Duration::from_secs(1),
         );
         let complete = async {
@@ -475,5 +697,206 @@ mod tests {
         let reply = reply.expect("structured reply should complete workflow node");
         assert_eq!(reply.status, ReplyStatus::Done);
         assert_eq!(reply.body, "{\"ok\":true}");
+    }
+
+    #[tokio::test]
+    async fn live_agent_reply_wait_accepts_explicit_transcript_marker_after_idle() {
+        let app_state = crate::state::AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            4096,
+        )));
+        let since = watch_state
+            .lock()
+            .expect("watch state lock")
+            .latest_cursor();
+        let task = app_state
+            .interactions
+            .create_task_with_id(
+                "wf_test_marker".to_string(),
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "write the file".to_string(),
+                },
+            )
+            .await;
+        let task_id = task.id.clone();
+        {
+            let mut guard = watch_state.lock().expect("watch state lock");
+            guard.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: format!(
+                    "Final workflow output\n\nwardian reply {task_id} --status done --stdin"
+                ),
+                provider: "gemini".to_string(),
+                turn_id: None,
+                source: Some("gemini_log".to_string()),
+            });
+            guard.push_event("status", serde_json::json!({ "status": "idle" }));
+        }
+
+        let reply = wait_for_live_agent_reply(
+            &app_state,
+            watch_state,
+            since,
+            &task_id,
+            "agent-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("marker should complete workflow task");
+
+        assert_eq!(reply.status, ReplyStatus::Done);
+        assert_eq!(reply.body, "Final workflow output");
+        assert!(app_state
+            .interactions
+            .structured_reply(&task_id)
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn live_agent_failure_cleanup_closes_task_and_releases_input_generation() {
+        let app_state = crate::state::AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            4096,
+        )));
+        let task = app_state
+            .interactions
+            .create_task_with_id(
+                "wf_test_cleanup".to_string(),
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "write the file".to_string(),
+                },
+            )
+            .await;
+        app_state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
+            .await;
+
+        fail_live_workflow_task(
+            &app_state,
+            &watch_state,
+            &task.id,
+            "agent-1",
+            "timed out",
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            app_state
+                .interactions
+                .interaction(&task.id)
+                .await
+                .unwrap()
+                .status,
+            wardian_core::control::InteractionStatus::Failed
+        );
+        assert_eq!(
+            app_state
+                .interactions
+                .structured_reply(&task.id)
+                .await
+                .unwrap()
+                .status,
+            ReplyStatus::Failed
+        );
+        assert_eq!(
+            app_state
+                .interactions
+                .provider_input_state("agent-1")
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::Unknown
+        );
+        let snapshot = watch_state
+            .lock()
+            .expect("watch state lock")
+            .snapshot_since(None, None)
+            .expect("watch snapshot");
+        assert!(snapshot.events.iter().any(|event| {
+            event.kind == "reply"
+                && event
+                    .payload
+                    .get("request_id")
+                    .and_then(|value| value.as_str())
+                    == Some("wf_test_cleanup")
+                && event.payload.get("status").and_then(|value| value.as_str()) == Some("failed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn live_agent_success_waits_for_provider_ready_evidence() {
+        let app_state = crate::state::AppState::new();
+        let input = app_state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
+            .await;
+
+        let wait = wait_for_live_agent_provider_ready(
+            &app_state,
+            "agent-1",
+            input.generation,
+            Duration::from_secs(1),
+        );
+        let ready = async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            app_state
+                .interactions
+                .record_provider_input_state(
+                    "agent-1",
+                    input.generation,
+                    ProviderInputReadiness::Ready,
+                    Some(ProviderReadyEvidence::ProviderEvent),
+                )
+                .await;
+        };
+
+        let (result, _) = tokio::join!(wait, ready);
+
+        result.expect("provider event readiness should release live workflow delivery");
+    }
+
+    #[test]
+    fn structured_reply_marker_requires_body_and_status() {
+        assert!(parse_structured_reply_marker(
+            "wardian reply wf_test --status done --stdin",
+            "wf_test"
+        )
+        .is_none());
+        assert!(
+            parse_structured_reply_marker("body\nwardian reply wf_test --stdin", "wf_test")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn structured_reply_marker_accepts_body_after_command() {
+        let (status, body) = parse_structured_reply_marker(
+            "wardian reply wf_test --status done --stdin\nSummary written.",
+            "wf_test",
+        )
+        .expect("marker-first reply should parse");
+
+        assert_eq!(status, ReplyStatus::Done);
+        assert_eq!(body, "Summary written.");
+    }
+
+    #[test]
+    fn structured_reply_marker_ignores_embedded_command_text() {
+        assert!(parse_structured_reply_marker(
+            "Please run wardian reply wf_test --status done --stdin after the work.\nSummary.",
+            "wf_test",
+        )
+        .is_none());
     }
 }
