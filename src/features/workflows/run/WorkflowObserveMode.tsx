@@ -53,7 +53,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
         }}
       />
       <div className={`grid min-h-0 ${selectedNodeId ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
-        <section className={`grid min-h-0 ${timelineCollapsed ? 'grid-rows-[minmax(0,1fr)_44px]' : 'grid-rows-[minmax(0,1fr)_clamp(280px,34vh,420px)]'}`}>
+        <section className={`grid min-h-0 ${timelineCollapsed ? 'grid-rows-[minmax(0,1fr)_auto]' : 'grid-rows-[minmax(0,1fr)_clamp(280px,34vh,420px)]'}`}>
           <div className="min-h-0 p-3">
             <RunDag
               blueprint={blueprint}
@@ -63,7 +63,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
               theme={theme}
             />
           </div>
-          <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] border-t border-wardian-border bg-[var(--color-wardian-card)]">
+          <div className={`grid min-h-0 overflow-hidden border-t border-wardian-border bg-[var(--color-wardian-card)] ${timelineCollapsed ? 'grid-rows-[auto]' : 'grid-rows-[auto_minmax(0,1fr)]'}`}>
             <div className="flex min-h-[34px] items-center justify-between gap-3 border-b border-wardian-border px-3">
               <div className="text-[10px] font-bold text-muted">Events</div>
               <button
@@ -76,15 +76,16 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
                 {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" aria-hidden /> : <ChevronDown className="h-3.5 w-3.5" aria-hidden />}
               </button>
             </div>
-            <div className="min-h-0 p-2">
-              <EventTimeline
-                events={events}
-                scrubIndex={scrubIndex}
-                onScrub={setScrubIndex}
-                onSelectNode={setSelectedNodeId}
-                collapsed={timelineCollapsed}
-              />
-            </div>
+            {timelineCollapsed ? null : (
+              <div className="min-h-0 p-2">
+                <EventTimeline
+                  events={events}
+                  scrubIndex={scrubIndex}
+                  onScrub={setScrubIndex}
+                  onSelectNode={setSelectedNodeId}
+                />
+              </div>
+            )}
           </div>
         </section>
         {selectedNodeId ? (
