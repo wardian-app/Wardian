@@ -33,4 +33,29 @@ describe('NodeConfigForm', () => {
     expect(prompt).toHaveClass('min-h-[132px]');
     expect(prompt).toHaveClass('w-full');
   });
+  it('shows templated loop max iterations as editable text', () => {
+    const onChange = vi.fn();
+    const loopNode: BlueprintNode = {
+      id: 'loop-1',
+      type: 'loop',
+      fields: {
+        max_iterations: '{{trigger.output.max_cycles}}',
+        until: 'nodes.agent-arbiter.output.converged',
+      },
+    };
+
+    render(<NodeConfigForm node={loopNode} onChange={onChange} />);
+
+    const maxIterations = screen.getByLabelText(/Max iterations/i) as HTMLInputElement;
+    expect(maxIterations).toHaveAttribute('type', 'text');
+    expect(maxIterations).toHaveValue('{{trigger.output.max_cycles}}');
+
+    fireEvent.change(maxIterations, { target: { value: '7' } });
+
+    expect(onChange).toHaveBeenCalledWith('max_iterations', 7);
+
+    fireEvent.change(maxIterations, { target: { value: '{{trigger.output.review_cap}}' } });
+
+    expect(onChange).toHaveBeenLastCalledWith('max_iterations', '{{trigger.output.review_cap}}');
+  });
 });
