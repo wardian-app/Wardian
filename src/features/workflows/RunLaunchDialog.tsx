@@ -559,14 +559,14 @@ function RoleAssignmentPicker({
         autoFocus
       />
       <PickerGroup title="Temporary agents">
-        <div className="grid grid-cols-2 gap-1">
+        <div data-testid="temporary-provider-options" className="flex min-w-0 flex-wrap gap-1">
           {providerOptions.map((option) => {
             const target = providerTarget(option.value);
             return (
               <button
                 key={option.value}
                 type="button"
-                className={pickerButtonClass(target === selectedTarget)}
+                className={`${pickerButtonClass(target === selectedTarget)} max-w-full flex-[1_1_8.75rem]`}
                 disabled={!option.available}
                 onClick={() => onSelect(target)}
               >
@@ -627,7 +627,7 @@ function PickerGroup({ title, children }: { title: string; children: ReactNode }
 }
 
 function pickerButtonClass(selected: boolean) {
-  return `min-w-0 rounded border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50 ${
+  return `flex min-w-0 flex-col overflow-hidden rounded border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50 ${
     selected
       ? 'border-[var(--color-wardian-accent)] bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)] text-primary'
       : 'border-wardian-border bg-[var(--color-wardian-bg)] text-primary hover:border-[var(--color-wardian-accent)]'

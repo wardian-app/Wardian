@@ -278,6 +278,34 @@ describe('RunLaunchDialog', () => {
     ));
   });
 
+  it('wraps temporary provider choices inside the role assignment picker', async () => {
+    const blueprint: Blueprint = {
+      schema: 2,
+      id: 'wf',
+      name: 'Workflow',
+      nodes: [
+        { id: 'heartbeat', type: 'task', fields: { agent: 'role:reasoning_gate', prompt: 'Check in.' } },
+      ],
+      edges: [],
+    };
+
+    render(
+      <RunLaunchDialog
+        path="/x/wf.md"
+        blueprint={blueprint}
+        onLaunched={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /change reasoning_gate assignment/i })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /change reasoning_gate assignment/i }));
+
+    const temporaryOptions = screen.getByTestId('temporary-provider-options');
+    expect(temporaryOptions).toHaveClass('flex-wrap');
+    expect(screen.getByRole('button', { name: /new temporary antigravity/i })).toHaveClass('max-w-full');
+  });
+
   it('lets each workflow role choose its own fresh provider', async () => {
     const blueprint: Blueprint = {
       schema: 2,
