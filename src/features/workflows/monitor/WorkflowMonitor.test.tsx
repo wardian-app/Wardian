@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkflowMonitor } from './WorkflowMonitor';
 import type { RunSummary } from '../run/runTypes';
@@ -56,11 +56,11 @@ describe('WorkflowMonitor', () => {
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
-    expect(screen.getByText('heartbeat')).toBeInTheDocument();
-    expect(screen.getByText('Completed')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('heartbeat');
+    expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('Completed');
   });
 
-  it('shows an operational stat strip and distinct monitor sections', () => {
+  it('shows one activity surface with triage groups instead of duplicate monitor columns', () => {
     scheduleState.schedules = [
       {
         id: 'schedule-1',
@@ -82,6 +82,16 @@ describe('WorkflowMonitor', () => {
         is_paused: true,
         last_run_status: 'failed',
         last_run_error: 'crashed',
+      },
+      {
+        id: 'schedule-3',
+        blueprint_id: 'report',
+        name: 'Report Sweep',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'daily', time_of_day: '14:00', active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 18, 0, 0),
       },
     ];
     runState.runs = [
@@ -112,10 +122,57 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 failed');
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 running');
-    expect(screen.getByRole('heading', { name: /active runs/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /upcoming/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /^schedules$/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /history/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /activity/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /needs attention/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /running now/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /due soon/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /recent history/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /^schedules$/i })).toBeNull();
+    expect(screen.getAllByText('Passive Heartbeat')).toHaveLength(1);
+  });
+
+  it('filters the activity surface by operational state', () => {
+    scheduleState.schedules = [
+      {
+        id: 'schedule-1',
+        blueprint_id: 'heartbeat',
+        name: 'Passive Heartbeat',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+      },
+      {
+        id: 'schedule-2',
+        blueprint_id: 'audit',
+        name: 'Audit',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'daily', time_of_day: '09:00', active: true },
+        is_paused: false,
+        last_run_status: 'failed',
+        last_run_error: 'crashed',
+      },
+    ];
+    runState.runs = [{
+      run_id: 'run-active',
+      blueprint_id: 'heartbeat',
+      status: 'running',
+      node_count: 2,
+      path: '/runs/active',
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /needs attention/i }));
+    expect(screen.getByText('Audit')).toBeInTheDocument();
+    expect(screen.getByText('crashed')).toBeInTheDocument();
+    expect(screen.queryByText('Passive Heartbeat')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /running/i }));
+    expect(screen.getByText('Passive Heartbeat')).toBeInTheDocument();
+    expect(screen.queryByText('Audit')).toBeNull();
   });
 
   it('counts only current workflow failures in the headline stats', () => {
@@ -149,7 +206,8 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 failed');
-    expect(screen.getByText('run-old-failed')).toBeInTheDocument();
+    expect(screen.getByText('run-current-failed')).toBeInTheDocument();
+    expect(screen.queryByText('run-old-failed')).toBeNull();
   });
 
   it('renders scheduled agent assignments as agent names', async () => {
@@ -176,6 +234,6 @@ describe('WorkflowMonitor', () => {
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
-    expect(await screen.findAllByText('reasoning_gate: Assistant - Gemini')).toHaveLength(2);
+    expect(await screen.findAllByText('reasoning_gate: Assistant - Gemini')).toHaveLength(1);
   });
 });

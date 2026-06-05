@@ -1,17 +1,73 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { ExternalLink, Pause, Pencil, Play, RotateCcw } from 'lucide-react';
 import { useSchedulesStore } from '../../../store/useSchedulesStore';
 import type { AgentConfig } from '../../../types';
-import type { WorkflowSchedule } from '../../../types/workflow';
-import { ActiveRunsList } from './ActiveRunsList';
-import { SchedulesTable } from './SchedulesTable';
+import type { WorkflowAssignments, WorkflowSchedule } from '../../../types/workflow';
 import { useRunStore } from '../run/useRunStore';
-import type { RunSummary } from '../run/runTypes';
+import type { RunStatusKind, RunSummary } from '../run/runTypes';
+import { formatRunStatus } from '../run/statusLabels';
+import { cadenceLabel, nextRunLabel } from './scheduleStatus';
 
 interface WorkflowMonitorProps {
   onOpenRun: (blueprintId: string, runId: string) => void;
   onEditSchedule: (schedule: WorkflowSchedule) => void;
 }
+
+type ActivityFilter = 'all' | 'attention' | 'running' | 'scheduled' | 'history';
+type ActivitySection = Exclude<ActivityFilter, 'all'>;
+type ActivityTone = 'error' | 'active' | 'warning' | 'accent' | 'success' | 'muted';
+
+interface WorkflowActivity {
+  blueprintId: string;
+  name: string;
+  schedules: WorkflowSchedule[];
+  latestRun: RunSummary | null;
+  activeRun: RunSummary | null;
+  nextSchedule: WorkflowSchedule | null;
+  statusLabel: string;
+  tone: ActivityTone;
+  section: ActivitySection;
+  issue: string | null;
+}
+
+const FILTERS: Array<{ id: ActivityFilter; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'attention', label: 'Needs attention' },
+  { id: 'running', label: 'Running' },
+  { id: 'scheduled', label: 'Scheduled' },
+  { id: 'history', label: 'History' },
+];
+
+const SECTION_LABELS: Record<ActivitySection, string> = {
+  attention: 'Needs attention',
+  running: 'Running now',
+  scheduled: 'Due soon',
+  history: 'Recent history',
+};
+
+const SECTION_ORDER: ActivitySection[] = ['attention', 'running', 'scheduled', 'history'];
+
+const toneClass: Record<ActivityTone, string> = {
+  error: 'text-[var(--color-wardian-error)]',
+  active: 'text-[var(--color-wardian-processing)]',
+  warning: 'text-[var(--color-wardian-warning)]',
+  accent: 'text-[var(--color-wardian-accent)]',
+  success: 'text-[var(--color-wardian-success)]',
+  muted: 'text-muted',
+};
+
+const toneDotClass: Record<ActivityTone, string> = {
+  error: 'bg-[var(--color-wardian-error)]',
+  active: 'bg-[var(--color-wardian-processing)]',
+  warning: 'bg-[var(--color-wardian-warning)]',
+  accent: 'bg-[var(--color-wardian-accent)]',
+  success: 'bg-[var(--color-wardian-success)]',
+  muted: 'bg-[var(--color-wardian-text-muted)]',
+};
+
+const actionClass =
+  'inline-flex h-7 w-7 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]';
 
 export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorProps) {
   const schedules = useSchedulesStore((state) => state.schedules);
@@ -20,11 +76,11 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   const pause = useSchedulesStore((state) => state.pause);
   const resume = useSchedulesStore((state) => state.resume);
   const runNow = useSchedulesStore((state) => state.runNow);
-  const remove = useSchedulesStore((state) => state.remove);
 
   const runs = useRunStore((state) => state.runs);
   const loadRuns = useRunStore((state) => state.loadRuns);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const [filter, setFilter] = useState<ActivityFilter>('all');
 
   useEffect(() => {
     void load();
@@ -49,31 +105,17 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
     };
   }, []);
 
-  const monitorRuns = useMemo(
-    () => {
-      const active = runs.filter((run) => run.status === 'running' || run.status === 'awaiting_approval');
-      const recent = runs.filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval');
-      return [...active, ...recent].slice(0, 20);
-    },
-    [runs],
-  );
-  const activeRuns = useMemo(
-    () => runs.filter((run) => run.status === 'running' || run.status === 'awaiting_approval'),
-    [runs],
-  );
-  const historyRuns = useMemo(
-    () => runs.filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval').slice(0, 20),
-    [runs],
-  );
+  const latestRuns = useMemo(() => latestRunPerBlueprint(runs), [runs]);
   const upcomingSchedules = useMemo(
     () => [...schedules]
       .filter((schedule) => !schedule.is_paused && schedule.next_run_epoch_ms)
-      .sort((left, right) => (left.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER) - (right.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER))
-      .slice(0, 8),
+      .sort((left, right) => (left.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER) - (right.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER)),
     [schedules],
   );
-  const latestRuns = useMemo(() => latestRunPerBlueprint(runs), [runs]);
+  const activities = useMemo(() => buildActivities(runs, schedules), [runs, schedules]);
+  const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
   const agentLabels = useMemo(() => agentLabelMap(agents), [agents]);
+
   const failedRuns = latestRuns.filter((run) => run.status === 'failed');
   const failedRunBlueprintIds = new Set(failedRuns.map((run) => run.blueprint_id));
   const failedCount = failedRuns.length
@@ -94,48 +136,363 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
         <MonitorStat label="failed" value={failedCount} tone={failedCount > 0 ? 'error' : 'muted'} />
         <MonitorStat label="running" value={runningCount} tone={runningCount > 0 ? 'active' : 'muted'} />
         <MonitorStat label="awaiting" value={awaitingCount} tone={awaitingCount > 0 ? 'warning' : 'muted'} />
-        <MonitorStat label="upcoming" value={upcomingSchedules.length} tone={upcomingSchedules.length > 0 ? 'accent' : 'muted'} />
+        <MonitorStat label="due soon" value={upcomingSchedules.length} tone={upcomingSchedules.length > 0 ? 'accent' : 'muted'} />
         <MonitorStat label="paused" value={pausedCount} tone={pausedCount > 0 ? 'warning' : 'muted'} />
       </div>
       {error ? <div className="shrink-0 text-[11px] text-[var(--color-wardian-error)]">{error}</div> : null}
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3 overflow-hidden">
-        <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 overflow-hidden">
-          <MonitorSection title="Active runs">
-            <ActiveRunsList runs={activeRuns} onOpen={onOpenRun} />
-          </MonitorSection>
-          <MonitorSection title="Upcoming">
-            <SchedulesTable
-              schedules={upcomingSchedules}
-              agentLabels={agentLabels}
-              onPause={pause}
-              onResume={resume}
-              onRunNow={runNow}
-              onRemove={remove}
-              onEdit={onEditSchedule}
-            />
-          </MonitorSection>
-          <MonitorSection title="History" scroll>
-            <ActiveRunsList
-              runs={historyRuns.length > 0 ? historyRuns : monitorRuns.filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval')}
-              onOpen={onOpenRun}
-              emptyLabel="No recent runs."
-            />
-          </MonitorSection>
+
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-wardian-border bg-[var(--color-wardian-bg)]">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3 py-2">
+          <div className="min-w-0">
+            <h3 className="text-xs font-bold text-[var(--color-wardian-text)]">Activity</h3>
+            <div className="mt-0.5 truncate text-[10px] text-muted">{activities.length} workflows tracked</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {FILTERS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={filter === item.id}
+                onClick={() => setFilter(item.id)}
+                className={`h-7 cursor-pointer select-none rounded border px-2 text-[10px] font-bold transition-colors ${
+                  filter === item.id
+                    ? 'border-[var(--color-wardian-accent)] bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)] text-[var(--color-wardian-accent)]'
+                    : 'border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
         </div>
-        <MonitorSection title="Schedules" scroll>
-          <SchedulesTable
-            schedules={schedules}
-            agentLabels={agentLabels}
-            onPause={pause}
-            onResume={resume}
-            onRunNow={runNow}
-            onRemove={remove}
-            onEdit={onEditSchedule}
-          />
-        </MonitorSection>
-      </div>
+
+        <div className="min-h-0 overflow-y-auto p-3">
+          {SECTION_ORDER.map((section) => {
+            const items = groupedActivities[section];
+            if (items.length === 0 && filter !== 'all') return null;
+            if (items.length === 0) return null;
+            return (
+              <ActivitySection
+                key={section}
+                title={SECTION_LABELS[section]}
+                activities={items}
+                agentLabels={agentLabels}
+                onOpenRun={onOpenRun}
+                onPause={pause}
+                onResume={resume}
+                onRunNow={runNow}
+                onEditSchedule={onEditSchedule}
+              />
+            );
+          })}
+          {Object.values(groupedActivities).every((items) => items.length === 0) ? (
+            <div className="select-text rounded border border-dashed border-wardian-border p-4 text-center text-xs text-muted">
+              No workflow activity in this view.
+            </div>
+          ) : null}
+        </div>
+      </section>
     </div>
   );
+}
+
+function ActivitySection({
+  title,
+  activities,
+  agentLabels,
+  onOpenRun,
+  onPause,
+  onResume,
+  onRunNow,
+  onEditSchedule,
+}: {
+  title: string;
+  activities: WorkflowActivity[];
+  agentLabels: Record<string, string>;
+  onOpenRun: (blueprintId: string, runId: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string) => void;
+  onRunNow: (id: string) => void;
+  onEditSchedule: (schedule: WorkflowSchedule) => void;
+}) {
+  return (
+    <section className="mb-4 last:mb-0">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h4 className="text-xs font-bold text-muted">{title}</h4>
+        <span className="font-mono text-[10px] text-muted">{activities.length}</span>
+      </div>
+      <div className="select-text overflow-hidden rounded border border-wardian-border">
+        <table className="w-full table-fixed border-collapse text-left">
+          <thead className="bg-[var(--color-wardian-card)] text-[10px] font-bold text-muted">
+            <tr>
+              <th scope="col" className="w-[128px] px-3 py-2">State</th>
+              <th scope="col" className="px-3 py-2">Workflow</th>
+              <th scope="col" className="w-[24%] px-3 py-2">Current run</th>
+              <th scope="col" className="w-[24%] px-3 py-2">Schedule</th>
+              <th scope="col" className="w-[20%] px-3 py-2">Assignment</th>
+              <th scope="col" className="w-[132px] px-3 py-2 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {activities.map((activity) => (
+              <ActivityRow
+                key={activity.blueprintId}
+                activity={activity}
+                agentLabels={agentLabels}
+                onOpenRun={onOpenRun}
+                onPause={onPause}
+                onResume={onResume}
+                onRunNow={onRunNow}
+                onEditSchedule={onEditSchedule}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ActivityRow({
+  activity,
+  agentLabels,
+  onOpenRun,
+  onPause,
+  onResume,
+  onRunNow,
+  onEditSchedule,
+}: {
+  activity: WorkflowActivity;
+  agentLabels: Record<string, string>;
+  onOpenRun: (blueprintId: string, runId: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string) => void;
+  onRunNow: (id: string) => void;
+  onEditSchedule: (schedule: WorkflowSchedule) => void;
+}) {
+  const schedule = activity.nextSchedule ?? activity.schedules[0] ?? null;
+  const labels = schedule
+    ? assignmentLabels(schedule.assignments, schedule.bindings, schedule.provider, agentLabels)
+    : [];
+
+  return (
+    <tr
+      data-testid={`workflow-activity-row-${activity.blueprintId}`}
+      className="border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] align-middle last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
+    >
+      <td className="px-3 py-2">
+        <div className={`flex items-center gap-2 text-[10px] font-bold ${toneClass[activity.tone]}`}>
+          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[activity.tone]}`} aria-hidden />
+          <span>{activity.statusLabel}</span>
+        </div>
+        {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
+      </td>
+      <td className="min-w-0 px-3 py-2">
+        <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>{activity.name}</div>
+        {activity.blueprintId !== activity.name ? (
+          <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.blueprintId}>{activity.blueprintId}</div>
+        ) : null}
+      </td>
+      <td className="min-w-0 px-3 py-2">
+        {activity.latestRun ? (
+          <>
+            <div className={`truncate text-[10px] font-bold ${runToneClass(activity.latestRun.status)}`}>
+              {formatRunStatus(activity.latestRun.status)}
+            </div>
+            <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.latestRun.run_id}>{activity.latestRun.run_id}</div>
+          </>
+        ) : (
+          <span className="text-[10px] text-muted">No runs yet</span>
+        )}
+      </td>
+      <td className="min-w-0 px-3 py-2">
+        {schedule ? (
+          <>
+            <div className="truncate text-[10px] text-muted" title={cadenceLabel(schedule.schedule)}>{cadenceLabel(schedule.schedule)}</div>
+            <div className="mt-0.5 truncate text-[10px] text-muted" title={nextRunLabel(schedule)}>Next {nextRunLabel(schedule)}</div>
+          </>
+        ) : (
+          <span className="text-[10px] text-muted">Manual only</span>
+        )}
+      </td>
+      <td className="min-w-0 px-3 py-2">
+        {labels.length > 0 ? (
+          <div className="flex max-w-[320px] flex-wrap gap-1">
+            {labels.slice(0, 2).map((label) => (
+              <span
+                key={label}
+                className="max-w-[180px] truncate rounded border border-wardian-border bg-[var(--color-wardian-card)] px-1.5 py-0.5 text-[10px] text-muted"
+                title={label}
+              >
+                {label}
+              </span>
+            ))}
+            {labels.length > 2 ? (
+              <span className="rounded border border-wardian-border bg-[var(--color-wardian-card)] px-1.5 py-0.5 text-[10px] text-muted">
+                +{labels.length - 2} roles
+              </span>
+            ) : null}
+          </div>
+        ) : (
+          <span className="text-[10px] text-muted">Default</span>
+        )}
+      </td>
+      <td className="px-3 py-2 text-right">
+        <div className="inline-flex shrink-0 items-center gap-1">
+          {activity.latestRun ? (
+            <button
+              type="button"
+              aria-label={`Open ${activity.blueprintId} run ${activity.latestRun.run_id}`}
+              title="Open run"
+              onClick={() => onOpenRun(activity.blueprintId, activity.latestRun?.run_id ?? '')}
+              className={actionClass}
+            >
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          ) : null}
+          {schedule ? (
+            <>
+              {schedule.is_paused ? (
+                <button type="button" className={actionClass} onClick={() => onResume(schedule.id)} aria-label={`Resume ${schedule.name}`} title="Resume">
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              ) : (
+                <button type="button" className={actionClass} onClick={() => onPause(schedule.id)} aria-label={`Pause ${schedule.name}`} title="Pause">
+                  <Pause className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              )}
+              <button type="button" className={actionClass} onClick={() => onRunNow(schedule.id)} aria-label={`Run ${schedule.name} now`} title="Run now">
+                <Play className="h-3.5 w-3.5" aria-hidden />
+              </button>
+              <button type="button" className={actionClass} onClick={() => onEditSchedule(schedule)} aria-label={`Edit ${schedule.name}`} title="Edit">
+                <Pencil className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            </>
+          ) : null}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): WorkflowActivity[] {
+  const ids = new Set<string>();
+  for (const run of runs) ids.add(run.blueprint_id);
+  for (const schedule of schedules) ids.add(schedule.blueprint_id);
+
+  return [...ids].map((blueprintId) => {
+    const workflowRuns = runs.filter((run) => run.blueprint_id === blueprintId);
+    const workflowSchedules = schedules
+      .filter((schedule) => schedule.blueprint_id === blueprintId)
+      .sort(compareScheduleRecency);
+    const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
+    const activeRun = workflowRuns.find((run) => run.status === 'awaiting_approval')
+      ?? workflowRuns.find((run) => run.status === 'running')
+      ?? null;
+    const nextSchedule = workflowSchedules.find((schedule) => !schedule.is_paused && schedule.next_run_epoch_ms)
+      ?? workflowSchedules[0]
+      ?? null;
+    const name = workflowSchedules[0]?.name ?? blueprintId;
+    const state = activityState(latestRun, activeRun, workflowSchedules, nextSchedule);
+
+    return {
+      blueprintId,
+      name,
+      schedules: workflowSchedules,
+      latestRun,
+      activeRun,
+      nextSchedule,
+      ...state,
+    };
+  }).sort(compareActivities);
+}
+
+function activityState(
+  latestRun: RunSummary | null,
+  activeRun: RunSummary | null,
+  schedules: WorkflowSchedule[],
+  nextSchedule: WorkflowSchedule | null,
+): Pick<WorkflowActivity, 'statusLabel' | 'tone' | 'section' | 'issue'> {
+  const failedSchedule = schedules.find((schedule) => schedule.last_run_status === 'failed' || schedule.last_run_error);
+  if (failedSchedule) {
+    return {
+      statusLabel: 'Needs attention',
+      tone: 'error',
+      section: 'attention',
+      issue: failedSchedule.last_run_error ?? 'Last scheduled run failed',
+    };
+  }
+  if (latestRun?.status === 'failed') {
+    return {
+      statusLabel: 'Needs attention',
+      tone: 'error',
+      section: 'attention',
+      issue: latestRun.failure ?? 'Latest run failed',
+    };
+  }
+  if (activeRun?.status === 'awaiting_approval') {
+    return { statusLabel: 'Awaiting approval', tone: 'warning', section: 'attention', issue: null };
+  }
+  if (activeRun?.status === 'running') {
+    return { statusLabel: 'Running', tone: 'active', section: 'running', issue: null };
+  }
+  if (nextSchedule && !nextSchedule.is_paused && nextSchedule.next_run_epoch_ms) {
+    return { statusLabel: 'Scheduled', tone: 'accent', section: 'scheduled', issue: null };
+  }
+  if (nextSchedule?.is_paused) {
+    return { statusLabel: 'Paused', tone: 'warning', section: 'scheduled', issue: null };
+  }
+  if (latestRun?.status === 'completed') {
+    return { statusLabel: 'Completed', tone: 'success', section: 'history', issue: null };
+  }
+  return { statusLabel: 'Idle', tone: 'muted', section: 'history', issue: null };
+}
+
+function groupActivities(activities: WorkflowActivity[], filter: ActivityFilter) {
+  const grouped: Record<ActivitySection, WorkflowActivity[]> = {
+    attention: [],
+    running: [],
+    scheduled: [],
+    history: [],
+  };
+
+  for (const activity of activities) {
+    if (filter !== 'all' && activity.section !== filter) continue;
+    grouped[activity.section].push(activity);
+  }
+
+  return grouped;
+}
+
+function compareActivities(left: WorkflowActivity, right: WorkflowActivity) {
+  const sectionDelta = SECTION_ORDER.indexOf(left.section) - SECTION_ORDER.indexOf(right.section);
+  if (sectionDelta !== 0) return sectionDelta;
+
+  const leftTime = activitySortTime(left);
+  const rightTime = activitySortTime(right);
+  if (leftTime !== rightTime) return leftTime - rightTime;
+  return left.name.localeCompare(right.name);
+}
+
+function activitySortTime(activity: WorkflowActivity) {
+  if (activity.section === 'scheduled') return activity.nextSchedule?.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER;
+  const stamp = activity.latestRun?.updated_at ?? activity.latestRun?.completed_at ?? activity.latestRun?.started_at ?? '';
+  return stamp ? -Date.parse(stamp) : 0;
+}
+
+function compareScheduleRecency(left: WorkflowSchedule, right: WorkflowSchedule) {
+  const leftNext = left.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER;
+  const rightNext = right.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER;
+  if (leftNext !== rightNext) return leftNext - rightNext;
+  return left.name.localeCompare(right.name);
+}
+
+function runToneClass(status: RunStatusKind) {
+  if (status === 'running') return 'text-[var(--color-wardian-processing)]';
+  if (status === 'awaiting_approval') return 'text-[var(--color-wardian-warning)]';
+  if (status === 'completed') return 'text-[var(--color-wardian-success)]';
+  if (status === 'failed') return 'text-[var(--color-wardian-error)]';
+  return 'text-muted';
 }
 
 function agentLabelMap(agents: AgentConfig[]) {
@@ -157,7 +514,7 @@ function latestRunPerBlueprint(runs: RunSummary[]) {
   const latest = new Map<string, RunSummary>();
   for (const run of runs) {
     const current = latest.get(run.blueprint_id);
-    if (!current || compareRunRecency(run, current) > 0) {
+    if (!current || compareRunRecency(run, current) < 0) {
       latest.set(run.blueprint_id, run);
     }
   }
@@ -167,18 +524,28 @@ function latestRunPerBlueprint(runs: RunSummary[]) {
 function compareRunRecency(left: RunSummary, right: RunSummary) {
   const leftStamp = left.updated_at ?? left.completed_at ?? left.started_at ?? '';
   const rightStamp = right.updated_at ?? right.completed_at ?? right.started_at ?? '';
-  if (leftStamp !== rightStamp) return leftStamp > rightStamp ? 1 : -1;
+  if (leftStamp !== rightStamp) return leftStamp > rightStamp ? -1 : 1;
   if (left.run_id === right.run_id) return 0;
-  return left.run_id > right.run_id ? 1 : -1;
+  return left.run_id > right.run_id ? -1 : 1;
 }
 
-function MonitorSection({ title, scroll, children }: { title: string; scroll?: boolean; children: ReactNode }) {
-  return (
-    <section className={`min-h-0 ${scroll ? 'overflow-y-auto' : 'overflow-visible'}`}>
-      <h3 className="mb-2 text-xs font-bold text-muted">{title}</h3>
-      {children}
-    </section>
-  );
+function assignmentLabels(
+  assignments?: WorkflowAssignments,
+  bindings?: Record<string, string>,
+  provider?: string | null,
+  agentLabels: Record<string, string> = {},
+) {
+  if (assignments && Object.keys(assignments).length > 0) {
+    return Object.entries(assignments).map(([role, assignment]) => {
+      if (assignment.target_type === 'agent') {
+        return `${role}: ${agentLabels[assignment.agent_id] ?? assignment.agent_id}`;
+      }
+      return `${role}: temp ${assignment.provider}`;
+    });
+  }
+  const bindingLabels = Object.entries(bindings ?? {}).map(([role, target]) => `${role}: ${agentLabels[target] ?? target}`);
+  if (bindingLabels.length > 0) return bindingLabels;
+  return provider ? [`temp ${provider}`] : [];
 }
 
 function MonitorStat({
@@ -190,7 +557,7 @@ function MonitorStat({
   value: number;
   tone: 'error' | 'active' | 'warning' | 'accent' | 'muted';
 }) {
-  const toneClass = {
+  const statToneClass = {
     error: 'text-[var(--color-wardian-error)]',
     active: 'text-[var(--color-wardian-processing)]',
     warning: 'text-[var(--color-wardian-warning)]',
@@ -200,7 +567,7 @@ function MonitorStat({
 
   return (
     <div className="min-w-0 rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-3 py-2">
-      <div className={`text-sm font-bold ${toneClass}`}>{value} {label}</div>
+      <div className={`text-sm font-bold ${statToneClass}`}>{value} {label}</div>
     </div>
   );
 }
