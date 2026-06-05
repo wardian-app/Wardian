@@ -81,6 +81,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   const loadRuns = useRunStore((state) => state.loadRuns);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [filter, setFilter] = useState<ActivityFilter>('all');
+  const [showOlderHistory, setShowOlderHistory] = useState(false);
 
   useEffect(() => {
     void load();
@@ -114,6 +115,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   );
   const activities = useMemo(() => buildActivities(runs, schedules), [runs, schedules]);
   const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
+  const olderHistoryRuns = useMemo(() => olderHistoryRunsFor(runs, latestRuns), [runs, latestRuns]);
   const agentLabels = useMemo(() => agentLabelMap(agents), [agents]);
 
   const failedRuns = latestRuns.filter((run) => run.status === 'failed');
@@ -169,19 +171,23 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
         <div className="min-h-0 overflow-y-auto p-3">
           {SECTION_ORDER.map((section) => {
             const items = groupedActivities[section];
-            if (items.length === 0 && filter !== 'all') return null;
-            if (items.length === 0) return null;
+            const hasOlderHistory = section === 'history' && olderHistoryRuns.length > 0;
+            if (items.length === 0 && filter !== 'all' && !hasOlderHistory) return null;
+            if (items.length === 0 && !hasOlderHistory) return null;
             return (
               <ActivitySection
                 key={section}
                 title={SECTION_LABELS[section]}
                 activities={items}
+                olderRuns={section === 'history' ? olderHistoryRuns : []}
+                showOlderRuns={section === 'history' && showOlderHistory}
                 agentLabels={agentLabels}
                 onOpenRun={onOpenRun}
                 onPause={pause}
                 onResume={resume}
                 onRunNow={runNow}
                 onEditSchedule={onEditSchedule}
+                onToggleOlderRuns={() => setShowOlderHistory((value) => !value)}
               />
             );
           })}
@@ -199,27 +205,46 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
 function ActivitySection({
   title,
   activities,
+  olderRuns,
+  showOlderRuns,
   agentLabels,
   onOpenRun,
   onPause,
   onResume,
   onRunNow,
   onEditSchedule,
+  onToggleOlderRuns,
 }: {
   title: string;
   activities: WorkflowActivity[];
+  olderRuns: RunSummary[];
+  showOlderRuns: boolean;
   agentLabels: Record<string, string>;
   onOpenRun: (blueprintId: string, runId: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRunNow: (id: string) => void;
   onEditSchedule: (schedule: WorkflowSchedule) => void;
+  onToggleOlderRuns: () => void;
 }) {
+  const visibleCount = activities.length + (showOlderRuns ? olderRuns.length : 0);
+
   return (
     <section className="mb-4 last:mb-0">
       <div className="mb-2 flex items-center justify-between gap-3">
         <h4 className="text-xs font-bold text-muted">{title}</h4>
-        <span className="font-mono text-[10px] text-muted">{activities.length}</span>
+        <div className="flex items-center gap-2">
+          {olderRuns.length > 0 ? (
+            <button
+              type="button"
+              onClick={onToggleOlderRuns}
+              className="h-6 cursor-pointer select-none rounded border border-wardian-border px-2 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+            >
+              {showOlderRuns ? 'Show less' : `Show older ${olderRuns.length}`}
+            </button>
+          ) : null}
+          <span className="font-mono text-[10px] text-muted">{visibleCount}</span>
+        </div>
       </div>
       <div className="select-text overflow-hidden rounded border border-wardian-border">
         {activities.map((activity) => (
@@ -234,6 +259,15 @@ function ActivitySection({
             onEditSchedule={onEditSchedule}
           />
         ))}
+        {showOlderRuns
+          ? olderRuns.map((run) => (
+            <HistoryRunRow
+              key={run.run_id}
+              run={run}
+              onOpenRun={onOpenRun}
+            />
+          ))
+          : null}
       </div>
     </section>
   );
@@ -355,6 +389,51 @@ function ActivityRow({
               </button>
             </>
           ) : null}
+      </div>
+    </div>
+  );
+}
+
+function HistoryRunRow({
+  run,
+  onOpenRun,
+}: {
+  run: RunSummary;
+  onOpenRun: (blueprintId: string, runId: string) => void;
+}) {
+  const stamp = run.updated_at ?? run.completed_at ?? run.started_at ?? '';
+  const tone = historyTone(run.status);
+
+  return (
+    <div
+      data-testid={`workflow-history-run-${run.run_id}`}
+      className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-wardian-border/70 bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_55%)] p-3 last:border-b-0"
+    >
+      <div className="min-w-[180px] flex-[1.4_1_220px]">
+        <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={run.blueprint_id}>{run.blueprint_id}</div>
+        <div className={`mt-1 flex items-center gap-2 text-[10px] font-bold ${runToneClass(run.status)}`}>
+          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[tone]}`} aria-hidden />
+          <span>{formatRunStatus(run.status)}</span>
+        </div>
+      </div>
+      <div className="min-w-[140px] flex-[1_1_150px]">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Run</div>
+        <div className="truncate font-mono text-[10px] text-muted" title={run.run_id}>{run.run_id}</div>
+      </div>
+      <div className="min-w-[150px] flex-[1_1_170px]">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Updated</div>
+        <div className="truncate text-[10px] text-muted" title={stamp}>{formatRunStamp(stamp)}</div>
+      </div>
+      <div className="ml-auto flex min-w-[34px] shrink-0 items-center justify-end gap-1.5 pr-1 pt-0.5">
+        <button
+          type="button"
+          aria-label={`Open ${run.blueprint_id} run ${run.run_id}`}
+          title="Open run"
+          onClick={() => onOpenRun(run.blueprint_id, run.run_id)}
+          className={actionClass}
+        >
+          <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+        </button>
       </div>
     </div>
   );
@@ -506,12 +585,33 @@ function latestRunPerBlueprint(runs: RunSummary[]) {
   return [...latest.values()];
 }
 
+function olderHistoryRunsFor(runs: RunSummary[], latestRuns: RunSummary[]) {
+  const latestRunIds = new Set(latestRuns.map((run) => run.run_id));
+  return runs
+    .filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval')
+    .filter((run) => !latestRunIds.has(run.run_id))
+    .sort(compareRunRecency);
+}
+
 function compareRunRecency(left: RunSummary, right: RunSummary) {
   const leftStamp = left.updated_at ?? left.completed_at ?? left.started_at ?? '';
   const rightStamp = right.updated_at ?? right.completed_at ?? right.started_at ?? '';
   if (leftStamp !== rightStamp) return leftStamp > rightStamp ? -1 : 1;
   if (left.run_id === right.run_id) return 0;
   return left.run_id > right.run_id ? -1 : 1;
+}
+
+function formatRunStamp(stamp: string) {
+  if (!stamp) return 'Unknown';
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return stamp;
+  return date.toLocaleString();
+}
+
+function historyTone(status: RunStatusKind): ActivityTone {
+  if (status === 'failed') return 'error';
+  if (status === 'completed') return 'success';
+  return 'muted';
 }
 
 function assignmentLabels(

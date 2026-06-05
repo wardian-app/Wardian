@@ -263,6 +263,39 @@ describe('WorkflowMonitor', () => {
     expect(screen.queryByText('run-old-failed')).toBeNull();
   });
 
+  it('expands recent history to show older runs on demand', () => {
+    runState.runs = [
+      {
+        run_id: 'run-new',
+        blueprint_id: 'audit',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/new',
+        updated_at: '2026-06-01T16:00:00Z',
+      },
+      {
+        run_id: 'run-old',
+        blueprint_id: 'audit',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/old',
+        updated_at: '2026-06-01T12:00:00Z',
+      },
+    ];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: /recent history/i })).toBeInTheDocument();
+    expect(screen.getByText('run-new')).toBeInTheDocument();
+    expect(screen.queryByText('run-old')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /show older/i }));
+
+    expect(screen.getByText('run-new')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-history-run-run-old')).toHaveTextContent('run-old');
+    expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
+  });
+
   it('renders scheduled agent assignments as agent names', async () => {
     invokeMock.mockResolvedValue([
       {
