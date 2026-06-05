@@ -28,7 +28,7 @@ describe('NodeInspector', () => {
     render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
 
     expect(screen.getByText('a')).toBeInTheDocument();
-    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(screen.getByText('Failed')).toBeInTheDocument();
     expect(screen.getByText(/"ok": true/)).toBeInTheDocument();
     expect(screen.getByText('boom')).toBeInTheDocument();
   });
@@ -55,5 +55,13 @@ describe('NodeInspector', () => {
     render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
 
     expect(screen.getByText('boom').closest('.select-text')).not.toBeNull();
+  });
+
+  it('uses regular capitalization for inspector headings', () => {
+    render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
+
+    expect(screen.getByText('Node')).not.toHaveClass('uppercase');
+    expect(screen.getByText('Output')).not.toHaveClass('uppercase');
+    expect(screen.getByText('Failure')).not.toHaveClass('uppercase');
   });
 });

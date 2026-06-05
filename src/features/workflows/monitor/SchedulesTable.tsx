@@ -24,7 +24,7 @@ export function SchedulesTable(props: SchedulesTableProps) {
   return (
     <div className="select-text rounded border border-wardian-border">
       <table className="w-full table-fixed border-collapse text-left">
-        <thead className="bg-[var(--color-wardian-card)] text-[10px] font-bold uppercase tracking-wide text-muted">
+        <thead className="bg-[var(--color-wardian-card)] text-[10px] font-bold text-muted">
           <tr>
             <th scope="col" className="w-[92px] px-3 py-2">Status</th>
             <th scope="col" className="px-3 py-2">Workflow</th>

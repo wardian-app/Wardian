@@ -1,5 +1,6 @@
 import { ExternalLink } from 'lucide-react';
 import type { RunStatusKind, RunSummary } from '../run/runTypes';
+import { formatRunStatus } from '../run/statusLabels';
 
 interface ActiveRunsListProps {
   runs: RunSummary[];
@@ -26,7 +27,7 @@ export function ActiveRunsList({ runs, onOpen, emptyLabel = 'No active runs.' }:
   return (
     <div className="select-text overflow-hidden rounded border border-wardian-border">
       <table className="w-full table-fixed border-collapse text-left">
-        <thead className="bg-[var(--color-wardian-card)] text-[10px] font-bold uppercase tracking-wide text-muted">
+        <thead className="bg-[var(--color-wardian-card)] text-[10px] font-bold text-muted">
           <tr>
             <th scope="col" className="w-[108px] px-3 py-2">Status</th>
             <th scope="col" className="px-3 py-2">Workflow</th>
@@ -41,8 +42,8 @@ export function ActiveRunsList({ runs, onOpen, emptyLabel = 'No active runs.' }:
               className="border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
             >
               <td className="px-3 py-2">
-                <span className="text-[10px] font-bold uppercase" style={{ color: STATUS_COLOR[run.status] }}>
-                  {run.status.replace('_', ' ')}
+                <span className="text-[10px] font-bold" style={{ color: STATUS_COLOR[run.status] }}>
+                  {formatRunStatus(run.status)}
                 </span>
               </td>
               <td className="min-w-0 px-3 py-2">

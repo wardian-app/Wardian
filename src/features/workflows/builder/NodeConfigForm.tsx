@@ -18,7 +18,7 @@ function FieldInput({ field, value, onChange }: { field: FieldDef; value: unknow
   const id = `field-${field.id}`;
   const str = (value as string) ?? '';
   const label = (
-    <label htmlFor={id} className="flex min-w-0 items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-muted">
+    <label htmlFor={id} className="flex min-w-0 items-center gap-1 text-[10px] font-bold text-muted">
       <span className="truncate">{field.label}</span>
       {field.required ? <span className="text-[var(--color-wardian-error)]">*</span> : null}
     </label>

@@ -57,7 +57,7 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByText('heartbeat')).toBeInTheDocument();
-    expect(screen.getByText('completed')).toBeInTheDocument();
+    expect(screen.getByText('Completed')).toBeInTheDocument();
   });
 
   it('shows an operational stat strip and distinct monitor sections', () => {

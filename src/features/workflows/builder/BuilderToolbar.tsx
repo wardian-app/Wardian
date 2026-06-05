@@ -18,17 +18,17 @@ export function BuilderToolbar() {
           onChange={(event) => blueprint && setBlueprint({ ...blueprint, name: event.target.value })}
           className="min-w-[220px] rounded-md border border-wardian-border bg-[var(--color-wardian-bg)] px-3 py-1.5 text-sm font-bold text-[var(--color-wardian-text)] outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
         />
-        <span className="text-[10px] font-bold tracking-wide text-muted">{dirty ? 'Unsaved changes' : 'Saved state'}</span>
+        <span className="text-[10px] font-bold text-muted">{dirty ? 'Unsaved changes' : 'Saved state'}</span>
       </div>
       <div className="flex items-center gap-3">
-        <span className={`text-[10px] font-bold tracking-wide ${invalid ? 'text-[var(--color-wardian-error)]' : 'text-[var(--color-wardian-success)]'}`}>
+        <span className={`text-[10px] font-bold ${invalid ? 'text-[var(--color-wardian-error)]' : 'text-[var(--color-wardian-success)]'}`}>
           {invalid ? `${diagnostics.length} issue${diagnostics.length === 1 ? '' : 's'}` : 'Valid'}
         </span>
         <button
           type="button"
           disabled={!blueprint || invalid}
           onClick={() => void save()}
-          className="rounded-md border border-wardian-border bg-[var(--color-wardian-accent)] px-4 py-1.5 text-[11px] font-bold text-black transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-md border border-wardian-border bg-[var(--color-wardian-accent)] px-4 py-1.5 text-[11px] font-bold text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
         >
           Save
         </button>

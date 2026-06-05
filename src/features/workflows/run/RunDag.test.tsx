@@ -44,7 +44,7 @@ describe('RunDag', () => {
     fitViewMock.mockClear();
   });
 
-  it('renders failed node status directly on the graph', () => {
+  it('renders human-readable node status directly on the graph', () => {
     render(
       <RunDag
         blueprint={blueprint}
@@ -57,7 +57,7 @@ describe('RunDag', () => {
 
     const task = screen.getByTestId('run-dag-node-task-1');
     expect(task).toHaveAttribute('data-status', 'failed');
-    expect(within(task).getByText('failed')).toBeVisible();
+    expect(within(task).getByText('Failed')).toBeVisible();
   });
 
   it('refits the viewport when a run blueprint loads after an empty observe surface', async () => {

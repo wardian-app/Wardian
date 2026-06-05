@@ -175,7 +175,7 @@ function compareRunRecency(left: RunSummary, right: RunSummary) {
 function MonitorSection({ title, scroll, children }: { title: string; scroll?: boolean; children: ReactNode }) {
   return (
     <section className={`min-h-0 ${scroll ? 'overflow-y-auto' : 'overflow-visible'}`}>
-      <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-muted">{title}</h3>
+      <h3 className="mb-2 text-xs font-bold text-muted">{title}</h3>
       {children}
     </section>
   );

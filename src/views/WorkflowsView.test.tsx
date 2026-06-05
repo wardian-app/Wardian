@@ -598,7 +598,7 @@ describe('WorkflowsView', () => {
     });
     render(<WorkflowsView theme="dark" />);
 
-    await waitFor(() => expect(screen.getByText('failed')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Failed')).toBeInTheDocument());
     expect(screen.getByText('Task crashed')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /save/i })).toBeNull();
   });

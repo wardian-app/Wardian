@@ -591,8 +591,8 @@ function RoleAssignmentPicker({
                 >
                   <span className="flex min-w-0 items-center justify-between gap-2">
                     <span className="truncate text-left font-bold">{agent.session_name || agent.session_id}</span>
-                    <span className="shrink-0 rounded border border-wardian-border px-1 py-0.5 text-[9px] uppercase text-muted">
-                      {agent.is_off ? 'off' : 'idle'}
+                    <span className="shrink-0 rounded border border-wardian-border px-1 py-0.5 text-[9px] text-muted">
+                      {agent.is_off ? 'Off' : 'Idle'}
                     </span>
                   </span>
                   <span className="truncate text-left text-[10px] text-muted">
@@ -620,7 +620,7 @@ function RoleAssignmentPicker({
 function PickerGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="mb-2 last:mb-0">
-      <div className="mb-1 text-[10px] font-bold uppercase text-muted">{title}</div>
+      <div className="mb-1 text-[10px] font-bold text-muted">{title}</div>
       {children}
     </div>
   );
