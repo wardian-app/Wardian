@@ -43,10 +43,11 @@ const SECTION_LABELS: Record<ActivitySection, string> = {
   attention: 'Needs attention',
   running: 'Running now',
   scheduled: 'Scheduled',
-  history: 'Recent history',
+  history: 'History',
 };
 
 const SECTION_ORDER: ActivitySection[] = ['attention', 'running', 'scheduled', 'history'];
+const HISTORY_PAGE_SIZE = 10;
 
 const toneClass: Record<ActivityTone, string> = {
   error: 'text-[var(--color-wardian-error)]',
@@ -81,7 +82,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   const loadRuns = useRunStore((state) => state.loadRuns);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [filter, setFilter] = useState<ActivityFilter>('all');
-  const [showOlderHistory, setShowOlderHistory] = useState(false);
+  const [visibleOlderHistoryCount, setVisibleOlderHistoryCount] = useState(0);
 
   useEffect(() => {
     void load();
@@ -116,7 +117,16 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   const activities = useMemo(() => buildActivities(runs, schedules), [runs, schedules]);
   const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
   const olderHistoryRuns = useMemo(() => olderHistoryRunsFor(runs, latestRuns), [runs, latestRuns]);
+  const visibleOlderHistoryLimit = Math.min(visibleOlderHistoryCount, olderHistoryRuns.length);
+  const visibleOlderHistoryRuns = useMemo(
+    () => olderHistoryRuns.slice(0, visibleOlderHistoryLimit),
+    [olderHistoryRuns, visibleOlderHistoryLimit],
+  );
+  const visibleSections = useMemo(() => sectionsForFilter(filter), [filter]);
   const agentLabels = useMemo(() => agentLabelMap(agents), [agents]);
+  const historyFilterActive = filter === 'history';
+  const hasVisibleActivity = visibleSections.some((section) => groupedActivities[section].length > 0)
+    || (historyFilterActive && olderHistoryRuns.length > 0);
 
   const failedRuns = latestRuns.filter((run) => run.status === 'failed');
   const failedRunBlueprintIds = new Set(failedRuns.map((run) => run.blueprint_id));
@@ -169,29 +179,29 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
         </div>
 
         <div className="min-h-0 overflow-y-auto p-3">
-          {SECTION_ORDER.map((section) => {
+          {visibleSections.map((section) => {
             const items = groupedActivities[section];
-            const hasOlderHistory = section === 'history' && olderHistoryRuns.length > 0;
-            if (items.length === 0 && filter !== 'all' && !hasOlderHistory) return null;
+            const hasOlderHistory = historyFilterActive && section === 'history' && olderHistoryRuns.length > 0;
             if (items.length === 0 && !hasOlderHistory) return null;
             return (
               <ActivitySection
                 key={section}
                 title={SECTION_LABELS[section]}
                 activities={items}
-                olderRuns={section === 'history' ? olderHistoryRuns : []}
-                showOlderRuns={section === 'history' && showOlderHistory}
+                olderRuns={hasOlderHistory ? visibleOlderHistoryRuns : []}
+                remainingOlderRuns={hasOlderHistory ? Math.max(0, olderHistoryRuns.length - visibleOlderHistoryRuns.length) : 0}
                 agentLabels={agentLabels}
                 onOpenRun={onOpenRun}
                 onPause={pause}
                 onResume={resume}
                 onRunNow={runNow}
                 onEditSchedule={onEditSchedule}
-                onToggleOlderRuns={() => setShowOlderHistory((value) => !value)}
+                onShowMoreOlderRuns={() => setVisibleOlderHistoryCount((count) => Math.min(olderHistoryRuns.length, count + HISTORY_PAGE_SIZE))}
+                onResetOlderRuns={() => setVisibleOlderHistoryCount(0)}
               />
             );
           })}
-          {Object.values(groupedActivities).every((items) => items.length === 0) ? (
+          {!hasVisibleActivity ? (
             <div className="select-text rounded border border-dashed border-wardian-border p-4 text-center text-xs text-muted">
               No workflow activity in this view.
             </div>
@@ -206,28 +216,31 @@ function ActivitySection({
   title,
   activities,
   olderRuns,
-  showOlderRuns,
+  remainingOlderRuns,
   agentLabels,
   onOpenRun,
   onPause,
   onResume,
   onRunNow,
   onEditSchedule,
-  onToggleOlderRuns,
+  onShowMoreOlderRuns,
+  onResetOlderRuns,
 }: {
   title: string;
   activities: WorkflowActivity[];
   olderRuns: RunSummary[];
-  showOlderRuns: boolean;
+  remainingOlderRuns: number;
   agentLabels: Record<string, string>;
   onOpenRun: (blueprintId: string, runId: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRunNow: (id: string) => void;
   onEditSchedule: (schedule: WorkflowSchedule) => void;
-  onToggleOlderRuns: () => void;
+  onShowMoreOlderRuns: () => void;
+  onResetOlderRuns: () => void;
 }) {
-  const visibleCount = activities.length + (showOlderRuns ? olderRuns.length : 0);
+  const visibleCount = activities.length + olderRuns.length;
+  const showMoreCount = Math.min(HISTORY_PAGE_SIZE, remainingOlderRuns);
 
   return (
     <section className="mb-4 last:mb-0">
@@ -248,31 +261,40 @@ function ActivitySection({
             onEditSchedule={onEditSchedule}
           />
         ))}
-        {showOlderRuns
-          ? olderRuns.map((run) => (
-            <ActivityRow
-              key={run.run_id}
-              activity={historyActivityFromRun(run)}
-              agentLabels={agentLabels}
-              testId={`workflow-history-run-${run.run_id}`}
-              onOpenRun={onOpenRun}
-              onPause={onPause}
-              onResume={onResume}
-              onRunNow={onRunNow}
-              onEditSchedule={onEditSchedule}
-            />
-          ))
-          : null}
-        {olderRuns.length > 0 ? (
-          <div className="flex items-center justify-center border-t border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2">
-            <button
-              type="button"
-              aria-expanded={showOlderRuns}
-              onClick={onToggleOlderRuns}
-              className="h-7 cursor-pointer select-none rounded border border-wardian-border px-3 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
-            >
-              {showOlderRuns ? 'Show less' : `Show older ${olderRuns.length}`}
-            </button>
+        {olderRuns.map((run) => (
+          <ActivityRow
+            key={run.run_id}
+            activity={historyActivityFromRun(run)}
+            agentLabels={agentLabels}
+            testId={`workflow-history-run-${run.run_id}`}
+            onOpenRun={onOpenRun}
+            onPause={onPause}
+            onResume={onResume}
+            onRunNow={onRunNow}
+            onEditSchedule={onEditSchedule}
+          />
+        ))}
+        {remainingOlderRuns > 0 || olderRuns.length > 0 ? (
+          <div className="flex flex-wrap items-center justify-center gap-2 border-t border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2">
+            {remainingOlderRuns > 0 ? (
+              <button
+                type="button"
+                aria-expanded={olderRuns.length > 0}
+                onClick={onShowMoreOlderRuns}
+                className="h-7 cursor-pointer select-none rounded border border-wardian-border px-3 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+              >
+                Show {showMoreCount} older
+              </button>
+            ) : null}
+            {olderRuns.length > 0 ? (
+              <button
+                type="button"
+                onClick={onResetOlderRuns}
+                className="h-7 cursor-pointer select-none rounded border border-wardian-border px-3 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+              >
+                Show less
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -505,6 +527,11 @@ function groupActivities(activities: WorkflowActivity[], filter: ActivityFilter)
   }
 
   return grouped;
+}
+
+function sectionsForFilter(filter: ActivityFilter): ActivitySection[] {
+  if (filter === 'all') return ['attention', 'running', 'scheduled'];
+  return [filter];
 }
 
 function compareActivities(left: WorkflowActivity, right: WorkflowActivity) {

@@ -45,7 +45,7 @@ describe('WorkflowMonitor', () => {
     invokeMock.mockResolvedValue([]);
   });
 
-  it('shows recent completed runs alongside active runs', () => {
+  it('shows completed runs in history', () => {
     runState.runs = [{
       run_id: 'run-1',
       blueprint_id: 'heartbeat',
@@ -55,6 +55,10 @@ describe('WorkflowMonitor', () => {
     }];
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    expect(screen.queryByTestId('workflow-activity-row-heartbeat')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
     expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('heartbeat');
     expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('Completed');
@@ -126,7 +130,7 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByRole('heading', { name: /needs attention/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /running now/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /recent history/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /^history$/i })).toBeNull();
     expect(screen.queryByRole('heading', { name: /^schedules$/i })).toBeNull();
     expect(screen.getAllByText('Passive Heartbeat')).toHaveLength(1);
   });
@@ -173,6 +177,49 @@ describe('WorkflowMonitor', () => {
     fireEvent.click(screen.getByRole('button', { name: /running/i }));
     expect(screen.getByText('Passive Heartbeat')).toBeInTheDocument();
     expect(screen.queryByText('Audit')).toBeNull();
+  });
+
+  it('shows history only when the history filter is selected', () => {
+    scheduleState.schedules = [{
+      id: 'schedule-1',
+      blueprint_id: 'heartbeat',
+      name: 'Passive Heartbeat',
+      input: {},
+      bindings: {},
+      schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+      is_paused: false,
+      next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+    }];
+    runState.runs = [
+      {
+        run_id: 'run-current',
+        blueprint_id: 'heartbeat',
+        status: 'running',
+        node_count: 2,
+        path: '/runs/current',
+      },
+      {
+        run_id: 'run-history',
+        blueprint_id: 'manual-review',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/history',
+        updated_at: '2026-06-01T12:00:00Z',
+      },
+    ];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    expect(screen.queryByRole('heading', { name: /^history$/i })).toBeNull();
+    expect(screen.queryByText('manual-review')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /running/i }));
+    expect(screen.queryByRole('heading', { name: /^history$/i })).toBeNull();
+    expect(screen.queryByText('manual-review')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+    expect(screen.getByRole('heading', { name: /^history$/i })).toBeInTheDocument();
+    expect(screen.getByText('manual-review')).toBeInTheDocument();
   });
 
   it('shows all scheduled workflows with neutral scheduled labeling', () => {
@@ -263,7 +310,7 @@ describe('WorkflowMonitor', () => {
     expect(screen.queryByText('run-old-failed')).toBeNull();
   });
 
-  it('expands recent history to show older runs on demand', () => {
+  it('expands history to show older runs on demand', () => {
     runState.runs = [
       {
         run_id: 'run-new',
@@ -284,10 +331,11 @@ describe('WorkflowMonitor', () => {
     ];
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.getByRole('heading', { name: /recent history/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^history$/i })).toBeInTheDocument();
     const latestRunId = screen.getByText('run-new');
-    const showOlderButton = screen.getByRole('button', { name: /show older/i });
+    const showOlderButton = screen.getByRole('button', { name: /show 1 older/i });
     expect(latestRunId.compareDocumentPosition(showOlderButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByText('run-old')).toBeNull();
 
@@ -302,6 +350,46 @@ describe('WorkflowMonitor', () => {
     expect(olderRunRow).toHaveTextContent('Manual only');
     expect(olderRunRow).toHaveTextContent('Default');
     expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
+  });
+
+  it('reveals older history ten runs at a time', () => {
+    runState.runs = [
+      {
+        run_id: 'run-latest',
+        blueprint_id: 'audit',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/latest',
+        updated_at: '2026-06-01T23:00:00Z',
+      },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        run_id: `run-old-${String(index + 1).padStart(2, '0')}`,
+        blueprint_id: 'audit',
+        status: 'completed' as const,
+        node_count: 2,
+        path: `/runs/old-${index + 1}`,
+        updated_at: `2026-06-01T${String(22 - index).padStart(2, '0')}:00:00Z`,
+      })),
+    ];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    expect(screen.queryByText('run-old-01')).toBeNull();
+    expect(screen.getByRole('button', { name: /show 10 older/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /show 10 older/i }));
+
+    expect(screen.getByText('run-old-01')).toBeInTheDocument();
+    expect(screen.getByText('run-old-10')).toBeInTheDocument();
+    expect(screen.queryByText('run-old-11')).toBeNull();
+    expect(screen.getByRole('button', { name: /show 2 older/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /show 2 older/i }));
+
+    expect(screen.getByText('run-old-11')).toBeInTheDocument();
+    expect(screen.getByText('run-old-12')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
   });
 
   it('renders scheduled agent assignments as agent names', async () => {
