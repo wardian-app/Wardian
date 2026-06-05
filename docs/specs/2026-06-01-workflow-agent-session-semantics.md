@@ -326,8 +326,12 @@ For each task/decision node:
      resume;
    - agent + current conversation + busy -> apply busy policy.
 4. Execute the route.
-5. Parse output using existing workflow task/decision output semantics.
-6. Release leases and update schedule/run status.
+5. For the live/open route, create a task interaction and require the target
+   agent to answer with `wardian reply <request-id> --status ... --stdin`.
+   Terminal `idle` is not completion by itself; it only enables transcript
+   marker compatibility checks. `blocked` and `failed` replies fail the node.
+6. Parse output using existing workflow task/decision output semantics.
+7. Release leases and update schedule/run status.
 
 ## 11. UI Placement
 

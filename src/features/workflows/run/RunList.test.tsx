@@ -28,7 +28,7 @@ describe('RunList', () => {
     fireEvent.click(screen.getByRole('button', { name: /open wf run run-1/i }));
 
     expect(onOpen).toHaveBeenCalledWith('wf', 'run-1');
-    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(screen.getByText('Failed')).toBeInTheDocument();
   });
 
   it('keeps run text selectable instead of making the whole card a button', () => {

@@ -25,7 +25,7 @@ export function ScheduleRow({ schedule, agentLabels = {}, onPause, onResume, onR
       className="select-text border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] align-middle last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
     >
       <td className="w-[92px] px-3 py-2">
-        <div className="flex items-center gap-2 text-[10px] font-bold uppercase text-muted">
+        <div className="flex items-center gap-2 text-[10px] font-bold text-muted">
           <span
             className="h-2 w-2 shrink-0 rounded-full"
             style={{ backgroundColor: scheduleStatusColor(schedule) }}

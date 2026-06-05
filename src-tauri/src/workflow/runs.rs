@@ -9,7 +9,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use wardian_core::engine::store::read_checkpoint;
+use wardian_core::engine::event::{Event, EventKind};
+use wardian_core::engine::store::{append_event, read_checkpoint, read_events, write_checkpoint};
 use wardian_core::engine::{Engine, RunStatus};
 use wardian_core::models::{
     AgentConfig, InvocationKind, WorkflowAssignments, WorkflowRoleAssignment,
@@ -28,7 +29,7 @@ pub struct WorkflowRunInvocation {
 }
 
 /// Scan `<runs_dir>/<id>/<run>/state.json` for runs still marked Running.
-/// Returns `(blueprint_id, run_id)` pairs for resume affordances.
+/// Returns `(blueprint_id, run_id)` pairs for diagnostics and tests.
 pub fn scan_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
     let mut interrupted = Vec::new();
     let Ok(blueprints) = std::fs::read_dir(runs_dir) else {
@@ -46,6 +47,64 @@ pub fn scan_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
                     interrupted.push((state.blueprint_id, state.run_id));
                 }
             }
+        }
+    }
+
+    interrupted
+}
+
+pub fn fail_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
+    let mut interrupted = Vec::new();
+    let Ok(blueprints) = std::fs::read_dir(runs_dir) else {
+        return interrupted;
+    };
+
+    for blueprint in blueprints.flatten().filter(|entry| entry.path().is_dir()) {
+        let Ok(runs) = std::fs::read_dir(blueprint.path()) else {
+            continue;
+        };
+
+        for run in runs.flatten().filter(|entry| entry.path().is_dir()) {
+            let run_root = run.path();
+            let Ok(Some(mut state)) = read_checkpoint(&run_root) else {
+                continue;
+            };
+            if state.status != RunStatus::Running {
+                continue;
+            }
+            let message = "workflow run interrupted by application restart".to_string();
+            let events = read_events(&run_root).unwrap_or_default();
+            let event_next_seq = events
+                .iter()
+                .map(|event| event.seq + 1)
+                .max()
+                .unwrap_or(state.next_seq);
+            let already_recorded = events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::RunFailed { error } if error == &message
+                )
+            });
+            if !already_recorded {
+                let event = Event::new(
+                    state.next_seq,
+                    EventKind::RunFailed {
+                        error: message.clone(),
+                    },
+                );
+                if append_event(&run_root, &event).is_err() {
+                    continue;
+                }
+                state.next_seq = event.seq + 1;
+            } else {
+                state.next_seq = state.next_seq.max(event_next_seq);
+            }
+            state.status = RunStatus::Failed;
+            state.failure = Some(message);
+            if write_checkpoint(&run_root, &state).is_err() {
+                continue;
+            }
+            interrupted.push((state.blueprint_id, state.run_id));
         }
     }
 
@@ -294,6 +353,7 @@ fn agent_binding_from_config(
         resume_session: config.resume_session.clone(),
         is_live,
         is_input_ready,
+        config: Some(config.clone()),
     })
 }
 
@@ -565,6 +625,70 @@ edges:
 
         let interrupted = scan_interrupted_runs(dir.path());
         assert_eq!(interrupted, vec![("wf".to_string(), "run-1".to_string())]);
+    }
+
+    #[test]
+    fn fail_interrupted_runs_marks_running_checkpoint_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("wf").join("run-1");
+        std::fs::create_dir_all(&run_root).unwrap();
+        let mut state = RunState::new("run-1", "wf");
+        state.status = RunStatus::Running;
+        wardian_core::engine::store::write_checkpoint(&run_root, &state).unwrap();
+
+        let interrupted = fail_interrupted_runs(dir.path());
+
+        assert_eq!(interrupted, vec![("wf".to_string(), "run-1".to_string())]);
+        let state = wardian_core::engine::store::read_checkpoint(&run_root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert_eq!(
+            state.failure.as_deref(),
+            Some("workflow run interrupted by application restart")
+        );
+        let events = read_events(&run_root).unwrap();
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(EventKind::RunFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn fail_interrupted_runs_does_not_duplicate_existing_restart_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("wf").join("run-1");
+        std::fs::create_dir_all(&run_root).unwrap();
+        let mut state = RunState::new("run-1", "wf");
+        state.status = RunStatus::Running;
+        wardian_core::engine::store::write_checkpoint(&run_root, &state).unwrap();
+        wardian_core::engine::store::append_event(
+            &run_root,
+            &Event::new(
+                0,
+                EventKind::RunFailed {
+                    error: "workflow run interrupted by application restart".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+
+        let interrupted = fail_interrupted_runs(dir.path());
+
+        assert_eq!(interrupted, vec![("wf".to_string(), "run-1".to_string())]);
+        let events = read_events(&run_root).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::RunFailed { .. }))
+                .count(),
+            1
+        );
+        let state = wardian_core::engine::store::read_checkpoint(&run_root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.next_seq, 1);
+        assert_eq!(state.status, RunStatus::Failed);
     }
 
     #[test]

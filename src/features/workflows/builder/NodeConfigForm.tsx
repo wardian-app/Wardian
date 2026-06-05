@@ -8,17 +8,27 @@ export function NodeConfigForm({ node, onChange }: { node: BlueprintNode; onChan
   return (
     <div className="grid gap-3" data-testid="node-config-form">
       {def.fields.map((f) => (
-        <FieldInput key={f.id} field={f} value={node.fields?.[f.id]} onChange={(v) => onChange(f.id, v)} />
+        <FieldInput key={f.id} nodeType={node.type} field={f} value={node.fields?.[f.id]} onChange={(v) => onChange(f.id, v)} />
       ))}
     </div>
   );
 }
 
-function FieldInput({ field, value, onChange }: { field: FieldDef; value: unknown; onChange: (v: unknown) => void }) {
+function FieldInput({
+  nodeType,
+  field,
+  value,
+  onChange,
+}: {
+  nodeType: string;
+  field: FieldDef;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
   const id = `field-${field.id}`;
   const str = (value as string) ?? '';
   const label = (
-    <label htmlFor={id} className="flex min-w-0 items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-muted">
+    <label htmlFor={id} className="flex min-w-0 items-center gap-1 text-[10px] font-bold text-muted">
       <span className="truncate">{field.label}</span>
       {field.required ? <span className="text-[var(--color-wardian-error)]">*</span> : null}
     </label>
@@ -71,6 +81,19 @@ function FieldInput({ field, value, onChange }: { field: FieldDef; value: unknow
         </div>
       );
     case 'number':
+      if (nodeType === 'loop' && field.id === 'max_iterations') {
+        return shell(
+          <input
+            id={id}
+            type="text"
+            inputMode="numeric"
+            value={str}
+            onChange={(e) => onChange(loopMaxIterationsValue(e.target.value))}
+            className={controlClass}
+          />,
+        );
+      }
+      return shell(<input id={id} type="number" value={str} onChange={(e) => onChange(e.target.value)} className={controlClass} />);
     case 'duration':
       return shell(<input id={id} type="number" value={str} onChange={(e) => onChange(e.target.value)} className={controlClass} />);
     case 'branch_port':
@@ -88,6 +111,11 @@ function FieldInput({ field, value, onChange }: { field: FieldDef; value: unknow
         />,
       );
   }
+}
+
+function loopMaxIterationsValue(raw: string) {
+  const trimmed = raw.trim();
+  return /^[1-9]\d*$/.test(trimmed) ? Number(trimmed) : raw;
 }
 
 function PortListEditor({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {

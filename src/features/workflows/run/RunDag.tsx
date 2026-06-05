@@ -17,6 +17,7 @@ import '@xyflow/react/dist/style.css';
 import { findNodeType } from '../builder/registry';
 import { toReactFlow } from '../builder/blueprintGraph';
 import { nodeStatusColor } from './statusColors';
+import { formatNodeStatus } from './statusLabels';
 import type { Blueprint, BlueprintNode, PortDef } from '../builder/blueprintTypes';
 import type { NodeStatusKind } from './runTypes';
 
@@ -135,9 +136,9 @@ const RunNode = memo(({ data, selected }: NodeProps<Node<RunNodeData>>) => {
       {renderHandles('target', portsFor(def?.inputs ?? []), Position.Left)}
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[9px] font-bold tracking-wide text-muted">{def?.label ?? node.type}</span>
+          <span className="text-[9px] font-bold text-muted">{def?.label ?? node.type}</span>
           <span className="rounded border px-1.5 py-0.5 text-[9px] font-bold" style={{ borderColor: data.statusColor, color: data.statusColor }}>
-            {data.status}
+            {formatNodeStatus(data.status)}
           </span>
         </div>
         <div className="truncate text-sm font-bold text-[var(--color-wardian-text)]">{node.name ?? node.id}</div>
@@ -161,11 +162,11 @@ const RunGroupNode = memo(({ data, selected }: NodeProps<Node<RunNodeData>>) => 
       {renderHandles('target', portsFor(def?.inputs ?? []), Position.Left)}
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[10px] font-bold tracking-wide text-muted">{def?.label ?? 'Loop'}</div>
+          <div className="text-[10px] font-bold text-muted">{def?.label ?? 'Loop'}</div>
           <div className="mt-1 text-sm font-bold text-[var(--color-wardian-text)]">{node.name ?? node.id}</div>
         </div>
         <span className="rounded border px-1.5 py-0.5 text-[9px] font-bold" style={{ borderColor: data.statusColor, color: data.statusColor }}>
-          {data.status}
+          {formatNodeStatus(data.status)}
         </span>
       </div>
       {renderHandles('source', outputPorts(node, def?.outputs ?? [], def?.outputs_from_field), Position.Right)}

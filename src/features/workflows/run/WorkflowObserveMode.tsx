@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { RunControls, type RunControlStatus } from '../RunControls';
 import { EventTimeline } from './EventTimeline';
 import { NodeInspector } from './NodeInspector';
 import { RunDag } from './RunDag';
 import type { RunEvent, RunStatusKind } from './runTypes';
+import { formatRunStatus } from './statusLabels';
 import { useRunStore } from './useRunStore';
 
 interface WorkflowObserveModeProps {
@@ -51,7 +53,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
         }}
       />
       <div className={`grid min-h-0 ${selectedNodeId ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
-        <section className={`grid min-h-0 ${timelineCollapsed ? 'grid-rows-[minmax(0,1fr)_44px]' : 'grid-rows-[minmax(0,1fr)_190px]'}`}>
+        <section className={`grid min-h-0 ${timelineCollapsed ? 'grid-rows-[minmax(0,1fr)_auto]' : 'grid-rows-[minmax(0,1fr)_clamp(280px,34vh,420px)]'}`}>
           <div className="min-h-0 p-3">
             <RunDag
               blueprint={blueprint}
@@ -61,26 +63,29 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
               theme={theme}
             />
           </div>
-          <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] border-t border-wardian-border bg-[var(--color-wardian-card)]">
+          <div className={`grid min-h-0 overflow-hidden border-t border-wardian-border bg-[var(--color-wardian-card)] ${timelineCollapsed ? 'grid-rows-[auto]' : 'grid-rows-[auto_minmax(0,1fr)]'}`}>
             <div className="flex min-h-[34px] items-center justify-between gap-3 border-b border-wardian-border px-3">
-              <div className="text-[10px] font-bold uppercase text-muted">Events</div>
+              <div className="text-[10px] font-bold text-muted">Events</div>
               <button
                 type="button"
-                className="cursor-pointer select-none rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                className="inline-flex h-7 w-7 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
                 onClick={() => setTimelineCollapsed((collapsed) => !collapsed)}
+                aria-label={timelineCollapsed ? 'Expand events' : 'Collapse events'}
+                title={timelineCollapsed ? 'Expand events' : 'Collapse events'}
               >
-                {timelineCollapsed ? 'Expand' : 'Collapse'}
+                {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" aria-hidden /> : <ChevronDown className="h-3.5 w-3.5" aria-hidden />}
               </button>
             </div>
-            <div className="min-h-0 p-2">
-              <EventTimeline
-                events={events}
-                scrubIndex={scrubIndex}
-                onScrub={setScrubIndex}
-                onSelectNode={setSelectedNodeId}
-                collapsed={timelineCollapsed}
-              />
-            </div>
+            {timelineCollapsed ? null : (
+              <div className="min-h-0 p-2">
+                <EventTimeline
+                  events={events}
+                  scrubIndex={scrubIndex}
+                  onScrub={setScrubIndex}
+                  onSelectNode={setSelectedNodeId}
+                />
+              </div>
+            )}
           </div>
         </section>
         {selectedNodeId ? (
@@ -119,7 +124,7 @@ function ObserveRunHeader({ state, events, activeBlueprintPath, controlsStatus, 
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <div className="truncate text-sm font-bold text-[var(--color-wardian-text)]">{state?.run_id ?? 'No run selected'}</div>
-            {state?.status ? <span className="shrink-0 rounded border border-wardian-border px-1.5 py-0.5 text-[9px] font-bold uppercase text-muted">{state.status}</span> : null}
+            {state?.status ? <span className="shrink-0 rounded border border-wardian-border px-1.5 py-0.5 text-[9px] font-bold text-muted">{formatRunStatus(state.status)}</span> : null}
           </div>
           <div className="mt-0.5 truncate text-[10px] font-mono text-muted">{state?.blueprint_id ?? 'Open a run from Runs or Monitor'}</div>
         </div>
@@ -147,7 +152,7 @@ function ObserveRunHeader({ state, events, activeBlueprintPath, controlsStatus, 
 function PulseLabel({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <span className="font-bold uppercase text-[var(--color-wardian-text-muted)]">{label}</span>
+      <span className="font-bold text-[var(--color-wardian-text-muted)]">{label}</span>
       <span className="ml-1 font-mono text-[var(--color-wardian-text)]">{value}</span>
     </div>
   );

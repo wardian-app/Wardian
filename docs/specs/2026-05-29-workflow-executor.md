@@ -6,7 +6,7 @@
 
 > **Structure note:** the workflow engine/workflow logic lives as modules in `wardian-core` (`wardian_core::engine`, `wardian_core::workflow`). The live executor lives in `src-tauri` because it owns the agent runtime. Read "executor" as a `src-tauri` impl of the `wardian_core::engine::StepExecutor` trait.
 
-> **Implementation note (5a):** shipped the `src-tauri` live executor, headless/fake runner boundary, output and decision parsing, agent resolution, shell/script/notify/state ops, run/resume/approve/cancel commands, startup interrupted-run logging, and mock-provider end-to-end validation. Deferred scope remains live named-agent routing, visible grouped workers, per-node worktrees, scheduled/event triggers, per-run session continuity, old workflow system retirement, and UI unification.
+> **Implementation note (5a):** shipped the `src-tauri` live executor, headless/fake runner boundary, output and decision parsing, agent resolution, shell/script/notify/state ops, run/resume/approve/cancel commands, startup interrupted-run reconciliation, and mock-provider end-to-end validation. Deferred scope remains live named-agent routing, visible grouped workers, per-node worktrees, scheduled/event triggers, per-run session continuity, old workflow system retirement, and UI unification.
 
 ## 1. Problem & goal
 
@@ -50,9 +50,9 @@ New module `src-tauri/src/workflow/` with `LiveStepExecutor` implementing `wardi
 
 - **`workflow_run(path)`** — load + validate the blueprint (refuse to run if invalid), build a `LiveStepExecutor`, generate a `run_id`, set `run_root = paths::workflow_run_dir(bp.id, run_id)`, and drive `Engine::start_with_id` in a **background tokio task**. Returns the `run_id` immediately; the run proceeds async, writing `events.jsonl` + `state.json` that **Run View (3b) already observes live**.
 - **Approval** — when the engine reaches `AwaitingApproval` it returns and the status persists. `workflow_approve(id, run, granted, note)` resumes via `Engine::grant_approval` / `reject_approval` in a new background task.
-- **`workflow_resume(id, run)`** — resume an interrupted/paused run via `Engine::resume` (completed nodes skipped).
+- **`workflow_resume(id, run)`** — resume an explicitly selected durable run via `Engine::resume` (completed nodes skipped).
 - **`workflow_cancel(id, run)`** — abort a live run (cancel the background task; mark the run failed/stopped with a reason).
-- **Crash recovery** — on app start, scan `logs/workflows/**` for runs still marked `Running` (their workers are gone) and mark them **interrupted**; Run View surfaces a **Resume** affordance that calls `workflow_resume`. No auto-resume (no surprise re-execution of side-effecting steps at startup).
+- **Crash recovery** — on app start, scan `logs/workflows/**` for runs still marked `Running` and mark them **failed** with an interruption reason. The new app process no longer owns the old background tasks or provider processes, so startup does not silently resume or leave those runs displayed as active.
 
 ## 6. Testing
 

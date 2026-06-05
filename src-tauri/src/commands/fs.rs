@@ -604,7 +604,9 @@ mod tests {
         let file_path = temp.path().join("notes");
         fs::write(&file_path, "test").expect("write file");
 
-        assert!(terminal_link_target_exists(file_path.to_string_lossy().into_owned()));
+        assert!(terminal_link_target_exists(
+            file_path.to_string_lossy().into_owned()
+        ));
         assert!(terminal_link_target_exists(
             temp.path().to_string_lossy().into_owned()
         ));

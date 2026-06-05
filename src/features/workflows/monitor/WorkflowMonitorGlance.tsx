@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { ExternalLink, Pause, Play, RotateCcw } from 'lucide-react';
 import type { WorkflowSchedule } from '../../../types/workflow';
 import type { RunStatusKind, RunSummary } from '../run/runTypes';
+import { formatRunStatus } from '../run/statusLabels';
 import { cadenceLabel, nextRunLabel, scheduleStatusColor, scheduleStatusLabel } from './scheduleStatus';
 
 interface GlanceProps {
@@ -155,7 +156,7 @@ function StatusChip({ label, count, tone }: { label: string; count: number; tone
 
 function SectionHeading({ title, count }: { title: string; count: number }) {
   return (
-    <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-wide text-muted">
+    <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-muted">
       <h3>{title}</h3>
       <span className="font-mono text-[9px]">{count}</span>
     </div>
@@ -179,7 +180,7 @@ function RunCard({ run, onOpenRun }: { run: RunSummary; onOpenRun: (blueprintId:
       <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: RUN_STATUS_COLOR[run.status] }} aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="truncate text-[11px] font-bold text-[var(--color-wardian-text)]">{run.blueprint_id}</div>
-        <div className="truncate text-[9px] font-mono text-muted">{run.status.replace('_', ' ')} · {run.run_id}</div>
+        <div className="truncate text-[9px] font-mono text-muted">{formatRunStatus(run.status)} · {run.run_id}</div>
       </div>
       <button
         type="button"

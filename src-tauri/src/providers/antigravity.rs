@@ -113,6 +113,15 @@ impl AgentProvider for AntigravityProvider {
                     for name in ["agy.exe", "agy.cmd", "agy.bat", "agy"] {
                         let candidate = path.join(name);
                         if candidate.is_file() {
+                            if !name.eq_ignore_ascii_case("agy.exe") {
+                                if let Some(launch) =
+                                    crate::providers::npm::node_launch_from_npm_cmd_shim(
+                                        &path, "agy",
+                                    )
+                                {
+                                    return launch;
+                                }
+                            }
                             return (candidate.to_string_lossy().to_string(), vec![]);
                         }
                     }
@@ -275,6 +284,45 @@ mod tests {
     #[test]
     fn instruction_filename_is_agents_md() {
         assert_eq!(make_provider().get_instruction_filename(), "AGENTS.md");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_resolution_prefers_node_entrypoint_over_cmd_shim() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().unwrap();
+        let agy_js = temp
+            .path()
+            .join("node_modules")
+            .join("@google")
+            .join("antigravity")
+            .join("bin")
+            .join("agy.js");
+        std::fs::create_dir_all(agy_js.parent().unwrap()).unwrap();
+        std::fs::write(
+            temp.path().join("agy.cmd"),
+            r#"@ECHO off
+SET dp0=%~dp0
+"%dp0%\node.exe" "%dp0%\node_modules\@google\antigravity\bin\agy.js" %*
+"#,
+        )
+        .unwrap();
+        std::fs::write(&agy_js, "console.log('agy')").unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", temp.path());
+        }
+
+        let (executable, args) = AntigravityProvider::new().get_executable();
+
+        assert_eq!(executable, "node");
+        assert_eq!(args, vec![agy_js.to_string_lossy().to_string()]);
+
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     #[test]

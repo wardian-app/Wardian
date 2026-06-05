@@ -214,10 +214,10 @@ pub fn run() {
             start_metrics_supervisor(app.handle().clone());
 
             if let Some(runs_dir) = wardian_core::paths::workflow_runs_dir() {
-                let interrupted = crate::workflow::runs::scan_interrupted_runs(&runs_dir);
+                let interrupted = crate::workflow::runs::fail_interrupted_runs(&runs_dir);
                 if !interrupted.is_empty() {
                     crate::utils::logging::log_debug(&format!(
-                        "[workflow] {} interrupted run(s) on startup: {:?}",
+                        "[workflow] marked {} interrupted run(s) failed on startup: {:?}",
                         interrupted.len(),
                         interrupted
                     ));

@@ -16,22 +16,28 @@ This document captures the practical runtime differences between Wardian's suppo
 - Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
 - Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
+- On Windows, provider adapters should prefer direct native executables or a
+  direct `node <script.js>` launch resolved from an npm `.cmd` shim. Shell-wrap
+  only when shell dispatch is required, such as extensionless OpenCode shims.
 
 ## Quick Comparison
 
 | Provider | Working root | Instruction file | Skill model | Session identity |
 | --- | --- | --- | --- | --- |
-| Gemini | Real target workspace | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
+| Gemini | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 | Antigravity | Real target workspace | `AGENTS.md` | `--add-dir` roots expose Wardian context | Discovered from conversation cache and transcript path |
 | Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
-| Codex | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
-| OpenCode | Real target workspace | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
+| Codex | Real target workspace via `--cd`; habitat-backed `CODEX_HOME` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
+| OpenCode | Habitat command root with real workspace passed as `--dir` | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
 
 ## Gemini
 
 ### Working-root model
 
-Gemini runs directly in the real target workspace. Wardian does not project a habitat workspace for Gemini.
+Gemini headless runs use a projected habitat workspace so shared, class, and
+agent instructions and skills can be materialized outside Wardian's hidden state
+tree. The real target workspace remains the author-facing workspace, but the
+provider process runs from the habitat workspace path during headless execution.
 
 ### Instruction and skill discovery
 
@@ -47,8 +53,8 @@ Gemini runs directly in the real target workspace. Wardian does not project a ha
 
 ### Practical implications
 
-- Gemini is the least habitat-dependent provider.
-- Regressions here are usually about CLI patch drift, include-directory handling, or event parsing, not workspace projection.
+- Gemini regressions are usually about habitat projection, CLI patch drift,
+  include-directory handling, or event parsing.
 
 ## Antigravity
 
@@ -204,7 +210,7 @@ Codex commentary events like `agent_message` should not be used as hard status t
 
 ### Working-root model
 
-OpenCode runs directly in the real target workspace. Wardian does not use a projected workspace for OpenCode.
+OpenCode uses a Wardian habitat as the provider command root when projected context is available. The real target workspace remains the project directory and is passed to `opencode run` explicitly with `--dir`.
 
 ### Instruction and skill discovery
 
@@ -224,11 +230,15 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 
 ### Practical implications
 
-- OpenCode is closer to Gemini than Codex on workspace handling: it wants the real repo as `cwd`.
+- OpenCode is closer to Gemini than Codex on workspace handling: Wardian launches from the habitat command root while passing the real repo with `--dir`.
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `OPENCODE_CONFIG_CONTENT` first.
 - If interactive spawn works but telemetry is thin, that is expected today; OpenCode does not expose one stable per-session JSONL path the way Claude and Codex do.
-- On Windows, Wardian should prefer a native `opencode.exe` or packaged OpenCode binary over `.cmd`/script shims during PATH resolution. If only a shim exists, interactive launch must wrap it through `cmd /d /c ...` because direct PTY spawning does not get shell dispatch semantics.
+- On Windows, Wardian should prefer a native `opencode.exe` or packaged
+  OpenCode binary over `.cmd`/script shims during PATH resolution. If only an
+  extensionless or script shim exists, interactive and headless launch must wrap
+  it through `cmd /d /c ...` because direct process spawning does not get shell
+  dispatch semantics.
 
 ## Choosing Where to Debug
 

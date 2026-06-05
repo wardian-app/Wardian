@@ -5,6 +5,7 @@ pub mod codex;
 pub mod factory;
 pub mod gemini;
 pub mod mock;
+pub mod npm;
 pub mod opencode;
 pub mod readiness;
 pub mod transcript;

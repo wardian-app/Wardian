@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { RefreshCw, X } from 'lucide-react';
 import { BlueprintSelector } from '../features/workflows/BlueprintSelector';
 import { RunLaunchDialog, type RunInputParam } from '../features/workflows/RunLaunchDialog';
 import { BuilderCanvas } from '../features/workflows/builder/BuilderCanvas';
@@ -286,10 +287,12 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           {mode !== 'edit' ? (
             <button
               type="button"
-              className="cursor-pointer select-none rounded border border-wardian-border px-3 py-1.5 text-xs font-bold text-muted transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+              className="inline-flex h-8 w-8 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
               onClick={() => void refreshCurrentMode()}
+              aria-label="Refresh workflow view"
+              title="Refresh"
             >
-              Refresh
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden />
             </button>
           ) : null}
           <button
@@ -336,9 +339,11 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
               <button
                 type="button"
                 onClick={() => void loadRuns()}
-                className="cursor-pointer select-none rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                className="inline-flex h-7 w-7 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                aria-label="Refresh runs"
+                title="Refresh"
               >
-                Refresh
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
             <RunList
@@ -504,13 +509,13 @@ function WorkflowEditMode({ theme, addNodeRequest }: WorkflowEditModeProps) {
 
   const contextMenuItems: ContextMenuItem[] = contextMenu?.type === 'node'
     ? [
-        { label: 'Duplicate Node', onClick: () => duplicateNode(contextMenu.targetId) },
-        { label: 'Copy Node ID', onClick: () => copyNodeId(contextMenu.targetId) },
+        { label: 'Duplicate node', onClick: () => duplicateNode(contextMenu.targetId) },
+        { label: 'Copy node ID', onClick: () => copyNodeId(contextMenu.targetId) },
         { divider: true },
-        { label: 'Delete Node', danger: true, onClick: () => deleteNode(contextMenu.targetId) },
+        { label: 'Delete node', danger: true, onClick: () => deleteNode(contextMenu.targetId) },
       ]
     : [
-        { label: 'Delete Connection', danger: true, onClick: () => deleteEdge(contextMenu?.targetId ?? '') },
+        { label: 'Delete connection', danger: true, onClick: () => deleteEdge(contextMenu?.targetId ?? '') },
       ];
 
   return (
@@ -569,7 +574,7 @@ function WorkflowEditMode({ theme, addNodeRequest }: WorkflowEditModeProps) {
                   {selectedNode.name ?? selectedNodeDef?.label ?? selectedNode.id}
                 </div>
                 <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-muted">
-                  <span className="shrink-0 rounded border border-wardian-border px-1.5 py-0.5 font-bold uppercase tracking-wide">
+                  <span className="shrink-0 font-bold text-[var(--color-wardian-text-muted)]">
                     {selectedNodeDef?.label ?? selectedNode.type}
                   </span>
                   <button
@@ -584,10 +589,12 @@ function WorkflowEditMode({ theme, addNodeRequest }: WorkflowEditModeProps) {
               </div>
               <button
                 type="button"
-                className="rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                className="inline-flex h-7 w-7 items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
                 onClick={() => setSelectedNodeId(null)}
+                aria-label="Close node inspector"
+                title="Close"
               >
-                Close
+                <X className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
             <div className="grid min-h-0 gap-4 overflow-y-auto p-3">

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { X } from 'lucide-react';
 import { nodeTypes } from './registry';
 import { summarizeNodeType } from './nodeSummary';
 import type { NodeTypeDef } from './blueprintTypes';
@@ -27,8 +28,14 @@ export function NodeLibrary({ mode, onAdd, onClose }: NodeLibraryProps) {
             <div className="mt-0.5 text-[10px] text-muted">Registry-backed workflow blocks</div>
           </div>
           {onClose ? (
-            <button type="button" className="rounded border border-wardian-border px-2 py-1 text-xs text-muted" onClick={onClose}>
-              Close
+            <button
+              type="button"
+              className="inline-flex h-7 w-7 items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+              onClick={onClose}
+              aria-label="Close node library"
+              title="Close"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
             </button>
           ) : null}
         </div>
@@ -48,7 +55,7 @@ export function NodeLibrary({ mode, onAdd, onClose }: NodeLibraryProps) {
           <div className="grid gap-3">
             {groups.map(([category, defs]) => (
               <section key={category}>
-                <div className="mb-2 text-[10px] font-bold uppercase tracking-wide text-muted">{category}</div>
+                <div className="mb-2 text-[10px] font-bold text-muted">{category}</div>
                 <div className={mode === 'popover' ? 'grid grid-cols-2 gap-2' : 'grid gap-2'}>
                   {defs.map((def) => (
                     <NodeLibraryCard key={def.id} def={def} onAdd={onAdd} />
@@ -77,7 +84,7 @@ function NodeLibraryCard({ def, onAdd }: { def: NodeTypeDef; onAdd: (def: NodeTy
           <div className="truncate text-sm font-bold text-[var(--color-wardian-text)]">{def.label}</div>
           <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">{def.description}</div>
         </div>
-        <span className="shrink-0 rounded border border-wardian-border px-1.5 py-0.5 text-[9px] font-bold text-muted">{def.kind}</span>
+        <span className="shrink-0 text-[10px] font-bold text-muted">{def.kind}</span>
       </div>
       <div className="mt-3 grid gap-1.5 text-[10px] text-muted">
         {summary.required.length > 0 ? <div>Requires {summary.required.join(', ')}</div> : <div>No required fields</div>}

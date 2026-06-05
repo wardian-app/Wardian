@@ -1,5 +1,6 @@
 import { ExternalLink } from 'lucide-react';
 import type { RunStatusKind, RunSummary } from './runTypes';
+import { formatRunStatus } from './statusLabels';
 
 interface RunListProps {
   runs: RunSummary[];
@@ -51,7 +52,7 @@ export function RunList({ runs, selectedRunId, onOpen }: RunListProps) {
                     backgroundColor: `color-mix(in srgb, ${color}, transparent 86%)`,
                   }}
                 >
-                  {run.status}
+                  {formatRunStatus(run.status)}
                 </span>
                 <button
                   type="button"

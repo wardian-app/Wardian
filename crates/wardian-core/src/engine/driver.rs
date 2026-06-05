@@ -354,29 +354,12 @@ fn eval_branch(s: &RunState, node: &Node) -> crate::engine::Result<String> {
         .get("condition")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let truthy = lookup_truthy(&s.registry, cond);
+    let truthy = core::lookup_truthy(&s.registry, cond);
     Ok(if truthy {
         "on_true".into()
     } else {
         "on_false".into()
     })
-}
-
-fn lookup_truthy(registry: &serde_json::Value, path: &str) -> bool {
-    let mut cur = registry;
-    for seg in path.split('.') {
-        match cur.get(seg) {
-            Some(v) => cur = v,
-            None => return false,
-        }
-    }
-    match cur {
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::Null => false,
-        serde_json::Value::String(s) => !s.is_empty(),
-        serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
-        _ => true,
-    }
 }
 
 /// Interpolate the node's string fields and call the matching executor method.

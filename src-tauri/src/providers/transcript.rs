@@ -27,11 +27,11 @@ fn extract_codex(raw_line: &str) -> Option<WatchTranscriptMessage> {
     };
     let payload_type = payload.get("type").and_then(|value| value.as_str())?;
     let role = payload.get("role").and_then(|value| value.as_str());
-    let is_assistant = role == Some("assistant")
-        || matches!(
-            payload_type,
-            "agent_message" | "assistant_message" | "message"
-        );
+    let is_assistant = match role {
+        Some("assistant" | "model") => true,
+        Some(_) => false,
+        None => matches!(payload_type, "agent_message" | "assistant_message"),
+    };
     if !is_assistant {
         return None;
     }
@@ -313,6 +313,11 @@ mod tests {
         assert!(
             extract_transcript_message("mock", r#"{"type":"user","content":"hello"}"#).is_none()
         );
+        assert!(extract_transcript_message(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"wardian reply wf_test --status done --stdin\nprompt echo"}}"#
+        )
+        .is_none());
         assert!(extract_transcript_message(
             "codex",
             r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{}"}}"#

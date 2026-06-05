@@ -559,14 +559,14 @@ function RoleAssignmentPicker({
         autoFocus
       />
       <PickerGroup title="Temporary agents">
-        <div className="grid grid-cols-2 gap-1">
+        <div data-testid="temporary-provider-options" className="flex min-w-0 flex-wrap gap-1">
           {providerOptions.map((option) => {
             const target = providerTarget(option.value);
             return (
               <button
                 key={option.value}
                 type="button"
-                className={pickerButtonClass(target === selectedTarget)}
+                className={`${pickerButtonClass(target === selectedTarget)} max-w-full flex-[1_1_8.75rem]`}
                 disabled={!option.available}
                 onClick={() => onSelect(target)}
               >
@@ -591,8 +591,8 @@ function RoleAssignmentPicker({
                 >
                   <span className="flex min-w-0 items-center justify-between gap-2">
                     <span className="truncate text-left font-bold">{agent.session_name || agent.session_id}</span>
-                    <span className="shrink-0 rounded border border-wardian-border px-1 py-0.5 text-[9px] uppercase text-muted">
-                      {agent.is_off ? 'off' : 'idle'}
+                    <span className="shrink-0 rounded border border-wardian-border px-1 py-0.5 text-[9px] text-muted">
+                      {agent.is_off ? 'Off' : 'Idle'}
                     </span>
                   </span>
                   <span className="truncate text-left text-[10px] text-muted">
@@ -620,14 +620,14 @@ function RoleAssignmentPicker({
 function PickerGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="mb-2 last:mb-0">
-      <div className="mb-1 text-[10px] font-bold uppercase text-muted">{title}</div>
+      <div className="mb-1 text-[10px] font-bold text-muted">{title}</div>
       {children}
     </div>
   );
 }
 
 function pickerButtonClass(selected: boolean) {
-  return `min-w-0 rounded border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50 ${
+  return `flex min-w-0 flex-col overflow-hidden rounded border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50 ${
     selected
       ? 'border-[var(--color-wardian-accent)] bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)] text-primary'
       : 'border-wardian-border bg-[var(--color-wardian-bg)] text-primary hover:border-[var(--color-wardian-accent)]'

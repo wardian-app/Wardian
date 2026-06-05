@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use wardian_core::models::workflow::{AgentConversationMode, BusyPolicy};
+use wardian_core::models::AgentConfig;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AgentBinding {
     pub session_id: String,
     pub provider: String,
@@ -10,6 +11,7 @@ pub struct AgentBinding {
     pub resume_session: Option<String>,
     pub is_live: bool,
     pub is_input_ready: bool,
+    pub config: Option<AgentConfig>,
 }
 
 /// A resolved agent reference ready to run headlessly.
@@ -19,6 +21,7 @@ pub struct ResolvedAgent {
     pub cwd: PathBuf,
     pub session_id: String,
     pub resume_session: Option<String>,
+    pub config: Option<AgentConfig>,
     /// True for role:/class:/ephemeral workers; false for explicit live agent
     /// names whose live routing is deferred beyond 5a.
     pub is_ephemeral: bool,
@@ -108,6 +111,7 @@ pub fn resolve_agent_with_catalog(
                 cwd: workspace.to_path_buf(),
                 session_id: String::new(),
                 resume_session: None,
+                config: None,
                 is_ephemeral,
                 is_live: false,
                 is_input_ready: false,
@@ -120,6 +124,7 @@ pub fn resolve_agent_with_catalog(
                 cwd: agent.cwd.clone(),
                 session_id: agent.session_id.clone(),
                 resume_session: agent.resume_session.clone(),
+                config: agent.config.clone(),
                 is_ephemeral: false,
                 is_live: agent.is_live,
                 is_input_ready: agent.is_input_ready,
@@ -133,6 +138,7 @@ pub fn resolve_agent_with_catalog(
             cwd: agent.cwd.clone(),
             session_id: agent.session_id.clone(),
             resume_session: agent.resume_session.clone(),
+            config: agent.config.clone(),
             is_ephemeral: false,
             is_live: agent.is_live,
             is_input_ready: agent.is_input_ready,
@@ -144,6 +150,7 @@ pub fn resolve_agent_with_catalog(
         cwd: workspace.to_path_buf(),
         session_id: String::new(),
         resume_session: None,
+        config: None,
         is_ephemeral,
         is_live: false,
         is_input_ready: false,
@@ -210,6 +217,7 @@ mod tests {
                 resume_session: Some("provider-session-456".to_string()),
                 is_live: true,
                 is_input_ready: true,
+                config: None,
             },
         );
 
@@ -244,6 +252,7 @@ mod tests {
                 resume_session: Some("provider-session-456".to_string()),
                 is_live: false,
                 is_input_ready: false,
+                config: None,
             },
         );
 

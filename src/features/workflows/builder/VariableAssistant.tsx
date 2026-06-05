@@ -20,7 +20,7 @@ export const VariableAssistant = memo(({ blueprint, selectedNodeId }: VariableAs
   return (
     <div className="grid gap-1.5">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] font-bold uppercase tracking-wide text-muted">Insert variable</div>
+        <div className="text-[10px] font-bold text-muted">Insert variable</div>
         <div className="text-[9px] font-mono text-muted">{variables.length}</div>
       </div>
       <div className="grid gap-1">

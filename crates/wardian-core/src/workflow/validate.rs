@@ -31,6 +31,15 @@ impl Diagnostic {
             node: node.map(str::to_string),
         }
     }
+
+    fn warning(code: &'static str, message: impl Into<String>, node: Option<&str>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            code,
+            message: message.into(),
+            node: node.map(str::to_string),
+        }
+    }
 }
 
 /// The result of validating a blueprint.
@@ -101,6 +110,16 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
                 ));
             }
             if let Some(value) = present {
+                if node.r#type == "loop" && field.id == "max_iterations" {
+                    if let Some(msg) = check_loop_max_iterations(value) {
+                        report.diagnostics.push(Diagnostic::warning(
+                            "invalid_loop_max_iterations",
+                            format!("node `{}` field `max_iterations`: {}", node.id, msg),
+                            Some(&node.id),
+                        ));
+                    }
+                    continue;
+                }
                 if let Some(msg) = check_value_kind(&field.field_type, value) {
                     report.diagnostics.push(Diagnostic::error(
                         "invalid_field_value",
@@ -154,6 +173,28 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
     }
 
     report
+}
+
+fn check_loop_max_iterations(value: &serde_json::Value) -> Option<String> {
+    if let Some(n) = value.as_u64() {
+        return (n == 0).then_some("expected a positive integer or a {{...}} template".into());
+    }
+
+    if let Some(template) = value.as_str() {
+        return (!is_single_template(template))
+            .then_some("expected a positive integer or a single {{...}} template".into());
+    }
+
+    Some("expected a positive integer or a {{...}} template".into())
+}
+
+fn is_single_template(value: &str) -> bool {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("{{") || !trimmed.ends_with("}}") {
+        return false;
+    }
+    let inner = trimmed[2..trimmed.len() - 2].trim();
+    !inner.is_empty() && !inner.contains("{{") && !inner.contains("}}")
 }
 
 /// Returns a human message when `value` cannot be the given field type.
@@ -232,6 +273,19 @@ mod tests {
         Node {
             id: id.into(),
             r#type: "task".into(),
+            name: None,
+            parent: None,
+            fields,
+            position: None,
+        }
+    }
+
+    fn loop_node(max_iterations: serde_json::Value) -> Node {
+        let mut fields = serde_json::Map::new();
+        fields.insert("max_iterations".into(), max_iterations);
+        Node {
+            id: "lp".into(),
+            r#type: "loop".into(),
             name: None,
             parent: None,
             fields,
@@ -352,5 +406,58 @@ mod tests {
         let bp = base(vec![task("plan"), child], vec![]);
         let report = validate(&bp);
         assert!(report.errors().iter().any(|d| d.code == "invalid_parent"));
+    }
+
+    #[test]
+    fn loop_max_iterations_accepts_template_string() {
+        let bp = base(
+            vec![loop_node(serde_json::json!(
+                "{{trigger.output.max_cycles}}"
+            ))],
+            vec![],
+        );
+
+        let report = validate(&bp);
+
+        assert!(
+            report.is_valid(),
+            "unexpected errors: {:?}",
+            report.errors()
+        );
+        assert!(!report
+            .diagnostics
+            .iter()
+            .any(|d| { d.code == "invalid_field_value" && d.node.as_deref() == Some("lp") }));
+    }
+
+    #[test]
+    fn loop_max_iterations_warns_for_malformed_template_string() {
+        let bp = base(
+            vec![loop_node(serde_json::json!("{{trigger.output.max_cycles"))],
+            vec![],
+        );
+
+        let report = validate(&bp);
+
+        assert!(report.diagnostics.iter().any(|d| {
+            d.severity == Severity::Warning
+                && d.code == "invalid_loop_max_iterations"
+                && d.node.as_deref() == Some("lp")
+        }));
+        assert!(report.is_valid());
+    }
+
+    #[test]
+    fn loop_max_iterations_warns_for_non_positive_literal() {
+        let bp = base(vec![loop_node(serde_json::json!(0))], vec![]);
+
+        let report = validate(&bp);
+
+        assert!(report.diagnostics.iter().any(|d| {
+            d.severity == Severity::Warning
+                && d.code == "invalid_loop_max_iterations"
+                && d.node.as_deref() == Some("lp")
+        }));
+        assert!(report.is_valid());
     }
 }

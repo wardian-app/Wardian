@@ -136,6 +136,12 @@ impl AgentProvider for ClaudeProvider {
                     });
 
                 for path in std::env::split_paths(&paths) {
+                    if let Some(launch) =
+                        crate::providers::npm::node_launch_from_npm_cmd_shim(&path, "claude")
+                    {
+                        return launch;
+                    }
+
                     let direct = path.join("claude");
                     if direct.exists() {
                         return (direct.to_string_lossy().to_string(), vec![]);
@@ -150,7 +156,14 @@ impl AgentProvider for ClaudeProvider {
             }
 
             if let Some(appdata) = dirs::data_dir() {
-                let npm_claude = appdata.join("npm").join("claude.cmd");
+                let npm_dir = appdata.join("npm");
+                if let Some(launch) =
+                    crate::providers::npm::node_launch_from_npm_cmd_shim(&npm_dir, "claude")
+                {
+                    return launch;
+                }
+
+                let npm_claude = npm_dir.join("claude.cmd");
                 if npm_claude.exists() {
                     return (npm_claude.to_string_lossy().to_string(), vec![]);
                 }
@@ -392,6 +405,44 @@ mod tests {
     fn instruction_filename_is_claude_md() {
         let p = make_provider();
         assert_eq!(p.get_instruction_filename(), "CLAUDE.md");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_resolution_prefers_node_entrypoint_over_cmd_shim() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let previous_path = std::env::var_os("PATH");
+        let temp = tempfile::tempdir().unwrap();
+        let claude_js = temp
+            .path()
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("cli.js");
+        std::fs::create_dir_all(claude_js.parent().unwrap()).unwrap();
+        std::fs::write(
+            temp.path().join("claude.cmd"),
+            r#"@ECHO off
+SET dp0=%~dp0
+"%dp0%\node.exe" "%dp0%\node_modules\@anthropic-ai\claude-code\cli.js" %*
+"#,
+        )
+        .unwrap();
+        std::fs::write(&claude_js, "console.log('claude')").unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", temp.path());
+        }
+
+        let (executable, args) = ClaudeProvider::new().get_executable();
+
+        assert_eq!(executable, "node");
+        assert_eq!(args, vec![claude_js.to_string_lossy().to_string()]);
+
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     #[test]

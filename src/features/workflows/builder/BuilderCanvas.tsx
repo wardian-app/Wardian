@@ -195,7 +195,7 @@ const BuilderNode = memo(({ data, selected }: NodeProps<Node<BuilderNodeData>>) 
       {renderHandles('target', portsFor(def?.inputs ?? []), Position.Left)}
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[9px] font-bold tracking-wide text-muted">{def?.label ?? node.type}</span>
+          <span className="text-[9px] font-bold text-muted">{def?.label ?? node.type}</span>
           {hasDiagnostics && (
             <span className="text-[9px] font-bold text-[var(--color-wardian-error)]">Error</span>
           )}
@@ -236,7 +236,7 @@ const LoopGroupNode = memo(({ data, selected }: NodeProps<Node<BuilderNodeData>>
           : 'border-wardian-border'
     }`}>
       {renderHandles('target', portsFor(def?.inputs ?? []), Position.Left)}
-      <div className="text-[10px] font-bold tracking-wide text-muted">{def?.label ?? 'Loop'}</div>
+      <div className="text-[10px] font-bold text-muted">{def?.label ?? 'Loop'}</div>
       <div className="mt-1 text-sm font-bold text-[var(--color-wardian-text)]">{node.name ?? node.id}</div>
       {renderHandles('source', outputPorts(node, def?.outputs ?? [], def?.outputs_from_field), Position.Right)}
     </div>

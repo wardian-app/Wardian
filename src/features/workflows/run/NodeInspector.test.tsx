@@ -28,8 +28,40 @@ describe('NodeInspector', () => {
     render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
 
     expect(screen.getByText('a')).toBeInTheDocument();
-    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(screen.getByText('Failed')).toBeInTheDocument();
     expect(screen.getByText(/"ok": true/)).toBeInTheDocument();
     expect(screen.getByText('boom')).toBeInTheDocument();
+  });
+
+  it('formats timestamp fields as local display values', () => {
+    const timestamp = '2026-06-05T03:03:35.136Z';
+    const expected = new Date(timestamp).toLocaleString();
+    render(
+      <NodeInspector
+        selectedNodeId="a"
+        state={state}
+        currentStatuses={{ a: 'completed' }}
+        events={[
+          { seq: 0, ts: 't0', kind: 'node_completed', node: 'a', output: { timestamp } },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText(new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))).toBeInTheDocument();
+    expect(screen.queryByText(/2026-06-05T03:03:35/)).toBeNull();
+  });
+
+  it('allows selecting text in the inspector', () => {
+    render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
+
+    expect(screen.getByText('boom').closest('.select-text')).not.toBeNull();
+  });
+
+  it('uses regular capitalization for inspector headings', () => {
+    render(<NodeInspector selectedNodeId="a" state={state} currentStatuses={{ a: 'failed' }} events={events} />);
+
+    expect(screen.getByText('Node')).not.toHaveClass('uppercase');
+    expect(screen.getByText('Output')).not.toHaveClass('uppercase');
+    expect(screen.getByText('Failure')).not.toHaveClass('uppercase');
   });
 });
