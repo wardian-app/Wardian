@@ -233,18 +233,7 @@ function ActivitySection({
     <section className="mb-4 last:mb-0">
       <div className="mb-2 flex items-center justify-between gap-3">
         <h4 className="text-xs font-bold text-muted">{title}</h4>
-        <div className="flex items-center gap-2">
-          {olderRuns.length > 0 ? (
-            <button
-              type="button"
-              onClick={onToggleOlderRuns}
-              className="h-6 cursor-pointer select-none rounded border border-wardian-border px-2 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
-            >
-              {showOlderRuns ? 'Show less' : `Show older ${olderRuns.length}`}
-            </button>
-          ) : null}
-          <span className="font-mono text-[10px] text-muted">{visibleCount}</span>
-        </div>
+        <span className="font-mono text-[10px] text-muted">{visibleCount}</span>
       </div>
       <div className="select-text overflow-hidden rounded border border-wardian-border">
         {activities.map((activity) => (
@@ -261,13 +250,31 @@ function ActivitySection({
         ))}
         {showOlderRuns
           ? olderRuns.map((run) => (
-            <HistoryRunRow
+            <ActivityRow
               key={run.run_id}
-              run={run}
+              activity={historyActivityFromRun(run)}
+              agentLabels={agentLabels}
+              testId={`workflow-history-run-${run.run_id}`}
               onOpenRun={onOpenRun}
+              onPause={onPause}
+              onResume={onResume}
+              onRunNow={onRunNow}
+              onEditSchedule={onEditSchedule}
             />
           ))
           : null}
+        {olderRuns.length > 0 ? (
+          <div className="flex items-center justify-center border-t border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2">
+            <button
+              type="button"
+              aria-expanded={showOlderRuns}
+              onClick={onToggleOlderRuns}
+              className="h-7 cursor-pointer select-none rounded border border-wardian-border px-3 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+            >
+              {showOlderRuns ? 'Show less' : `Show older ${olderRuns.length}`}
+            </button>
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -281,6 +288,7 @@ function ActivityRow({
   onResume,
   onRunNow,
   onEditSchedule,
+  testId,
 }: {
   activity: WorkflowActivity;
   agentLabels: Record<string, string>;
@@ -289,6 +297,7 @@ function ActivityRow({
   onResume: (id: string) => void;
   onRunNow: (id: string) => void;
   onEditSchedule: (schedule: WorkflowSchedule) => void;
+  testId?: string;
 }) {
   const schedule = activity.nextSchedule ?? activity.schedules[0] ?? null;
   const labels = schedule
@@ -297,7 +306,7 @@ function ActivityRow({
 
   return (
     <div
-      data-testid={`workflow-activity-row-${activity.blueprintId}`}
+      data-testid={testId ?? `workflow-activity-row-${activity.blueprintId}`}
       className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] p-3 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
     >
       <div className="min-w-[180px] flex-[1.4_1_220px]">
@@ -394,51 +403,6 @@ function ActivityRow({
   );
 }
 
-function HistoryRunRow({
-  run,
-  onOpenRun,
-}: {
-  run: RunSummary;
-  onOpenRun: (blueprintId: string, runId: string) => void;
-}) {
-  const stamp = run.updated_at ?? run.completed_at ?? run.started_at ?? '';
-  const tone = historyTone(run.status);
-
-  return (
-    <div
-      data-testid={`workflow-history-run-${run.run_id}`}
-      className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-wardian-border/70 bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_55%)] p-3 last:border-b-0"
-    >
-      <div className="min-w-[180px] flex-[1.4_1_220px]">
-        <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={run.blueprint_id}>{run.blueprint_id}</div>
-        <div className={`mt-1 flex items-center gap-2 text-[10px] font-bold ${runToneClass(run.status)}`}>
-          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[tone]}`} aria-hidden />
-          <span>{formatRunStatus(run.status)}</span>
-        </div>
-      </div>
-      <div className="min-w-[140px] flex-[1_1_150px]">
-        <div className="mb-0.5 text-[9px] font-bold text-muted">Run</div>
-        <div className="truncate font-mono text-[10px] text-muted" title={run.run_id}>{run.run_id}</div>
-      </div>
-      <div className="min-w-[150px] flex-[1_1_170px]">
-        <div className="mb-0.5 text-[9px] font-bold text-muted">Updated</div>
-        <div className="truncate text-[10px] text-muted" title={stamp}>{formatRunStamp(stamp)}</div>
-      </div>
-      <div className="ml-auto flex min-w-[34px] shrink-0 items-center justify-end gap-1.5 pr-1 pt-0.5">
-        <button
-          type="button"
-          aria-label={`Open ${run.blueprint_id} run ${run.run_id}`}
-          title="Open run"
-          onClick={() => onOpenRun(run.blueprint_id, run.run_id)}
-          className={actionClass}
-        >
-          <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): WorkflowActivity[] {
   const ids = new Set<string>();
   for (const run of runs) ids.add(run.blueprint_id);
@@ -469,6 +433,21 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
       ...state,
     };
   }).sort(compareActivities);
+}
+
+function historyActivityFromRun(run: RunSummary): WorkflowActivity {
+  return {
+    blueprintId: run.blueprint_id,
+    name: run.blueprint_id,
+    schedules: [],
+    latestRun: run,
+    activeRun: null,
+    nextSchedule: null,
+    statusLabel: formatRunStatus(run.status),
+    tone: historyTone(run.status),
+    section: 'history',
+    issue: run.status === 'failed' ? run.failure ?? 'Run failed' : null,
+  };
 }
 
 function activityState(
@@ -599,13 +578,6 @@ function compareRunRecency(left: RunSummary, right: RunSummary) {
   if (leftStamp !== rightStamp) return leftStamp > rightStamp ? -1 : 1;
   if (left.run_id === right.run_id) return 0;
   return left.run_id > right.run_id ? -1 : 1;
-}
-
-function formatRunStamp(stamp: string) {
-  if (!stamp) return 'Unknown';
-  const date = new Date(stamp);
-  if (Number.isNaN(date.getTime())) return stamp;
-  return date.toLocaleString();
 }
 
 function historyTone(status: RunStatusKind): ActivityTone {

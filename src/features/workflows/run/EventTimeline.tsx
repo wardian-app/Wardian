@@ -110,7 +110,7 @@ export function EventTimeline({ events, scrubIndex, onScrub, onSelectNode, colla
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 rounded-lg border border-wardian-border bg-[var(--color-wardian-card)] p-3">
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden rounded border border-wardian-border bg-[var(--color-wardian-card)] p-3">
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -141,7 +141,7 @@ export function EventTimeline({ events, scrubIndex, onScrub, onSelectNode, colla
         </button>
       </div>
 
-      <div className="min-h-0 overflow-y-auto rounded border border-wardian-border bg-[var(--color-wardian-bg)]">
+      <div className="min-h-0 overflow-y-auto overflow-x-hidden rounded border border-wardian-border bg-[var(--color-wardian-bg)]">
         {events.map((event, index) => {
           const selected = index === currentIndex;
           const node = eventNode(event);
@@ -155,7 +155,7 @@ export function EventTimeline({ events, scrubIndex, onScrub, onSelectNode, colla
                 onScrub(index);
                 if (node) onSelectNode?.(node);
               }}
-              className={`grid w-full grid-cols-[44px_minmax(0,1fr)_minmax(72px,auto)_minmax(128px,auto)] items-center gap-3 border-b border-wardian-border/50 px-3 py-2 text-left text-[11px] last:border-b-0 ${
+              className={`grid w-full grid-cols-[44px_minmax(0,1fr)_minmax(96px,0.55fr)_minmax(148px,0.7fr)] items-center gap-3 border-b border-wardian-border/50 px-3 py-2.5 text-left text-[11px] last:border-b-0 ${
                 selected
                   ? 'bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)] text-[var(--color-wardian-text)]'
                   : 'text-[var(--color-wardian-text-muted)] hover:bg-[var(--color-wardian-card-bg-muted)]'
@@ -166,8 +166,8 @@ export function EventTimeline({ events, scrubIndex, onScrub, onSelectNode, colla
                 <span className="block truncate font-bold">{event.kind}</span>
                 {detail ? <span className="mt-0.5 block truncate text-[10px] text-muted">{detail}</span> : null}
               </span>
-              {node ? <span className="max-w-[120px] truncate font-mono text-[var(--color-wardian-processing)]">{node}</span> : <span />}
-              <span className="grid min-w-[128px] grid-cols-[1fr_auto] gap-x-2 gap-y-0.5 text-right font-mono text-[10px] text-muted" title={timing.title}>
+              {node ? <span className="min-w-0 truncate font-mono text-[var(--color-wardian-processing)]">{node}</span> : <span />}
+              <span className="grid min-w-0 grid-cols-[1fr_auto] gap-x-2 gap-y-0.5 text-right font-mono text-[10px] text-muted" title={timing.title}>
                 <span className="col-span-2 truncate text-[var(--color-wardian-text)]">{timing.clock}</span>
                 <span>{timing.elapsed}</span>
                 <span>{timing.delta}</span>

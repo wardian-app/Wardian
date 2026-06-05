@@ -53,7 +53,7 @@ export function WorkflowObserveMode({ theme }: WorkflowObserveModeProps) {
         }}
       />
       <div className={`grid min-h-0 ${selectedNodeId ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
-        <section className={`grid min-h-0 ${timelineCollapsed ? 'grid-rows-[minmax(0,1fr)_44px]' : 'grid-rows-[minmax(0,1fr)_190px]'}`}>
+        <section className={`grid min-h-0 ${timelineCollapsed ? 'grid-rows-[minmax(0,1fr)_44px]' : 'grid-rows-[minmax(0,1fr)_clamp(280px,34vh,420px)]'}`}>
           <div className="min-h-0 p-3">
             <RunDag
               blueprint={blueprint}

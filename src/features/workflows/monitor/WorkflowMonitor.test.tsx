@@ -286,13 +286,21 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByRole('heading', { name: /recent history/i })).toBeInTheDocument();
-    expect(screen.getByText('run-new')).toBeInTheDocument();
+    const latestRunId = screen.getByText('run-new');
+    const showOlderButton = screen.getByRole('button', { name: /show older/i });
+    expect(latestRunId.compareDocumentPosition(showOlderButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByText('run-old')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /show older/i }));
+    fireEvent.click(showOlderButton);
 
     expect(screen.getByText('run-new')).toBeInTheDocument();
-    expect(screen.getByTestId('workflow-history-run-run-old')).toHaveTextContent('run-old');
+    const olderRunRow = screen.getByTestId('workflow-history-run-run-old');
+    expect(olderRunRow).toHaveTextContent('run-old');
+    expect(olderRunRow).toHaveTextContent('Run');
+    expect(olderRunRow).toHaveTextContent('Schedule');
+    expect(olderRunRow).toHaveTextContent('Assignment');
+    expect(olderRunRow).toHaveTextContent('Manual only');
+    expect(olderRunRow).toHaveTextContent('Default');
     expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
   });
 
