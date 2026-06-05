@@ -102,7 +102,7 @@ pub fn resolve_cwd(folder: &str, agent_id: &str) -> std::path::PathBuf {
 }
 
 pub fn provider_uses_projected_workspace(provider: &str) -> bool {
-    matches!(provider, "codex" | "opencode")
+    matches!(provider, "codex" | "gemini" | "opencode")
 }
 
 pub fn prepare_provider_habitat(
@@ -1083,11 +1083,11 @@ mod tests {
     }
 
     #[test]
-    fn only_codex_and_opencode_use_projected_workspaces() {
+    fn codex_gemini_and_opencode_use_projected_workspaces() {
         assert!(!provider_uses_projected_workspace("claude"));
         assert!(provider_uses_projected_workspace("codex"));
+        assert!(provider_uses_projected_workspace("gemini"));
         assert!(provider_uses_projected_workspace("opencode"));
-        assert!(!provider_uses_projected_workspace("gemini"));
     }
 
     #[test]

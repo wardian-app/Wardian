@@ -51,6 +51,44 @@ pub struct HeadlessRunOptions<'a> {
     pub config_override: Option<&'a AgentConfig>,
 }
 
+#[derive(Debug)]
+struct HeadlessProviderContext {
+    class_name: String,
+    command_cwd: std::path::PathBuf,
+    args_cwd: std::path::PathBuf,
+    habitat_root: Option<std::path::PathBuf>,
+}
+
+fn headless_provider_context(
+    provider_name: &str,
+    cwd: &std::path::Path,
+    wardian_session_id: &str,
+    config_override: Option<&AgentConfig>,
+    persisted_config: Option<&AgentConfig>,
+) -> Result<HeadlessProviderContext, String> {
+    let class_name = config_override
+        .or(persisted_config)
+        .map(|config| config.agent_class.trim().to_string())
+        .filter(|class_name| !class_name.is_empty())
+        .unwrap_or_default();
+    let habitat_root =
+        prepare_provider_habitat(provider_name, cwd, &class_name, Some(wardian_session_id))?;
+    let command_cwd =
+        super::interactive_provider_cwd(provider_name, cwd, habitat_root.as_deref(), None);
+    let args_cwd = if provider_name == "opencode" {
+        cwd.to_path_buf()
+    } else {
+        command_cwd.clone()
+    };
+
+    Ok(HeadlessProviderContext {
+        class_name,
+        command_cwd,
+        args_cwd,
+        habitat_root,
+    })
+}
+
 pub(crate) fn headless_provider_args(
     provider_name: &str,
     provider: &dyn AgentProvider,
@@ -86,6 +124,25 @@ pub(crate) fn headless_provider_args(
         "mock" => {
             provider_args.push("--print".to_string());
             provider_args.push(prompt.to_string());
+        }
+        "gemini" => {
+            if let Some(config) = config_override {
+                let mut config = config.clone();
+                config.resume_session = resume_session.map(str::to_string);
+                let spawn_args = provider.get_spawn_args(&config, resume_session.is_some());
+                let spawn_args = strip_flag_value_pairs(spawn_args, "--session-id");
+                let spawn_args = strip_flag_value_pairs(spawn_args, "--resume");
+                let spawn_args = strip_flag_value_pairs(spawn_args, "--output-format");
+                provider_args.extend(spawn_args);
+            }
+            provider_args.push("-p".to_string());
+            provider_args.push(prompt.to_string());
+            provider_args.push("--output-format".to_string());
+            provider_args.push(output_format.to_string());
+            if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
+                provider_args.push("--resume".to_string());
+                provider_args.push(resume_id.to_string());
+            }
         }
         "opencode" => {
             provider_args.push("run".to_string());
@@ -183,16 +240,22 @@ pub async fn run_headless_with_options(
     let config_override = options.config_override;
     let provider = ProviderFactory::resolve(provider_name)?;
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
-    let habitat_root = prepare_provider_habitat(provider_name, cwd, "", Some(wardian_session_id))?;
-    let provider_cwd = cwd.to_path_buf();
     let persisted_config = persisted_agent_config(wardian_session_id);
-    let persisted_provider_config = if matches!(provider_name, "opencode" | "antigravity") {
-        config_override
-            .cloned()
-            .or_else(|| persisted_config.clone())
-    } else {
-        None
-    };
+    let provider_context = headless_provider_context(
+        provider_name,
+        cwd,
+        wardian_session_id,
+        config_override,
+        persisted_config.as_ref(),
+    )?;
+    let persisted_provider_config =
+        if matches!(provider_name, "gemini" | "opencode" | "antigravity") {
+            config_override
+                .cloned()
+                .or_else(|| persisted_config.clone())
+        } else {
+            None
+        };
     let (bin, _) = provider.get_executable();
     let claude_hook = if provider_name == "claude" {
         ensure_claude_permission_hook(wardian_session_id).ok()
@@ -203,7 +266,7 @@ pub async fn run_headless_with_options(
     let mut provider_args = headless_provider_args(
         provider_name,
         provider.as_ref(),
-        &provider_cwd,
+        &provider_context.args_cwd,
         prompt,
         output_format,
         resume_session,
@@ -229,24 +292,20 @@ pub async fn run_headless_with_options(
         }
     }
     if provider_name == "codex" {
-        if let Some(root) = habitat_root.as_ref() {
+        if let Some(root) = provider_context.habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
     } else if provider_name == "claude" {
         cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
     } else if provider_name == "opencode" {
-        let class_name = persisted_provider_config
-            .as_ref()
-            .map(|config| config.agent_class.as_str())
-            .unwrap_or("");
         let opencode_scope_session = if resume_session.is_some() {
             resume_session
         } else {
             (!wardian_session_id.trim().is_empty()).then_some(wardian_session_id)
         };
         for (key, value) in opencode_env(
-            &provider_cwd,
-            class_name,
+            cwd,
+            &provider_context.class_name,
             opencode_scope_session,
             persisted_provider_config.as_ref(),
         )? {
@@ -270,7 +329,7 @@ pub async fn run_headless_with_options(
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
 
-    cmd.current_dir(&provider_cwd)
+    cmd.current_dir(&provider_context.command_cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -282,7 +341,7 @@ pub async fn run_headless_with_options(
         } else {
             wardian_session_id
         },
-        cwd.display(),
+        provider_context.command_cwd.display(),
         prompt.len(),
         output_format
     ));
@@ -744,7 +803,7 @@ fn apply_headless_identity_env(cmd: &mut tokio::process::Command, wardian_sessio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     #[test]
     fn bootstrap_session_prompt_uses_intro_prompt_for_providers_that_need_bootstrap() {
         assert_eq!(session_bootstrap_prompt(), "Introduce yourself");
@@ -783,6 +842,49 @@ mod tests {
 
         assert!(args.contains(&"--print".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn gemini_headless_args_include_config_without_session_reuse() {
+        let provider = crate::providers::ProviderFactory::resolve("gemini").unwrap();
+        let config = AgentConfig {
+            session_id: "wardian-agent".into(),
+            resume_session: Some("provider-session".into()),
+            system_include_directories: Some(vec!["C:/wardian/common".into()]),
+            include_directories: Some(vec!["C:/workspace/docs".into()]),
+            model: Some("gemini-test-model".into()),
+            provider_config: wardian_core::models::ProviderConfig::Gemini(
+                wardian_core::models::GeminiProviderConfig {
+                    output_format: Some("text".into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+
+        let args = headless_provider_args(
+            "gemini",
+            provider.as_ref(),
+            Path::new("D:/Development/Wardian"),
+            "task",
+            "json",
+            None,
+            Some(&config),
+        );
+
+        assert!(args.contains(&"--include-directories".to_string()));
+        assert!(args.contains(&"C:/wardian/common,C:/workspace/docs".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"gemini-test-model".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"wardian-agent".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"provider-session".to_string()));
+        let output_format_index = args
+            .iter()
+            .position(|arg| arg == "--output-format")
+            .expect("output format flag");
+        assert_eq!(args[output_format_index + 1], "json");
     }
 
     #[test]
@@ -850,6 +952,97 @@ mod tests {
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"--output-format".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn gemini_headless_context_projects_persisted_class_skills() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let wardian_home = tempfile::tempdir().expect("wardian home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let class_skill = wardian_home
+            .path()
+            .join("classes")
+            .join("Personal Assistant")
+            .join(".agents")
+            .join("skills")
+            .join("gws");
+        std::fs::create_dir_all(&class_skill).expect("create class skill");
+        std::fs::write(class_skill.join("SKILL.md"), "gws skill").expect("write class skill");
+        std::env::set_var("WARDIAN_HOME", wardian_home.path());
+
+        let persisted = AgentConfig {
+            session_id: "agent-1".into(),
+            agent_class: "Personal Assistant".into(),
+            provider: "gemini".into(),
+            ..Default::default()
+        };
+        let context = headless_provider_context(
+            "gemini",
+            workspace.path(),
+            "agent-1",
+            None,
+            Some(&persisted),
+        )
+        .expect("headless context");
+
+        let expected_habitat = wardian_home
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("habitat");
+        assert_eq!(context.habitat_root, Some(expected_habitat.clone()));
+        assert_eq!(context.command_cwd, expected_habitat.join("workspace"));
+        assert_eq!(context.args_cwd, context.command_cwd);
+        assert!(expected_habitat.join("GEMINI.md").is_file());
+        assert!(expected_habitat
+            .join(".agents")
+            .join("skills")
+            .join("gws")
+            .join("SKILL.md")
+            .is_file());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[test]
+    fn opencode_headless_context_keeps_real_workspace_as_run_dir() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let wardian_home = tempfile::tempdir().expect("wardian home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::env::set_var("WARDIAN_HOME", wardian_home.path());
+
+        let persisted = AgentConfig {
+            session_id: "agent-1".into(),
+            agent_class: "Builder".into(),
+            provider: "opencode".into(),
+            ..Default::default()
+        };
+        let context = headless_provider_context(
+            "opencode",
+            workspace.path(),
+            "agent-1",
+            None,
+            Some(&persisted),
+        )
+        .expect("headless context");
+
+        let expected_habitat = wardian_home
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("habitat");
+        assert_eq!(context.command_cwd, expected_habitat);
+        assert_eq!(context.args_cwd, PathBuf::from(workspace.path()));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 
     #[test]
