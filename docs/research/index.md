@@ -13,5 +13,6 @@ Research documents are not product evaluations, affiliation claims, endorsements
 - [Graph Visualization References](./graph-visualization-references.md)
 - [Local-First State References](./local-first-state-references.md)
 - [Multi-Agent Orchestrator References](./multi-agent-orchestrator-references.md)
+- [Shared Agent Memory References](./shared-agent-memory-references.md)
 - [Skill Manager References](./skill-manager-references.md)
 - [Workflow Design References](./workflow-design-references.md)
