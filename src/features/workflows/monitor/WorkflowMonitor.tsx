@@ -42,7 +42,7 @@ const FILTERS: Array<{ id: ActivityFilter; label: string }> = [
 const SECTION_LABELS: Record<ActivitySection, string> = {
   attention: 'Needs attention',
   running: 'Running now',
-  scheduled: 'Due soon',
+  scheduled: 'Scheduled',
   history: 'Recent history',
 };
 
@@ -222,32 +222,18 @@ function ActivitySection({
         <span className="font-mono text-[10px] text-muted">{activities.length}</span>
       </div>
       <div className="select-text overflow-hidden rounded border border-wardian-border">
-        <table className="w-full table-fixed border-collapse text-left">
-          <thead className="bg-[var(--color-wardian-card)] text-[10px] font-bold text-muted">
-            <tr>
-              <th scope="col" className="w-[128px] px-3 py-2">State</th>
-              <th scope="col" className="px-3 py-2">Workflow</th>
-              <th scope="col" className="w-[24%] px-3 py-2">Current run</th>
-              <th scope="col" className="w-[24%] px-3 py-2">Schedule</th>
-              <th scope="col" className="w-[20%] px-3 py-2">Assignment</th>
-              <th scope="col" className="w-[132px] px-3 py-2 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {activities.map((activity) => (
-              <ActivityRow
-                key={activity.blueprintId}
-                activity={activity}
-                agentLabels={agentLabels}
-                onOpenRun={onOpenRun}
-                onPause={onPause}
-                onResume={onResume}
-                onRunNow={onRunNow}
-                onEditSchedule={onEditSchedule}
-              />
-            ))}
-          </tbody>
-        </table>
+        {activities.map((activity) => (
+          <ActivityRow
+            key={activity.blueprintId}
+            activity={activity}
+            agentLabels={agentLabels}
+            onOpenRun={onOpenRun}
+            onPause={onPause}
+            onResume={onResume}
+            onRunNow={onRunNow}
+            onEditSchedule={onEditSchedule}
+          />
+        ))}
       </div>
     </section>
   );
@@ -276,24 +262,23 @@ function ActivityRow({
     : [];
 
   return (
-    <tr
+    <div
       data-testid={`workflow-activity-row-${activity.blueprintId}`}
-      className="border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] align-middle last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
+      className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] p-3 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
     >
-      <td className="px-3 py-2">
-        <div className={`flex items-center gap-2 text-[10px] font-bold ${toneClass[activity.tone]}`}>
-          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[activity.tone]}`} aria-hidden />
-          <span>{activity.statusLabel}</span>
-        </div>
-        {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
-      </td>
-      <td className="min-w-0 px-3 py-2">
+      <div className="min-w-[180px] flex-[1.4_1_220px]">
         <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>{activity.name}</div>
         {activity.blueprintId !== activity.name ? (
           <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.blueprintId}>{activity.blueprintId}</div>
         ) : null}
-      </td>
-      <td className="min-w-0 px-3 py-2">
+        <div className={`mt-1 flex items-center gap-2 text-[10px] font-bold ${toneClass[activity.tone]}`}>
+          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[activity.tone]}`} aria-hidden />
+          <span>{activity.statusLabel}</span>
+        </div>
+        {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
+      </div>
+      <div className="min-w-[140px] flex-[1_1_150px]">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Run</div>
         {activity.latestRun ? (
           <>
             <div className={`truncate text-[10px] font-bold ${runToneClass(activity.latestRun.status)}`}>
@@ -304,8 +289,9 @@ function ActivityRow({
         ) : (
           <span className="text-[10px] text-muted">No runs yet</span>
         )}
-      </td>
-      <td className="min-w-0 px-3 py-2">
+      </div>
+      <div className="min-w-[150px] flex-[1_1_170px]">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Schedule</div>
         {schedule ? (
           <>
             <div className="truncate text-[10px] text-muted" title={cadenceLabel(schedule.schedule)}>{cadenceLabel(schedule.schedule)}</div>
@@ -314,8 +300,9 @@ function ActivityRow({
         ) : (
           <span className="text-[10px] text-muted">Manual only</span>
         )}
-      </td>
-      <td className="min-w-0 px-3 py-2">
+      </div>
+      <div className="min-w-[130px] flex-[1_1_150px]">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Assignment</div>
         {labels.length > 0 ? (
           <div className="flex max-w-[320px] flex-wrap gap-1">
             {labels.slice(0, 2).map((label) => (
@@ -336,9 +323,8 @@ function ActivityRow({
         ) : (
           <span className="text-[10px] text-muted">Default</span>
         )}
-      </td>
-      <td className="px-3 py-2 text-right">
-        <div className="inline-flex shrink-0 items-center gap-1">
+      </div>
+      <div className="ml-auto flex min-w-[112px] shrink-0 items-center justify-end gap-1.5 pr-1 pt-0.5">
           {activity.latestRun ? (
             <button
               type="button"
@@ -369,9 +355,8 @@ function ActivityRow({
               </button>
             </>
           ) : null}
-        </div>
-      </td>
-    </tr>
+      </div>
+    </div>
   );
 }
 

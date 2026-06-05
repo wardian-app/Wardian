@@ -125,7 +125,7 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByRole('heading', { name: /activity/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /needs attention/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /running now/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /due soon/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /recent history/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /^schedules$/i })).toBeNull();
     expect(screen.getAllByText('Passive Heartbeat')).toHaveLength(1);
@@ -173,6 +173,59 @@ describe('WorkflowMonitor', () => {
     fireEvent.click(screen.getByRole('button', { name: /running/i }));
     expect(screen.getByText('Passive Heartbeat')).toBeInTheDocument();
     expect(screen.queryByText('Audit')).toBeNull();
+  });
+
+  it('shows all scheduled workflows with neutral scheduled labeling', () => {
+    scheduleState.schedules = [
+      {
+        id: 'schedule-1',
+        blueprint_id: 'heartbeat',
+        name: 'Passive Heartbeat',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+      },
+      {
+        id: 'schedule-2',
+        blueprint_id: 'nightly',
+        name: 'Nightly Review',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'daily', time_of_day: '22:00', active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 2, 2, 0, 0),
+      },
+    ];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /scheduled/i }));
+
+    expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /due soon/i })).toBeNull();
+    expect(screen.getByText('Passive Heartbeat')).toBeInTheDocument();
+    expect(screen.getByText('Nightly Review')).toBeInTheDocument();
+  });
+
+  it('renders activity actions inside responsive rows instead of a fixed actions table', () => {
+    scheduleState.schedules = [{
+      id: 'schedule-1',
+      blueprint_id: 'heartbeat',
+      name: 'Passive Heartbeat',
+      input: {},
+      bindings: {},
+      schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+      is_paused: false,
+      next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('Passive Heartbeat');
+    expect(screen.queryByRole('columnheader', { name: /actions/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /pause passive heartbeat/i })).toBeInTheDocument();
   });
 
   it('counts only current workflow failures in the headline stats', () => {
