@@ -196,14 +196,20 @@ pub fn advance_loops(g: &Graph, s: &mut RunState) {
         }
 
         let iter = *s.loop_iter.get(&lp).unwrap_or(&0);
-        let max = g
-            .blueprint()
-            .find_node(&lp)
+        let loop_node = g.blueprint().find_node(&lp);
+        let max = loop_node
             .and_then(|nd| nd.fields.get("max_iterations"))
             .and_then(|v| v.as_u64())
             .unwrap_or(1) as u32;
+        let until_met = loop_node
+            .and_then(|nd| nd.fields.get("until"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+            .map(|condition| lookup_truthy(&s.registry, condition))
+            .unwrap_or(false);
 
-        if iter + 1 < max {
+        if !until_met && iter + 1 < max {
             // Snapshot this iteration's outputs as `prev`, then reset the body.
             for b in &body {
                 if let Some(out) = s.node_output(b).cloned() {
@@ -235,6 +241,23 @@ pub fn advance_loops(g: &Graph, s: &mut RunState) {
             s.set_node_status(&lp, NodeStatus::Completed);
             deliver_from_port(g, s, &lp, "done");
         }
+    }
+}
+
+pub(crate) fn lookup_truthy(registry: &serde_json::Value, path: &str) -> bool {
+    let mut cur = registry;
+    for seg in path.split('.') {
+        match cur.get(seg) {
+            Some(v) => cur = v,
+            None => return false,
+        }
+    }
+    match cur {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Null => false,
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        _ => true,
     }
 }
 
@@ -440,6 +463,73 @@ mod tests {
         advance_loops(&g, &mut s);
         assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
         assert!(step(&g, &s).contains(&"ship".to_string())); // done port delivered
+    }
+
+    #[test]
+    fn loop_exits_early_when_until_condition_is_truthy() {
+        let mut lp = loop_node("lp", 5);
+        lp.fields
+            .insert("until".into(), serde_json::json!("nodes.b.output.done"));
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                lp,
+                child("b", "lp"),
+                node("ship", "task"),
+            ],
+            vec![
+                edge("t", "out", "lp"),
+                edge("lp", "body", "b"),
+                edge("lp", "done", "ship"),
+            ],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        enter_loop(&g, &mut s, "lp");
+
+        complete(&g, &mut s, "b", serde_json::json!({ "done": true }));
+        advance_loops(&g, &mut s);
+
+        assert_eq!(s.loop_iter["lp"], 0);
+        assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
+        assert!(step(&g, &s).contains(&"ship".to_string()));
+    }
+
+    #[test]
+    fn loop_continues_until_max_when_until_condition_is_false() {
+        let mut lp = loop_node("lp", 2);
+        lp.fields
+            .insert("until".into(), serde_json::json!("nodes.b.output.done"));
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                lp,
+                child("b", "lp"),
+                node("ship", "task"),
+            ],
+            vec![
+                edge("t", "out", "lp"),
+                edge("lp", "body", "b"),
+                edge("lp", "done", "ship"),
+            ],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        enter_loop(&g, &mut s, "lp");
+
+        complete(&g, &mut s, "b", serde_json::json!({ "done": false }));
+        advance_loops(&g, &mut s);
+
+        assert_eq!(s.loop_iter["lp"], 1);
+        assert_eq!(s.status_or_pending("b"), NodeStatus::Pending);
+
+        complete(&g, &mut s, "b", serde_json::json!({ "done": false }));
+        advance_loops(&g, &mut s);
+
+        assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
+        assert!(step(&g, &s).contains(&"ship".to_string()));
     }
 
     #[test]
