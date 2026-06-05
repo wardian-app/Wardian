@@ -349,6 +349,18 @@ fn assignment_role_name(agent_ref: &str) -> String {
         .to_string()
 }
 
+fn prompt_for_agent_task(prompt: String, output_schema: Option<&str>) -> String {
+    let Some(schema) = output_schema
+        .map(str::trim)
+        .filter(|schema| !schema.is_empty())
+    else {
+        return prompt;
+    };
+    format!(
+        "{prompt}\n\nWorkflow output contract:\nRespond with valid JSON that satisfies this output_schema. Return only the JSON object, or put the final JSON object in a trailing fenced ```json block.\noutput_schema:\n{schema}"
+    )
+}
+
 fn acquire_background_resume_lease(
     agent: &AgentBinding,
     resume_session: &str,
@@ -388,7 +400,8 @@ impl StepExecutor for LiveStepExecutor {
         Self: 'async_trait,
     {
         Box::pin(async move {
-            let response = self.run_prompt(&req.node, &req.agent, req.prompt).await?;
+            let prompt = prompt_for_agent_task(req.prompt, req.output_schema.as_deref());
+            let response = self.run_prompt(&req.node, &req.agent, prompt).await?;
             output::extract_structured_output(&response, req.output_schema.as_deref())
                 .map(StepOutput)
                 .map_err(StepError::new)
@@ -487,6 +500,7 @@ mod tests {
     use super::*;
     use crate::workflow::runner::{FakeAgentRunner, FakeLiveAgentRunner};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use wardian_core::engine::executor::{AgentTaskRequest, DecisionRequest, StepExecutor};
     use wardian_core::models::{
         AgentConversationMode, BusyPolicy, WorkflowAssignments, WorkflowRoleAssignment,
@@ -548,6 +562,47 @@ mod tests {
             .expect_err("schema-bound agent task should require declared fields");
 
         assert!(err.0.contains("reason"));
+    }
+
+    #[tokio::test]
+    async fn agent_task_with_schema_instructs_background_agents_to_return_json() {
+        struct PromptCapturingRunner {
+            prompt: Mutex<Option<String>>,
+        }
+
+        impl AgentRunner for PromptCapturingRunner {
+            fn run(
+                &self,
+                spec: AgentRunSpec,
+            ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+                *self.prompt.lock().expect("prompt lock") = Some(spec.prompt);
+                Box::pin(async { Ok(r#"{"decision":"buy","reason":"breakout"}"#.to_string()) })
+            }
+        }
+
+        let runner = Arc::new(PromptCapturingRunner {
+            prompt: Mutex::new(None),
+        });
+        let exec = LiveStepExecutor::new(
+            runner.clone(),
+            std::path::PathBuf::from("."),
+            "mock".into(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        exec.run_agent_task(AgentTaskRequest {
+            node: "plan".into(),
+            agent: "role:Coder".into(),
+            prompt: "analyze".into(),
+            output_schema: Some(r#"{"decision":"string","reason":"string"}"#.into()),
+        })
+        .await
+        .unwrap();
+
+        let prompt = runner.prompt.lock().expect("prompt lock").clone().unwrap();
+        assert!(prompt.contains("Respond with valid JSON"));
+        assert!(prompt.contains(r#"{"decision":"string","reason":"string"}"#));
     }
 
     #[tokio::test]

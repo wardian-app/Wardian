@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Manager;
+use wardian_core::control::{InteractionBodyRef, ProviderInputReadiness, ReplyStatus};
 
 type AgentRunFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 type LiveAgentRunFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
@@ -129,19 +130,42 @@ async fn run_live_agent_prompt(
         .map_err(|_| format!("Agent {} watch state lock poisoned", spec.session_id))?
         .latest_cursor();
 
+    let task = state
+        .interactions
+        .create_task(
+            None,
+            spec.session_id.clone(),
+            InteractionBodyRef::Inline {
+                body: spec.prompt.clone(),
+            },
+        )
+        .await;
+    {
+        let mut guard = watch_state
+            .lock()
+            .map_err(|_| format!("Agent {} watch state lock poisoned", spec.session_id))?;
+        guard.push_event(
+            "request",
+            serde_json::json!({
+                "request_id": &task.id,
+                "target_session_id": &spec.session_id,
+                "status": "pending",
+                "created_at": &task.created_at,
+                "workflow_node": &spec.node,
+            }),
+        );
+    }
+
     if should_mark_processing {
         crate::manager::set_agent_status(app, &spec.session_id, &current_status, "Processing...");
     }
     state
         .interactions
-        .start_provider_input_generation(
-            &spec.session_id,
-            wardian_core::control::ProviderInputReadiness::Busy,
-            None,
-        )
+        .start_provider_input_generation(&spec.session_id, ProviderInputReadiness::Busy, None)
         .await;
 
-    crate::utils::terminal_input::submit_prompt_via_sender(&tx, &spec.prompt, &provider_name)
+    let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
+    crate::utils::terminal_input::submit_prompt_via_sender(&tx, &prompt, &provider_name)
         .await
         .map_err(|error| {
             format!(
@@ -150,9 +174,18 @@ async fn run_live_agent_prompt(
             )
         })?;
 
-    let snapshot =
-        wait_for_live_agent_completion(watch_state, initial_cursor, spec.timeout).await?;
-    let response = live_agent_response_from_snapshot(&snapshot);
+    let reply =
+        wait_for_live_agent_reply(&state, watch_state, initial_cursor, &task.id, spec.timeout)
+            .await?;
+    let response = match reply.status {
+        ReplyStatus::Done => reply.body,
+        ReplyStatus::Blocked | ReplyStatus::Failed => {
+            return Err(format!(
+                "live agent {} returned {:?} for workflow node {}: {}",
+                spec.session_id, reply.status, spec.node, reply.body
+            ));
+        }
+    };
     if response.trim().is_empty() {
         Err(format!(
             "live agent {} completed workflow node {} without readable output",
@@ -163,6 +196,46 @@ async fn run_live_agent_prompt(
     }
 }
 
+fn prompt_with_structured_reply_instruction(prompt: &str, request_id: &str) -> String {
+    format!(
+        "{prompt}\n\nWardian workflow request id: {request_id}\nWhen this workflow node is fully complete, respond with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the final workflow output on stdin."
+    )
+}
+
+async fn wait_for_live_agent_reply(
+    app_state: &crate::state::AppState,
+    watch_state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
+    since: String,
+    request_id: &str,
+    timeout: Duration,
+) -> Result<wardian_core::control::StructuredReply, String> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(reply) = app_state.interactions.structured_reply(request_id).await {
+            return Ok(reply);
+        }
+        let snapshot = {
+            let guard = watch_state
+                .lock()
+                .map_err(|_| "watch state lock poisoned".to_string())?;
+            guard
+                .snapshot_since(Some(&since), Some(128 * 1024))
+                .map_err(|error| format!("watch state error: {}", error.code()))?
+        };
+        if let Some(error) = live_agent_terminal_failure(&snapshot) {
+            return Err(error);
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(format!(
+                "timed out waiting for live agent workflow reply {request_id}"
+            ));
+        }
+        tokio::time::sleep((timeout - elapsed).min(Duration::from_millis(25))).await;
+    }
+}
+
+#[cfg(test)]
 async fn wait_for_live_agent_completion(
     state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
     since: String,
@@ -185,16 +258,8 @@ async fn wait_for_live_agent_completion(
                 .map_err(|error| format!("watch state error: {}", error.code()))?
         };
 
-        if let Some(status) = latest_terminal_status(&snapshot) {
-            match status.as_str() {
-                "idle" => return Ok(snapshot),
-                "action_required" | "off" | "error" => {
-                    return Err(format!(
-                        "live agent reached {status} before completing workflow node"
-                    ));
-                }
-                _ => {}
-            }
+        if let Some(error) = live_agent_terminal_failure(&snapshot) {
+            return Err(error);
         }
 
         let elapsed = started.elapsed();
@@ -210,6 +275,17 @@ async fn wait_for_live_agent_completion(
     }
 }
 
+fn live_agent_terminal_failure(
+    snapshot: &crate::state::agent_watch::WatchSnapshot,
+) -> Option<String> {
+    latest_terminal_status(snapshot).and_then(|status| match status.as_str() {
+        "action_required" | "off" | "error" => Some(format!(
+            "live agent reached {status} before completing workflow node"
+        )),
+        _ => None,
+    })
+}
+
 fn latest_terminal_status(snapshot: &crate::state::agent_watch::WatchSnapshot) -> Option<String> {
     snapshot.events.iter().rev().find_map(|event| {
         (event.kind == "status")
@@ -217,25 +293,6 @@ fn latest_terminal_status(snapshot: &crate::state::agent_watch::WatchSnapshot) -
             .flatten()
             .map(wardian_core::identity::normalize_status)
     })
-}
-
-fn live_agent_response_from_snapshot(
-    snapshot: &crate::state::agent_watch::WatchSnapshot,
-) -> String {
-    snapshot
-        .transcript
-        .messages
-        .iter()
-        .rev()
-        .find(|message| {
-            !message.text.trim().is_empty() && !matches!(message.role.as_str(), "user" | "human")
-        })
-        .map(|message| message.text.clone())
-        .or_else(|| {
-            (!snapshot.transcript.latest_text.trim().is_empty())
-                .then(|| snapshot.transcript.latest_text.clone())
-        })
-        .unwrap_or_else(|| snapshot.output.text.clone())
 }
 
 /// Test double: scripted responses keyed by node id; records call order.
@@ -322,6 +379,7 @@ impl LiveAgentRunner for FakeLiveAgentRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn fake_runner_returns_scripted_response_and_records_calls() {
@@ -337,5 +395,85 @@ mod tests {
         let out = runner.run(spec).await.unwrap();
         assert!(out.contains("ok"));
         assert_eq!(runner.calls(), vec!["plan".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn live_agent_wait_does_not_complete_on_idle_status_alone() {
+        let state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            4096,
+        )));
+        let since = state.lock().expect("watch state lock").latest_cursor();
+        {
+            let mut guard = state.lock().expect("watch state lock");
+            guard.push_output(b"stale terminal repaint text");
+            guard.push_event("status", serde_json::json!({ "status": "idle" }));
+        }
+
+        let result = wait_for_live_agent_completion(state, since, Duration::from_millis(10)).await;
+
+        assert_eq!(
+            result.expect_err("idle status alone must not complete a live workflow node"),
+            "timed out waiting for live agent workflow node to complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_agent_reply_wait_completes_only_after_structured_reply() {
+        let app_state = crate::state::AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            4096,
+        )));
+        let since = watch_state
+            .lock()
+            .expect("watch state lock")
+            .latest_cursor();
+        {
+            let mut guard = watch_state.lock().expect("watch state lock");
+            guard.push_output(b"stale terminal repaint text");
+            guard.push_event("status", serde_json::json!({ "status": "idle" }));
+        }
+        let task = app_state
+            .interactions
+            .create_task_with_id(
+                "wf_test_reply".to_string(),
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "write the file".to_string(),
+                },
+            )
+            .await;
+        let task_id = task.id.clone();
+
+        let wait = wait_for_live_agent_reply(
+            &app_state,
+            watch_state,
+            since,
+            &task_id,
+            Duration::from_secs(1),
+        );
+        let complete = async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            app_state
+                .interactions
+                .complete_task_with_reply(
+                    &task_id,
+                    Some("agent-1"),
+                    ReplyStatus::Done,
+                    "{\"ok\":true}",
+                )
+                .await
+                .expect("complete workflow task")
+        };
+
+        let (reply, _) = tokio::join!(wait, complete);
+
+        let reply = reply.expect("structured reply should complete workflow node");
+        assert_eq!(reply.status, ReplyStatus::Done);
+        assert_eq!(reply.body, "{\"ok\":true}");
     }
 }

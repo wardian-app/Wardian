@@ -24,6 +24,29 @@ function nodePayload(events: RunEvent[], nodeId: string): { output?: unknown; er
   return payload;
 }
 
+const TIMESTAMP_FIELD_PATTERN = /(^ts$|timestamp|_at$|At$)/;
+
+function inspectorDisplayValue(value: unknown, key?: string): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => inspectorDisplayValue(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
+        entryKey,
+        inspectorDisplayValue(entryValue, entryKey),
+      ]),
+    );
+  }
+  if (typeof value === 'string' && key && TIMESTAMP_FIELD_PATTERN.test(key)) {
+    const date = new Date(value);
+    if (Number.isFinite(date.getTime())) {
+      return date.toLocaleString();
+    }
+  }
+  return value;
+}
+
 export function NodeInspector({ selectedNodeId, state, currentStatuses, events }: NodeInspectorProps) {
   if (!selectedNodeId) {
     return (
@@ -35,10 +58,10 @@ export function NodeInspector({ selectedNodeId, state, currentStatuses, events }
 
   const status = currentStatuses[selectedNodeId] ?? state?.nodes[selectedNodeId] ?? 'pending';
   const payload = nodePayload(events, selectedNodeId);
-  const output = payload.output === undefined ? null : JSON.stringify(payload.output, null, 2);
+  const output = payload.output === undefined ? null : JSON.stringify(inspectorDisplayValue(payload.output), null, 2);
 
   return (
-    <aside className="flex h-full min-h-0 flex-col gap-4 rounded-lg border border-wardian-border bg-[var(--color-wardian-card)] p-4">
+    <aside className="flex h-full min-h-0 select-text flex-col gap-4 rounded-lg border border-wardian-border bg-[var(--color-wardian-card)] p-4">
       <div>
         <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--color-wardian-text-muted)]">Node</div>
         <div className="mt-1 truncate text-lg font-bold text-[var(--color-wardian-text)]">{selectedNodeId}</div>
