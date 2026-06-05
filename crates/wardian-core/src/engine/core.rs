@@ -171,6 +171,28 @@ pub fn enter_loop(g: &Graph, s: &mut RunState, loop_id: &str) {
 
 /// For each Running loop whose body is fully terminal, evaluate its bound and
 /// either start the next iteration or finish (pulse `done`).
+fn resolve_u32_field(
+    fields: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    registry: &serde_json::Value,
+    default: u32,
+) -> u32 {
+    let Some(value) = fields.get(key) else {
+        return default;
+    };
+
+    if let Some(n) = value.as_u64() {
+        return u32::try_from(n).unwrap_or(u32::MAX);
+    }
+
+    value
+        .as_str()
+        .and_then(|template| crate::engine::interpolate::resolve(template, registry).ok())
+        .and_then(|resolved| resolved.trim().parse::<u64>().ok())
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        .unwrap_or(default)
+}
+
 pub fn advance_loops(g: &Graph, s: &mut RunState) {
     let loop_ids: Vec<String> = g
         .blueprint()
@@ -198,9 +220,9 @@ pub fn advance_loops(g: &Graph, s: &mut RunState) {
         let iter = *s.loop_iter.get(&lp).unwrap_or(&0);
         let loop_node = g.blueprint().find_node(&lp);
         let max = loop_node
-            .and_then(|nd| nd.fields.get("max_iterations"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1) as u32;
+            .map(|nd| resolve_u32_field(&nd.fields, "max_iterations", &s.registry, 1))
+            .unwrap_or(1)
+            .max(1);
         let until_met = loop_node
             .and_then(|nd| nd.fields.get("until"))
             .and_then(|v| v.as_str())
@@ -463,6 +485,109 @@ mod tests {
         advance_loops(&g, &mut s);
         assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
         assert!(step(&g, &s).contains(&"ship".to_string())); // done port delivered
+    }
+
+    #[test]
+    fn loop_uses_interpolated_max_iterations_from_trigger_output() {
+        let mut lp = loop_node("lp", 1);
+        lp.fields.insert(
+            "max_iterations".into(),
+            serde_json::json!("{{trigger.output.n}}"),
+        );
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                lp,
+                child("b", "lp"),
+                node("ship", "task"),
+            ],
+            vec![
+                edge("t", "out", "lp"),
+                edge("lp", "body", "b"),
+                edge("lp", "done", "ship"),
+            ],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        s.set_trigger(serde_json::json!({ "n": 3 }));
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        enter_loop(&g, &mut s, "lp");
+
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.loop_iter["lp"], 1);
+        assert_eq!(s.status_or_pending("b"), NodeStatus::Pending);
+
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.loop_iter["lp"], 2);
+        assert_eq!(s.status_or_pending("b"), NodeStatus::Pending);
+
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
+        assert!(step(&g, &s).contains(&"ship".to_string()));
+    }
+
+    #[test]
+    fn loop_keeps_integer_literal_max_iterations_behavior() {
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                loop_node("lp", 2),
+                child("b", "lp"),
+                node("ship", "task"),
+            ],
+            vec![
+                edge("t", "out", "lp"),
+                edge("lp", "body", "b"),
+                edge("lp", "done", "ship"),
+            ],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        enter_loop(&g, &mut s, "lp");
+
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.loop_iter["lp"], 1);
+
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+        assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
+    }
+
+    #[test]
+    fn unresolved_loop_max_iterations_template_falls_back_to_default() {
+        let mut lp = loop_node("lp", 2);
+        lp.fields.insert(
+            "max_iterations".into(),
+            serde_json::json!("{{trigger.output.missing}}"),
+        );
+        let blueprint = bp(
+            vec![
+                node("t", "manual_trigger"),
+                lp,
+                child("b", "lp"),
+                node("ship", "task"),
+            ],
+            vec![
+                edge("t", "out", "lp"),
+                edge("lp", "body", "b"),
+                edge("lp", "done", "ship"),
+            ],
+        );
+        let g = Graph::new(&blueprint);
+        let mut s = RunState::new("r", "wf");
+        complete(&g, &mut s, "t", serde_json::json!({}));
+        enter_loop(&g, &mut s, "lp");
+
+        complete(&g, &mut s, "b", serde_json::json!({}));
+        advance_loops(&g, &mut s);
+
+        assert_eq!(s.status_or_pending("lp"), NodeStatus::Completed);
+        assert!(step(&g, &s).contains(&"ship".to_string()));
     }
 
     #[test]
