@@ -62,7 +62,7 @@ Container: repeats its body subgraph until a bound is hit.
 
 ### Fields
 
-- `max_iterations` — Max iterations [number or `{{registry.path}}` template].
+- `max_iterations` — Max iterations [number or `&#123;&#123;registry.path&#125;&#125;` template].
   Runtime clamps the resolved value to at least `1`; malformed templates warn
   during validation and fall back at runtime.
 - `until` — Registry dot path checked for truthiness before another body pulse,

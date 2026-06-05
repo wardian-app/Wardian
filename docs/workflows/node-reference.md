@@ -171,7 +171,7 @@ Behavior:
 
 - supports `count` mode and `conditional` mode
 - accepts `max_iterations` as a positive integer or as a single registry
-  template such as `{{trigger.output.limit}}`
+  template such as `&#123;&#123;trigger.output.limit&#125;&#125;`
 - resolves `until` as a dot path against the run registry, such as
   `nodes.review.output.done`
 - treats truthy `until` values as the signal to stop before another body pulse
