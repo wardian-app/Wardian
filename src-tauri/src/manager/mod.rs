@@ -658,7 +658,7 @@ pub(crate) fn interactive_provider_launch(
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("exe"));
         if !is_native_exe {
-            let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let cmd_host = windows_cmd_host();
             let mut fragments = vec![quote_cmd_arg(bin)];
             fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
             return Ok(crate::utils::shell::ShellLaunchSpec {
@@ -704,13 +704,6 @@ pub(crate) fn apply_interactive_provider_runtime_env(
     provider_name: &str,
     cmd: &mut CommandBuilder,
 ) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let _ = provider_name;
-        apply_windows_silent_cmd_shim_to_pty(cmd)?;
-    }
-
-    #[cfg(not(windows))]
     let _ = (provider_name, cmd);
 
     Ok(())
@@ -720,51 +713,22 @@ pub(crate) fn apply_process_provider_runtime_env(
     provider_name: &str,
     cmd: &mut tokio::process::Command,
 ) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let _ = provider_name;
-        apply_windows_silent_cmd_shim_to_process(cmd)?;
-    }
-
-    #[cfg(not(windows))]
     let _ = (provider_name, cmd);
 
     Ok(())
 }
 
 #[cfg(windows)]
-fn apply_windows_silent_cmd_shim_to_pty(cmd: &mut CommandBuilder) -> Result<(), String> {
-    let (shim, real_comspec) = windows_silent_cmd_shim_env_values()?;
-    cmd.env("ComSpec", shim);
-    cmd.env(
-        crate::utils::process::WARDIAN_REAL_COMSPEC_ENV,
-        real_comspec,
-    );
-    cmd.env(crate::utils::process::WARDIAN_SILENT_CMD_SHIM_ENV, "1");
-    Ok(())
-}
-
-#[cfg(windows)]
-fn apply_windows_silent_cmd_shim_to_process(
-    cmd: &mut tokio::process::Command,
-) -> Result<(), String> {
-    let (shim, real_comspec) = windows_silent_cmd_shim_env_values()?;
-    cmd.env("ComSpec", shim);
-    cmd.env(
-        crate::utils::process::WARDIAN_REAL_COMSPEC_ENV,
-        real_comspec,
-    );
-    cmd.env(crate::utils::process::WARDIAN_SILENT_CMD_SHIM_ENV, "1");
-    Ok(())
-}
-
-#[cfg(windows)]
-fn windows_silent_cmd_shim_env_values() -> Result<(std::path::PathBuf, std::path::PathBuf), String>
-{
-    let shim = std::env::current_exe()
-        .map_err(|error| format!("Failed to resolve Wardian executable for cmd shim: {error}"))?;
-    let real_comspec = crate::utils::process::windows_real_comspec_for_silent_shim(&shim);
-    Ok((shim, real_comspec))
+pub(crate) fn windows_cmd_host() -> String {
+    std::env::var("ComSpec")
+        .ok()
+        .filter(|value| {
+            std::path::Path::new(value)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+        })
+        .unwrap_or_else(|| "cmd.exe".to_string())
 }
 
 #[cfg(windows)]
@@ -865,6 +829,27 @@ mod tests {
         assert!(launch.args[2].contains("--prompt-interactive"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_cmd_host_ignores_poisoned_comspec() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_comspec = std::env::var_os("ComSpec");
+
+        std::env::set_var(
+            "ComSpec",
+            r"D:\Development\Wardian\target\release\Wardian.exe",
+        );
+        assert_eq!(windows_cmd_host(), "cmd.exe");
+
+        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
+        assert_eq!(windows_cmd_host(), r"C:\Windows\System32\cmd.exe");
+
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
+    }
+
     #[test]
     fn terminal_identity_env_includes_resolved_wardian_home() {
         let _guard = crate::utils::wardian_test_env_lock();
@@ -925,118 +910,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn provider_runtime_env_sets_general_silent_cmd_shim() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_comspec = std::env::var_os("ComSpec");
-        let previous_shim = std::env::var_os("WARDIAN_SILENT_CMD_SHIM");
-        let previous_real_comspec = std::env::var_os("WARDIAN_REAL_COMSPEC");
-
-        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
-        std::env::remove_var("WARDIAN_SILENT_CMD_SHIM");
-        std::env::remove_var("WARDIAN_REAL_COMSPEC");
-
-        let mut cmd = CommandBuilder::new("codex");
-        apply_interactive_provider_runtime_env("codex", &mut cmd).unwrap();
-
-        let comspec = cmd
-            .get_env("ComSpec")
-            .expect("ComSpec env")
-            .to_string_lossy()
-            .to_string();
-        assert_eq!(
-            comspec,
-            std::env::current_exe()
-                .unwrap()
-                .to_string_lossy()
-                .to_string()
-        );
-        assert_eq!(
-            cmd.get_env("WARDIAN_REAL_COMSPEC")
-                .expect("WARDIAN_REAL_COMSPEC env")
-                .to_string_lossy(),
-            r"C:\Windows\System32\cmd.exe"
-        );
-        assert_eq!(
-            cmd.get_env("WARDIAN_SILENT_CMD_SHIM")
-                .expect("WARDIAN_SILENT_CMD_SHIM env")
-                .to_string_lossy(),
-            "1"
-        );
-
-        match previous_comspec {
-            Some(value) => std::env::set_var("ComSpec", value),
-            None => std::env::remove_var("ComSpec"),
-        }
-        match previous_shim {
-            Some(value) => std::env::set_var("WARDIAN_SILENT_CMD_SHIM", value),
-            None => std::env::remove_var("WARDIAN_SILENT_CMD_SHIM"),
-        }
-        match previous_real_comspec {
-            Some(value) => std::env::set_var("WARDIAN_REAL_COMSPEC", value),
-            None => std::env::remove_var("WARDIAN_REAL_COMSPEC"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn provider_process_runtime_env_sets_general_silent_cmd_shim() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_comspec = std::env::var_os("ComSpec");
-        let previous_shim = std::env::var_os("WARDIAN_SILENT_CMD_SHIM");
-        let previous_real_comspec = std::env::var_os("WARDIAN_REAL_COMSPEC");
-
-        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
-        std::env::remove_var("WARDIAN_SILENT_CMD_SHIM");
-        std::env::remove_var("WARDIAN_REAL_COMSPEC");
-
-        let mut cmd = tokio::process::Command::new("codex");
-        apply_process_provider_runtime_env("codex", &mut cmd).unwrap();
-
-        let envs = cmd
-            .as_std()
-            .get_envs()
-            .filter_map(|(key, value)| {
-                Some((
-                    key.to_string_lossy().to_string(),
-                    value?.to_string_lossy().to_string(),
-                ))
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(
-            envs.get("ComSpec").expect("ComSpec env"),
-            &std::env::current_exe()
-                .unwrap()
-                .to_string_lossy()
-                .to_string()
-        );
-        assert_eq!(
-            envs.get("WARDIAN_REAL_COMSPEC")
-                .expect("WARDIAN_REAL_COMSPEC env"),
-            r"C:\Windows\System32\cmd.exe"
-        );
-        assert_eq!(
-            envs.get("WARDIAN_SILENT_CMD_SHIM")
-                .expect("WARDIAN_SILENT_CMD_SHIM env"),
-            "1"
-        );
-
-        match previous_comspec {
-            Some(value) => std::env::set_var("ComSpec", value),
-            None => std::env::remove_var("ComSpec"),
-        }
-        match previous_shim {
-            Some(value) => std::env::set_var("WARDIAN_SILENT_CMD_SHIM", value),
-            None => std::env::remove_var("WARDIAN_SILENT_CMD_SHIM"),
-        }
-        match previous_real_comspec {
-            Some(value) => std::env::set_var("WARDIAN_REAL_COMSPEC", value),
-            None => std::env::remove_var("WARDIAN_REAL_COMSPEC"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn provider_runtime_env_does_not_inject_node_options() {
+    fn provider_runtime_env_does_not_inject_shell_or_node_hooks() {
         let _guard = crate::utils::wardian_test_env_lock();
         let previous_comspec = std::env::var_os("ComSpec");
         let previous_node_options = std::env::var_os("NODE_OPTIONS");
@@ -1050,16 +924,42 @@ mod tests {
 
         let mut interactive = CommandBuilder::new("gemini");
         apply_interactive_provider_runtime_env("gemini", &mut interactive).unwrap();
-        assert!(!interactive
+        let interactive_env = interactive
             .iter_extra_env_as_str()
-            .any(|(key, _)| key.eq_ignore_ascii_case("NODE_OPTIONS")));
+            .map(|(key, _)| key.to_string())
+            .collect::<Vec<_>>();
+        assert!(!interactive_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("ComSpec")));
+        assert!(!interactive_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("NODE_OPTIONS")));
+        assert!(!interactive_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("WARDIAN_SILENT_CMD_SHIM")));
+        assert!(!interactive_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("WARDIAN_REAL_COMSPEC")));
 
         let mut process = tokio::process::Command::new("antigravity");
         apply_process_provider_runtime_env("antigravity", &mut process).unwrap();
-        assert!(!process
+        let process_env = process
             .as_std()
             .get_envs()
-            .any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("NODE_OPTIONS")));
+            .map(|(key, _)| key.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(!process_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("ComSpec")));
+        assert!(!process_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("NODE_OPTIONS")));
+        assert!(!process_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("WARDIAN_SILENT_CMD_SHIM")));
+        assert!(!process_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("WARDIAN_REAL_COMSPEC")));
 
         match previous_comspec {
             Some(value) => std::env::set_var("ComSpec", value),

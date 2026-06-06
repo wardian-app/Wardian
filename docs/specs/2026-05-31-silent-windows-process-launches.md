@@ -24,7 +24,7 @@ The Wardian desktop binary should also use the Windows GUI subsystem in developm
 
 Scripts launched by the Rust backend are part of the same process policy. If a production-reachable Node script starts its own package-manager or shell probes, those child-process calls should set `windowsHide` on Windows so the parent Rust no-window policy is not bypassed by a second-order `cmd.exe` launch.
 
-Provider-owned grandchildren are a separate boundary. Gemini, Claude, Antigravity, and other providers can start configured tools such as `npx chrome-devtools-mcp@latest`; on Windows that can resolve through npm `.cmd` shims even when the immediate provider process was launched silently. Wardian should not patch provider internals, inject runtime preloads, or rewrite user/provider MCP configuration to control those children, because that can change provider-intended behavior and may affect agent context. Instead, Wardian sets a narrow Windows `ComSpec` shim only in environments it creates for provider processes. The shim is the Wardian executable running in a marker-env mode; it delegates all arguments to the inherited real `cmd.exe` with `CREATE_NO_WINDOW`, preserving stdin/stdout/stderr and exit status. If a provider bypasses `ComSpec`, hardcodes another shell, or uses lower-level process creation that still shows a terminal, that is outside this Wardian-owned launch boundary.
+Provider-owned grandchildren are a separate boundary. Gemini, Claude, Antigravity, and other providers can start configured tools such as `npx chrome-devtools-mcp@latest`; on Windows that can resolve through npm `.cmd` shims even when the immediate provider process was launched silently. Wardian should not patch provider internals, inject runtime preloads, rewrite user/provider MCP configuration, or override shell environment such as `ComSpec` to control those children, because that can change provider-intended behavior and may affect agent context. If a provider bypasses Wardian's direct process-launch policy, hardcodes another shell, or uses lower-level process creation that still shows a terminal, that is outside this Wardian-owned launch boundary.
 
 ## Non-Goals
 
@@ -36,7 +36,7 @@ Provider-owned grandchildren are a separate boundary. Gemini, Claude, Antigravit
 
 - Unit tests for the centralized Windows process flag helpers, launch specs, and captured stdout/stderr behavior.
 - Existing Rust tests around provider launch argument construction and shell selection.
-- Rust coverage for the provider `ComSpec` shim environment, recursion avoidance, and the absence of Wardian-added `NODE_OPTIONS`.
+- Rust coverage for silent Wardian-owned process flags and the absence of provider runtime shell/Node hook injection.
 - Native user-terminal smoke to prove the ConPTY path still runs commands after the process-creation policy change.
 - `cargo check`, `cargo test`, and `cargo clippy` in `src-tauri`.
 - Frontend validation remains unchanged because this is backend/runtime infrastructure only.

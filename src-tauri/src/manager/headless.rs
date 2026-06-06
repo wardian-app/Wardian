@@ -18,7 +18,7 @@ use crate::utils::logging::log_debug;
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
 #[cfg(windows)]
-use super::quote_cmd_arg;
+use super::{quote_cmd_arg, windows_cmd_host};
 
 pub(crate) fn headless_provider_launch(
     provider_name: &str,
@@ -29,7 +29,7 @@ pub(crate) fn headless_provider_launch(
     {
         let lower_bin = bin.to_ascii_lowercase();
         if provider_name == "opencode" && !lower_bin.ends_with(".exe") {
-            let cmd_host = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let cmd_host = windows_cmd_host();
             let mut fragments = vec![quote_cmd_arg(bin)];
             fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
             return Ok(crate::utils::shell::ShellLaunchSpec {

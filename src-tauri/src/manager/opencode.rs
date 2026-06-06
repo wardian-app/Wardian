@@ -799,7 +799,8 @@ mod tests {
 
         assert!(
             launch.executable.ends_with(r"\cmd.exe")
-                || launch.executable.eq_ignore_ascii_case("cmd"),
+                || launch.executable.eq_ignore_ascii_case("cmd")
+                || launch.executable.eq_ignore_ascii_case("cmd.exe"),
             "expected cmd host, got {}",
             launch.executable
         );
