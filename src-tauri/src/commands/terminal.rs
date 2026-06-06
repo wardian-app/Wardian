@@ -1,7 +1,6 @@
 use crate::manager;
 use crate::state::{AppState, UserTerminalSession};
 use crate::utils::append_bounded_pty_output;
-use crate::utils::terminal_input::submit_prompt_via_sender;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::Deserialize;
@@ -10,6 +9,39 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 use tauri::{AppHandle, Emitter};
+
+pub(crate) async fn submit_prompt_to_agent_with_codex_echo_guard(
+    state: &AppState,
+    session_id: &str,
+    provider_name: &str,
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    prompt: &str,
+) -> Result<(), String> {
+    let payload_cursor =
+        crate::control::codex_payload_echo_cursor(state, provider_name, session_id).await;
+    let wait_provider = provider_name.to_string();
+    let wait_session_id = session_id.to_string();
+    let wait_prompt = prompt.to_string();
+
+    crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
+        tx,
+        prompt,
+        provider_name,
+        || async move {
+            crate::control::wait_for_codex_payload_echo_before_submit(
+                state,
+                &wait_provider,
+                &wait_session_id,
+                payload_cursor.as_deref(),
+                &wait_prompt,
+            )
+            .await;
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
 
 async fn wait_for_opencode_terminal_ready(
     session_id: &str,
@@ -195,7 +227,8 @@ pub async fn submit_prompt_to_agent(
         }
     }
 
-    submit_prompt_via_sender(&tx, &prompt, &provider_name).await
+    submit_prompt_to_agent_with_codex_echo_guard(&state, &session_id, &provider_name, &tx, &prompt)
+        .await
 }
 
 #[tauri::command]
@@ -658,7 +691,13 @@ pub async fn set_user_terminal_cwd(path: String, state: State<'_, AppState>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{read_pty_buffer, validate_user_terminal_cwd, ReadAgentPtyOptions};
+    use super::{
+        read_pty_buffer, submit_prompt_to_agent_with_codex_echo_guard, validate_user_terminal_cwd,
+        ReadAgentPtyOptions,
+    };
+    use crate::state::{ActiveAgent, AppState};
+    use std::sync::{Arc, Mutex};
+    use wardian_core::models::AgentConfig;
 
     #[test]
     fn user_terminal_cwd_validation_rejects_missing_directory() {
@@ -683,6 +722,56 @@ mod tests {
         );
 
         assert_eq!(normalized, "hello world");
+    }
+
+    #[tokio::test]
+    async fn codex_submit_waits_for_prompt_echo_before_enter() {
+        let state = AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            262_144,
+        )));
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            test_agent("agent-1", "codex", watch_state.clone()),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx.clone());
+
+        let submit = tokio::spawn(async move {
+            submit_prompt_to_agent_with_codex_echo_guard(
+                &state,
+                "agent-1",
+                "codex",
+                &tx,
+                "Check composer injection",
+            )
+            .await
+        });
+
+        assert_eq!(
+            rx.recv().await.expect("payload"),
+            b"\x1b[200~Check composer injection\x1b[201~".to_vec()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "submit key should wait for the Codex prompt echo"
+        );
+
+        watch_state
+            .lock()
+            .unwrap()
+            .push_output("› Check composer injection".as_bytes());
+
+        assert_eq!(rx.recv().await.expect("submit key"), b"\r".to_vec());
+        submit.await.expect("submit task").expect("submit succeeds");
     }
 
     #[test]
@@ -729,5 +818,39 @@ mod tests {
             Some("older scrollback\nmiddle scrollback\nrecent frame\n")
         );
         assert!(buffer.is_empty());
+    }
+
+    fn test_agent(
+        session_id: &str,
+        provider: &str,
+        watch_state: Arc<Mutex<crate::state::AgentWatchState>>,
+    ) -> ActiveAgent {
+        ActiveAgent {
+            config: Arc::new(Mutex::new(AgentConfig {
+                session_id: session_id.to_string(),
+                session_name: session_id.to_string(),
+                agent_class: "Coder".to_string(),
+                provider: provider.to_string(),
+                folder: "D:/work".to_string(),
+                ..Default::default()
+            })),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: Arc::new(Mutex::new(String::new())),
+            process_id: Some(1234),
+            query_count: Arc::new(Mutex::new(0)),
+            init_timestamp: Arc::new(Mutex::new(None)),
+            current_status: Arc::new(Mutex::new("Idle".to_string())),
+            last_status_at: Arc::new(Mutex::new(None)),
+            watch_state,
+            terminal_title: Arc::new(Mutex::new(String::new())),
+            last_output_at: Arc::new(Mutex::new(None)),
+            log_path: Arc::new(Mutex::new(None)),
+            log_last_modified: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
     }
 }

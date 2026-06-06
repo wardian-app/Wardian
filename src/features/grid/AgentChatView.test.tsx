@@ -88,7 +88,8 @@ describe("AgentChatView", () => {
     expect(screen.queryByText("Agent")).not.toBeInTheDocument();
     expect(screen.queryByText("Assistant")).not.toBeInTheDocument();
     expect(screen.getByText("Read test output")).toBeInTheDocument();
-    expect(container.querySelector('code[data-language="shell"]')?.textContent).toContain("$ npm run test");
+    expect(screen.getByText("npm run test")).toBeInTheDocument();
+    expect(container.querySelector('code[data-language="shell"]')?.textContent).toContain("tests failed in AgentChatView");
     expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_transcript", { sessionId: "agent-1" });
     expect(screen.queryByText("codex")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
@@ -201,6 +202,25 @@ describe("AgentChatView", () => {
     expect(screen.queryByText("running")).not.toBeInTheDocument();
   });
 
+  it("shows running function calls when a tool name is available", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "tool-running",
+        kind: "tool_call",
+        role: null,
+        title: "function_call",
+        status: "running",
+        metadata: { raw_type: "function_call", tool_name: "shell_command" },
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByText("shell command")).toBeInTheDocument();
+    expect(screen.getByText("running")).toBeInTheDocument();
+  });
+
   it("renders approval events as warning activity", async () => {
     invokeMock.mockResolvedValue([
       event({
@@ -218,7 +238,7 @@ describe("AgentChatView", () => {
     render(<AgentChatView sessionId="agent-1" />);
 
     expect(await screen.findByText("Approval required")).toBeInTheDocument();
-    expect(screen.getByText(/\$ Get-ChildItem -Path include/)).toBeInTheDocument();
+    expect(screen.getAllByText("Get-ChildItem -Path include").length).toBeGreaterThan(0);
     expect(screen.getByText("Action required. Choose a response or type below.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send approval response y: Yes" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send approval response n: No" })).toBeInTheDocument();
@@ -304,12 +324,232 @@ describe("AgentChatView", () => {
 
     render(<AgentChatView sessionId="agent-1" />);
 
-    expect(await screen.findByText("Work log")).toBeInTheDocument();
-    expect(screen.getByText("2 events")).toBeInTheDocument();
-    expect(screen.getByText("Changed files")).toBeInTheDocument();
+    expect(await screen.findByText("Edit file")).toBeInTheDocument();
+    expect(screen.queryByText("Work log")).not.toBeInTheDocument();
+    expect(screen.getByText("Patch applied")).toBeInTheDocument();
+    expect(screen.getAllByText("Changed files").length).toBeGreaterThan(0);
     expect(screen.getByText(".../grid/AgentChatView.tsx")).toBeInTheDocument();
     expect(screen.getByText(".../grid/activityBlocks.ts")).toBeInTheDocument();
     expect(screen.getByText("Done.")).toBeInTheDocument();
+  });
+
+  it("groups only larger adjacent work batches", async () => {
+    invokeMock.mockResolvedValue([
+      event({ id: "tool-1", kind: "tool_call", title: "Read file", text: "reading", sequence: 1 }),
+      event({ id: "tool-2", kind: "tool_result", title: "Read output", text: "content", sequence: 2 }),
+      event({ id: "tool-3", kind: "tool_call", title: "Search files", text: "rg AgentChatView", sequence: 3 }),
+      event({ id: "tool-4", kind: "tool_result", title: "Search output", text: "matches", sequence: 4 }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByText("Work log")).toBeInTheDocument();
+    expect(screen.getByText("4 events")).toBeInTheDocument();
+  });
+
+  it("surfaces concrete shell commands inside grouped work logs", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "shell-call-1",
+        kind: "tool_call",
+        title: "shell_command",
+        command: "Get-ChildItem src/features/grid",
+        status: "running",
+        metadata: { raw_type: "function_call", tool_name: "shell_command" },
+        sequence: 1,
+      }),
+      event({
+        id: "shell-call-2",
+        kind: "tool_call",
+        title: "shell_command",
+        command: "cargo test -p Wardian commands::terminal::tests",
+        status: "running",
+        metadata: { raw_type: "function_call", tool_name: "shell_command" },
+        sequence: 2,
+      }),
+      event({
+        id: "shell-result-1",
+        kind: "tool_result",
+        title: "Tool result",
+        text: "commands::terminal::tests passed",
+        status: "succeeded",
+        exit_code: 0,
+        sequence: 3,
+      }),
+      event({
+        id: "shell-call-3",
+        kind: "tool_call",
+        title: "shell_command",
+        command: "npm run test -- src/features/grid/AgentChatView.test.tsx",
+        status: "running",
+        metadata: { raw_type: "function_call", tool_name: "shell_command" },
+        sequence: 4,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    const group = await screen.findByText("Work log");
+    const article = group.closest("article") as HTMLElement;
+
+    expect(within(article).getByText("Get-ChildItem src/features/grid")).toBeInTheDocument();
+    expect(within(article).getByText("cargo test -p Wardian commands::terminal::tests")).toBeInTheDocument();
+    expect(within(article).getByText("npm run test -- src/features/grid/AgentChatView.test.tsx")).toBeInTheDocument();
+    expect(within(article).queryAllByText("running")).toHaveLength(0);
+  });
+
+  it("renders diff stats and todo tools as specialized activity", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "patch-tool",
+        kind: "tool_result",
+        title: "apply_patch",
+        text: "diff --git a/src/App.tsx b/src/App.tsx\n+added\n-removed",
+        language: "diff",
+        sequence: 1,
+      }),
+      event({
+        id: "todo-tool",
+        kind: "tool_result",
+        title: "todowrite",
+        text: "- [x] Inspect transcript\n- [ ] Add lazy rows",
+        sequence: 2,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByTestId("tool-diff-panel")).toHaveTextContent("1 file");
+    expect(screen.getByText("+1")).toBeInTheDocument();
+    expect(screen.getByText("-1")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-todo-list")).toHaveTextContent("Inspect transcript");
+    expect(screen.getByTestId("tool-todo-list")).toHaveTextContent("Add lazy rows");
+  });
+
+  it("computes diff stats from full content while rendering a collapsed preview", async () => {
+    const longDiff = [
+      "diff --git a/src/one.ts b/src/one.ts",
+      "+one added",
+      "-one removed",
+      ...Array.from({ length: 42 }, (_, index) => ` context ${index}`),
+      "diff --git a/src/two.ts b/src/two.ts",
+      "+two added",
+      "-two removed",
+    ].join("\n");
+
+    invokeMock.mockResolvedValue([
+      event({
+        id: "large-diff",
+        kind: "tool_result",
+        title: "apply_patch",
+        text: longDiff,
+        language: "diff",
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    const panel = await screen.findByTestId("tool-diff-panel");
+    expect(panel).toHaveTextContent("2 files");
+    expect(screen.getByText("+2")).toBeInTheDocument();
+    expect(screen.getByText("-2")).toBeInTheDocument();
+    expect(within(panel).queryByText("two added")).not.toBeInTheDocument();
+  });
+
+  it("lazy-loads older transcript rows on demand", async () => {
+    invokeMock.mockResolvedValue(
+      Array.from({ length: 85 }, (_, index) =>
+        event({
+          id: `message-${index + 1}`,
+          kind: "message",
+          role: "assistant",
+          text: `message ${index + 1}`,
+          sequence: index + 1,
+        }),
+      ),
+    );
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByText("message 85")).toBeInTheDocument();
+    expect(screen.queryByText("message 1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load 5 earlier transcript rows" }));
+
+    expect(screen.getByText("message 1")).toBeInTheDocument();
+  });
+
+  it("anchors long transcript loads to the latest visible rows", async () => {
+    const scrollHeightSpy = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1200);
+    invokeMock.mockResolvedValue(
+      Array.from({ length: 85 }, (_, index) =>
+        event({
+          id: `message-${index + 1}`,
+          kind: "message",
+          role: "assistant",
+          text: `message ${index + 1}`,
+          sequence: index + 1,
+        }),
+      ),
+    );
+
+    try {
+      render(<AgentChatView sessionId="agent-1" />);
+
+      const scrollRegion = await screen.findByTestId("agent-chat-scroll-region");
+
+      await waitFor(() => expect(scrollRegion.scrollTop).toBe(1200));
+      expect(screen.getByText("message 85")).toBeInTheDocument();
+      expect(screen.queryByText("message 1")).not.toBeInTheDocument();
+    } finally {
+      scrollHeightSpy.mockRestore();
+    }
+  });
+
+  it("preserves the viewport when older transcript rows are revealed", async () => {
+    const scrollHeightSpy = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1000);
+    invokeMock.mockResolvedValue(
+      Array.from({ length: 85 }, (_, index) =>
+        event({
+          id: `message-${index + 1}`,
+          kind: "message",
+          role: "assistant",
+          text: `message ${index + 1}`,
+          sequence: index + 1,
+        }),
+      ),
+    );
+
+    try {
+      render(<AgentChatView sessionId="agent-1" />);
+
+      const scrollRegion = await screen.findByTestId("agent-chat-scroll-region");
+      await waitFor(() => expect(scrollRegion.scrollTop).toBe(1000));
+      scrollHeightSpy.mockRestore();
+
+      let loadOlderScrollHeightReads = 0;
+      Object.defineProperty(scrollRegion, "scrollHeight", {
+        configurable: true,
+        get: () => {
+          loadOlderScrollHeightReads += 1;
+          return loadOlderScrollHeightReads === 1 ? 1000 : 1300;
+        },
+      });
+
+      act(() => {
+        scrollRegion.scrollTop = 240;
+        fireEvent.scroll(scrollRegion);
+      });
+      loadOlderScrollHeightReads = 0;
+
+      fireEvent.click(screen.getByRole("button", { name: "Load 5 earlier transcript rows" }));
+
+      await waitFor(() => expect(scrollRegion.scrollTop).toBe(540));
+      expect(screen.getByText("message 1")).toBeInTheDocument();
+    } finally {
+      scrollHeightSpy.mockRestore();
+    }
   });
 
   it("keeps approvals outside adjacent work groups", async () => {
@@ -664,6 +904,51 @@ describe("AgentChatView", () => {
     expect(input).toHaveValue("");
   });
 
+  it("keeps the latest transcript rows anchored after sending a chat message", async () => {
+    let scrollHeight = 1000;
+    const scrollHeightSpy = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => scrollHeight);
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_transcript") {
+        return Promise.resolve([
+          event({
+            id: "message-before-send",
+            kind: "message",
+            role: "assistant",
+            text: "Ready for input.",
+            sequence: 1,
+          }),
+        ]);
+      }
+      if (command === "submit_prompt_to_agent") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    try {
+      render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+      const scrollRegion = await screen.findByTestId("agent-chat-scroll-region");
+      await waitFor(() => expect(scrollRegion.scrollTop).toBe(1000));
+
+      act(() => {
+        scrollRegion.scrollTop = 320;
+        fireEvent.scroll(scrollRegion);
+      });
+
+      const input = await screen.findByLabelText("Message agent");
+      fireEvent.change(input, { target: { value: "Stay at the newest message." } });
+      scrollHeight = 1400;
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+        sessionId: "agent-1",
+        prompt: "Stay at the newest message.",
+      }));
+      await waitFor(() => expect(scrollRegion.scrollTop).toBe(1400));
+    } finally {
+      scrollHeightSpy.mockRestore();
+    }
+  });
+
   it("focuses the composer when requested", async () => {
     invokeMock.mockResolvedValue([]);
 
@@ -730,6 +1015,26 @@ describe("AgentChatView", () => {
       sessionId: "agent-1",
       prompt: "line one\nline two",
     }));
+  });
+
+  it("submits on numpad Enter instead of inserting a textarea line break", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_transcript") return Promise.resolve([]);
+      if (command === "submit_prompt_to_agent") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+    const input = await screen.findByLabelText("Message agent");
+    fireEvent.change(input, { target: { value: "Inject this" } });
+    fireEvent.keyDown(input, { code: "NumpadEnter", key: "NumpadEnter" });
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      sessionId: "agent-1",
+      prompt: "Inject this",
+    }));
+    await waitFor(() => expect(input).toHaveValue(""));
   });
 
   it("does not clear repeated optimistic prompts from older matching transcript text", async () => {

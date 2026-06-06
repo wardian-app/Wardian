@@ -42,6 +42,8 @@ Terminal output can also expose clickable HTTP/HTTPS URLs and workspace file pat
 
 ![Grid chat mode showing normalized agent messages, action-needed output, and prompt composers](../assets/screenshots/grid-chat/chat-composer.png)
 
+![Grid chat mode showing a grouped work log with concrete shell commands instead of generic status rows](../assets/screenshots/grid-chat/tool-call-work-log.png)
+
 ## Important Limits
 
 - Grid only shows agents that have active or restorable Wardian sessions.

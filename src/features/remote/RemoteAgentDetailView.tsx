@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { AgentChatEvent, AgentChatRole, RemoteAgentSummary } from "../../types";
-import { toActivityBlock } from "../grid/activityBlocks";
+import { toActivityBlock, type ActivityBlockModel } from "../grid/activityBlocks";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
@@ -41,6 +41,12 @@ const iconButtonClass =
 
 const modeButtonClass =
   "min-h-9 flex-1 rounded-md px-3 text-xs font-semibold transition-colors";
+
+const WORK_GROUP_MIN_EVENTS = 4;
+
+type RemoteChatRow =
+  | { kind: "event"; event: AgentChatEvent }
+  | { kind: "work_group"; id: string; events: AgentChatEvent[] };
 
 function wardianColorToken(name: string, fallback: string) {
   if (typeof window === "undefined") return fallback;
@@ -526,6 +532,8 @@ function ChatPane({
   error: string;
   endRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  const rows = useMemo(() => deriveRemoteChatRows(sortRemoteTranscriptEvents(visibleEvents).filter(shouldShowRemoteChatEvent)), [visibleEvents]);
+
   return (
     <section className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
       {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
@@ -540,8 +548,14 @@ function ChatPane({
           No chat transcript yet.
         </div>
       )}
-      {visibleEvents.map((event) =>
-        event.kind === "message" ? <MessageBubble key={event.id} event={event} /> : <ActivityRow key={event.id} event={event} />,
+      {rows.map((row) =>
+        row.kind === "work_group" ? (
+          <WorkGroupRow key={row.id} row={row} />
+        ) : row.event.kind === "message" ? (
+          <MessageBubble key={row.event.id} event={row.event} />
+        ) : (
+          <ActivityRow key={row.event.id} event={row.event} />
+        ),
       )}
       <div ref={endRef} aria-hidden="true" />
     </section>
@@ -562,16 +576,217 @@ function MessageBubble({ event }: { event: AgentChatEvent }) {
 
 function ActivityRow({ event }: { event: AgentChatEvent }) {
   const block = toActivityBlock(event);
+  const output = outputWithoutCommandPrefix(block.content, event.command);
+  const details = [
+    event.source,
+    formatStatus(event.status),
+    event.path ? compactPath(event.path) : null,
+    typeof event.exit_code === "number" ? `exit ${event.exit_code}` : null,
+    block.language,
+  ].filter((detail): detail is string => Boolean(detail?.trim()));
+
   return (
     <article className="rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-xs">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate font-semibold text-primary">{block.title}</div>
-          {block.subtitle && <div className="mt-1 truncate text-muted-neutral">{block.subtitle}</div>}
+          {details.length > 0 && <div className="mt-1 truncate text-muted-neutral">{details.join(" - ")}</div>}
         </div>
-        {event.status && <span className="shrink-0 text-muted-neutral">{event.status.replace(/_/g, " ")}</span>}
       </div>
-      {block.content && <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-muted-neutral">{block.content}</pre>}
+      {event.command?.trim() ? (
+        <div className="mt-2 flex min-w-0 items-center gap-1.5 rounded border border-wardian-border bg-wardian-bg px-2 py-1 font-mono text-[11px] leading-4 text-primary">
+          <span className="shrink-0 text-[var(--color-wardian-accent)]">$</span>
+          <span className="min-w-0 truncate" title={event.command}>
+            {event.command}
+          </span>
+        </div>
+      ) : null}
+      {output && <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-muted-neutral">{output}</pre>}
     </article>
   );
+}
+
+function WorkGroupRow({ row }: { row: Extract<RemoteChatRow, { kind: "work_group" }> }) {
+  const entries = row.events.map((event) => ({ event, block: toActivityBlock(event) }));
+  const visibleEntries = entries.slice(-6);
+  const hiddenCount = entries.length - visibleEntries.length;
+
+  return (
+    <article className="rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-semibold text-primary">{workGroupTitle(row.events)}</div>
+          <div className="mt-1 text-muted-neutral">
+            {entries.length} {entries.length === 1 ? "event" : "events"}
+            {hiddenCount > 0 ? ` - showing latest ${visibleEntries.length}` : ""}
+          </div>
+        </div>
+      </div>
+      <div className="mt-2 space-y-1">
+        {visibleEntries.map(({ event, block }) => (
+          <WorkEntry block={block} event={event} key={block.id} />
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function WorkEntry({ event, block }: { event: AgentChatEvent; block: ActivityBlockModel }) {
+  const summary = workEntrySummary(event, block);
+  return (
+    <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 py-1 text-xs leading-4">
+      <span className={`mt-1 h-1.5 w-1.5 rounded-full ${remoteActivityDotClass(block.tone)}`} aria-hidden="true" />
+      <div className="min-w-0">
+        <div className="truncate font-medium text-primary">{block.title}</div>
+        {summary ? (
+          <div className="truncate font-mono text-[11px] text-muted-neutral" title={summary}>
+            {summary}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function deriveRemoteChatRows(events: AgentChatEvent[]): RemoteChatRow[] {
+  const rows: RemoteChatRow[] = [];
+  let pendingWorkEvents: AgentChatEvent[] = [];
+
+  const flushPendingWork = () => {
+    if (pendingWorkEvents.length === 0) return;
+
+    if (pendingWorkEvents.length < WORK_GROUP_MIN_EVENTS) {
+      pendingWorkEvents.forEach((event) => rows.push({ kind: "event", event }));
+    } else {
+      const first = pendingWorkEvents[0];
+      const last = pendingWorkEvents[pendingWorkEvents.length - 1];
+      rows.push({
+        kind: "work_group",
+        id: `work-group-${first.id}-${last.id}`,
+        events: pendingWorkEvents,
+      });
+    }
+
+    pendingWorkEvents = [];
+  };
+
+  events.forEach((event) => {
+    if (isGroupableRemoteWorkEvent(event)) {
+      pendingWorkEvents.push(event);
+      return;
+    }
+
+    flushPendingWork();
+    rows.push({ kind: "event", event });
+  });
+
+  flushPendingWork();
+  return rows;
+}
+
+function isGroupableRemoteWorkEvent(event: AgentChatEvent): boolean {
+  if (event.status === "action_required") return false;
+  return event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "error";
+}
+
+function sortRemoteTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[] {
+  return [...events].sort((a, b) => {
+    if (typeof a.sequence === "number" && typeof b.sequence === "number" && a.sequence !== b.sequence) {
+      return a.sequence - b.sequence;
+    }
+
+    const aTime = Date.parse(a.created_at ?? "");
+    const bTime = Date.parse(b.created_at ?? "");
+    if (!Number.isNaN(aTime) && !Number.isNaN(bTime) && aTime !== bTime) {
+      return aTime - bTime;
+    }
+
+    return 0;
+  });
+}
+
+function shouldShowRemoteChatEvent(event: AgentChatEvent): boolean {
+  if (
+    event.kind === "tool_call" &&
+    !event.command?.trim() &&
+    !event.text?.trim() &&
+    !hasMeaningfulToolIdentity(event) &&
+    (event.status === "running" || event.status === "processing")
+  ) {
+    return false;
+  }
+  if (event.kind !== "status") return true;
+  return event.status === "failed" || event.status === "cancelled" || event.status === "action_required";
+}
+
+function hasMeaningfulToolIdentity(event: AgentChatEvent): boolean {
+  const title = event.title?.trim();
+  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return true;
+  return Boolean(toolNameFromEvent(event));
+}
+
+function toolNameFromEvent(event: AgentChatEvent): string | null {
+  return (
+    stringMetadata(event.metadata, "tool_name") ||
+    stringMetadata(event.metadata, "function_name") ||
+    stringMetadata(event.metadata, "name") ||
+    stringMetadata(event.metadata, "tool")
+  );
+}
+
+function stringMetadata(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function workGroupTitle(events: AgentChatEvent[]): string {
+  if (events.some((event) => event.kind === "error" || event.status === "failed")) return "Work log with error";
+  if (events.some((event) => event.status === "action_required")) return "Work log needs attention";
+  return "Work log";
+}
+
+function firstContentLine(content: string): string {
+  const line = content
+    .split(/\r\n|\r|\n/)
+    .map((part) => part.trim())
+    .find(Boolean);
+  if (!line) return "";
+  return line.length > 140 ? `${line.slice(0, 137)}...` : line;
+}
+
+function workEntrySummary(event: AgentChatEvent, block: ActivityBlockModel): string {
+  const command = event.command?.trim();
+  if (command) return command.length > 140 ? `${command.slice(0, 137)}...` : command;
+
+  const content = firstContentLine(block.content);
+  const status = formatStatus(event.status);
+  if (content && content !== status) return content;
+
+  if (typeof event.exit_code === "number") return `Exit code: ${event.exit_code}`;
+  return "";
+}
+
+function outputWithoutCommandPrefix(content: string, command: string | null): string {
+  if (!command?.trim()) return content;
+  const escaped = command.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return content.replace(new RegExp(`^\\$\\s+${escaped}\\s*(?:\\r?\\n){1,2}`), "").trimEnd();
+}
+
+function compactPath(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return path;
+  return `.../${parts.slice(-2).join("/")}`;
+}
+
+function formatStatus(status: AgentChatEvent["status"]): string | null {
+  if (!status) return null;
+  return status.replace(/_/g, " ");
+}
+
+function remoteActivityDotClass(tone: ActivityBlockModel["tone"]): string {
+  if (tone === "success") return "bg-wardian-success";
+  if (tone === "warning") return "bg-wardian-warning";
+  if (tone === "error") return "bg-wardian-error";
+  if (tone === "processing") return "bg-wardian-processing";
+  return "bg-wardian-off";
 }
