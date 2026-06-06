@@ -658,13 +658,7 @@ pub(crate) fn interactive_provider_launch(
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("exe"));
         if !is_native_exe {
-            let cmd_host = windows_cmd_host();
-            let mut fragments = vec![quote_cmd_arg(bin)];
-            fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
-            return Ok(crate::utils::shell::ShellLaunchSpec {
-                executable: cmd_host,
-                args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
-            });
+            return build_program_launch(bin, provider_args);
         }
     }
 
@@ -716,33 +710,6 @@ pub(crate) fn apply_process_provider_runtime_env(
     let _ = (provider_name, cmd);
 
     Ok(())
-}
-
-#[cfg(windows)]
-pub(crate) fn windows_cmd_host() -> String {
-    std::env::var("ComSpec")
-        .ok()
-        .filter(|value| {
-            std::path::Path::new(value)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
-        })
-        .unwrap_or_else(|| "cmd.exe".to_string())
-}
-
-#[cfg(windows)]
-pub(crate) fn quote_cmd_arg(value: &str) -> String {
-    let escaped = value.replace('"', r#"\""#);
-    if escaped.is_empty()
-        || escaped
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '^' | '&' | '|' | '<' | '>' | '(' | ')'))
-    {
-        format!("\"{}\"", escaped)
-    } else {
-        escaped
-    }
 }
 
 pub(crate) fn display_log_path(path: &std::path::Path) -> String {
@@ -814,7 +781,29 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn antigravity_interactive_launch_wraps_windows_cmd_shims() {
+    fn antigravity_interactive_launch_uses_configured_shell_for_windows_cmd_shims() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_comspec = std::env::var_os("ComSpec");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var(
+            "ComSpec",
+            r"D:\Development\Wardian\target\release\Wardian.exe",
+        );
+        let settings_path = home.path().join("settings").join("shell.json");
+        std::fs::create_dir_all(settings_path.parent().expect("settings parent")).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{
+              "shell_id": "custom",
+              "custom_executable": "pwsh.exe",
+              "custom_args": "-NoProfile -Command",
+              "agent_session_persistence": "resume"
+            }"#,
+        )
+        .unwrap();
+
         let launch = interactive_provider_launch(
             "antigravity",
             r"C:\Users\test\AppData\Roaming\npm\agy.cmd",
@@ -822,28 +811,17 @@ mod tests {
         )
         .expect("launch");
 
-        assert!(launch.executable.ends_with("cmd.exe") || launch.executable == "cmd.exe");
-        assert_eq!(launch.args[0], "/d");
-        assert_eq!(launch.args[1], "/c");
+        assert_eq!(launch.executable, "pwsh.exe");
+        assert_eq!(launch.args[0], "-NoProfile");
+        assert_eq!(launch.args[1], "-Command");
         assert!(launch.args[2].contains("agy.cmd"));
         assert!(launch.args[2].contains("--prompt-interactive"));
-    }
+        assert!(!launch.args[2].contains("ComSpec"));
 
-    #[cfg(windows)]
-    #[test]
-    fn windows_cmd_host_ignores_poisoned_comspec() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_comspec = std::env::var_os("ComSpec");
-
-        std::env::set_var(
-            "ComSpec",
-            r"D:\Development\Wardian\target\release\Wardian.exe",
-        );
-        assert_eq!(windows_cmd_host(), "cmd.exe");
-
-        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
-        assert_eq!(windows_cmd_host(), r"C:\Windows\System32\cmd.exe");
-
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
         match previous_comspec {
             Some(value) => std::env::set_var("ComSpec", value),
             None => std::env::remove_var("ComSpec"),

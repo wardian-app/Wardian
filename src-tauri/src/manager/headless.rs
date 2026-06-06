@@ -17,9 +17,6 @@ use crate::utils::logging::log_debug;
 
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
-#[cfg(windows)]
-use super::{quote_cmd_arg, windows_cmd_host};
-
 pub(crate) fn headless_provider_launch(
     provider_name: &str,
     bin: &str,
@@ -29,13 +26,7 @@ pub(crate) fn headless_provider_launch(
     {
         let lower_bin = bin.to_ascii_lowercase();
         if provider_name == "opencode" && !lower_bin.ends_with(".exe") {
-            let cmd_host = windows_cmd_host();
-            let mut fragments = vec![quote_cmd_arg(bin)];
-            fragments.extend(provider_args.iter().map(|arg| quote_cmd_arg(arg)));
-            return Ok(crate::utils::shell::ShellLaunchSpec {
-                executable: cmd_host,
-                args: vec!["/d".to_string(), "/c".to_string(), fragments.join(" ")],
-            });
+            return build_program_launch(bin, provider_args);
         }
         if !lower_bin.ends_with(".cmd")
             && !lower_bin.ends_with(".bat")
@@ -896,7 +887,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn opencode_extensionless_headless_launch_uses_cmd_host_on_windows() {
+    fn opencode_extensionless_headless_launch_uses_configured_shell_on_windows() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_comspec = std::env::var_os("ComSpec");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var(
+            "ComSpec",
+            r"D:\Development\Wardian\target\release\Wardian.exe",
+        );
+        let settings_path = home.path().join("settings").join("shell.json");
+        std::fs::create_dir_all(settings_path.parent().expect("settings parent")).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{
+              "shell_id": "custom",
+              "custom_executable": "pwsh.exe",
+              "custom_args": "-NoProfile -Command",
+              "agent_session_persistence": "resume"
+            }"#,
+        )
+        .unwrap();
         let args = vec![
             "run".to_string(),
             "--print-logs".to_string(),
@@ -906,11 +918,21 @@ mod tests {
         let spec = headless_provider_launch("opencode", "C:/nvm4w/nodejs/opencode", &args)
             .expect("launch spec");
 
-        assert!(spec.executable.ends_with("cmd.exe") || spec.executable == "cmd.exe");
-        assert_eq!(spec.args[0], "/d");
-        assert_eq!(spec.args[1], "/c");
+        assert_eq!(spec.executable, "pwsh.exe");
+        assert_eq!(spec.args[0], "-NoProfile");
+        assert_eq!(spec.args[1], "-Command");
         assert!(spec.args[2].contains("C:/nvm4w/nodejs/opencode"));
         assert!(spec.args[2].contains("first line\nsecond line"));
+        assert!(!spec.args[2].contains("ComSpec"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
     }
 
     #[test]
