@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-04-19
-- **Decider:** Tan Gemicioglu
 
 ## Context and Problem Statement
 

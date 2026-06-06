@@ -2,7 +2,6 @@
 
 * **Status:** Accepted
 * **Date:** 2026-05-21
-* **Decider:** Core Runtime
 
 ## Context and Problem Statement
 

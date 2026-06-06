@@ -2,7 +2,6 @@
 
 - **Status:** Placeholder
 - **Date:** 2026-04-17
-- **Decider:** User
 
 ## Context and Problem Statement
 

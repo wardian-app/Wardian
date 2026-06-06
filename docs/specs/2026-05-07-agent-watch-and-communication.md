@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-05-07
-- **Decider:** Wardian Codex
 
 ## Context and Problem Statement
 

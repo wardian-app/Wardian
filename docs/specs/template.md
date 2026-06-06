@@ -4,7 +4,6 @@ Filename: `YYYY-MM-DD-short-slug.md`
 
 - **Status:** Proposed | Implemented | Deprecated
 - **Date:** [YYYY-MM-DD]
-- **Decider:** [Role/User]
 
 ## Context and Problem Statement
 

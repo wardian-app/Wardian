@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-29
-- **Decider:** User
 
 ## Context
 

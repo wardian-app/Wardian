@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-05-21
-- **Decider:** Wardian maintainers
 
 ## Context
 

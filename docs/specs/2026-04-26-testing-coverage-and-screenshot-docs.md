@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-04-26
-- **Decider:** Tan Gemicioglu
 
 ## Context and Problem Statement
 

@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-05-22
-- **Decider:** Product/Engineering
 
 ## Context and Problem Statement
 

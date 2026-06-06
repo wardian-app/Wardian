@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-05-19
-- **Decider:** Wardian Codex and user
 
 ## Context and Problem Statement
 

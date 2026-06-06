@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-19
-- **Decider:** Product/Engineering
 
 ## Context and Problem Statement
 

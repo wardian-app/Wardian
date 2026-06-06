@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-06-02
-- **Decider:** User
 
 ## Context and Problem Statement
 

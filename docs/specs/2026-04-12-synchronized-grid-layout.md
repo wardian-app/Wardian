@@ -2,7 +2,6 @@
 
 * **Status:** Draft (Flush Layout)
 * **Date:** 2026-04-12
-* **Decider:** Designer / User
 
 ## Context and Problem Statement
 Current grid management in Wardian is limited to a simple `flex-wrap` layout with heavy whitespace gaps. To create a high-fidelity "Command Center" experience, we need a system that allows for **Direct Visual Manipulation** of a flush, zero-gap grid where terminals share edges.

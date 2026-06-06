@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-05-21
-- **Decider:** Product/Engineering
 - **Issue:** [#184](https://github.com/wardian-app/Wardian/issues/184)
 - **Related:** [#336](https://github.com/wardian-app/Wardian/issues/336)
 

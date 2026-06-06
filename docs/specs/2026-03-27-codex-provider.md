@@ -2,7 +2,6 @@
 
 * **Status:** Implemented
 * **Date:** 2026-03-27
-* **Decider:** Architect
 
 ## Context and Problem Statement
 Wardian already has a multi-provider backend, but the current implementation only supports Gemini and Claude. Codex support is required for local agent sessions, headless execution, and telemetry without expanding the workflow-engine merge surface.

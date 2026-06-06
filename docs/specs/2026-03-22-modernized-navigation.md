@@ -2,7 +2,6 @@
 
 * **Status:** Implemented
 * **Date:** 2026-03-17
-* **Decider:** Architect
 
 ## Context and Problem Statement
 Wardian's current navigation is "nested" within the main content area, and sidebar controls use inconsistent floating arrows. To elevate the application to a "Pro-Tool" status (similar to Obsidian or VS Code), we need a global navigation layer that remains consistent across all views.

@@ -2,7 +2,6 @@
 
 - **Status:** Planned
 - **Date:** 2026-05-23
-- **Decider:** Wardian maintainers
 
 ## Context and Problem Statement
 

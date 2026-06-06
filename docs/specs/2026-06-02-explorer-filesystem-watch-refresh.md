@@ -2,7 +2,6 @@
 
 * **Status:** Accepted
 * **Date:** 2026-06-02
-* **Decider:** User, Codex
 
 ## Context
 
