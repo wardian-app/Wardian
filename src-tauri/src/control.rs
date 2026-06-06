@@ -1367,7 +1367,7 @@ async fn wait_for_terminal_output(
     ))
 }
 
-async fn codex_payload_echo_cursor(
+pub(crate) async fn codex_payload_echo_cursor(
     state: &AppState,
     provider: &str,
     session_id: &str,
@@ -1383,7 +1383,7 @@ async fn codex_payload_echo_cursor(
     watch_state.lock().ok().map(|guard| guard.latest_cursor())
 }
 
-async fn wait_for_codex_payload_echo_before_submit(
+pub(crate) async fn wait_for_codex_payload_echo_before_submit(
     state: &AppState,
     provider: &str,
     session_id: &str,

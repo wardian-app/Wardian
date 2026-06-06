@@ -245,30 +245,36 @@ fn normalize_codex_payload(
             payload,
         )),
         "function_call" | "custom_tool_call" => {
-            let arguments = str_field(payload, "arguments").and_then(parse_json_string);
+            let arguments = codex_tool_call_input(payload);
+            let tool_name = str_field(payload, "name").unwrap_or(payload_type);
             let command = arguments
                 .as_ref()
-                .and_then(|value| str_field(value, "command").map(str::to_string))
-                .or_else(|| str_field(payload, "name").map(str::to_string));
+                .and_then(|value| str_field(value, "command").map(str::to_string));
             let needs_approval = arguments.as_ref().is_some_and(|value| {
                 str_field(value, "sandbox_permissions") == Some("require_escalated")
             });
             let text = arguments
                 .as_ref()
                 .and_then(|value| str_field(value, "justification").map(str::to_string));
-            Some(tool_call_event(
+            Some(event(
                 session_id,
                 provider,
                 sequence,
-                source,
-                turn_id,
-                command,
-                text,
-                payload_type,
-                if needs_approval {
-                    AgentChatStatus::ActionRequired
-                } else {
-                    AgentChatStatus::Running
+                AgentChatEventKind::ToolCall,
+                EventFields {
+                    text,
+                    title: Some(tool_name.to_string()),
+                    status: Some(if needs_approval {
+                        AgentChatStatus::ActionRequired
+                    } else {
+                        AgentChatStatus::Running
+                    }),
+                    turn_id,
+                    source: Some(source),
+                    command: command.clone(),
+                    language: command.as_ref().map(|_| "shell".to_string()),
+                    metadata: json!({"raw_type": payload_type, "tool_name": tool_name}),
+                    ..Default::default()
                 },
             ))
         }
@@ -1165,6 +1171,19 @@ fn normalize_provider(provider: &str) -> String {
     provider.trim().to_ascii_lowercase()
 }
 
+fn codex_tool_call_input(payload: &Value) -> Option<Value> {
+    json_object_or_encoded_json(payload.get("arguments"))
+        .or_else(|| json_object_or_encoded_json(payload.get("input")))
+}
+
+fn json_object_or_encoded_json(value: Option<&Value>) -> Option<Value> {
+    match value {
+        Some(Value::Object(_)) => value.cloned(),
+        Some(Value::String(raw)) => parse_json_string(raw),
+        _ => None,
+    }
+}
+
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|value| value.as_str())
 }
@@ -1244,12 +1263,29 @@ mod tests {
 
         let approval = one(
             "codex",
-            r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"git status\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Need git status\"}"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"git status\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Need git status\"}"}}"#,
         );
         assert_eq!(approval.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(approval.title.as_deref(), Some("shell_command"));
         assert_eq!(approval.status, Some(AgentChatStatus::ActionRequired));
         assert_eq!(approval.command.as_deref(), Some("git status"));
         assert_eq!(approval.text.as_deref(), Some("Need git status"));
+        assert_eq!(approval.metadata["raw_type"], "function_call");
+        assert_eq!(approval.metadata["tool_name"], "shell_command");
+    }
+
+    #[test]
+    fn codex_tool_call_input_object_exposes_command() {
+        let tool = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"shell_command","input":{"command":"Get-ChildItem src-tauri","sandbox_permissions":"read-only"}}}"#,
+        );
+
+        assert_eq!(tool.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(tool.title.as_deref(), Some("shell_command"));
+        assert_eq!(tool.command.as_deref(), Some("Get-ChildItem src-tauri"));
+        assert_eq!(tool.language.as_deref(), Some("shell"));
+        assert_eq!(tool.metadata["tool_name"], "shell_command");
     }
 
     #[test]

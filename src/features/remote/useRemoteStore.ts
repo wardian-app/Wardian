@@ -7,6 +7,7 @@ import {
   type WatchlistPrefs,
 } from "../../layout/watchlist/types";
 import { normalizeWatchlistState } from "../../layout/watchlist/watchlistUtils";
+import { normalizedRemoteAgentStatus } from "./remoteAgentStatus";
 import {
   clearStoredRemoteIdentity,
   createRemoteDeviceKeyPair,
@@ -198,6 +199,11 @@ const scheduleBackgroundActiveChatRefresh = (set: RemoteSet, get: RemoteGet) => 
 const activeAgentRefreshKey = (agent: RemoteAgentSummary) =>
   [agent.session_id, agent.status, agent.latest_text ?? ""].join("\0");
 
+const activeAgentStatusShouldRefreshChat = (status: string) => {
+  const normalized = normalizedRemoteAgentStatus(status);
+  return normalized === "processing" || normalized === "running" || normalized === "action_required" || normalized === "action_needed";
+};
+
 const scheduleStatusStreamReconnect = (set: RemoteSet, get: RemoteGet) => {
   if (statusStreamReconnectTimer !== null || statusStreamSocket || get().status === "session_expired") return;
   const delay = Math.min(
@@ -243,7 +249,7 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
         const nextRefreshKey = activeAgentRefreshKey(activeAgent);
         const refreshKeyChanged = nextRefreshKey !== lastActiveAgentRefreshKey;
         lastActiveAgentRefreshKey = nextRefreshKey;
-        if (refreshKeyChanged && get().activeAgentViewMode === "chat") {
+        if ((refreshKeyChanged || activeAgentStatusShouldRefreshChat(activeAgent.status)) && get().activeAgentViewMode === "chat") {
           scheduleBackgroundActiveChatRefresh(set, get);
         }
       } else {

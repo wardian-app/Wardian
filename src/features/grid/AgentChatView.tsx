@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Check, Copy, Loader2, SendHorizontal } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { Check, Copy, FileText, GitCompare, ListChecks, Loader2, Search, SendHorizontal, ShieldAlert, Terminal, Wrench } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type { AgentChatEvent, AgentChatRole, AgentConfig, AgentTelemetry } from "../../types";
 import { submitInputToAgent } from "../../utils/terminalInput";
 import { toActivityBlock, type ActivityBlockModel, type ActivityTone } from "./activityBlocks";
@@ -58,6 +59,19 @@ type ChatRow =
 
 type CopyState = "idle" | "copied" | "error";
 type ApprovalChoice = { value: string; label: string };
+type ToolDisplayKind = "diff" | "file" | "permission" | "search" | "shell" | "todo" | "generic";
+type ToolPresentation = {
+  kind: ToolDisplayKind;
+  label: string;
+  title: string;
+  details: string[];
+  icon: LucideIcon;
+};
+
+const CHAT_INITIAL_ROW_LIMIT = 80;
+const CHAT_ROW_PAGE_SIZE = 60;
+const CHAT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
+const WORK_GROUP_MIN_EVENTS = 4;
 
 export function AgentChatView({
   sessionId,
@@ -82,7 +96,11 @@ export function AgentChatView({
   const [internalDraft, setInternalDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [visibleRowLimit, setVisibleRowLimit] = useState(CHAT_INITIAL_ROW_LIMIT);
+  const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const transcriptRequestRef = useRef(0);
+  const stickToLatestRef = useRef(true);
+  const prependScrollSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const activeDraft = draft ?? internalDraft;
   const setActiveDraft = onDraftChange ?? setInternalDraft;
 
@@ -92,6 +110,8 @@ export function AgentChatView({
 
     listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
       if (event.payload?.session_id !== sessionId) return;
+      stickToLatestRef.current = true;
+      prependScrollSnapshotRef.current = null;
       setEvents([]);
       setPendingMessages([]);
       setLoadState("ready");
@@ -131,6 +151,10 @@ export function AgentChatView({
         .then((transcript) => {
           if (cancelled || requestId !== transcriptRequestRef.current) return;
           const nextEvents = Array.isArray(transcript) ? transcript : [];
+          const scrollRegion = transcriptScrollRef.current;
+          if (scrollRegion && !prependScrollSnapshotRef.current) {
+            stickToLatestRef.current = stickToLatestRef.current || isNearTranscriptBottom(scrollRegion);
+          }
           setEvents(nextEvents);
           setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
           setLoadState("ready");
@@ -155,13 +179,41 @@ export function AgentChatView({
 
   const mergedEvents = useMemo(() => mergePendingMessages(events, pendingMessages), [events, pendingMessages]);
   const chatRows = useMemo(() => deriveChatRows(sortTranscriptEvents(mergedEvents).filter(shouldShowChatEvent)), [mergedEvents]);
+  const hiddenOlderRowCount = Math.max(0, chatRows.length - visibleRowLimit);
+  const visibleChatRows = useMemo(() => chatRows.slice(hiddenOlderRowCount), [chatRows, hiddenOlderRowCount]);
+  const latestVisibleRowKey = visibleChatRows.length > 0 ? chatRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const disabledReason = inputDisabledReason(status ?? telemetry?.current_status ?? null, isSubmitting);
+
+  useEffect(() => {
+    stickToLatestRef.current = true;
+    prependScrollSnapshotRef.current = null;
+    setVisibleRowLimit(CHAT_INITIAL_ROW_LIMIT);
+  }, [sessionId]);
+
+  useLayoutEffect(() => {
+    const scrollRegion = transcriptScrollRef.current;
+    if (!scrollRegion || loadState !== "ready") return;
+
+    const prependSnapshot = prependScrollSnapshotRef.current;
+    if (prependSnapshot) {
+      scrollRegion.scrollTop = scrollRegion.scrollHeight - prependSnapshot.scrollHeight + prependSnapshot.scrollTop;
+      prependScrollSnapshotRef.current = null;
+      stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
+      return;
+    }
+
+    if (stickToLatestRef.current) {
+      scrollRegion.scrollTop = scrollRegion.scrollHeight;
+      stickToLatestRef.current = true;
+    }
+  }, [hiddenOlderRowCount, latestVisibleRowKey, loadState, visibleChatRows.length]);
 
   const submitPrompt = async (promptValue: string, clearDraft: boolean) => {
     const prompt = promptValue.trim();
     if (!prompt || disabledReason) return;
 
+    stickToLatestRef.current = true;
     setIsSubmitting(true);
     setSubmitError(null);
     try {
@@ -187,6 +239,24 @@ export function AgentChatView({
     void submitPrompt(response, false);
   };
 
+  const handleTranscriptScroll = () => {
+    const scrollRegion = transcriptScrollRef.current;
+    if (!scrollRegion || prependScrollSnapshotRef.current) return;
+    stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
+  };
+
+  const handleLoadOlderRows = () => {
+    const scrollRegion = transcriptScrollRef.current;
+    if (scrollRegion) {
+      prependScrollSnapshotRef.current = {
+        scrollHeight: scrollRegion.scrollHeight,
+        scrollTop: scrollRegion.scrollTop,
+      };
+      stickToLatestRef.current = false;
+    }
+    setVisibleRowLimit((limit) => limit + CHAT_ROW_PAGE_SIZE);
+  };
+
   return (
     <section
       aria-label={`Chat transcript for ${agent?.session_name ?? sessionId}`}
@@ -194,13 +264,29 @@ export function AgentChatView({
       data-theme-mode={theme}
       data-testid="agent-chat-view"
     >
-      <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
+      <div
+        className="min-h-0 flex-1 overflow-auto px-3 py-3"
+        data-testid="agent-chat-scroll-region"
+        onScroll={handleTranscriptScroll}
+        ref={transcriptScrollRef}
+      >
         {loadState === "loading" ? <LoadingState /> : null}
         {loadState === "error" ? <ErrorState error={error} onRetry={() => setReloadKey((key) => key + 1)} /> : null}
         {loadState === "ready" && chatRows.length === 0 ? <EmptyState /> : null}
         {loadState === "ready" && chatRows.length > 0 ? (
           <ol className="space-y-2" data-testid="agent-chat-transcript">
-            {chatRows.map((row) => (
+            {hiddenOlderRowCount > 0 ? (
+              <li>
+                <button
+                  type="button"
+                  className="w-full rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-3 py-2 text-[12px] font-semibold leading-5 text-muted-neutral hover:text-primary"
+                  onClick={handleLoadOlderRows}
+                >
+                  Load {Math.min(CHAT_ROW_PAGE_SIZE, hiddenOlderRowCount)} earlier transcript rows
+                </button>
+              </li>
+            ) : null}
+            {visibleChatRows.map((row) => (
               <li key={row.kind === "event" ? row.event.id : row.id}>
                 {row.kind === "work_group" ? (
                   <WorkGroupRow row={row} />
@@ -229,6 +315,14 @@ export function AgentChatView({
       />
     </section>
   );
+}
+
+function chatRowKey(row: ChatRow): string {
+  return row.kind === "event" ? row.event.id : row.id;
+}
+
+function isNearTranscriptBottom(scrollRegion: HTMLElement): boolean {
+  return scrollRegion.scrollHeight - scrollRegion.scrollTop - scrollRegion.clientHeight <= CHAT_SCROLL_BOTTOM_THRESHOLD_PX;
 }
 
 function TranscriptEvent({
@@ -332,11 +426,11 @@ function ActivityEvent({
 
 function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }) {
   const [expanded, setExpanded] = useState(false);
-  const blocks = row.events.map(toActivityBlock);
-  const visibleBlocks = expanded ? blocks : blocks.slice(-6);
-  const hiddenCount = blocks.length - visibleBlocks.length;
+  const entries = row.events.map((event) => ({ event, block: toActivityBlock(event) }));
+  const visibleEntries = expanded ? entries : entries.slice(-6);
+  const hiddenCount = entries.length - visibleEntries.length;
   const title = workGroupTitle(row.events);
-  const copyValue = formatWorkGroupForCopy(blocks, row.changedPaths);
+  const copyValue = formatWorkGroupForCopy(entries, row.changedPaths);
 
   return (
     <article className="border-l-2 border-wardian-light bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),transparent_18%)] px-3 py-2">
@@ -344,13 +438,13 @@ function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }
         <div className="min-w-0 flex-1">
           <div className="truncate text-[12px] font-semibold leading-5 text-primary">{title}</div>
           <div className="text-[11px] leading-4 text-muted-neutral">
-            {blocks.length} {blocks.length === 1 ? "event" : "events"}
-            {hiddenCount > 0 ? ` - showing latest ${visibleBlocks.length}` : ""}
+            {entries.length} {entries.length === 1 ? "event" : "events"}
+            {hiddenCount > 0 ? ` - showing latest ${visibleEntries.length}` : ""}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <CopyIconButton label="Copy work log" value={copyValue} />
-          {blocks.length > visibleBlocks.length || expanded ? (
+          {entries.length > visibleEntries.length || expanded ? (
             <button
               type="button"
               className="rounded border border-wardian-light px-2 py-1 text-[11px] font-semibold leading-4 text-muted-neutral hover:text-primary"
@@ -365,8 +459,8 @@ function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }
       {row.changedPaths.length > 0 ? <ChangedFiles paths={row.changedPaths} /> : null}
 
       <div className="mt-2 space-y-1">
-        {visibleBlocks.map((block) => (
-          <WorkEntry block={block} key={block.id} />
+        {visibleEntries.map(({ event, block }) => (
+          <WorkEntry block={block} event={event} key={block.id} />
         ))}
       </div>
     </article>
@@ -394,14 +488,18 @@ function ChangedFiles({ paths }: { paths: string[] }) {
   );
 }
 
-function WorkEntry({ block }: { block: ActivityBlockModel }) {
-  const summary = firstContentLine(block.content);
+function WorkEntry({ event, block }: { event: AgentChatEvent; block: ActivityBlockModel }) {
+  const summary = workEntrySummary(event, block);
   return (
     <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 rounded border border-transparent py-1 text-[12px] leading-4">
       <span className={`mt-1 h-1.5 w-1.5 rounded-full ${toneDotClass(block.tone)}`} aria-hidden="true" />
       <div className="min-w-0">
         <div className="truncate font-medium text-primary">{block.title}</div>
-        {summary ? <div className="truncate font-mono text-[11px] text-muted-neutral">{summary}</div> : null}
+        {summary ? (
+          <div className="truncate font-mono text-[11px] text-muted-neutral" title={summary}>
+            {summary}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -435,16 +533,34 @@ function ActivityRow({
   const visibleContent = expanded ? block.content : previewContent(block.content);
   const isApproval = block.kind === "approval" || block.tone === "warning";
   const approvalChoices = isApproval ? parseApprovalChoices(event.text ?? block.content) : [];
+  const presentation = toolPresentation(event, block);
+  const Icon = presentation.icon;
+  const output = outputWithoutCommandPrefix(block.content, event.command);
+  const changedPaths = changedPathsFromEvents([event]);
 
   return (
     <article className={`border-l-2 bg-[var(--color-wardian-card-bg-muted)] px-3 py-2 ${TONE_CLASSES[block.tone]}`}>
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-[12px] font-semibold leading-5 text-primary">{block.title}</div>
-          <div className="truncate text-[11px] leading-4 text-muted-neutral">
-            {block.subtitle ? `${block.subtitle} - ` : ""}
-            {block.language} - {block.lineCount} {block.lineCount === 1 ? "line" : "lines"}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border ${toolIconClass(presentation.kind)}`}>
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-[12px] font-semibold leading-5 text-primary">{presentation.title}</div>
+              <div className="truncate text-[11px] leading-4 text-muted-neutral">
+                {presentation.details.join(" - ")}
+              </div>
+            </div>
           </div>
+          {event.command?.trim() ? (
+            <div className="mt-2 flex min-w-0 items-center gap-1.5 rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] px-2 py-1 font-mono text-[11px] leading-4 text-primary">
+              <span className="shrink-0 text-[var(--color-wardian-accent)]">$</span>
+              <span className="min-w-0 truncate" title={event.command}>
+                {event.command}
+              </span>
+            </div>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <CopyIconButton label="Copy activity output" value={block.content} />
@@ -464,6 +580,7 @@ function ActivityRow({
           {approvalChoices.length > 0 ? "Action required. Choose a response or type below." : "Action required. Respond below or switch to terminal mode."}
         </div>
       ) : null}
+      {changedPaths.length > 0 ? <ChangedFiles paths={changedPaths} /> : null}
       {approvalChoices.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1.5" aria-label="Approval choices">
           {approvalChoices.map((choice) => (
@@ -481,11 +598,208 @@ function ActivityRow({
           ))}
         </div>
       ) : null}
-      <pre className="mt-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-words rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] p-2 text-[12px] leading-5 text-primary">
-        <code data-language={block.language}>{renderHighlightedCode(visibleContent || "No activity content", block.language)}</code>
-      </pre>
+      <ToolBody
+        block={block}
+        content={event.command ? outputWithoutCommandPrefix(visibleContent, event.command) : visibleContent}
+        output={output}
+        presentation={presentation}
+      />
     </article>
   );
+}
+
+function ToolBody({
+  block,
+  content,
+  output,
+  presentation,
+}: {
+  block: ActivityBlockModel;
+  content: string;
+  output: string;
+  presentation: ToolPresentation;
+}) {
+  const safeContent = content.trimEnd() || "No activity content";
+
+  if (presentation.kind === "todo") {
+    const items = parseTodoItems(output || safeContent);
+    if (items.length > 0) {
+      return (
+        <ul className="mt-2 space-y-1 rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] p-2" data-testid="tool-todo-list">
+          {items.map((item, index) => (
+            <li className="flex items-start gap-2 text-[12px] leading-5 text-primary" key={`${index}-${item.label.slice(0, 24)}`}>
+              <span
+                aria-hidden="true"
+                className={`mt-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                  item.done
+                    ? "border-[var(--color-wardian-success)] bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_82%)]"
+                    : "border-wardian-light bg-[var(--color-wardian-card-bg-muted)]"
+                }`}
+              >
+                {item.done ? <Check className="h-2.5 w-2.5 text-[var(--color-wardian-success)]" aria-hidden="true" /> : null}
+              </span>
+              <span className="break-words">{item.label}</span>
+            </li>
+          ))}
+        </ul>
+      );
+    }
+  }
+
+  if (presentation.kind === "diff") {
+    const stats = diffStats((output || safeContent).trimEnd());
+    return (
+      <div className="mt-2 rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)]" data-testid="tool-diff-panel">
+        <div className="flex flex-wrap items-center gap-2 border-b border-wardian-light px-2 py-1 text-[11px] leading-4 text-muted-neutral">
+          <span>{stats.files.length > 0 ? `${stats.files.length} ${stats.files.length === 1 ? "file" : "files"}` : "Patch"}</span>
+          <span className="text-[var(--color-wardian-success)]">+{stats.added}</span>
+          <span className="text-[var(--color-wardian-error)]">-{stats.removed}</span>
+          {stats.files.slice(0, 3).map((file) => (
+            <span className="max-w-[180px] truncate font-mono text-primary" key={file} title={file}>
+              {compactPath(file)}
+            </span>
+          ))}
+        </div>
+        <CodePanel content={safeContent} language="diff" />
+      </div>
+    );
+  }
+
+  return <CodePanel content={safeContent} language={block.language} />;
+}
+
+function CodePanel({ content, language }: { content: string; language: string }) {
+  return (
+    <pre className="mt-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-words rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] p-2 text-[12px] leading-5 text-primary">
+      <code data-language={language}>{renderHighlightedCode(content, language)}</code>
+    </pre>
+  );
+}
+
+function toolPresentation(event: AgentChatEvent, block: ActivityBlockModel): ToolPresentation {
+  const rawType = stringMetadata(event.metadata, "raw_type");
+  const toolName = toolNameFromEvent(event);
+  const haystack = [event.kind, event.title, event.source, event.command, rawType, toolName, event.path, block.language]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const details = [
+    toolLabelFromEvent(event, rawType, toolName),
+    formatStatus(event.status),
+    event.path ? compactPath(event.path) : null,
+    typeof event.exit_code === "number" ? `exit ${event.exit_code}` : null,
+    `${block.lineCount} ${block.lineCount === 1 ? "line" : "lines"}`,
+  ].filter((detail): detail is string => Boolean(detail?.trim()));
+
+  if (event.kind === "approval" || event.status === "action_required") {
+    return { kind: "permission", label: "Permission", title: readableToolTitle(event, "Permission required"), details, icon: ShieldAlert };
+  }
+
+  if (haystack.includes("todo")) {
+    return { kind: "todo", label: "Todo", title: readableToolTitle(event, "Todo update"), details, icon: ListChecks };
+  }
+
+  if (block.language === "diff" || /\b(apply_patch|patch|diff|edit|write)\b/.test(haystack)) {
+    return { kind: "diff", label: "Change", title: readableToolTitle(event, "File change"), details, icon: GitCompare };
+  }
+
+  if (event.command?.trim() || /\b(bash|shell|exec|command|powershell|pwsh|cmd)\b/.test(haystack)) {
+    return { kind: "shell", label: "Shell", title: readableToolTitle(event, "Shell command"), details, icon: Terminal };
+  }
+
+  if (/\b(search|grep|glob|rg|find|webfetch|websearch)\b/.test(haystack)) {
+    return { kind: "search", label: "Search", title: readableToolTitle(event, "Search"), details, icon: Search };
+  }
+
+  if (event.path || /\b(read|file|filesystem)\b/.test(haystack)) {
+    return { kind: "file", label: "File", title: readableToolTitle(event, "File operation"), details, icon: FileText };
+  }
+
+  return { kind: "generic", label: "Tool", title: readableToolTitle(event, block.title || "Tool activity"), details, icon: Wrench };
+}
+
+function toolIconClass(kind: ToolDisplayKind): string {
+  if (kind === "permission") return "border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_42%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] text-[var(--color-wardian-warning)]";
+  if (kind === "diff") return "border-[color-mix(in_srgb,var(--color-wardian-success),transparent_45%)] bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_88%)] text-[var(--color-wardian-success)]";
+  if (kind === "shell") return "border-[color-mix(in_srgb,var(--color-wardian-processing),transparent_42%)] bg-[color-mix(in_srgb,var(--color-wardian-processing),transparent_88%)] text-[var(--color-wardian-processing)]";
+  return "border-wardian-light bg-[var(--color-wardian-card)] text-muted-neutral";
+}
+
+function readableToolTitle(event: AgentChatEvent, fallback: string): string {
+  const title = event.title?.trim();
+  const toolName = toolNameFromEvent(event);
+  const command = event.command?.trim();
+  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return title.replace(/_/g, " ");
+  if (toolName) return toolName.replace(/_/g, " ");
+  if (command) return commandName(command);
+  return fallback;
+}
+
+function commandName(command: string): string {
+  const first = command.trim().split(/\s+/)[0];
+  if (!first) return "Shell command";
+  return first.replace(/\.(exe|cmd|ps1)$/i, "");
+}
+
+function toolLabelFromEvent(event: AgentChatEvent, rawType: string | null, toolName: string | null): string | null {
+  const title = event.title?.trim();
+  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return title.replace(/_/g, " ");
+  if (toolName) return toolName.replace(/_/g, " ");
+  if (rawType) return rawType.replace(/_/g, " ");
+  if (event.kind === "tool_call") return "tool call";
+  if (event.kind === "tool_result") return "tool result";
+  return null;
+}
+
+function toolNameFromEvent(event: AgentChatEvent): string | null {
+  return (
+    stringMetadata(event.metadata, "tool_name") ||
+    stringMetadata(event.metadata, "function_name") ||
+    stringMetadata(event.metadata, "name") ||
+    stringMetadata(event.metadata, "tool")
+  );
+}
+
+function stringMetadata(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function outputWithoutCommandPrefix(content: string, command: string | null): string {
+  if (!command?.trim()) return content;
+  const escaped = command.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return content.replace(new RegExp(`^\\$\\s+${escaped}\\s*(?:\\r?\\n){1,2}`), "").trimEnd();
+}
+
+function parseTodoItems(content: string): Array<{ done: boolean; label: string }> {
+  return content
+    .replace(/\r\n|\r/g, "\n")
+    .split("\n")
+    .map((line) => {
+      const checkbox = /^\s*(?:[-*]\s*)?\[([ xX])\]\s+(.+)$/.exec(line);
+      if (checkbox) return { done: checkbox[1].toLowerCase() === "x", label: checkbox[2].trim() };
+      const prefixed = /^\s*(?:done|completed|pending|todo|in_progress|in progress)\s*[:-]\s*(.+)$/i.exec(line);
+      if (prefixed) return { done: /^(done|completed)/i.test(line.trim()), label: prefixed[1].trim() };
+      return null;
+    })
+    .filter((item): item is { done: boolean; label: string } => Boolean(item?.label));
+}
+
+function diffStats(content: string): { added: number; removed: number; files: string[] } {
+  const files = new Set<string>();
+  let added = 0;
+  let removed = 0;
+
+  content.split(/\r\n|\r|\n/).forEach((line) => {
+    if (/^\+[^+]/.test(line)) added += 1;
+    if (/^-[^-]/.test(line)) removed += 1;
+    const diffFile = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (diffFile) files.add(diffFile[2]);
+    const patchFile = /^(\*\*\* (?:Add|Update|Delete) File:\s+)(.+)$/.exec(line);
+    if (patchFile) files.add(patchFile[2].trim());
+  });
+
+  return { added, removed, files: [...files] };
 }
 
 function parseApprovalChoices(text: string): ApprovalChoice[] {
@@ -661,9 +975,10 @@ function ChatComposer({
           disabled={Boolean(disabledReason)}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (shouldSubmitComposerKey(event)) {
               event.preventDefault();
-              onSubmit();
+              event.stopPropagation();
+              if (canSubmit) onSubmit();
             }
           }}
           placeholder={placeholder}
@@ -691,6 +1006,11 @@ function ChatComposer({
       ) : null}
     </form>
   );
+}
+
+function shouldSubmitComposerKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+  if (event.shiftKey || event.nativeEvent.isComposing) return false;
+  return event.key === "Enter" || event.key === "NumpadEnter" || event.code === "Enter" || event.code === "NumpadEnter";
 }
 
 function LoadingState() {
@@ -829,11 +1149,23 @@ function sortTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[] {
 }
 
 function shouldShowChatEvent(event: AgentChatEvent): boolean {
-  if (event.kind === "tool_call" && !event.command?.trim() && !event.text?.trim() && (event.status === "running" || event.status === "processing")) {
+  if (
+    event.kind === "tool_call" &&
+    !event.command?.trim() &&
+    !event.text?.trim() &&
+    !hasMeaningfulToolIdentity(event) &&
+    (event.status === "running" || event.status === "processing")
+  ) {
     return false;
   }
   if (event.kind !== "status") return true;
   return event.status === "failed" || event.status === "cancelled" || event.status === "action_required";
+}
+
+function hasMeaningfulToolIdentity(event: AgentChatEvent): boolean {
+  const title = event.title?.trim();
+  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return true;
+  return Boolean(toolNameFromEvent(event));
 }
 
 function deriveChatRows(events: AgentChatEvent[]): ChatRow[] {
@@ -843,8 +1175,8 @@ function deriveChatRows(events: AgentChatEvent[]): ChatRow[] {
   const flushPendingWork = () => {
     if (pendingWorkEvents.length === 0) return;
 
-    if (pendingWorkEvents.length === 1) {
-      rows.push({ kind: "event", event: pendingWorkEvents[0] });
+    if (pendingWorkEvents.length < WORK_GROUP_MIN_EVENTS) {
+      pendingWorkEvents.forEach((event) => rows.push({ kind: "event", event }));
     } else {
       const first = pendingWorkEvents[0];
       const last = pendingWorkEvents[pendingWorkEvents.length - 1];
@@ -950,10 +1282,23 @@ function firstContentLine(content: string): string {
   return line.length > 140 ? `${line.slice(0, 137)}...` : line;
 }
 
-function formatWorkGroupForCopy(blocks: ActivityBlockModel[], changedPaths: string[]): string {
-  const sections = blocks.map((block) => {
+function workEntrySummary(event: AgentChatEvent, block: ActivityBlockModel): string {
+  const command = event.command?.trim();
+  if (command) return command.length > 140 ? `${command.slice(0, 137)}...` : command;
+
+  const content = firstContentLine(block.content);
+  const status = formatStatus(event.status);
+  if (content && content !== status) return content;
+
+  if (typeof event.exit_code === "number") return `Exit code: ${event.exit_code}`;
+  return "";
+}
+
+function formatWorkGroupForCopy(entries: Array<{ event: AgentChatEvent; block: ActivityBlockModel }>, changedPaths: string[]): string {
+  const sections = entries.map(({ event, block }) => {
     const header = [block.title, block.subtitle].filter(Boolean).join(" - ");
-    return `${header}\n${block.content}`.trim();
+    const content = event.command?.trim() && !block.content.includes(event.command.trim()) ? `$ ${event.command.trim()}\n\n${block.content}` : block.content;
+    return `${header}\n${content}`.trim();
   });
 
   if (changedPaths.length > 0) {

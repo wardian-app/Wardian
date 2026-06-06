@@ -183,8 +183,14 @@ async fn run_live_agent_prompt(
         .await;
 
     let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
-    if let Err(error) =
-        crate::utils::terminal_input::submit_prompt_via_sender(&tx, &prompt, &provider_name).await
+    if let Err(error) = crate::commands::terminal::submit_prompt_to_agent_with_codex_echo_guard(
+        &state,
+        &spec.session_id,
+        &provider_name,
+        &tx,
+        &prompt,
+    )
+    .await
     {
         let message = format!(
             "failed to submit workflow node {} to live agent {}: {error}",

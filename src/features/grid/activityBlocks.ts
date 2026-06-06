@@ -17,6 +17,13 @@ export interface ActivityBlockModel {
   lineCount: number;
 }
 
+const GENERIC_TITLES = new Set([
+  "custom_tool_call",
+  "function_call",
+  "tool_call",
+  "tool_use",
+]);
+
 const EXTENSION_LANGUAGE: Record<string, string> = {
   bat: "batch",
   cjs: "javascript",
@@ -93,9 +100,11 @@ export function toActivityBlock(event: AgentChatEvent): ActivityBlockModel {
 }
 
 function activityTitle(event: AgentChatEvent): string {
-  if (event.title?.trim()) return event.title.trim();
+  const title = event.title?.trim();
+  if (title && !GENERIC_TITLES.has(title.toLowerCase())) return title;
   if (event.command?.trim()) return event.command.trim();
   if (event.kind === "message") return event.role ?? "message";
+  if (title) return title.replace(/_/g, " ");
   return KIND_TITLES[event.kind];
 }
 
@@ -113,7 +122,7 @@ function activitySubtitle(event: AgentChatEvent): string | null {
 function activityContent(event: AgentChatEvent): string {
   const lines: string[] = [];
 
-  if (event.command?.trim() && event.text?.trim() && event.command.trim() !== event.title?.trim()) {
+  if (event.command?.trim() && event.command.trim() !== event.title?.trim()) {
     lines.push(`$ ${event.command.trim()}`);
   }
 

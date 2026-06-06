@@ -768,6 +768,264 @@ describe("RemoteMobileApp", () => {
     });
   });
 
+  it("renders remote chat work logs with concrete tool call details", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Processing...",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents/agent-1/chat") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              events: [
+                {
+                  id: "shell-call-1",
+                  session_id: "agent-1",
+                  provider: "codex",
+                  kind: "tool_call",
+                  role: null,
+                  text: null,
+                  title: "shell_command",
+                  status: "running",
+                  turn_id: null,
+                  source: "provider_log",
+                  command: "Get-ChildItem src/features/grid",
+                  exit_code: null,
+                  path: null,
+                  language: "shell",
+                  created_at: "2026-05-21T08:00:00.000Z",
+                  sequence: 1,
+                  metadata: { raw_type: "custom_tool_call", tool_name: "shell_command" },
+                },
+                {
+                  id: "shell-call-2",
+                  session_id: "agent-1",
+                  provider: "codex",
+                  kind: "tool_call",
+                  role: null,
+                  text: null,
+                  title: "shell_command",
+                  status: "running",
+                  turn_id: null,
+                  source: "provider_log",
+                  command: "cargo test -p Wardian commands::terminal::tests",
+                  exit_code: null,
+                  path: null,
+                  language: "shell",
+                  created_at: "2026-05-21T08:00:01.000Z",
+                  sequence: 2,
+                  metadata: { raw_type: "custom_tool_call", tool_name: "shell_command" },
+                },
+                {
+                  id: "shell-result-1",
+                  session_id: "agent-1",
+                  provider: "codex",
+                  kind: "tool_result",
+                  role: "tool",
+                  text: "commands::terminal::tests passed",
+                  title: "Tool result",
+                  status: "succeeded",
+                  turn_id: null,
+                  source: "provider_log",
+                  command: null,
+                  exit_code: 0,
+                  path: null,
+                  language: null,
+                  created_at: "2026-05-21T08:00:02.000Z",
+                  sequence: 3,
+                  metadata: {},
+                },
+                {
+                  id: "shell-call-3",
+                  session_id: "agent-1",
+                  provider: "codex",
+                  kind: "tool_call",
+                  role: null,
+                  text: null,
+                  title: "shell_command",
+                  status: "running",
+                  turn_id: null,
+                  source: "provider_log",
+                  command: "npm run test -- src/features/grid/AgentChatView.test.tsx",
+                  exit_code: null,
+                  path: null,
+                  language: "shell",
+                  created_at: "2026-05-21T08:00:03.000Z",
+                  sequence: 4,
+                  metadata: { raw_type: "custom_tool_call", tool_name: "shell_command" },
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const group = await screen.findByText("Work log");
+    const article = group.closest("article") as HTMLElement;
+
+    expect(article).toHaveTextContent("4 events");
+    expect(article).toHaveTextContent("Get-ChildItem src/features/grid");
+    expect(article).toHaveTextContent("cargo test -p Wardian commands::terminal::tests");
+    expect(article).toHaveTextContent("npm run test -- src/features/grid/AgentChatView.test.tsx");
+    expect(article).not.toHaveTextContent("running");
+  });
+
+  it("refreshes remote chat on repeated active status frames", async () => {
+    let chatCalls = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Processing...",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents/agent-1/chat") {
+        chatCalls += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              events: [
+                {
+                  id: `agent-1:${chatCalls}`,
+                  session_id: "agent-1",
+                  provider: "codex",
+                  kind: "message",
+                  role: "assistant",
+                  text: chatCalls === 1 ? "Initial active message." : "New active message.",
+                  title: null,
+                  status: null,
+                  turn_id: "turn-1",
+                  source: "provider_log",
+                  command: null,
+                  exit_code: null,
+                  path: null,
+                  language: null,
+                  created_at: "2026-05-21T08:00:00.000Z",
+                  sequence: chatCalls,
+                  metadata: {},
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    expect(await screen.findByText("Initial active message.")).toBeVisible();
+    expect(chatCalls).toBe(1);
+
+    act(() => {
+      MockWebSocket.instances[0]?.emit("message", {
+        data: JSON.stringify({
+          type: "agent_status",
+          agents: [
+            {
+              session_id: "agent-1",
+              session_name: "Coder",
+              agent_class: "Coder",
+              provider: "codex",
+              workspace: "<absolute-workspace-path>",
+              status: "Processing...",
+              latest_text: null,
+            },
+          ],
+        }),
+      });
+    });
+
+    expect(await screen.findByText("New active message.")).toBeVisible();
+    expect(chatCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it("maps touch drag gestures in the terminal pane to xterm scrollback", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
