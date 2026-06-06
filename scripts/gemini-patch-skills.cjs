@@ -64,6 +64,7 @@ function packageRootsFromManagers() {
             encoding: 'utf8',
             shell: process.platform === 'win32',
             stdio: ['ignore', 'pipe', 'ignore'],
+            windowsHide: process.platform === 'win32',
         });
         if (result.status === 0 && result.stdout.trim()) {
             roots.push(result.stdout.trim());

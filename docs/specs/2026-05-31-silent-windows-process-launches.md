@@ -12,13 +12,17 @@ All Wardian-owned terminal and background process launches should be silent on W
 
 1. **PTY-backed terminal processes**: managed agents and the standalone user terminal. These use `portable-pty` and must stay attached to ConPTY while preventing an external console window.
 2. **Captured background commands**: provider bootstrap/headless runs, workflow shell and script steps, git, Tailscale status checks, patch scripts, `taskkill`, and junction creation. These should use shared no-window process helpers.
-3. **Intentional GUI handoffs**: `explorer`, `open`, `xdg-open`, external editors, and the Windows update handoff. These should remain explicit and should not be accidentally reclassified as background-only launches.
+3. **Intentional GUI handoffs**: `explorer`, `open`, `xdg-open`, external editors, and the Windows update handoff. These should remain explicit and should not be accidentally reclassified as background-only launches. On Windows, a GUI handoff may still use the shared silent fire-and-forget process policy for its short-lived command wrapper, such as `cmd /C start` or `code.cmd`, so the target application opens without flashing a console window.
 
 ## Design
 
 Wardian already patches `portable-pty` through `vendor/portable-pty`. Keep that Windows ConPTY patch focused on `STARTF_USESHOWWINDOW` and `SW_HIDE`; native validation showed that adding `CREATE_NO_WINDOW` to ConPTY child creation prevents the standalone user terminal from operating correctly. This is the PTY-specific boundary: ConPTY children remain hidden through the startup window hint, while non-PTY background process launches use `CREATE_NO_WINDOW`.
 
-For non-PTY processes, keep `src-tauri/src/utils/process.rs` as the central launcher policy. Captured commands should use `new_silent_command` or `new_silent_std_command` so `stdout` and `stderr` capture semantics stay intact while Windows uses `CREATE_NO_WINDOW`. Fire-and-forget commands should use `new_headless_command` or `new_headless_std_command`, which build on the same silent policy and explicitly null standard handles. Call sites that already need path-candidate fidelity can apply the shared silent-command policy functions to an existing `Command`. Existing GUI handoff call sites remain direct or use their existing handoff-specific flags so the refactor does not suppress user-visible file manager or editor behavior.
+For non-PTY processes, keep `src-tauri/src/utils/process.rs` as the central launcher policy. Captured commands should use `new_silent_command` or `new_silent_std_command` so `stdout` and `stderr` capture semantics stay intact while Windows uses `CREATE_NO_WINDOW`. Fire-and-forget commands should use `new_headless_command` or `new_headless_std_command`, which build on the same silent policy and explicitly null standard handles. Call sites that already need path-candidate fidelity can apply the shared silent-command policy functions to an existing `Command`. Existing GUI handoff call sites remain direct or use their existing handoff-specific flags so the refactor does not suppress user-visible file manager or editor behavior. External editor launches are the important exception: the opened editor or system-default application remains visible, but the Windows command wrapper uses the silent fire-and-forget policy.
+
+The Wardian desktop binary should also use the Windows GUI subsystem in development and release builds. Debug diagnostics should flow through Wardian logging and test output rather than an extra console window attached to the desktop process.
+
+Scripts launched by the Rust backend are part of the same process policy. If a production-reachable Node script starts its own package-manager or shell probes, those child-process calls should set `windowsHide` on Windows so the parent Rust no-window policy is not bypassed by a second-order `cmd.exe` launch.
 
 ## Non-Goals
 
