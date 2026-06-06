@@ -27,8 +27,8 @@ Provider binaries still keep their provider-specific arguments and environment v
 
 On Windows, shim handling is host-aware.
 
-- PowerShell hosts route `.cmd` and `.bat` provider shims through `cmd.exe /d /c`.
-- POSIX-like hosts on Windows such as Git Bash or WSL route Windows commands through `cmd.exe /c`.
+- PowerShell hosts invoke `.cmd` and `.bat` provider shims directly through PowerShell.
+- POSIX-like hosts on Windows such as Git Bash or WSL route Windows shims through `cmd.exe /c` for compatibility.
 - Claude now resolves the actual executable found on `PATH` instead of assuming `claude.cmd`.
 
 ## Consequences

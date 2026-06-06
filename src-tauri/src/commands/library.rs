@@ -345,7 +345,7 @@ pub async fn open_library_folder(
     {
         // On Windows, use Canonicalize to get absolute path for explorer, otherwise it might open Documents
         let abs_path = target_dir.canonicalize().unwrap_or(target_dir);
-        std::process::Command::new("explorer")
+        crate::utils::process::new_silent_std_command("explorer")
             .arg(abs_path)
             .spawn()
             .map_err(|e| e.to_string())?;

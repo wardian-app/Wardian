@@ -16,4 +16,8 @@ describe("cross-platform runtime contracts", () => {
     expect(geminiPatchScript).toContain("resolveCommand('gemini')");
     expect(geminiPatchScript).toContain("require.main === module");
   });
+
+  it("hides Windows package-manager probe windows in the Gemini patch script", () => {
+    expect(geminiPatchScript).toContain("windowsHide: process.platform === 'win32'");
+  });
 });

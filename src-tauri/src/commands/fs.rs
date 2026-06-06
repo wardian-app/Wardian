@@ -25,6 +25,7 @@ pub struct ExternalEditorLaunchSettings {
 struct ExternalEditorLaunchSpec {
     program: String,
     args: Vec<String>,
+    use_silent_process_policy: bool,
 }
 
 fn normalize_explorer_watch_key(path: &Path) -> Result<String, String> {
@@ -300,7 +301,7 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let args = windows_explorer_args(Path::new(&path));
-        std::process::Command::new("explorer")
+        crate::utils::process::new_silent_std_command("explorer")
             .args(args)
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -334,7 +335,12 @@ pub async fn open_in_external_editor(
     editor: ExternalEditorLaunchSettings,
 ) -> Result<(), String> {
     let launch = external_editor_launch(Path::new(&path), &editor)?;
-    std::process::Command::new(&launch.program)
+    let mut command = if launch.use_silent_process_policy {
+        crate::utils::process::new_headless_std_command(&launch.program)
+    } else {
+        std::process::Command::new(&launch.program)
+    };
+    command
         .args(&launch.args)
         .spawn()
         .map_err(|e| e.to_string())?;
@@ -355,6 +361,7 @@ fn external_editor_launch(
         "vscode" => Ok(ExternalEditorLaunchSpec {
             program: vscode_command().to_string(),
             args: vec![path_arg],
+            use_silent_process_policy: cfg!(target_os = "windows"),
         }),
         "custom" => {
             let program = editor
@@ -366,6 +373,7 @@ fn external_editor_launch(
             Ok(ExternalEditorLaunchSpec {
                 program: program.to_string(),
                 args: vec![path_arg],
+                use_silent_process_policy: cfg!(target_os = "windows"),
             })
         }
         _ => Ok(system_default_open_launch(path_arg)),
@@ -387,6 +395,7 @@ fn system_default_open_launch(path: String) -> ExternalEditorLaunchSpec {
     ExternalEditorLaunchSpec {
         program: "cmd".to_string(),
         args: vec!["/C".to_string(), "start".to_string(), "".to_string(), path],
+        use_silent_process_policy: true,
     }
 }
 
@@ -395,6 +404,7 @@ fn system_default_open_launch(path: String) -> ExternalEditorLaunchSpec {
     ExternalEditorLaunchSpec {
         program: "open".to_string(),
         args: vec![path],
+        use_silent_process_policy: false,
     }
 }
 
@@ -403,6 +413,7 @@ fn system_default_open_launch(path: String) -> ExternalEditorLaunchSpec {
     ExternalEditorLaunchSpec {
         program: "xdg-open".to_string(),
         args: vec![path],
+        use_silent_process_policy: false,
     }
 }
 
@@ -520,6 +531,22 @@ mod tests {
                 "C:/Users/Test Project/notes.md".to_string()
             ]
         );
+        assert!(launch.use_silent_process_policy);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vscode_external_editor_launch_uses_silent_process_policy_on_windows() {
+        let launch = external_editor_launch(
+            Path::new("C:/Users/Test Project/notes.md"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "vscode".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert!(launch.use_silent_process_policy);
     }
 
     #[cfg(target_os = "macos")]

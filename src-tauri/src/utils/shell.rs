@@ -785,15 +785,6 @@ fn build_cmd_invocation(program: &str, program_args: &[String]) -> String {
 }
 
 fn build_powershell_invocation(program: &str, program_args: &[String]) -> String {
-    #[cfg(windows)]
-    if is_windows_cmd_shim(program) {
-        let cmd_invocation = build_cmd_invocation(program, program_args);
-        return format!(
-            "& $env:ComSpec /d /c {}",
-            quote_powershell_arg(&cmd_invocation)
-        );
-    }
-
     let mut fragments = Vec::with_capacity(program_args.len() + 2);
     fragments.push("&".to_string());
     fragments.push(quote_powershell_arg(program));
@@ -1545,7 +1536,7 @@ mod tests {
         assert_eq!(spec.executable, "pwsh");
         assert_eq!(spec.args[0..2], ["-NoProfile", "-Command"]);
         if cfg!(windows) {
-            assert!(spec.args[2].contains("$env:ComSpec"));
+            assert!(!spec.args[2].contains("ComSpec"));
             assert!(spec.args[2].contains("codex.cmd"));
             assert!(spec.args[2].contains("--resume"));
         } else {

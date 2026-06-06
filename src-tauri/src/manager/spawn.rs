@@ -378,6 +378,7 @@ pub async fn spawn_agent(
     cmd.cwd(&provider_cwd);
     apply_terminal_identity_env(&mut cmd);
     super::apply_managed_cli_path_to_pty(&mut cmd);
+    super::apply_interactive_provider_runtime_env(&config.provider, &mut cmd)?;
     cmd.env("WARDIAN_SESSION_ID", &config.session_id);
     for (key, value) in super::worktree_build_env(&config) {
         cmd.env(key, value);

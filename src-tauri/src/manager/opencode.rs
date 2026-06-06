@@ -789,7 +789,29 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn opencode_interactive_launch_wraps_cmd_shims_through_cmd_exe() {
+    fn opencode_interactive_launch_uses_configured_shell_for_cmd_shims() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_comspec = std::env::var_os("ComSpec");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var(
+            "ComSpec",
+            r"D:\Development\Wardian\target\release\Wardian.exe",
+        );
+        let settings_path = home.path().join("settings").join("shell.json");
+        std::fs::create_dir_all(settings_path.parent().expect("settings parent")).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{
+              "shell_id": "custom",
+              "custom_executable": "pwsh.exe",
+              "custom_args": "-NoProfile -Command",
+              "agent_session_persistence": "resume"
+            }"#,
+        )
+        .unwrap();
+
         let launch = interactive_provider_launch(
             "opencode",
             r"C:\nvm4w\nodejs\opencode.cmd",
@@ -797,16 +819,24 @@ mod tests {
         )
         .expect("launch spec");
 
-        assert!(
-            launch.executable.ends_with(r"\cmd.exe")
-                || launch.executable.eq_ignore_ascii_case("cmd"),
-            "expected cmd host, got {}",
-            launch.executable
+        assert_eq!(launch.executable, "pwsh.exe");
+        assert_eq!(
+            launch.args[..2],
+            ["-NoProfile".to_string(), "-Command".to_string()]
         );
-        assert_eq!(launch.args[..2], ["/d".to_string(), "/c".to_string()]);
         assert!(launch.args[2].contains(r"C:\nvm4w\nodejs\opencode.cmd"));
         assert!(launch.args[2].contains("--session"));
         assert!(launch.args[2].contains("ses_test"));
+        assert!(!launch.args[2].contains("ComSpec"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
     }
 
     #[test]
@@ -926,7 +956,29 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn opencode_headless_launch_uses_cmd_host_on_windows() {
+    fn opencode_headless_launch_uses_configured_shell_on_windows() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_comspec = std::env::var_os("ComSpec");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var(
+            "ComSpec",
+            r"D:\Development\Wardian\target\release\Wardian.exe",
+        );
+        let settings_path = home.path().join("settings").join("shell.json");
+        std::fs::create_dir_all(settings_path.parent().expect("settings parent")).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{
+              "shell_id": "custom",
+              "custom_executable": "pwsh.exe",
+              "custom_args": "-NoProfile -Command",
+              "agent_session_persistence": "resume"
+            }"#,
+        )
+        .unwrap();
+
         let launch = headless_provider_launch(
             "opencode",
             "C:/nvm4w/nodejs/opencode",
@@ -941,16 +993,24 @@ mod tests {
         )
         .expect("headless launch spec");
 
-        assert!(
-            launch.executable.to_ascii_lowercase().ends_with("cmd.exe"),
-            "expected cmd.exe host, got {}",
-            launch.executable
+        assert_eq!(launch.executable, "pwsh.exe");
+        assert_eq!(
+            launch.args[..2],
+            ["-NoProfile".to_string(), "-Command".to_string()]
         );
-        assert_eq!(launch.args[0], "/d");
-        assert_eq!(launch.args[1], "/c");
         assert!(launch.args[2].contains("opencode"));
         assert!(launch.args[2].contains("--format"));
         assert!(launch.args[2].contains(session_bootstrap_prompt()));
+        assert!(!launch.args[2].contains("ComSpec"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
     }
 
     #[test]
