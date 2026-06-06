@@ -705,9 +705,14 @@ pub(crate) fn apply_interactive_provider_runtime_env(
     cmd: &mut CommandBuilder,
 ) -> Result<(), String> {
     #[cfg(windows)]
-    if provider_name == "gemini" {
-        let node_options = gemini_windows_node_options()?;
-        cmd.env("NODE_OPTIONS", node_options);
+    {
+        if provider_uses_windows_node_runtime_preload(provider_name) {
+            let node_options = windows_provider_node_options()?;
+            cmd.env("NODE_OPTIONS", node_options);
+        }
+        if provider_name == "antigravity" {
+            ensure_antigravity_windows_mcp_npx_shims_are_silent()?;
+        }
     }
 
     #[cfg(not(windows))]
@@ -721,9 +726,14 @@ pub(crate) fn apply_process_provider_runtime_env(
     cmd: &mut tokio::process::Command,
 ) -> Result<(), String> {
     #[cfg(windows)]
-    if provider_name == "gemini" {
-        let node_options = gemini_windows_node_options()?;
-        cmd.env("NODE_OPTIONS", node_options);
+    {
+        if provider_uses_windows_node_runtime_preload(provider_name) {
+            let node_options = windows_provider_node_options()?;
+            cmd.env("NODE_OPTIONS", node_options);
+        }
+        if provider_name == "antigravity" {
+            ensure_antigravity_windows_mcp_npx_shims_are_silent()?;
+        }
     }
 
     #[cfg(not(windows))]
@@ -733,8 +743,13 @@ pub(crate) fn apply_process_provider_runtime_env(
 }
 
 #[cfg(windows)]
-fn gemini_windows_node_options() -> Result<String, String> {
-    let preload = ensure_gemini_windows_node_preload()?;
+fn provider_uses_windows_node_runtime_preload(provider_name: &str) -> bool {
+    matches!(provider_name, "claude" | "gemini" | "antigravity")
+}
+
+#[cfg(windows)]
+fn windows_provider_node_options() -> Result<String, String> {
+    let preload = ensure_windows_provider_node_preload()?;
     let require_option = format!("--require {}", quote_node_options_path(&preload));
     let existing = std::env::var("NODE_OPTIONS")
         .ok()
@@ -763,12 +778,12 @@ fn quote_node_options_path(path: &std::path::Path) -> String {
 }
 
 #[cfg(windows)]
-fn ensure_gemini_windows_node_preload() -> Result<std::path::PathBuf, String> {
+fn ensure_windows_provider_node_preload() -> Result<std::path::PathBuf, String> {
     let home = crate::utils::fs::get_wardian_home()
-        .ok_or_else(|| "Could not resolve Wardian home for Gemini runtime preload".to_string())?;
+        .ok_or_else(|| "Could not resolve Wardian home for provider runtime preload".to_string())?;
     let script = home
         .join("runtime")
-        .join("gemini")
+        .join("windows")
         .join("wardian-node-preload.cjs");
     let content = r#"'use strict';
 
@@ -783,30 +798,276 @@ try {
   }
 } catch {
 }
+
+try {
+  const childProcess = require('node:child_process');
+
+  function hidden(options) {
+    if (options && typeof options === 'object' && !Array.isArray(options)) {
+      return { ...options, windowsHide: true };
+    }
+    return { windowsHide: true };
+  }
+
+  function patchSpawnLike(name) {
+    const original = childProcess[name];
+    if (typeof original !== 'function') return;
+    childProcess[name] = function(command, args, options) {
+      if (Array.isArray(args)) {
+        return original.call(this, command, args, hidden(options));
+      }
+      return original.call(this, command, [], hidden(args));
+    };
+  }
+
+  function patchExecLike(name) {
+    const original = childProcess[name];
+    if (typeof original !== 'function') return;
+    childProcess[name] = function(command, options, callback) {
+      if (typeof options === 'function') {
+        return original.call(this, command, hidden(undefined), options);
+      }
+      return original.call(this, command, hidden(options), callback);
+    };
+  }
+
+  function patchExecFileLike(name) {
+    const original = childProcess[name];
+    if (typeof original !== 'function') return;
+    childProcess[name] = function(file, args, options, callback) {
+      if (Array.isArray(args)) {
+        if (typeof options === 'function') {
+          return original.call(this, file, args, hidden(undefined), options);
+        }
+        return original.call(this, file, args, hidden(options), callback);
+      }
+      if (typeof args === 'function') {
+        return original.call(this, file, [], hidden(undefined), args);
+      }
+      if (typeof options === 'function') {
+        return original.call(this, file, [], hidden(args), options);
+      }
+      return original.call(this, file, [], hidden(args));
+    };
+  }
+
+  const originalFork = childProcess.fork;
+  if (typeof originalFork === 'function') {
+    childProcess.fork = function(modulePath, args, options) {
+      if (Array.isArray(args)) {
+        return originalFork.call(this, modulePath, args, hidden(options));
+      }
+      return originalFork.call(this, modulePath, [], hidden(args));
+    };
+  }
+
+  patchSpawnLike('spawn');
+  patchSpawnLike('spawnSync');
+  patchExecLike('exec');
+  patchExecLike('execSync');
+  patchExecFileLike('execFile');
+  patchExecFileLike('execFileSync');
+} catch {
+}
 "#;
 
     if std::fs::read_to_string(&script).ok().as_deref() == Some(content) {
         return Ok(script);
     }
 
-    let parent = script
-        .parent()
-        .ok_or_else(|| format!("Invalid Gemini runtime preload path: {}", script.display()))?;
+    let parent = script.parent().ok_or_else(|| {
+        format!(
+            "Invalid provider runtime preload path: {}",
+            script.display()
+        )
+    })?;
     std::fs::create_dir_all(parent).map_err(|err| {
         format!(
-            "Failed to create Gemini runtime preload directory {}: {}",
+            "Failed to create provider runtime preload directory {}: {}",
             parent.display(),
             err
         )
     })?;
     std::fs::write(&script, content).map_err(|err| {
         format!(
-            "Failed to write Gemini runtime preload {}: {}",
+            "Failed to write provider runtime preload {}: {}",
             script.display(),
             err
         )
     })?;
 
+    Ok(script)
+}
+
+#[cfg(windows)]
+fn ensure_antigravity_windows_mcp_npx_shims_are_silent() -> Result<(), String> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    ensure_antigravity_windows_mcp_npx_shims_are_silent_in(
+        &home.join(".gemini").join("mcp_config.json"),
+    )
+}
+
+#[cfg(windows)]
+fn ensure_antigravity_windows_mcp_npx_shims_are_silent_in(
+    config_path: &std::path::Path,
+) -> Result<(), String> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read Antigravity MCP config {}: {}",
+                config_path.display(),
+                error
+            ));
+        }
+    };
+    let mut value = serde_json::from_str::<serde_json::Value>(&content).map_err(|error| {
+        format!(
+            "Failed to parse Antigravity MCP config {}: {}",
+            config_path.display(),
+            error
+        )
+    })?;
+    let wrapper = ensure_windows_provider_npx_wrapper()?;
+    let Some(servers) = value
+        .get_mut("mcpServers")
+        .and_then(|value| value.as_object_mut())
+    else {
+        return Ok(());
+    };
+
+    let mut changed = false;
+    for server in servers.values_mut() {
+        if rewrite_antigravity_mcp_server_npx_command(server, &wrapper) {
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create Antigravity MCP config directory {}: {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+    let rendered = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    std::fs::write(config_path, rendered).map_err(|error| {
+        format!(
+            "Failed to write Antigravity MCP config {}: {}",
+            config_path.display(),
+            error
+        )
+    })
+}
+
+#[cfg(windows)]
+fn rewrite_antigravity_mcp_server_npx_command(
+    server: &mut serde_json::Value,
+    wrapper: &std::path::Path,
+) -> bool {
+    let Some(object) = server.as_object_mut() else {
+        return false;
+    };
+    let command = object
+        .get("command")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('"')
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let command_name = command.rsplit('/').next().unwrap_or(command.as_str());
+    if command == "node" {
+        return false;
+    }
+    if !matches!(command_name, "npx" | "npx.cmd" | "npx.bat") {
+        return false;
+    }
+
+    let mut args = vec![serde_json::Value::String(
+        wrapper.to_string_lossy().to_string(),
+    )];
+    if let Some(existing) = object.get("args").and_then(|value| value.as_array()) {
+        args.extend(existing.iter().cloned());
+    }
+
+    object.insert(
+        "command".to_string(),
+        serde_json::Value::String("node".to_string()),
+    );
+    object.insert("args".to_string(), serde_json::Value::Array(args));
+    true
+}
+
+#[cfg(windows)]
+fn ensure_windows_provider_npx_wrapper() -> Result<std::path::PathBuf, String> {
+    let home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not resolve Wardian home for provider npx wrapper".to_string())?;
+    let script = home.join("runtime").join("windows").join("wardian-npx.cjs");
+    let preload = ensure_windows_provider_node_preload()?;
+    let preload = preload
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    let content = r#"'use strict';
+
+require('__WARDIAN_PRELOAD__');
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const candidates = [
+  process.env.npm_execpath,
+  process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules', 'npm', 'bin', 'npx-cli.js'),
+  path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js'),
+].filter(Boolean);
+
+const npxCli = candidates.find((candidate) => {
+  try {
+    return fs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+});
+
+if (!npxCli) {
+  console.error('[Wardian] Could not locate npm npx-cli.js for silent MCP launch.');
+  process.exit(1);
+}
+
+process.argv = [process.execPath, npxCli, ...process.argv.slice(2)];
+require(npxCli);
+"#
+    .replace("__WARDIAN_PRELOAD__", &preload);
+
+    if std::fs::read_to_string(&script).ok().as_deref() == Some(content.as_str()) {
+        return Ok(script);
+    }
+    let parent = script
+        .parent()
+        .ok_or_else(|| format!("Invalid provider npx wrapper path: {}", script.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create provider npx wrapper directory {}: {}",
+            parent.display(),
+            error
+        )
+    })?;
+    std::fs::write(&script, content).map_err(|error| {
+        format!(
+            "Failed to write provider npx wrapper {}: {}",
+            script.display(),
+            error
+        )
+    })?;
     Ok(script)
 }
 
@@ -992,9 +1253,121 @@ mod tests {
         assert!(home
             .path()
             .join("runtime")
-            .join("gemini")
+            .join("windows")
             .join("wardian-node-preload.cjs")
             .is_file());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_node_options {
+            Some(value) => std::env::set_var("NODE_OPTIONS", value),
+            None => std::env::remove_var("NODE_OPTIONS"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_windows_provider_node_options_adds_wardian_node_preload() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_node_options = std::env::var_os("NODE_OPTIONS");
+        let home = tempfile::tempdir().unwrap();
+
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::remove_var("NODE_OPTIONS");
+
+        let node_options = windows_provider_node_options().unwrap();
+
+        assert!(node_options.contains("--require "));
+        assert!(node_options.contains("wardian-node-preload.cjs"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_node_options {
+            Some(value) => std::env::set_var("NODE_OPTIONS", value),
+            None => std::env::remove_var("NODE_OPTIONS"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn antigravity_mcp_config_rewrites_npx_servers_to_silent_node_wrapper() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+        let config_path = home.path().join(".gemini").join("mcp_config.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{
+    "mcpServers": {
+    "chrome-devtools": {
+      "command": "C:\\Users\\testuser\\AppData\\Roaming\\npm\\npx.cmd",
+      "args": ["-y", "chrome-devtools-mcp@latest"]
+    },
+    "direct": {
+      "command": "node",
+      "args": ["server.js"]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        ensure_antigravity_windows_mcp_npx_shims_are_silent_in(&config_path).unwrap();
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let chrome = &rewritten["mcpServers"]["chrome-devtools"];
+        assert_eq!(chrome["command"], "node");
+        assert!(chrome["args"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("wardian-npx.cjs"));
+        assert_eq!(chrome["args"][1], "-y");
+        assert_eq!(chrome["args"][2], "chrome-devtools-mcp@latest");
+        assert_eq!(rewritten["mcpServers"]["direct"]["command"], "node");
+        assert_eq!(rewritten["mcpServers"]["direct"]["args"][0], "server.js");
+        assert!(home
+            .path()
+            .join("runtime")
+            .join("windows")
+            .join("wardian-npx.cjs")
+            .is_file());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_runtime_env_adds_wardian_node_preload_for_mcp_children() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_node_options = std::env::var_os("NODE_OPTIONS");
+        let home = tempfile::tempdir().unwrap();
+
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::remove_var("NODE_OPTIONS");
+
+        let mut cmd = CommandBuilder::new("node");
+        apply_interactive_provider_runtime_env("claude", &mut cmd).unwrap();
+
+        let node_options = cmd
+            .get_env("NODE_OPTIONS")
+            .expect("NODE_OPTIONS env")
+            .to_string_lossy()
+            .to_string();
+
+        assert!(node_options.contains("--require "));
+        assert!(node_options.contains("wardian-node-preload.cjs"));
 
         match previous_home {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),
@@ -1050,7 +1423,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn non_gemini_runtime_env_does_not_add_node_options() {
+    fn unsupported_provider_runtime_env_does_not_add_node_options() {
         let _guard = crate::utils::wardian_test_env_lock();
         let previous_node_options = std::env::var_os("NODE_OPTIONS");
         std::env::remove_var("NODE_OPTIONS");

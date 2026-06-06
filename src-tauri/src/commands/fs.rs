@@ -301,7 +301,7 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let args = windows_explorer_args(Path::new(&path));
-        std::process::Command::new("explorer")
+        crate::utils::process::new_silent_std_command("explorer")
             .args(args)
             .spawn()
             .map_err(|e| e.to_string())?;

@@ -24,7 +24,9 @@ The Wardian desktop binary should also use the Windows GUI subsystem in developm
 
 Scripts launched by the Rust backend are part of the same process policy. If a production-reachable Node script starts its own package-manager or shell probes, those child-process calls should set `windowsHide` on Windows so the parent Rust no-window policy is not bypassed by a second-order `cmd.exe` launch.
 
-Provider-owned grandchildren are a separate boundary. Gemini's MCP stdio transport can start configured tools such as `npx chrome-devtools-mcp@latest`; on Windows that can resolve through npm `.cmd` shims even when the transport uses `shell: false`. Wardian cannot wrap those grandchildren directly, so Windows Gemini launches add a Wardian-owned Node preload through `NODE_OPTIONS`. The preload defines the narrow `process.type` marker that Gemini's bundled MCP transport already checks before enabling `windowsHide`, preserving Gemini's MCP behavior while suppressing provider-owned shim windows. The preload is written under `WARDIAN_HOME/runtime/gemini/` and is applied only to Wardian-launched Gemini processes.
+Provider-owned grandchildren are a separate boundary. Gemini's MCP stdio transport and Claude's MCP config can start configured tools such as `npx chrome-devtools-mcp@latest`; on Windows that can resolve through npm `.cmd` shims even when the transport uses `shell: false`. Wardian cannot wrap those grandchildren directly, so Windows Node-based provider launches add a Wardian-owned preload through `NODE_OPTIONS`. The preload defines the narrow `process.type` marker that Gemini's bundled MCP transport already checks before enabling `windowsHide`, and also patches Node's `child_process` launch helpers to default provider-owned grandchildren to `windowsHide: true`. The shared Windows provider preload is written under `WARDIAN_HOME/runtime/windows/` and is applied only to Wardian-launched providers that need it.
+
+Antigravity uses the same user-level Gemini MCP configuration but runs as a native provider process, so `NODE_OPTIONS` does not reach the first MCP child launch. When Wardian launches Antigravity on Windows, it normalizes npm `npx` MCP entries in `<user-home>/.gemini/mcp_config.json` to `node <wardian-home>/runtime/windows/wardian-npx.cjs ...`. The wrapper loads the shared preload and then delegates to npm's `npx-cli.js`, preserving the configured MCP arguments while bypassing the `.cmd` shim that would otherwise create a visible console window. Existing direct `node` MCP entries are left unchanged.
 
 ## Non-Goals
 
@@ -36,7 +38,7 @@ Provider-owned grandchildren are a separate boundary. Gemini's MCP stdio transpo
 
 - Unit tests for the centralized Windows process flag helpers, launch specs, and captured stdout/stderr behavior.
 - Existing Rust tests around provider launch argument construction and shell selection.
-- Rust coverage for the Gemini runtime environment preload and `NODE_OPTIONS` preservation.
+- Rust coverage for the shared Windows provider preload, `NODE_OPTIONS` preservation, and Antigravity MCP `npx` normalization.
 - Native user-terminal smoke to prove the ConPTY path still runs commands after the process-creation policy change.
 - `cargo check`, `cargo test`, and `cargo clippy` in `src-tauri`.
 - Frontend validation remains unchanged because this is backend/runtime infrastructure only.
