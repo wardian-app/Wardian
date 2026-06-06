@@ -706,13 +706,8 @@ pub(crate) fn apply_interactive_provider_runtime_env(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if provider_uses_windows_node_runtime_preload(provider_name) {
-            let node_options = windows_provider_node_options()?;
-            cmd.env("NODE_OPTIONS", node_options);
-        }
-        if provider_name == "antigravity" {
-            ensure_antigravity_windows_mcp_npx_shims_are_silent()?;
-        }
+        let _ = provider_name;
+        apply_windows_silent_cmd_shim_to_pty(cmd)?;
     }
 
     #[cfg(not(windows))]
@@ -727,13 +722,8 @@ pub(crate) fn apply_process_provider_runtime_env(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if provider_uses_windows_node_runtime_preload(provider_name) {
-            let node_options = windows_provider_node_options()?;
-            cmd.env("NODE_OPTIONS", node_options);
-        }
-        if provider_name == "antigravity" {
-            ensure_antigravity_windows_mcp_npx_shims_are_silent()?;
-        }
+        let _ = provider_name;
+        apply_windows_silent_cmd_shim_to_process(cmd)?;
     }
 
     #[cfg(not(windows))]
@@ -743,348 +733,38 @@ pub(crate) fn apply_process_provider_runtime_env(
 }
 
 #[cfg(windows)]
-fn provider_uses_windows_node_runtime_preload(provider_name: &str) -> bool {
-    matches!(provider_name, "claude" | "gemini" | "antigravity")
-}
-
-#[cfg(windows)]
-fn windows_provider_node_options() -> Result<String, String> {
-    let preload = ensure_windows_provider_node_preload()?;
-    let require_option = format!("--require {}", quote_node_options_path(&preload));
-    let existing = std::env::var("NODE_OPTIONS")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    if let Some(existing) = existing {
-        if existing.contains(&preload.to_string_lossy().replace('\\', "/")) {
-            Ok(existing)
-        } else {
-            Ok(format!("{existing} {require_option}"))
-        }
-    } else {
-        Ok(require_option)
-    }
-}
-
-#[cfg(windows)]
-fn quote_node_options_path(path: &std::path::Path) -> String {
-    let value = path.to_string_lossy().replace('\\', "/");
-    if value.chars().any(char::is_whitespace) || value.contains('"') {
-        format!("\"{}\"", value.replace('"', "\\\""))
-    } else {
-        value
-    }
-}
-
-#[cfg(windows)]
-fn ensure_windows_provider_node_preload() -> Result<std::path::PathBuf, String> {
-    let home = crate::utils::fs::get_wardian_home()
-        .ok_or_else(|| "Could not resolve Wardian home for provider runtime preload".to_string())?;
-    let script = home
-        .join("runtime")
-        .join("windows")
-        .join("wardian-node-preload.cjs");
-    let content = r#"'use strict';
-
-try {
-  if (!('type' in process)) {
-    Object.defineProperty(process, 'type', {
-      value: 'browser',
-      configurable: true,
-      enumerable: false,
-      writable: false,
-    });
-  }
-} catch {
-}
-
-try {
-  const childProcess = require('node:child_process');
-
-  function hidden(options) {
-    if (options && typeof options === 'object' && !Array.isArray(options)) {
-      return { ...options, windowsHide: true };
-    }
-    return { windowsHide: true };
-  }
-
-  function patchSpawnLike(name) {
-    const original = childProcess[name];
-    if (typeof original !== 'function') return;
-    childProcess[name] = function(command, args, options) {
-      if (Array.isArray(args)) {
-        return original.call(this, command, args, hidden(options));
-      }
-      return original.call(this, command, [], hidden(args));
-    };
-  }
-
-  function patchExecLike(name) {
-    const original = childProcess[name];
-    if (typeof original !== 'function') return;
-    childProcess[name] = function(command, options, callback) {
-      if (typeof options === 'function') {
-        return original.call(this, command, hidden(undefined), options);
-      }
-      return original.call(this, command, hidden(options), callback);
-    };
-  }
-
-  function patchExecFileLike(name) {
-    const original = childProcess[name];
-    if (typeof original !== 'function') return;
-    childProcess[name] = function(file, args, options, callback) {
-      if (Array.isArray(args)) {
-        if (typeof options === 'function') {
-          return original.call(this, file, args, hidden(undefined), options);
-        }
-        return original.call(this, file, args, hidden(options), callback);
-      }
-      if (typeof args === 'function') {
-        return original.call(this, file, [], hidden(undefined), args);
-      }
-      if (typeof options === 'function') {
-        return original.call(this, file, [], hidden(args), options);
-      }
-      return original.call(this, file, [], hidden(args));
-    };
-  }
-
-  const originalFork = childProcess.fork;
-  if (typeof originalFork === 'function') {
-    childProcess.fork = function(modulePath, args, options) {
-      if (Array.isArray(args)) {
-        return originalFork.call(this, modulePath, args, hidden(options));
-      }
-      return originalFork.call(this, modulePath, [], hidden(args));
-    };
-  }
-
-  patchSpawnLike('spawn');
-  patchSpawnLike('spawnSync');
-  patchExecLike('exec');
-  patchExecLike('execSync');
-  patchExecFileLike('execFile');
-  patchExecFileLike('execFileSync');
-} catch {
-}
-"#;
-
-    if std::fs::read_to_string(&script).ok().as_deref() == Some(content) {
-        return Ok(script);
-    }
-
-    let parent = script.parent().ok_or_else(|| {
-        format!(
-            "Invalid provider runtime preload path: {}",
-            script.display()
-        )
-    })?;
-    std::fs::create_dir_all(parent).map_err(|err| {
-        format!(
-            "Failed to create provider runtime preload directory {}: {}",
-            parent.display(),
-            err
-        )
-    })?;
-    std::fs::write(&script, content).map_err(|err| {
-        format!(
-            "Failed to write provider runtime preload {}: {}",
-            script.display(),
-            err
-        )
-    })?;
-
-    Ok(script)
-}
-
-#[cfg(windows)]
-fn ensure_antigravity_windows_mcp_npx_shims_are_silent() -> Result<(), String> {
-    let Some(home) = dirs::home_dir() else {
-        return Ok(());
-    };
-    for config_path in antigravity_windows_mcp_config_candidates(&home) {
-        ensure_antigravity_windows_mcp_npx_shims_are_silent_in(&config_path)?;
-    }
+fn apply_windows_silent_cmd_shim_to_pty(cmd: &mut CommandBuilder) -> Result<(), String> {
+    let (shim, real_comspec) = windows_silent_cmd_shim_env_values()?;
+    cmd.env("ComSpec", shim);
+    cmd.env(
+        crate::utils::process::WARDIAN_REAL_COMSPEC_ENV,
+        real_comspec,
+    );
+    cmd.env(crate::utils::process::WARDIAN_SILENT_CMD_SHIM_ENV, "1");
     Ok(())
 }
 
 #[cfg(windows)]
-fn antigravity_windows_mcp_config_candidates(home: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let gemini = home.join(".gemini");
-    vec![
-        gemini.join("config").join("mcp_config.json"),
-        gemini.join("mcp_config.json"),
-        gemini.join("antigravity").join("mcp_config.json"),
-        gemini.join("antigravity-cli").join("mcp_config.json"),
-        gemini.join("antigravity-ide").join("mcp_config.json"),
-    ]
-}
-
-#[cfg(windows)]
-fn ensure_antigravity_windows_mcp_npx_shims_are_silent_in(
-    config_path: &std::path::Path,
+fn apply_windows_silent_cmd_shim_to_process(
+    cmd: &mut tokio::process::Command,
 ) -> Result<(), String> {
-    let content = match std::fs::read_to_string(config_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "Failed to read Antigravity MCP config {}: {}",
-                config_path.display(),
-                error
-            ));
-        }
-    };
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-    let mut value = serde_json::from_str::<serde_json::Value>(&content).map_err(|error| {
-        format!(
-            "Failed to parse Antigravity MCP config {}: {}",
-            config_path.display(),
-            error
-        )
-    })?;
-    let wrapper = ensure_windows_provider_npx_wrapper()?;
-    let Some(servers) = value
-        .get_mut("mcpServers")
-        .and_then(|value| value.as_object_mut())
-    else {
-        return Ok(());
-    };
-
-    let mut changed = false;
-    for server in servers.values_mut() {
-        if rewrite_antigravity_mcp_server_npx_command(server, &wrapper) {
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(());
-    }
-
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to create Antigravity MCP config directory {}: {}",
-                parent.display(),
-                error
-            )
-        })?;
-    }
-    let rendered = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
-    std::fs::write(config_path, rendered).map_err(|error| {
-        format!(
-            "Failed to write Antigravity MCP config {}: {}",
-            config_path.display(),
-            error
-        )
-    })
-}
-
-#[cfg(windows)]
-fn rewrite_antigravity_mcp_server_npx_command(
-    server: &mut serde_json::Value,
-    wrapper: &std::path::Path,
-) -> bool {
-    let Some(object) = server.as_object_mut() else {
-        return false;
-    };
-    let command = object
-        .get("command")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .trim()
-        .trim_matches('"')
-        .replace('\\', "/")
-        .to_ascii_lowercase();
-    let command_name = command.rsplit('/').next().unwrap_or(command.as_str());
-    if command == "node" {
-        return false;
-    }
-    if !matches!(command_name, "npx" | "npx.cmd" | "npx.bat") {
-        return false;
-    }
-
-    let mut args = vec![serde_json::Value::String(
-        wrapper.to_string_lossy().to_string(),
-    )];
-    if let Some(existing) = object.get("args").and_then(|value| value.as_array()) {
-        args.extend(existing.iter().cloned());
-    }
-
-    object.insert(
-        "command".to_string(),
-        serde_json::Value::String("node".to_string()),
+    let (shim, real_comspec) = windows_silent_cmd_shim_env_values()?;
+    cmd.env("ComSpec", shim);
+    cmd.env(
+        crate::utils::process::WARDIAN_REAL_COMSPEC_ENV,
+        real_comspec,
     );
-    object.insert("args".to_string(), serde_json::Value::Array(args));
-    true
+    cmd.env(crate::utils::process::WARDIAN_SILENT_CMD_SHIM_ENV, "1");
+    Ok(())
 }
 
 #[cfg(windows)]
-fn ensure_windows_provider_npx_wrapper() -> Result<std::path::PathBuf, String> {
-    let home = crate::utils::fs::get_wardian_home()
-        .ok_or_else(|| "Could not resolve Wardian home for provider npx wrapper".to_string())?;
-    let script = home.join("runtime").join("windows").join("wardian-npx.cjs");
-    let preload = ensure_windows_provider_node_preload()?;
-    let preload = preload
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'");
-    let content = r#"'use strict';
-
-require('__WARDIAN_PRELOAD__');
-
-const fs = require('node:fs');
-const path = require('node:path');
-
-const candidates = [
-  process.env.npm_execpath,
-  process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules', 'npm', 'bin', 'npx-cli.js'),
-  path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js'),
-].filter(Boolean);
-
-const npxCli = candidates.find((candidate) => {
-  try {
-    return fs.statSync(candidate).isFile();
-  } catch {
-    return false;
-  }
-});
-
-if (!npxCli) {
-  console.error('[Wardian] Could not locate npm npx-cli.js for silent MCP launch.');
-  process.exit(1);
-}
-
-process.argv = [process.execPath, npxCli, ...process.argv.slice(2)];
-require(npxCli);
-"#
-    .replace("__WARDIAN_PRELOAD__", &preload);
-
-    if std::fs::read_to_string(&script).ok().as_deref() == Some(content.as_str()) {
-        return Ok(script);
-    }
-    let parent = script
-        .parent()
-        .ok_or_else(|| format!("Invalid provider npx wrapper path: {}", script.display()))?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        format!(
-            "Failed to create provider npx wrapper directory {}: {}",
-            parent.display(),
-            error
-        )
-    })?;
-    std::fs::write(&script, content).map_err(|error| {
-        format!(
-            "Failed to write provider npx wrapper {}: {}",
-            script.display(),
-            error
-        )
-    })?;
-    Ok(script)
+fn windows_silent_cmd_shim_env_values() -> Result<(std::path::PathBuf, std::path::PathBuf), String>
+{
+    let shim = std::env::current_exe()
+        .map_err(|error| format!("Failed to resolve Wardian executable for cmd shim: {error}"))?;
+    let real_comspec = crate::utils::process::windows_real_comspec_for_silent_shim(&shim);
+    Ok((shim, real_comspec))
 }
 
 #[cfg(windows)]
@@ -1245,257 +925,157 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn gemini_runtime_env_adds_wardian_node_preload_without_replacing_node_options() {
+    fn provider_runtime_env_sets_general_silent_cmd_shim() {
         let _guard = crate::utils::wardian_test_env_lock();
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        let previous_node_options = std::env::var_os("NODE_OPTIONS");
-        let home = tempfile::tempdir().unwrap();
+        let previous_comspec = std::env::var_os("ComSpec");
+        let previous_shim = std::env::var_os("WARDIAN_SILENT_CMD_SHIM");
+        let previous_real_comspec = std::env::var_os("WARDIAN_REAL_COMSPEC");
 
-        std::env::set_var("WARDIAN_HOME", home.path());
-        std::env::set_var("NODE_OPTIONS", "--max-old-space-size=4096");
+        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
+        std::env::remove_var("WARDIAN_SILENT_CMD_SHIM");
+        std::env::remove_var("WARDIAN_REAL_COMSPEC");
 
-        let mut cmd = CommandBuilder::new("node");
-        apply_interactive_provider_runtime_env("gemini", &mut cmd).unwrap();
-
-        let node_options = cmd
-            .get_env("NODE_OPTIONS")
-            .expect("NODE_OPTIONS env")
-            .to_string_lossy()
-            .to_string();
-
-        assert!(node_options.starts_with("--max-old-space-size=4096 "));
-        assert!(node_options.contains("--require "));
-        assert!(node_options.contains("wardian-node-preload.cjs"));
-        assert!(home
-            .path()
-            .join("runtime")
-            .join("windows")
-            .join("wardian-node-preload.cjs")
-            .is_file());
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
-        match previous_node_options {
-            Some(value) => std::env::set_var("NODE_OPTIONS", value),
-            None => std::env::remove_var("NODE_OPTIONS"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn shared_windows_provider_node_options_adds_wardian_node_preload() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        let previous_node_options = std::env::var_os("NODE_OPTIONS");
-        let home = tempfile::tempdir().unwrap();
-
-        std::env::set_var("WARDIAN_HOME", home.path());
-        std::env::remove_var("NODE_OPTIONS");
-
-        let node_options = windows_provider_node_options().unwrap();
-
-        assert!(node_options.contains("--require "));
-        assert!(node_options.contains("wardian-node-preload.cjs"));
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
-        match previous_node_options {
-            Some(value) => std::env::set_var("NODE_OPTIONS", value),
-            None => std::env::remove_var("NODE_OPTIONS"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn antigravity_mcp_config_candidates_include_current_config_dir() {
-        let home = std::path::Path::new("C:/Users/testuser");
-        let candidates = antigravity_windows_mcp_config_candidates(home);
-
-        assert!(candidates.contains(&home.join(".gemini").join("config").join("mcp_config.json")));
-        assert!(candidates.contains(&home.join(".gemini").join("mcp_config.json")));
-        assert!(candidates.contains(
-            &home
-                .join(".gemini")
-                .join("antigravity-ide")
-                .join("mcp_config.json")
-        ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn antigravity_mcp_config_ignores_empty_files() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        let home = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", home.path());
-        let config_path = home
-            .path()
-            .join(".gemini")
-            .join("antigravity")
-            .join("mcp_config.json");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, "").unwrap();
-
-        ensure_antigravity_windows_mcp_npx_shims_are_silent_in(&config_path).unwrap();
-
-        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "");
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn antigravity_mcp_config_rewrites_npx_servers_to_silent_node_wrapper() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        let home = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", home.path());
-        let config_path = home.path().join(".gemini").join("mcp_config.json");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config_path,
-            r#"{
-    "mcpServers": {
-    "chrome-devtools": {
-      "command": "C:\\Users\\testuser\\AppData\\Roaming\\npm\\npx.cmd",
-      "args": ["-y", "chrome-devtools-mcp@latest"]
-    },
-    "direct": {
-      "command": "node",
-      "args": ["server.js"]
-    }
-  }
-}"#,
-        )
-        .unwrap();
-
-        ensure_antigravity_windows_mcp_npx_shims_are_silent_in(&config_path).unwrap();
-
-        let rewritten: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        let chrome = &rewritten["mcpServers"]["chrome-devtools"];
-        assert_eq!(chrome["command"], "node");
-        assert!(chrome["args"][0]
-            .as_str()
-            .unwrap()
-            .ends_with("wardian-npx.cjs"));
-        assert_eq!(chrome["args"][1], "-y");
-        assert_eq!(chrome["args"][2], "chrome-devtools-mcp@latest");
-        assert_eq!(rewritten["mcpServers"]["direct"]["command"], "node");
-        assert_eq!(rewritten["mcpServers"]["direct"]["args"][0], "server.js");
-        assert!(home
-            .path()
-            .join("runtime")
-            .join("windows")
-            .join("wardian-npx.cjs")
-            .is_file());
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn claude_runtime_env_adds_wardian_node_preload_for_mcp_children() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        let previous_node_options = std::env::var_os("NODE_OPTIONS");
-        let home = tempfile::tempdir().unwrap();
-
-        std::env::set_var("WARDIAN_HOME", home.path());
-        std::env::remove_var("NODE_OPTIONS");
-
-        let mut cmd = CommandBuilder::new("node");
-        apply_interactive_provider_runtime_env("claude", &mut cmd).unwrap();
-
-        let node_options = cmd
-            .get_env("NODE_OPTIONS")
-            .expect("NODE_OPTIONS env")
-            .to_string_lossy()
-            .to_string();
-
-        assert!(node_options.contains("--require "));
-        assert!(node_options.contains("wardian-node-preload.cjs"));
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
-        match previous_node_options {
-            Some(value) => std::env::set_var("NODE_OPTIONS", value),
-            None => std::env::remove_var("NODE_OPTIONS"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn gemini_process_runtime_env_adds_wardian_node_preload() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        let previous_node_options = std::env::var_os("NODE_OPTIONS");
-        let home = tempfile::tempdir().unwrap();
-
-        std::env::set_var("WARDIAN_HOME", home.path());
-        std::env::remove_var("NODE_OPTIONS");
-
-        let mut cmd = tokio::process::Command::new("node");
-        apply_process_provider_runtime_env("gemini", &mut cmd).unwrap();
-
-        let node_options = cmd
-            .as_std()
-            .get_envs()
-            .find_map(|(key, value)| {
-                key.to_string_lossy()
-                    .eq_ignore_ascii_case("NODE_OPTIONS")
-                    .then(|| {
-                        value
-                            .expect("NODE_OPTIONS value")
-                            .to_string_lossy()
-                            .to_string()
-                    })
-            })
-            .expect("NODE_OPTIONS env");
-
-        assert!(node_options.contains("--require "));
-        assert!(node_options.contains("wardian-node-preload.cjs"));
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
-        match previous_node_options {
-            Some(value) => std::env::set_var("NODE_OPTIONS", value),
-            None => std::env::remove_var("NODE_OPTIONS"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn unsupported_provider_runtime_env_does_not_add_node_options() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let previous_node_options = std::env::var_os("NODE_OPTIONS");
-        std::env::remove_var("NODE_OPTIONS");
-
-        let mut cmd = CommandBuilder::new("node");
-
+        let mut cmd = CommandBuilder::new("codex");
         apply_interactive_provider_runtime_env("codex", &mut cmd).unwrap();
 
-        assert!(!cmd
+        let comspec = cmd
+            .get_env("ComSpec")
+            .expect("ComSpec env")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            comspec,
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+        assert_eq!(
+            cmd.get_env("WARDIAN_REAL_COMSPEC")
+                .expect("WARDIAN_REAL_COMSPEC env")
+                .to_string_lossy(),
+            r"C:\Windows\System32\cmd.exe"
+        );
+        assert_eq!(
+            cmd.get_env("WARDIAN_SILENT_CMD_SHIM")
+                .expect("WARDIAN_SILENT_CMD_SHIM env")
+                .to_string_lossy(),
+            "1"
+        );
+
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
+        match previous_shim {
+            Some(value) => std::env::set_var("WARDIAN_SILENT_CMD_SHIM", value),
+            None => std::env::remove_var("WARDIAN_SILENT_CMD_SHIM"),
+        }
+        match previous_real_comspec {
+            Some(value) => std::env::set_var("WARDIAN_REAL_COMSPEC", value),
+            None => std::env::remove_var("WARDIAN_REAL_COMSPEC"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_process_runtime_env_sets_general_silent_cmd_shim() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_comspec = std::env::var_os("ComSpec");
+        let previous_shim = std::env::var_os("WARDIAN_SILENT_CMD_SHIM");
+        let previous_real_comspec = std::env::var_os("WARDIAN_REAL_COMSPEC");
+
+        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
+        std::env::remove_var("WARDIAN_SILENT_CMD_SHIM");
+        std::env::remove_var("WARDIAN_REAL_COMSPEC");
+
+        let mut cmd = tokio::process::Command::new("codex");
+        apply_process_provider_runtime_env("codex", &mut cmd).unwrap();
+
+        let envs = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().to_string(),
+                    value?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            envs.get("ComSpec").expect("ComSpec env"),
+            &std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+        assert_eq!(
+            envs.get("WARDIAN_REAL_COMSPEC")
+                .expect("WARDIAN_REAL_COMSPEC env"),
+            r"C:\Windows\System32\cmd.exe"
+        );
+        assert_eq!(
+            envs.get("WARDIAN_SILENT_CMD_SHIM")
+                .expect("WARDIAN_SILENT_CMD_SHIM env"),
+            "1"
+        );
+
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
+        match previous_shim {
+            Some(value) => std::env::set_var("WARDIAN_SILENT_CMD_SHIM", value),
+            None => std::env::remove_var("WARDIAN_SILENT_CMD_SHIM"),
+        }
+        match previous_real_comspec {
+            Some(value) => std::env::set_var("WARDIAN_REAL_COMSPEC", value),
+            None => std::env::remove_var("WARDIAN_REAL_COMSPEC"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_runtime_env_does_not_inject_node_options() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_comspec = std::env::var_os("ComSpec");
+        let previous_node_options = std::env::var_os("NODE_OPTIONS");
+        let previous_shim = std::env::var_os("WARDIAN_SILENT_CMD_SHIM");
+        let previous_real_comspec = std::env::var_os("WARDIAN_REAL_COMSPEC");
+
+        std::env::set_var("ComSpec", r"C:\Windows\System32\cmd.exe");
+        std::env::remove_var("NODE_OPTIONS");
+        std::env::remove_var("WARDIAN_SILENT_CMD_SHIM");
+        std::env::remove_var("WARDIAN_REAL_COMSPEC");
+
+        let mut interactive = CommandBuilder::new("gemini");
+        apply_interactive_provider_runtime_env("gemini", &mut interactive).unwrap();
+        assert!(!interactive
             .iter_extra_env_as_str()
             .any(|(key, _)| key.eq_ignore_ascii_case("NODE_OPTIONS")));
 
+        let mut process = tokio::process::Command::new("antigravity");
+        apply_process_provider_runtime_env("antigravity", &mut process).unwrap();
+        assert!(!process
+            .as_std()
+            .get_envs()
+            .any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("NODE_OPTIONS")));
+
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
         match previous_node_options {
             Some(value) => std::env::set_var("NODE_OPTIONS", value),
             None => std::env::remove_var("NODE_OPTIONS"),
+        }
+        match previous_shim {
+            Some(value) => std::env::set_var("WARDIAN_SILENT_CMD_SHIM", value),
+            None => std::env::remove_var("WARDIAN_SILENT_CMD_SHIM"),
+        }
+        match previous_real_comspec {
+            Some(value) => std::env::set_var("WARDIAN_REAL_COMSPEC", value),
+            None => std::env::remove_var("WARDIAN_REAL_COMSPEC"),
         }
     }
 

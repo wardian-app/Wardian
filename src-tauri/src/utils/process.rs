@@ -14,6 +14,11 @@ pub(crate) fn windows_silent_process_creation_flags() -> u32 {
     windows_create_no_window_flag()
 }
 
+#[cfg(windows)]
+pub const WARDIAN_SILENT_CMD_SHIM_ENV: &str = "WARDIAN_SILENT_CMD_SHIM";
+#[cfg(windows)]
+pub const WARDIAN_REAL_COMSPEC_ENV: &str = "WARDIAN_REAL_COMSPEC";
+
 pub(crate) fn apply_silent_tokio_command_policy(cmd: &mut tokio::process::Command) {
     #[cfg(windows)]
     {
@@ -27,6 +32,64 @@ pub(crate) fn apply_silent_std_command_policy(cmd: &mut std::process::Command) {
         use std::os::windows::process::CommandExt;
 
         cmd.creation_flags(windows_silent_process_creation_flags());
+    }
+}
+
+#[cfg(windows)]
+pub fn windows_real_comspec_for_silent_shim(shim: &std::path::Path) -> std::path::PathBuf {
+    let inherited_real = std::env::var_os(WARDIAN_REAL_COMSPEC_ENV).map(std::path::PathBuf::from);
+    let inherited_comspec = std::env::var_os("ComSpec").map(std::path::PathBuf::from);
+
+    inherited_real
+        .or(inherited_comspec)
+        .filter(|candidate| !same_windows_path(candidate, shim))
+        .unwrap_or_else(default_windows_comspec)
+}
+
+#[cfg(windows)]
+fn same_windows_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.to_string_lossy()
+        .trim()
+        .eq_ignore_ascii_case(right.to_string_lossy().trim())
+}
+
+#[cfg(windows)]
+fn default_windows_comspec() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join("cmd.exe")
+}
+
+#[cfg(windows)]
+pub fn run_silent_cmd_shim_if_requested() -> Option<i32> {
+    if std::env::var_os(WARDIAN_SILENT_CMD_SHIM_ENV).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return None;
+    }
+
+    Some(run_silent_cmd_shim())
+}
+
+#[cfg(windows)]
+fn run_silent_cmd_shim() -> i32 {
+    let real_comspec = std::env::var_os(WARDIAN_REAL_COMSPEC_ENV)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_windows_comspec);
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let mut cmd = std::process::Command::new(real_comspec);
+    cmd.args(args);
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+    apply_silent_std_command_policy(&mut cmd);
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("Wardian cmd shim failed to launch real ComSpec: {error}");
+            1
+        }
     }
 }
 
@@ -471,6 +534,63 @@ mod tests {
             super::windows_silent_process_creation_flags() & super::windows_create_no_window_flag(),
             super::windows_create_no_window_flag()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn silent_cmd_shim_resolves_inherited_comspec_without_recursing() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_comspec = std::env::var_os("ComSpec");
+        let previous_real_comspec = std::env::var_os(super::WARDIAN_REAL_COMSPEC_ENV);
+        let previous_system_root = std::env::var_os("SystemRoot");
+        let shim = std::path::Path::new(r"C:\Wardian\Wardian.exe");
+
+        std::env::set_var("ComSpec", shim);
+        std::env::remove_var(super::WARDIAN_REAL_COMSPEC_ENV);
+        std::env::set_var("SystemRoot", r"C:\TestWindows");
+
+        assert_eq!(
+            super::windows_real_comspec_for_silent_shim(shim),
+            std::path::PathBuf::from(r"C:\TestWindows\System32\cmd.exe")
+        );
+
+        std::env::set_var(
+            super::WARDIAN_REAL_COMSPEC_ENV,
+            r"C:\Windows\System32\cmd.exe",
+        );
+        assert_eq!(
+            super::windows_real_comspec_for_silent_shim(shim),
+            std::path::PathBuf::from(r"C:\Windows\System32\cmd.exe")
+        );
+
+        match previous_comspec {
+            Some(value) => std::env::set_var("ComSpec", value),
+            None => std::env::remove_var("ComSpec"),
+        }
+        match previous_real_comspec {
+            Some(value) => std::env::set_var(super::WARDIAN_REAL_COMSPEC_ENV, value),
+            None => std::env::remove_var(super::WARDIAN_REAL_COMSPEC_ENV),
+        }
+        match previous_system_root {
+            Some(value) => std::env::set_var("SystemRoot", value),
+            None => std::env::remove_var("SystemRoot"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn silent_cmd_shim_is_inactive_without_marker_env() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_shim = std::env::var_os(super::WARDIAN_SILENT_CMD_SHIM_ENV);
+
+        std::env::remove_var(super::WARDIAN_SILENT_CMD_SHIM_ENV);
+
+        assert_eq!(super::run_silent_cmd_shim_if_requested(), None);
+
+        match previous_shim {
+            Some(value) => std::env::set_var(super::WARDIAN_SILENT_CMD_SHIM_ENV, value),
+            None => std::env::remove_var(super::WARDIAN_SILENT_CMD_SHIM_ENV),
+        }
     }
 
     #[cfg(windows)]
