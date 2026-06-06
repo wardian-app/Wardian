@@ -407,16 +407,70 @@ fn render_workflow_exec(
     input: Option<&str>,
     bind: &[String],
 ) -> Result<String, CliError> {
-    if executor != "mock" {
-        return Err(CliError::backend(
-            ExitCode::Generic,
-            "unsupported_executor",
-            "only 'mock' is available until the real executor lands",
-        ));
-    }
-    let input = parse_workflow_exec_input(input)?;
-    let _bindings = parse_workflow_bindings(bind)?;
+    render_workflow_exec_with_live_launcher(path, executor, input, bind, live::workflow_run)
+}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowExecMode {
+    Live,
+    Mock,
+}
+
+impl WorkflowExecMode {
+    fn parse(value: &str) -> Result<Self, CliError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "live" | "real" | "full" => Ok(Self::Live),
+            "mock" => Ok(Self::Mock),
+            other => Err(CliError::backend(
+                ExitCode::Generic,
+                "unsupported_executor",
+                format!(
+                    "unsupported workflow executor `{other}`; expected live, real, full, or mock"
+                ),
+            )),
+        }
+    }
+}
+
+fn render_workflow_exec_with_live_launcher(
+    path: &str,
+    executor: &str,
+    input: Option<&str>,
+    bind: &[String],
+    live_launcher: impl FnOnce(live::WorkflowRunRequest) -> std::io::Result<serde_json::Value>,
+) -> Result<String, CliError> {
+    let input = parse_workflow_exec_input(input)?;
+    let bindings = parse_workflow_bindings(bind)?;
+    match WorkflowExecMode::parse(executor)? {
+        WorkflowExecMode::Live => {
+            let value = live_launcher(live::WorkflowRunRequest {
+                path: path.to_string(),
+                input,
+                bindings,
+            })
+            .map_err(control_error)?;
+            render_live_workflow_exec_response(value)
+        }
+        WorkflowExecMode::Mock => render_workflow_exec_mock(path, input),
+    }
+}
+
+fn render_live_workflow_exec_response(mut value: serde_json::Value) -> Result<String, CliError> {
+    let Some(object) = value.as_object_mut() else {
+        return Err(CliError::generic(
+            "workflow_run control response was not a JSON object",
+        ));
+    };
+    object
+        .entry("schema")
+        .or_insert_with(|| serde_json::json!(1));
+    object.insert("executor".to_string(), serde_json::json!("live"));
+    serde_json::to_string_pretty(&value)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn render_workflow_exec_mock(path: &str, input: serde_json::Value) -> Result<String, CliError> {
     let blueprint = wardian_core::workflow::parse_file(Path::new(path))
         .map_err(|e| CliError::generic(e.to_string()))?;
     let report = wardian_core::workflow::validate(&blueprint);
@@ -1378,6 +1432,61 @@ mod tests {
             .unwrap()
             .iter()
             .any(|d| d["code"] == "unknown_node_type"));
+    }
+
+    #[test]
+    fn workflow_exec_real_dispatches_to_live_launcher() {
+        let out = render_workflow_exec_with_live_launcher(
+            "wf.md",
+            "real",
+            Some(r#"{"target":"HEAD"}"#),
+            &["reviewer=codex".to_string()],
+            |request| {
+                assert_eq!(request.path, "wf.md");
+                assert_eq!(request.input, serde_json::json!({ "target": "HEAD" }));
+                assert_eq!(
+                    request.bindings,
+                    HashMap::from([("reviewer".to_string(), "codex".to_string())])
+                );
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "run_id": "run-1",
+                    "blueprint_id": "autoreview",
+                    "run_dir": "<absolute-workspace-path>/logs/workflows/autoreview/run-1"
+                }))
+            },
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["executor"], "live");
+        assert_eq!(json["run_id"], "run-1");
+    }
+
+    #[test]
+    fn workflow_exec_mock_stays_local_and_does_not_call_live_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wf.md");
+        std::fs::write(
+            &path,
+            "---\nschema: 2\nid: wf\nname: Workflow\nnodes:\n  - id: trigger\n    type: manual_trigger\n    fields: {}\nedges: []\n---\n",
+        )
+        .unwrap();
+
+        let out = render_workflow_exec_with_live_launcher(
+            path.to_str().unwrap(),
+            "mock",
+            None,
+            &[],
+            |_| panic!("mock executor must not call live launcher"),
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["executor"], "mock");
+        assert_eq!(json["blueprint_id"], "wf");
     }
 
     #[test]

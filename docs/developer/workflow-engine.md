@@ -59,6 +59,8 @@ Template fields resolve against this registry before each node executes.
 
 1. The frontend or scheduler calls `workflow_run` with a blueprint path and
    invocation context.
+   The CLI's default `wardian workflow exec <path>` path sends the same request
+   through the Wardian live control endpoint.
 2. The backend parses and validates the blueprint.
 3. `LiveStepExecutor` resolves agents, shell/script actions, notify operations,
    and state operations.

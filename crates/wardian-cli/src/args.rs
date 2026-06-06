@@ -72,8 +72,8 @@ pub enum WorkflowCommand {
     /// Execute a workflow blueprint headlessly and write a durable run.
     Exec {
         path: String,
-        /// Execution backend. Only `mock` is available until the real executor lands.
-        #[arg(long, default_value = "mock")]
+        /// Execution backend: live/real/full routes through the running app; mock runs locally.
+        #[arg(long, default_value = "live")]
         executor: String,
         /// JSON object of run input (entry input_schema values).
         #[arg(long)]
@@ -450,7 +450,7 @@ mod tests {
         assert!(matches!(
             args.command,
             WorkflowCommand::Exec { ref path, ref executor, .. }
-                if path == "wf.md" && executor == "mock"
+                if path == "wf.md" && executor == "live"
         ));
     }
 

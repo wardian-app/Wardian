@@ -38,6 +38,32 @@ The **Run** button opens a launch dialog for the current blueprint. Use **Run no
 
 Manual input parameters appear in the dialog when the blueprint's entry trigger defines an input schema.
 
+## Running From The CLI
+
+`wardian workflow exec <path>` launches a live workflow through the running
+Wardian app. Use the same `WARDIAN_HOME` for the app and CLI so both processes
+share the control endpoint and run logs.
+
+Bash:
+
+```bash
+export WARDIAN_HOME="$PWD/.tmp/wardian-workflow"
+wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md"
+wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" --executor mock
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_HOME = "$PWD\.tmp\wardian-workflow"
+wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md"
+wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" --executor mock
+```
+
+Use `--executor mock` for deterministic offline tests. The live/default path
+requires the app because active-agent routing, PTY input, and workflow task
+reply tracking are app-owned.
+
 ## Monitoring Workflow Activity
 
 Monitor shows a unified activity feed for workflow schedules and runs. Use the

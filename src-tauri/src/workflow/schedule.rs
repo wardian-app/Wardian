@@ -286,6 +286,7 @@ edges:
 "#;
 
     struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         previous_home: Option<std::ffi::OsString>,
         previous_session_id: Option<std::ffi::OsString>,
         previous_mock_scenario: Option<std::ffi::OsString>,
@@ -296,6 +297,7 @@ edges:
     impl EnvGuard {
         fn set(home: &std::path::Path, mock_script: &std::path::Path) -> Self {
             let guard = Self {
+                _lock: crate::utils::wardian_test_env_lock(),
                 previous_home: std::env::var_os("WARDIAN_HOME"),
                 previous_session_id: std::env::var_os("WARDIAN_SESSION_ID"),
                 previous_mock_scenario: std::env::var_os("WARDIAN_MOCK_SCENARIO"),
@@ -387,7 +389,6 @@ edges:
 
     #[tokio::test(flavor = "current_thread")]
     async fn due_schedule_fires_and_writes_a_run() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let blueprint_path = seed_blueprint(home.path(), "sched-test", SCHEDULED_BLUEPRINT);
         let _env = EnvGuard::set(home.path(), &mock_script_path());
@@ -435,7 +436,6 @@ edges:
 
     #[test]
     fn resolve_fire_resolves_blueprint_run_root_and_provider() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(home.path(), &mock_script_path());
         seed_blueprint(home.path(), "sched-test", SCHEDULED_BLUEPRINT);
@@ -454,7 +454,6 @@ edges:
 
     #[test]
     fn resolve_fire_normalizes_legacy_bindings_as_scheduled_assignments() {
-        let _guard = crate::utils::wardian_test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(home.path(), &mock_script_path());
         seed_blueprint(home.path(), "sched-normalize", BLUEPRINT);
@@ -485,7 +484,6 @@ edges:
 
     #[test]
     fn resolve_fire_errors_for_a_missing_blueprint() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(home.path(), &mock_script_path());
 
@@ -498,7 +496,6 @@ edges:
 
     #[test]
     fn resolve_fire_falls_back_to_settings_provider_when_request_has_none() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(home.path(), &mock_script_path());
         seed_blueprint(home.path(), "sched-test", SCHEDULED_BLUEPRINT);

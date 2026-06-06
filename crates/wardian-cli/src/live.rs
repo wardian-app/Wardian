@@ -71,6 +71,7 @@ enum ControlOperation {
     AgentWorktreeEnable,
     AgentWorktreeJoin,
     AgentWorktreeDisable,
+    WorkflowRun,
     SendMessage,
     Ask {
         requested: Duration,
@@ -216,6 +217,12 @@ pub struct AskAgentResponse {
     pub watch: AgentWatchResponse,
 }
 
+pub struct WorkflowRunRequest {
+    pub path: String,
+    pub input: serde_json::Value,
+    pub bindings: std::collections::HashMap<String, String>,
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -359,6 +366,22 @@ pub fn agent_worktree_disable(target: &str) -> io::Result<AgentWorktreeMutationR
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<serde_json::Value> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::WorkflowRun,
+        send_request(ControlRequest::WorkflowRun {
+            path: request.path,
+            provider: None,
+            workspace: None,
+            input: Some(request.input),
+            bindings: Some(request.bindings),
+            assignments: None,
+        }),
+    )
 }
 
 pub fn send_message(
@@ -724,6 +747,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentWorktreeEnable
         | ControlOperation::AgentWorktreeJoin
         | ControlOperation::AgentWorktreeDisable
+        | ControlOperation::WorkflowRun
         | ControlOperation::SendMessage
         | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,

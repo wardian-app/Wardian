@@ -1,5 +1,6 @@
 use crate::identity::AgentIdentity;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 pub const CONTROL_SCHEMA: u8 = 1;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -78,6 +79,14 @@ pub enum ControlRequest {
         timeout_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_echo_guard: Option<String>,
+    },
+    WorkflowRun {
+        path: String,
+        provider: Option<String>,
+        workspace: Option<String>,
+        input: Option<serde_json::Value>,
+        bindings: Option<HashMap<String, String>>,
+        assignments: Option<crate::models::WorkflowAssignments>,
     },
 }
 
@@ -966,6 +975,32 @@ mod tests {
         assert!(json.contains(r#""member_agent_ids":["uuid-1"]"#));
         assert!(json.contains(r#""can_delete":false"#));
         assert!(json.contains(r#""cleared_session":true"#));
+    }
+
+    #[test]
+    fn workflow_run_request_serializes_live_launch_options() {
+        let req = ControlRequest::WorkflowRun {
+            path: "<absolute-workspace-path>/library/workflows/autoreview.md".to_string(),
+            provider: Some("codex".to_string()),
+            workspace: Some("<absolute-workspace-path>".to_string()),
+            input: Some(serde_json::json!({ "target": "HEAD" })),
+            bindings: Some(std::collections::HashMap::from([(
+                "reviewer".to_string(),
+                "codex".to_string(),
+            )])),
+            assignments: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""command":"workflow_run""#));
+        assert!(
+            json.contains(r#""path":"<absolute-workspace-path>/library/workflows/autoreview.md""#)
+        );
+        assert!(json.contains(r#""provider":"codex""#));
+        assert!(json.contains(r#""bindings":{"reviewer":"codex"}"#));
+        assert_eq!(roundtrip, req);
     }
 
     #[test]

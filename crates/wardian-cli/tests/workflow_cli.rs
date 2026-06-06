@@ -77,7 +77,13 @@ fn workflow_exec_runs_show_replay_round_trip() {
 
     let exec = workflow_command(
         &home,
-        &["workflow", "exec", workflow_path.to_str().unwrap()],
+        &[
+            "workflow",
+            "exec",
+            workflow_path.to_str().unwrap(),
+            "--executor",
+            "mock",
+        ],
     );
     assert_eq!(exec["schema"], 1);
     assert_eq!(exec["ok"], true);

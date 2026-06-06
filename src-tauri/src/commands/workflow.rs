@@ -564,12 +564,14 @@ mod tests {
     use wardian_core::engine::{RunState, RunStatus};
 
     struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         previous_home: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
         fn set(home: &std::path::Path) -> Self {
             let guard = Self {
+                _lock: crate::utils::wardian_test_env_lock(),
                 previous_home: std::env::var_os("WARDIAN_HOME"),
             };
             std::env::set_var("WARDIAN_HOME", home);
@@ -668,7 +670,6 @@ edges: []
 
     #[test]
     fn run_summary_carries_resolved_blueprint_path_separately_from_run_path() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(dir.path());
         let blueprint_path = seed_workflow_blueprint(dir.path());
@@ -696,7 +697,6 @@ edges: []
 
     #[test]
     fn parse_blueprint_for_run_falls_back_from_run_dir_to_blueprint_id() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(dir.path());
         seed_workflow_blueprint(dir.path());
@@ -715,7 +715,6 @@ edges: []
 
     #[test]
     fn parse_blueprint_for_run_rejects_mismatched_provided_file() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(dir.path());
         let other_path = dir.path().join("other.md");
@@ -732,7 +731,6 @@ edges: []
 
     #[tokio::test]
     async fn schedule_list_reads_persisted_schedules() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(dir.path());
 
@@ -745,7 +743,6 @@ edges: []
 
     #[test]
     fn pause_then_resume_round_trips_via_core() {
-        let _lock = crate::utils::wardian_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(dir.path());
 
