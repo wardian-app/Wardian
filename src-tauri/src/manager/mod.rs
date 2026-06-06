@@ -1008,6 +1008,69 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn gemini_process_runtime_env_adds_wardian_node_preload() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_node_options = std::env::var_os("NODE_OPTIONS");
+        let home = tempfile::tempdir().unwrap();
+
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::remove_var("NODE_OPTIONS");
+
+        let mut cmd = tokio::process::Command::new("node");
+        apply_process_provider_runtime_env("gemini", &mut cmd).unwrap();
+
+        let node_options = cmd
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| {
+                key.to_string_lossy()
+                    .eq_ignore_ascii_case("NODE_OPTIONS")
+                    .then(|| {
+                        value
+                            .expect("NODE_OPTIONS value")
+                            .to_string_lossy()
+                            .to_string()
+                    })
+            })
+            .expect("NODE_OPTIONS env");
+
+        assert!(node_options.contains("--require "));
+        assert!(node_options.contains("wardian-node-preload.cjs"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_node_options {
+            Some(value) => std::env::set_var("NODE_OPTIONS", value),
+            None => std::env::remove_var("NODE_OPTIONS"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_gemini_runtime_env_does_not_add_node_options() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_node_options = std::env::var_os("NODE_OPTIONS");
+        std::env::remove_var("NODE_OPTIONS");
+
+        let mut cmd = CommandBuilder::new("node");
+
+        apply_interactive_provider_runtime_env("codex", &mut cmd).unwrap();
+
+        assert!(!cmd
+            .iter_extra_env_as_str()
+            .any(|(key, _)| key.eq_ignore_ascii_case("NODE_OPTIONS")));
+
+        match previous_node_options {
+            Some(value) => std::env::set_var("NODE_OPTIONS", value),
+            None => std::env::remove_var("NODE_OPTIONS"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn managed_cli_path_is_applied_to_headless_processes() {
         let _guard = crate::utils::wardian_test_env_lock();
         let previous_home = std::env::var_os("WARDIAN_HOME");
