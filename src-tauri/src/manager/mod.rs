@@ -904,9 +904,22 @@ fn ensure_antigravity_windows_mcp_npx_shims_are_silent() -> Result<(), String> {
     let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
-    ensure_antigravity_windows_mcp_npx_shims_are_silent_in(
-        &home.join(".gemini").join("mcp_config.json"),
-    )
+    for config_path in antigravity_windows_mcp_config_candidates(&home) {
+        ensure_antigravity_windows_mcp_npx_shims_are_silent_in(&config_path)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn antigravity_windows_mcp_config_candidates(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let gemini = home.join(".gemini");
+    vec![
+        gemini.join("config").join("mcp_config.json"),
+        gemini.join("mcp_config.json"),
+        gemini.join("antigravity").join("mcp_config.json"),
+        gemini.join("antigravity-cli").join("mcp_config.json"),
+        gemini.join("antigravity-ide").join("mcp_config.json"),
+    ]
 }
 
 #[cfg(windows)]
@@ -924,6 +937,9 @@ fn ensure_antigravity_windows_mcp_npx_shims_are_silent_in(
             ));
         }
     };
+    if content.trim().is_empty() {
+        return Ok(());
+    }
     let mut value = serde_json::from_str::<serde_json::Value>(&content).map_err(|error| {
         format!(
             "Failed to parse Antigravity MCP config {}: {}",
@@ -1290,6 +1306,47 @@ mod tests {
         match previous_node_options {
             Some(value) => std::env::set_var("NODE_OPTIONS", value),
             None => std::env::remove_var("NODE_OPTIONS"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn antigravity_mcp_config_candidates_include_current_config_dir() {
+        let home = std::path::Path::new("C:/Users/testuser");
+        let candidates = antigravity_windows_mcp_config_candidates(home);
+
+        assert!(candidates.contains(&home.join(".gemini").join("config").join("mcp_config.json")));
+        assert!(candidates.contains(&home.join(".gemini").join("mcp_config.json")));
+        assert!(candidates.contains(
+            &home
+                .join(".gemini")
+                .join("antigravity-ide")
+                .join("mcp_config.json")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn antigravity_mcp_config_ignores_empty_files() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+        let config_path = home
+            .path()
+            .join(".gemini")
+            .join("antigravity")
+            .join("mcp_config.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "").unwrap();
+
+        ensure_antigravity_windows_mcp_npx_shims_are_silent_in(&config_path).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "");
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
         }
     }
 
