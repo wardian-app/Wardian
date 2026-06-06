@@ -311,19 +311,7 @@ fn parse_control_workflow_blueprint(path: &str) -> Result<Blueprint, String> {
         ));
     }
 
-    let blueprint =
-        wardian_core::workflow::parse_file(&requested).map_err(|error| error.to_string())?;
-    if let Some(node) = blueprint
-        .nodes
-        .iter()
-        .find(|node| matches!(node.r#type.as_str(), "shell" | "script"))
-    {
-        return Err(format!(
-            "control workflow_run cannot launch `{}` nodes without an interactive approval boundary",
-            node.r#type
-        ));
-    }
-    Ok(blueprint)
+    wardian_core::workflow::parse_file(&requested).map_err(|error| error.to_string())
 }
 
 /// Resume an interrupted or parked workflow run.
@@ -867,7 +855,7 @@ edges:
     }
 
     #[test]
-    fn control_workflow_blueprint_rejects_shell_nodes() {
+    fn control_workflow_blueprint_allows_library_shell_nodes() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set(dir.path());
         let workflows_dir = dir.path().join("library").join("workflows");
@@ -875,9 +863,10 @@ edges:
         let path = workflows_dir.join("shell.md");
         std::fs::write(&path, SHELL_WORKFLOW_BLUEPRINT).unwrap();
 
-        let error = parse_control_workflow_blueprint(&path.to_string_lossy()).unwrap_err();
+        let blueprint = parse_control_workflow_blueprint(&path.to_string_lossy()).unwrap();
 
-        assert!(error.contains("cannot launch `shell` nodes"));
+        assert_eq!(blueprint.id, "shell-wf");
+        assert!(blueprint.nodes.iter().any(|node| node.r#type == "shell"));
     }
 
     #[tokio::test]
