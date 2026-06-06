@@ -2,8 +2,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Terminal } from "@xterm/xterm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { UserTerminalPanel } from "./UserTerminalPanel";
+import { TERMINAL_LINE_HEIGHT } from "./terminalTheme";
 import { useSettingsStore } from "../../store/useSettingsStore";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -28,11 +30,11 @@ const refreshMock = vi.fn();
 const registerLinkProviderMock = vi.fn(() => ({ dispose: vi.fn() }));
 
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn().mockImplementation(function MockTerminal() {
+  Terminal: vi.fn().mockImplementation(function MockTerminal(options?: Record<string, unknown>) {
     return {
       cols: 80,
       rows: 24,
-      options: {},
+      options: { ...(options ?? {}) },
       open: openMock,
       loadAddon: loadAddonMock,
       onData: onDataMock,
@@ -74,6 +76,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
+const mockTerminal = vi.mocked(Terminal);
 
 describe("UserTerminalPanel", () => {
   beforeEach(() => {
@@ -116,6 +119,36 @@ describe("UserTerminalPanel", () => {
       "href",
       "https://docs.wardian.org/guide/cli",
     );
+  });
+
+  it("uses the readable Wardian terminal palette and line height", async () => {
+    render(
+      <UserTerminalPanel
+        theme="dark"
+        height={320}
+        selectedWorkspace={null}
+        onHeightChange={vi.fn()}
+        onHide={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(terminalOptions.lineHeight).toBe(TERMINAL_LINE_HEIGHT);
+    expect(terminalOptions.theme).toMatchObject({
+      background: "#08100d",
+      foreground: "#edf3ea",
+      red: "#ff6b66",
+      green: "#69d489",
+      yellow: "#e7c15d",
+      cyan: "#6fd4e6",
+    });
   });
 
   it("installs conservative terminal shortcuts", async () => {

@@ -10,6 +10,7 @@ Located in `src/styles/App.css`, the theme is defined using a series of CSS vari
 - **Structural Variables**: Define the background, card, and sidebar colors (`--color-wardian-bg`, `--color-wardian-sidebar-primary`).
 - **Semantic Variables**: Define colors for system statuses (`--color-wardian-success`, `--color-wardian-processing`, `--color-wardian-error`).
 - **Typography Variables**: Define colors for primary, muted, and bright text.
+- **Terminal Variables**: Define the embedded xterm palette (`--color-wardian-terminal-*`) for terminal background, foreground, cursor, selection, and normal/bright ANSI colors.
 
 ### 2. The Theme Switcher
 The `App.tsx` component manages the active theme state and persists it to `localStorage`.
@@ -35,6 +36,13 @@ Specific colors are reserved for the Visual Builder nodes:
 - **Logic Node**: `--color-workflow-logic` (#f59e0b)
 - **Comm Node**: `--color-workflow-comm` (#8b5cf6)
 
+### Terminal Colors
+Agent terminals and the bottom user terminal consume xterm colors through
+`src/features/terminal/terminalTheme.ts`. Keep terminal rendering theme-aware by
+adding terminal colors as `--color-wardian-terminal-*` variables first, then
+mapping them into the xterm theme. Do not hardcode ANSI colors in terminal
+components.
+
 ## 🛠️ Developer Usage
 
 ### Using Theme Variables
@@ -51,5 +59,6 @@ When building new components, **NEVER** use hardcoded hex values or standard Tai
 ### Extending the Theme
 To add a new theme color:
 1. Define the variable in the `@theme` block in `App.css`.
-2. Provide a light-mode override in the `[data-theme='light']` block.
+2. Provide a dark-mode override in the `[data-theme='dark']` block when the
+   color differs from the light/default palette.
 3. (Optional) Create a mapped Tailwind utility class for ease of use.

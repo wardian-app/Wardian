@@ -10,20 +10,7 @@ import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSe
 import { DocsLink } from "../../components/DocsLink";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
-
-const DARK_TERM_THEME = {
-  background: "#020402",
-  foreground: "#EEF2EE",
-  cursor: "#F1D382",
-  selectionBackground: "#1E261E",
-};
-
-const LIGHT_TERM_THEME = {
-  background: "#fcfaf5",
-  foreground: "#111827",
-  cursor: "#b8860b",
-  selectionBackground: "#e5e7eb",
-};
+import { TERMINAL_LINE_HEIGHT, terminalThemeForMode } from "./terminalTheme";
 
 const MIN_TERMINAL_COLS = 80;
 const MIN_TERMINAL_ROWS = 24;
@@ -82,7 +69,7 @@ export function UserTerminalPanel({
   }, [theme]);
 
   const termTheme = useMemo(
-    () => (effectiveTheme === "light" ? LIGHT_TERM_THEME : DARK_TERM_THEME),
+    () => terminalThemeForMode(effectiveTheme),
     [effectiveTheme],
   );
 
@@ -157,6 +144,7 @@ export function UserTerminalPanel({
       cursorInactiveStyle: "bar",
       fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
       fontSize: terminalFontSize,
+      lineHeight: TERMINAL_LINE_HEIGHT,
       scrollback: 2_000,
       theme: termTheme,
     });

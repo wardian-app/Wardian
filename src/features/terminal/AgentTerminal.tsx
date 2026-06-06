@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useCallback, memo } from "react";
+import { useRef, useState, useEffect, useCallback, useMemo, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
@@ -19,20 +19,13 @@ import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
-
-const DARK_TERM_THEME = {
-  background: "#020402",
-  foreground: "#EEF2EE",
-  cursor: "#F1D382",
-  selectionBackground: "#1E261E",
-};
-
-const LIGHT_TERM_THEME = {
-  background: "#fcfaf5",
-  foreground: "#111827",
-  cursor: "#b8860b",
-  selectionBackground: "#e5e7eb",
-};
+import {
+  DARK_TERMINAL_THEME,
+  TERMINAL_LINE_HEIGHT,
+  terminalRgbTriplet,
+  terminalThemeForMode,
+  type TerminalThemeMode,
+} from "./terminalTheme";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -81,7 +74,8 @@ type TerminalSessionEntry = {
   outputReadyUnlisten: (() => void) | null;
   terminalClearedUnlisten: (() => void) | null;
   provider?: string;
-  currentTheme: typeof DARK_TERM_THEME;
+  currentTheme: ReturnType<typeof terminalThemeForMode>;
+  currentThemeMode: TerminalThemeMode;
   renderer: TerminalRendererEntry | null;
   rendererDisposeTimer: ReturnType<typeof setTimeout> | null;
   parser: HeadlessTerminal;
@@ -728,18 +722,10 @@ function queueTerminalCapabilityResponses(sessionId: string, data: string, entry
   }
   const { row, col } = terminalCursorPositionReply(entry);
   const { width, height } = terminalPixelSizeReply(entry);
-  const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
-  const prefersLight = termTheme === LIGHT_TERM_THEME;
-  const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
-  const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
-  const backgroundRgb =
-    background.length === 6
-      ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
-      : "02/04/02";
-  const foregroundRgb =
-    foreground.length === 6
-      ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
-      : "ee/f2/ee";
+  const termTheme = entry.currentTheme ?? DARK_TERMINAL_THEME;
+  const prefersLight = entry.currentThemeMode === "light";
+  const backgroundRgb = terminalRgbTriplet(termTheme.background, "08/10/0d");
+  const foregroundRgb = terminalRgbTriplet(termTheme.foreground, "ed/f3/ea");
 
   const plan = planTerminalCapabilityResponses(entry.provider, data, {
     cursorRow: row,
@@ -1282,7 +1268,8 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     outputReadyUnlisten: null,
     terminalClearedUnlisten: null,
     provider: resolvedProvider,
-    currentTheme: DARK_TERM_THEME,
+    currentTheme: DARK_TERMINAL_THEME,
+    currentThemeMode: "dark",
     renderer: null,
     rendererDisposeTimer: null,
     parser,
@@ -1371,6 +1358,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     theme: entry.currentTheme,
     fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
     fontSize: terminalFontSize,
+    lineHeight: TERMINAL_LINE_HEIGHT,
     customGlyphs: true,
     cursorBlink: true,
     cursorStyle: "bar",
@@ -1586,7 +1574,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => mediaQuery.removeEventListener("change", handler);
   }, [theme]);
 
-  const termTheme = effectiveTheme === "light" ? LIGHT_TERM_THEME : DARK_TERM_THEME;
+  const termTheme = useMemo(() => terminalThemeForMode(effectiveTheme), [effectiveTheme]);
 
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
@@ -1652,6 +1640,7 @@ export const AgentTerminal = memo(function AgentTerminal({
           onOpenError: setLinkOpenError,
         };
         session.currentTheme = termTheme;
+        session.currentThemeMode = effectiveTheme;
 
         const renderer = mountRenderer(sessionId, session, terminalRef.current);
         if (!renderer) {
@@ -1734,16 +1723,11 @@ export const AgentTerminal = memo(function AgentTerminal({
       return;
     }
     entry.currentTheme = termTheme;
+    entry.currentThemeMode = effectiveTheme;
     if (entry.provider === "opencode") {
-      const toRgbTriplet = (hex: string, fallback: string) => {
-        const cleaned = String(hex ?? "").replace("#", "");
-        return cleaned.length === 6
-          ? `${cleaned.slice(0, 2)}/${cleaned.slice(2, 4)}/${cleaned.slice(4, 6)}`
-          : fallback;
-      };
-      const background = toRgbTriplet(termTheme.background, "02/04/02");
-      const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
-      const prefersLight = termTheme === LIGHT_TERM_THEME;
+      const background = terminalRgbTriplet(termTheme.background, "08/10/0d");
+      const foreground = terminalRgbTriplet(termTheme.foreground, "ed/f3/ea");
+      const prefersLight = effectiveTheme === "light";
       // OpenTUI treats ?997 as a request to infer mode from subsequent OSC
       // color replies, so send it before the current Wardian colors.
       queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
@@ -1751,7 +1735,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
     }
-  }, [sessionId, termTheme]);
+  }, [effectiveTheme, sessionId, termTheme]);
 
   useEffect(() => {
     let isMounted = true;

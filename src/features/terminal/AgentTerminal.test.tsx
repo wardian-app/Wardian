@@ -7,6 +7,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { AgentTerminal, __terminalTesting, shouldExposeTerminalDebug } from "./AgentTerminal";
+import { TERMINAL_LINE_HEIGHT } from "./terminalTheme";
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 
@@ -784,6 +785,15 @@ describe("AgentTerminal scrollback", () => {
     >;
     expect(terminalOptions.reflowCursorLine).toBe(false);
     expect(terminalOptions.scrollOnEraseInDisplay).toBe(true);
+    expect(terminalOptions.lineHeight).toBe(TERMINAL_LINE_HEIGHT);
+    expect(terminalOptions.theme).toMatchObject({
+      background: "#08100d",
+      foreground: "#edf3ea",
+      red: "#ff6b66",
+      green: "#69d489",
+      yellow: "#e7c15d",
+      cyan: "#6fd4e6",
+    });
   });
 
   it("keeps non-Codex erase-in-display behavior at xterm defaults", async () => {
@@ -1985,15 +1995,15 @@ describe("AgentTerminal scrollback", () => {
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b]4;0;rgb:02/04/02\u001b\\",
+      input: "\u001b]4;0;rgb:08/10/0d\u001b\\",
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b]10;rgb:EE/F2/EE\u001b\\",
+      input: "\u001b]10;rgb:ed/f3/ea\u001b\\",
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b]11;rgb:02/04/02\u001b\\",
+      input: "\u001b]11;rgb:08/10/0d\u001b\\",
     });
   });
 

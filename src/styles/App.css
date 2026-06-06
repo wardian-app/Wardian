@@ -36,6 +36,28 @@
   --color-wardian-card-bg-muted: rgba(0, 0, 0, 0.04);
   --color-wardian-overlay: rgba(0, 0, 0, 0.4);
 
+  /* Terminal Palette */
+  --color-wardian-terminal-bg: #fcfaf5;
+  --color-wardian-terminal-fg: #111827;
+  --color-wardian-terminal-cursor: #926a09;
+  --color-wardian-terminal-selection: #e8dcc0;
+  --color-wardian-terminal-black: #111827;
+  --color-wardian-terminal-red: #b91c1c;
+  --color-wardian-terminal-green: #047857;
+  --color-wardian-terminal-yellow: #926a09;
+  --color-wardian-terminal-blue: #1d4ed8;
+  --color-wardian-terminal-magenta: #7e22ce;
+  --color-wardian-terminal-cyan: #0e7490;
+  --color-wardian-terminal-white: #f9fafb;
+  --color-wardian-terminal-bright-black: #6b7280;
+  --color-wardian-terminal-bright-red: #dc2626;
+  --color-wardian-terminal-bright-green: #059669;
+  --color-wardian-terminal-bright-yellow: #b45309;
+  --color-wardian-terminal-bright-blue: #2563eb;
+  --color-wardian-terminal-bright-magenta: #9333ea;
+  --color-wardian-terminal-bright-cyan: #0891b2;
+  --color-wardian-terminal-bright-white: #ffffff;
+
   /* Sidebar Widths */
   --sidebar-primary-width: 48px;
   --sidebar-content-width: 240px;
@@ -296,6 +318,28 @@
   --color-wardian-input-bg-rgb: 31, 41, 55;
   --color-wardian-card-bg-muted: rgba(31, 41, 55, 0.3);
   --color-wardian-overlay: rgba(0, 0, 0, 0.55);
+
+  /* Terminal Palette */
+  --color-wardian-terminal-bg: #08100d;
+  --color-wardian-terminal-fg: #edf3ea;
+  --color-wardian-terminal-cursor: #e6c76b;
+  --color-wardian-terminal-selection: #263729;
+  --color-wardian-terminal-black: #27302a;
+  --color-wardian-terminal-red: #ff6b66;
+  --color-wardian-terminal-green: #69d489;
+  --color-wardian-terminal-yellow: #e7c15d;
+  --color-wardian-terminal-blue: #7ab7ff;
+  --color-wardian-terminal-magenta: #d69cff;
+  --color-wardian-terminal-cyan: #6fd4e6;
+  --color-wardian-terminal-white: #edf3ea;
+  --color-wardian-terminal-bright-black: #748176;
+  --color-wardian-terminal-bright-red: #ff8b86;
+  --color-wardian-terminal-bright-green: #8de3a3;
+  --color-wardian-terminal-bright-yellow: #f0d77b;
+  --color-wardian-terminal-bright-blue: #9bc8ff;
+  --color-wardian-terminal-bright-magenta: #e3b6ff;
+  --color-wardian-terminal-bright-cyan: #91e0ec;
+  --color-wardian-terminal-bright-white: #fbfff8;
 
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
 }
