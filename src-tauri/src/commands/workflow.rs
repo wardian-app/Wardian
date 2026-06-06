@@ -147,8 +147,8 @@ pub fn workflow_read_run(
 }
 
 /// Launch a workflow blueprint run and write durable run artifacts. The default
-/// live path routes execution through the running app; local mock execution is
-/// the CLI's offline fallback.
+/// live path routes execution through the running app; CLI mock execution is
+/// reserved for workflow-engine tests.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn workflow_run(

@@ -54,7 +54,6 @@ wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" \
   --workspace "<absolute-workspace-path>" \
   --input '{"target":"PR #123","max_cycles":1}'
-wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" --executor mock
 ```
 
 PowerShell:
@@ -65,12 +64,11 @@ wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" `
   --workspace "<absolute-workspace-path>" `
   --input '{"target":"PR #123","max_cycles":1}'
-wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" --executor mock
 ```
 
-Use `--executor mock` for deterministic offline tests. The live/default path
-requires the app because active-agent routing, PTY input, and workflow task
-reply tracking are app-owned.
+The live/default path requires the app because active-agent routing, PTY input,
+workflow shell/script execution, and workflow task reply tracking are app-owned.
+The `mock` executor exists only for workflow-engine fixture tests.
 
 ## Monitoring Workflow Activity
 

@@ -85,7 +85,6 @@ wardian watchlist show <watchlist-name-or-id>
 wardian workflow node-types
 wardian workflow validate <path-to-workflow.md>
 wardian workflow exec <path-to-library-workflow.md> --provider codex --workspace <absolute-workspace-path>
-wardian workflow exec <path-to-workflow.md> --executor mock
 wardian workflow runs
 wardian workflow run-show <blueprint-id> <run-id>
 wardian workflow replay <blueprint-id> <run-id>
@@ -175,23 +174,13 @@ wardian workflow runs
 wardian workflow run-show autoreview <run-id>
 ```
 
-By default, `workflow exec` is a live-control command: it requires the desktop app to be running for the same `WARDIAN_HOME`, routes execution through app-owned runtime state, and accepts workflow files under `<wardian-home>/library/workflows`. Use `--executor mock` when you need an offline local run for validation, replay, or fixture tests:
-
-```bash
-wardian workflow exec <absolute-workspace-path>/scratch/workflow.md --executor mock
-```
-
-PowerShell:
-
-```powershell
-wardian workflow exec <absolute-workspace-path>\scratch\workflow.md --executor mock
-```
+By default, `workflow exec` is a live-control command: it requires the desktop app to be running for the same `WARDIAN_HOME`, routes execution through app-owned runtime state, and accepts workflow files under `<wardian-home>/library/workflows`. The `mock` executor is reserved for workflow-engine fixture tests and should not be used as a normal CLI launch path.
 
 Use `workflow runs`, `workflow run-show <blueprint-id> <run-id>`, and `workflow replay <blueprint-id> <run-id>` to inspect durable run artifacts under `<wardian-home>/logs/workflows`.
 
 Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `workflow exec`, and `send`.
 
-`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, and `workflow exec --executor mock` can run from disk without the desktop app.
+`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, and `workflow replay` can run from disk without the desktop app.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
 

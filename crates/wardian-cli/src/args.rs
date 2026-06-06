@@ -72,7 +72,7 @@ pub enum WorkflowCommand {
     /// Launch a workflow blueprint and write a durable run.
     Exec {
         path: String,
-        /// Execution backend: live/real/full routes through the running app; mock runs locally.
+        /// Execution backend: live/real/full routes through the running app; mock is reserved for engine tests.
         #[arg(long, default_value = "live")]
         executor: String,
         /// JSON object of run input (entry input_schema values).

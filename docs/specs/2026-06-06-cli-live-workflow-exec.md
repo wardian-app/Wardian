@@ -20,8 +20,9 @@ same control-endpoint launch path. The CLI sends a `workflow_run` request to the
 running Wardian app with the path, optional provider, optional workspace, JSON
 input object, and role/class bindings.
 
-`--executor mock` remains a local deterministic path for offline tests and run
-artifact round trips. It continues to use `MockExecutor` in the CLI process.
+`--executor mock` remains only as a workflow-engine fixture path. It continues
+to use `MockExecutor` in the CLI process so tests can exercise the durable engine
+without depending on app/live runtime systems.
 
 ## Rationale
 
@@ -43,8 +44,8 @@ scheduler.
   should execute against a specific project checkout instead of the workflow run
   directory.
 - Running `wardian workflow exec <path> --executor mock` does not contact the
-  app and writes durable run artifacts under
-  `<wardian-home>/logs/workflows/<blueprint-id>/<run-id>/`.
+  app. This path is reserved for workflow-engine fixture tests, not normal CLI
+  workflow execution.
 
 ## Examples
 
@@ -56,7 +57,6 @@ wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" \
   --workspace "<absolute-workspace-path>" \
   --input '{"target":"PR #123","max_cycles":1}'
-wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" --executor mock
 ```
 
 PowerShell:
@@ -67,5 +67,4 @@ wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" `
   --workspace "<absolute-workspace-path>" `
   --input '{"target":"PR #123","max_cycles":1}'
-wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" --executor mock
 ```
