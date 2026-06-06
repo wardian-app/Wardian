@@ -1,6 +1,6 @@
 # Automated Testing Harness
 
-* **Status:** Accepted
+* **Status:** Proposed
 * **Date:** 2026-03-31
 
 ## Context and Problem Statement

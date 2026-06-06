@@ -1,6 +1,6 @@
 # Watchlist Team Collapse
 
-- **Status:** Planned
+- **Status:** Proposed
 - **Date:** 2026-05-23
 
 ## Context and Problem Statement

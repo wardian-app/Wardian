@@ -1,6 +1,6 @@
 # Fullscreen E2E Visual Defaults
 
-- **Status:** Accepted
+- **Status:** Proposed
 - **Date:** 2026-06-01
 
 ## Context

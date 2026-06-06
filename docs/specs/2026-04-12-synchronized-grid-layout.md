@@ -1,6 +1,6 @@
 # Synchronized Grid Layout & Tactile Resizing
 
-* **Status:** Draft (Flush Layout)
+* **Status:** Proposed
 * **Date:** 2026-04-12
 
 ## Context and Problem Statement

@@ -1,6 +1,6 @@
 # Agent Lifecycle Locking
 
-* **Status:** Accepted
+* **Status:** Proposed
 * **Date:** 2026-05-21
 
 ## Context and Problem Statement
