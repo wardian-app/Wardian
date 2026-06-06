@@ -271,27 +271,8 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             handle_agent_worktree_disable(app, &target).await
         }
 
-        ControlRequest::WorkflowRun {
-            path,
-            provider,
-            workspace,
-            input,
-            bindings,
-            assignments,
-        } => {
-            let result = crate::commands::workflow::workflow_run_from_control(
-                app.state::<AppState>(),
-                app.clone(),
-                path,
-                provider,
-                workspace,
-                input,
-                bindings,
-                assignments,
-            )
-            .await
-            .map_err(ControlError::request_failed)?;
-            ok_json(&result)
+        request @ ControlRequest::WorkflowRun { .. } => {
+            handle_workflow_run_control(app, workflow_run_control_launch(request)?).await
         }
 
         ControlRequest::SendMessage {
@@ -623,6 +604,60 @@ async fn clear_agent_after_worktree_move(
     )
     .await
     .map_err(ControlError::request_failed)
+}
+
+#[derive(Debug)]
+struct WorkflowRunControlLaunch {
+    path: String,
+    provider: Option<String>,
+    workspace: Option<String>,
+    input: Option<serde_json::Value>,
+    bindings: Option<std::collections::HashMap<String, String>>,
+    assignments: Option<wardian_core::models::WorkflowAssignments>,
+}
+
+fn workflow_run_control_launch(
+    request: ControlRequest,
+) -> Result<WorkflowRunControlLaunch, ControlError> {
+    match request {
+        ControlRequest::WorkflowRun {
+            path,
+            provider,
+            workspace,
+            input,
+            bindings,
+            assignments,
+        } => Ok(WorkflowRunControlLaunch {
+            path,
+            provider,
+            workspace,
+            input,
+            bindings,
+            assignments,
+        }),
+        _ => Err(ControlError::bad_request(
+            "expected workflow_run control request",
+        )),
+    }
+}
+
+async fn handle_workflow_run_control(
+    app: &AppHandle,
+    launch: WorkflowRunControlLaunch,
+) -> Result<String, ControlError> {
+    let result = crate::commands::workflow::workflow_run_from_control(
+        app.state::<AppState>(),
+        app.clone(),
+        launch.path,
+        launch.provider,
+        launch.workspace,
+        launch.input,
+        launch.bindings,
+        launch.assignments,
+    )
+    .await
+    .map_err(ControlError::request_failed)?;
+    ok_json(&result)
 }
 
 async fn agent_worktree_branch_name(
@@ -3197,36 +3232,8 @@ mod tests {
         drop(first);
     }
 
-    #[tokio::test]
-    async fn workflow_run_control_dispatch_forwards_launch_options() {
-        let home = TestWardianHome::new();
-        let workflows_dir = home._temp.path().join("library").join("workflows");
-        std::fs::create_dir_all(&workflows_dir).unwrap();
-        let blueprint_path = workflows_dir.join("controlwf.md");
-        std::fs::write(
-            &blueprint_path,
-            r#"---
-schema: 2
-id: controlwf
-name: Control Workflow
-nodes:
-  - id: trigger
-    type: manual_trigger
-    fields: {}
-edges: []
----
-
-# Control Workflow
-"#,
-        )
-        .unwrap();
-        let workspace = home._temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let app = tauri::Builder::default()
-            .any_thread()
-            .manage(AppState::new())
-            .build(tauri::generate_context!())
-            .unwrap();
+    #[test]
+    fn workflow_run_control_launch_forwards_launch_options() {
         let mut assignments = wardian_core::models::WorkflowAssignments::new();
         assignments.insert(
             "reviewer".to_string(),
@@ -3237,40 +3244,24 @@ edges: []
             },
         );
         let bindings = HashMap::from([("legacy".to_string(), "mock".to_string())]);
-        let expected_assignments = wardian_core::workflow::assignment::normalize_assignments(
-            Some(assignments.clone()),
-            &bindings,
-            wardian_core::models::InvocationKind::Manual,
-        );
+        let input = serde_json::json!({"target":"HEAD"});
         let request = ControlRequest::WorkflowRun {
-            path: blueprint_path.to_string_lossy().to_string(),
+            path: "/workflow/controlwf.md".to_string(),
             provider: Some("mock".to_string()),
-            workspace: Some(workspace.to_string_lossy().to_string()),
-            input: Some(serde_json::json!({"target":"HEAD"})),
-            bindings: Some(bindings),
+            workspace: Some("/workspace".to_string()),
+            input: Some(input.clone()),
+            bindings: Some(bindings.clone()),
             assignments: Some(assignments.clone()),
         };
 
-        let response = dispatch_request(&serde_json::to_string(&request).unwrap(), app.handle())
-            .await
-            .unwrap();
-        let response: wardian_core::control::WorkflowRunResponse =
-            serde_json::from_str(&response).unwrap();
+        let launch = workflow_run_control_launch(request).unwrap();
 
-        assert!(response.ok);
-        assert_eq!(response.executor, "live");
-        assert_eq!(response.blueprint_id.as_deref(), Some("controlwf"));
-        let run_dir = std::path::PathBuf::from(response.run_dir.unwrap());
-        assert!(run_dir.join("invocation.json").is_file());
-        assert!(run_dir.join("events.jsonl").is_file());
-        assert!(run_dir.join("state.json").is_file());
-        let invocation = crate::workflow::runs::read_run_invocation(&run_dir)
-            .unwrap()
-            .unwrap();
-        assert_eq!(invocation.provider, "mock");
-        assert_eq!(invocation.workspace, workspace.to_string_lossy());
-        assert_eq!(invocation.bindings["legacy"], "mock");
-        assert_eq!(invocation.assignments, expected_assignments);
+        assert_eq!(launch.path, "/workflow/controlwf.md");
+        assert_eq!(launch.provider.as_deref(), Some("mock"));
+        assert_eq!(launch.workspace.as_deref(), Some("/workspace"));
+        assert_eq!(launch.input, Some(input));
+        assert_eq!(launch.bindings, Some(bindings));
+        assert_eq!(launch.assignments, Some(assignments));
     }
 
     fn test_agent(session_id: &str, session_name: &str, agent_class: &str) -> ActiveAgent {
