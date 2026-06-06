@@ -121,7 +121,20 @@ pub fn workflow_runs_dir() -> Option<PathBuf> {
 
 /// `<wardian-home>/logs/workflows/<blueprint_id>/<run_id>` — one run's durable root.
 pub fn workflow_run_dir(blueprint_id: &str, run_id: &str) -> Option<PathBuf> {
+    if !is_safe_path_component(blueprint_id) || !is_safe_path_component(run_id) {
+        return None;
+    }
     workflow_runs_dir().map(|dir| dir.join(blueprint_id).join(run_id))
+}
+
+pub fn is_safe_path_component(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value == "." || value == ".." {
+        return false;
+    }
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 /// `<wardian-home>/library/workflows` — where workflow blueprints live.
@@ -186,6 +199,20 @@ mod tests {
                 .join("wf")
                 .join("run-1")
         );
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn workflow_run_dir_rejects_path_traversal_components() {
+        let _guard = crate::tests::env_lock();
+        std::env::set_var("WARDIAN_HOME", "/tmp/wardian-run-view");
+
+        assert!(workflow_run_dir("../../outside", "run-1").is_none());
+        assert!(workflow_run_dir("wf", "../outside").is_none());
+        assert!(workflow_run_dir("wf/name", "run-1").is_none());
+        assert!(workflow_run_dir("wf", "run\\one").is_none());
+        assert!(workflow_run_dir("wf.name_1", "run-1").is_some());
 
         std::env::remove_var("WARDIAN_HOME");
     }

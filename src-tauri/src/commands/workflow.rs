@@ -2,6 +2,7 @@ use crate::{state::AppState, workflow::runs};
 use serde_json::Value;
 use std::collections::HashMap;
 use tauri::{AppHandle, State};
+use wardian_core::control::WorkflowRunResponse;
 use wardian_core::engine::store::{read_checkpoint, read_events};
 use wardian_core::engine::RunStatus;
 use wardian_core::models::{InvocationKind, WorkflowAssignments, WorkflowSchedule};
@@ -145,8 +146,9 @@ pub fn workflow_read_run(
     }))
 }
 
-/// Launch a workflow blueprint run headlessly. Validates, then drives the engine in a
-/// background task writing logs/workflows/<id>/<run-id>/. Returns the run id.
+/// Launch a workflow blueprint run and write durable run artifacts. The default
+/// live path routes execution through the running app; local mock execution is
+/// the CLI's offline fallback.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn workflow_run(
@@ -158,20 +160,80 @@ pub async fn workflow_run(
     input: Option<Value>,
     bindings: Option<HashMap<String, String>>,
     assignments: Option<WorkflowAssignments>,
-) -> Result<serde_json::Value, String> {
-    let blueprint = wardian_core::workflow::parse_file(std::path::Path::new(&path))
-        .map_err(|e| e.to_string())?;
+) -> Result<WorkflowRunResponse, String> {
+    workflow_run_impl(
+        state,
+        app,
+        path,
+        provider,
+        workspace,
+        input,
+        bindings,
+        assignments,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn workflow_run_from_control(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    path: String,
+    provider: Option<String>,
+    workspace: Option<String>,
+    input: Option<Value>,
+    bindings: Option<HashMap<String, String>>,
+    assignments: Option<WorkflowAssignments>,
+) -> Result<WorkflowRunResponse, String> {
+    workflow_run_impl(
+        state,
+        app,
+        path,
+        provider,
+        workspace,
+        input,
+        bindings,
+        assignments,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn workflow_run_impl(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    path: String,
+    provider: Option<String>,
+    workspace: Option<String>,
+    input: Option<Value>,
+    bindings: Option<HashMap<String, String>>,
+    assignments: Option<WorkflowAssignments>,
+    control_origin: bool,
+) -> Result<WorkflowRunResponse, String> {
+    let blueprint = if control_origin {
+        parse_control_workflow_blueprint(&path)?
+    } else {
+        wardian_core::workflow::parse_file(std::path::Path::new(&path))
+            .map_err(|e| e.to_string())?
+    };
     let report = wardian_core::workflow::validate(&blueprint);
     if !report.is_valid() {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "diagnostics": report.diagnostics
-        }));
+        return Ok(WorkflowRunResponse::validation_failed(
+            "live",
+            serde_json::to_value(report.diagnostics).map_err(|error| error.to_string())?,
+        ));
     }
 
     let run_id = wardian_core::engine::driver::new_run_id();
     let run_root =
-        wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id).ok_or("no wardian home")?;
+        wardian_core::paths::workflow_run_dir(&blueprint.id, &run_id).ok_or_else(|| {
+            format!(
+                "invalid workflow run path components for blueprint id `{}` and run id `{run_id}`",
+                blueprint.id
+            )
+        })?;
     let provider = provider.unwrap_or_else(|| "codex".to_string());
     let workspace = workspace
         .map(std::path::PathBuf::from)
@@ -192,18 +254,26 @@ pub async fn workflow_run(
     )
     .await;
     let blueprint_for_run = blueprint.clone();
-    let run_id_for_run = run_id.clone();
     let run_root_for_run = run_root.clone();
+    let run_state = runs::prepare_new_run_with_assignments(
+        &blueprint,
+        &run_id,
+        &run_root,
+        &workspace,
+        &provider,
+        &bindings,
+        &assignments,
+        input,
+    )?;
 
     tokio::spawn(async move {
-        if let Err(error) = runs::drive_new_run_with_catalog_and_assignments(
+        if let Err(error) = runs::drive_started_run_with_catalog_and_assignments(
             Some(app),
             blueprint_for_run,
-            run_id_for_run,
+            run_state,
             run_root_for_run,
             workspace,
             provider,
-            input,
             bindings,
             assignments,
             agent_catalog,
@@ -214,12 +284,46 @@ pub async fn workflow_run(
         }
     });
 
-    Ok(serde_json::json!({
-        "ok": true,
-        "run_id": run_id,
-        "blueprint_id": blueprint.id,
-        "run_dir": run_root.to_string_lossy(),
-    }))
+    Ok(WorkflowRunResponse::started(
+        "live",
+        run_id,
+        blueprint.id,
+        run_root.to_string_lossy().to_string(),
+    ))
+}
+
+fn parse_control_workflow_blueprint(path: &str) -> Result<Blueprint, String> {
+    let requested = std::path::Path::new(path);
+    let requested = std::fs::canonicalize(requested)
+        .map_err(|error| format!("workflow path is not readable: {error}"))?;
+    let workflows_dir = wardian_core::paths::library_workflows_dir()
+        .ok_or_else(|| "no wardian home".to_string())?;
+    let workflows_dir = std::fs::canonicalize(&workflows_dir).map_err(|error| {
+        format!(
+            "workflow library is not readable at {}: {error}",
+            workflows_dir.to_string_lossy()
+        )
+    })?;
+    if !requested.starts_with(&workflows_dir) {
+        return Err(format!(
+            "control workflow_run only accepts files under {}",
+            workflows_dir.to_string_lossy()
+        ));
+    }
+
+    let blueprint =
+        wardian_core::workflow::parse_file(&requested).map_err(|error| error.to_string())?;
+    if let Some(node) = blueprint
+        .nodes
+        .iter()
+        .find(|node| matches!(node.r#type.as_str(), "shell" | "script"))
+    {
+        return Err(format!(
+            "control workflow_run cannot launch `{}` nodes without an interactive approval boundary",
+            node.r#type
+        ));
+    }
+    Ok(blueprint)
 }
 
 /// Resume an interrupted or parked workflow run.
@@ -627,6 +731,26 @@ edges: []
 # Workflow
 "#;
 
+    const SHELL_WORKFLOW_BLUEPRINT: &str = r#"---
+schema: 2
+id: shell-wf
+name: Shell Workflow
+nodes:
+  - id: trigger
+    type: manual_trigger
+    fields: {}
+  - id: shell
+    type: shell
+    fields:
+      command: echo unsafe
+edges:
+  - from: trigger
+    to: shell
+---
+
+# Shell Workflow
+"#;
+
     fn seed_workflow_blueprint(home: &std::path::Path) -> std::path::PathBuf {
         let workflows_dir = home.join("library").join("workflows");
         std::fs::create_dir_all(&workflows_dir).unwrap();
@@ -727,6 +851,33 @@ edges: []
         let error = parse_blueprint_for_run("wf", &other_path.to_string_lossy()).unwrap_err();
 
         assert!(error.contains("blueprint path id mismatch"));
+    }
+
+    #[test]
+    fn control_workflow_blueprint_must_live_under_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(dir.path());
+        std::fs::create_dir_all(dir.path().join("library").join("workflows")).unwrap();
+        let outside_path = dir.path().join("outside.md");
+        std::fs::write(&outside_path, WORKFLOW_BLUEPRINT).unwrap();
+
+        let error = parse_control_workflow_blueprint(&outside_path.to_string_lossy()).unwrap_err();
+
+        assert!(error.contains("only accepts files under"));
+    }
+
+    #[test]
+    fn control_workflow_blueprint_rejects_shell_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(dir.path());
+        let workflows_dir = dir.path().join("library").join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        let path = workflows_dir.join("shell.md");
+        std::fs::write(&path, SHELL_WORKFLOW_BLUEPRINT).unwrap();
+
+        let error = parse_control_workflow_blueprint(&path.to_string_lossy()).unwrap_err();
+
+        assert!(error.contains("cannot launch `shell` nodes"));
     }
 
     #[tokio::test]

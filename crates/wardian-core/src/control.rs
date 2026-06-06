@@ -171,6 +171,62 @@ impl Default for OkResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRunLaunchStatus {
+    Started,
+    ValidationFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowRunResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub executor: String,
+    pub status: WorkflowRunLaunchStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blueprint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<serde_json::Value>,
+}
+
+impl WorkflowRunResponse {
+    pub fn started(
+        executor: impl Into<String>,
+        run_id: impl Into<String>,
+        blueprint_id: impl Into<String>,
+        run_dir: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            executor: executor.into(),
+            status: WorkflowRunLaunchStatus::Started,
+            run_id: Some(run_id.into()),
+            blueprint_id: Some(blueprint_id.into()),
+            run_dir: Some(run_dir.into()),
+            diagnostics: None,
+        }
+    }
+
+    pub fn validation_failed(executor: impl Into<String>, diagnostics: serde_json::Value) -> Self {
+        Self {
+            schema: CONTROL_SCHEMA,
+            ok: false,
+            executor: executor.into(),
+            status: WorkflowRunLaunchStatus::ValidationFailed,
+            run_id: None,
+            blueprint_id: None,
+            run_dir: None,
+            diagnostics: Some(diagnostics),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeliveryErrorDetail {
     pub code: String,
@@ -1001,6 +1057,24 @@ mod tests {
         assert!(json.contains(r#""provider":"codex""#));
         assert!(json.contains(r#""bindings":{"reviewer":"codex"}"#));
         assert_eq!(roundtrip, req);
+    }
+
+    #[test]
+    fn workflow_run_response_serializes_live_start_contract() {
+        let response = WorkflowRunResponse::started(
+            "live",
+            "run-1",
+            "autoreview",
+            "<absolute-workspace-path>/logs/workflows/autoreview/run-1",
+        );
+
+        let json = serde_json::to_string(&response).unwrap();
+        let roundtrip: WorkflowRunResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains(r#""schema":1"#));
+        assert!(json.contains(r#""executor":"live""#));
+        assert!(json.contains(r#""status":"started""#));
+        assert_eq!(roundtrip, response);
     }
 
     #[test]

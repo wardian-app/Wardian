@@ -36,6 +36,19 @@ impl Engine {
         run_root: &Path,
         exec: &dyn StepExecutor,
     ) -> crate::engine::Result<RunState> {
+        let s = Self::initialize_with_id(bp, run_id, trigger, run_root)?;
+        Self::drive_from_state(bp, s, run_root, exec).await
+    }
+
+    /// Initialize a fresh run by writing the invocation-independent
+    /// `RunStarted` event and checkpoint. Callers that detach long-running
+    /// execution can use this as the durable startup acknowledgement.
+    pub fn initialize_with_id(
+        bp: &Blueprint,
+        run_id: impl Into<String>,
+        trigger: serde_json::Value,
+        run_root: &Path,
+    ) -> crate::engine::Result<RunState> {
         let g = Graph::new(bp);
         let mut s = RunState::new(run_id.into(), &bp.id);
         emit(
@@ -48,6 +61,17 @@ impl Engine {
                 trigger,
             },
         )?;
+        Ok(s)
+    }
+
+    /// Continue driving an already-initialized run state.
+    pub async fn drive_from_state(
+        bp: &Blueprint,
+        mut s: RunState,
+        run_root: &Path,
+        exec: &dyn StepExecutor,
+    ) -> crate::engine::Result<RunState> {
+        let g = Graph::new(bp);
         drive(&g, &mut s, run_root, exec).await?;
         Ok(s)
     }
@@ -495,6 +519,44 @@ mod tests {
         assert_eq!(state.run_id, "run-xyz");
         let checkpoint = read_checkpoint(dir.path()).unwrap().unwrap();
         assert_eq!(checkpoint.run_id, "run-xyz");
+    }
+
+    #[test]
+    fn initialize_with_id_persists_started_checkpoint_before_driving() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint = Blueprint {
+            schema: 2,
+            id: "wf".into(),
+            name: "Workflow".into(),
+            nodes: vec![Node {
+                id: "t".into(),
+                r#type: "manual_trigger".into(),
+                name: None,
+                parent: None,
+                fields: serde_json::Map::new(),
+                position: None,
+            }],
+            edges: vec![],
+            body: String::new(),
+        };
+
+        let state = Engine::initialize_with_id(
+            &blueprint,
+            "run-xyz",
+            serde_json::json!({"source":"manual"}),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(state.run_id, "run-xyz");
+        let checkpoint = read_checkpoint(dir.path()).unwrap().unwrap();
+        assert_eq!(checkpoint.run_id, "run-xyz");
+        assert_eq!(checkpoint.next_seq, 1);
+        let events = read_events(dir.path()).unwrap();
+        assert!(matches!(
+            events.first().map(|event| &event.kind),
+            Some(EventKind::RunStarted { .. })
+        ));
     }
 
     #[tokio::test]

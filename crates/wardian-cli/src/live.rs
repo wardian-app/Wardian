@@ -9,6 +9,7 @@ use wardian_core::control::{
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
     ControlRequest, DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse,
     ReplyStatus, SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError,
+    WorkflowRunResponse,
 };
 use wardian_core::identity::AgentIdentity;
 
@@ -370,9 +371,9 @@ pub fn agent_worktree_disable(target: &str) -> io::Result<AgentWorktreeMutationR
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
-pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<serde_json::Value> {
+pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<WorkflowRunResponse> {
     let runtime = build_runtime()?;
-    timeout_block(
+    let value = timeout_block(
         &runtime,
         ControlOperation::WorkflowRun,
         send_request(ControlRequest::WorkflowRun {
@@ -383,7 +384,8 @@ pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<serde_json::Value
             bindings: Some(request.bindings),
             assignments: None,
         }),
-    )
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
 pub fn send_message(

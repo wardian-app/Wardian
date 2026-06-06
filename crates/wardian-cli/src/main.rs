@@ -20,7 +20,7 @@ use args::{
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
-use wardian_core::control::{ApprovalAction, MessageInputMode, QueuePolicy};
+use wardian_core::control::{ApprovalAction, MessageInputMode, QueuePolicy, WorkflowRunResponse};
 use wardian_core::identity::{self, ListFilters, Scope};
 
 fn main() {
@@ -468,13 +468,13 @@ fn render_workflow_exec_with_live_launcher(
     provider: Option<&str>,
     workspace: Option<&str>,
     bind: &[String],
-    live_launcher: impl FnOnce(live::WorkflowRunRequest) -> std::io::Result<serde_json::Value>,
+    live_launcher: impl FnOnce(live::WorkflowRunRequest) -> std::io::Result<WorkflowRunResponse>,
 ) -> Result<String, CliError> {
     let input = parse_workflow_exec_input(input)?;
     let bindings = parse_workflow_bindings(bind)?;
     match WorkflowExecMode::parse(executor)? {
         WorkflowExecMode::Live => {
-            let value = live_launcher(live::WorkflowRunRequest {
+            let response = live_launcher(live::WorkflowRunRequest {
                 path: path.to_string(),
                 provider: provider.map(str::to_string),
                 workspace: workspace.map(str::to_string),
@@ -482,23 +482,14 @@ fn render_workflow_exec_with_live_launcher(
                 bindings,
             })
             .map_err(control_error)?;
-            render_live_workflow_exec_response(value)
+            render_live_workflow_exec_response(response)
         }
         WorkflowExecMode::Mock => render_workflow_exec_mock(path, input),
     }
 }
 
-fn render_live_workflow_exec_response(mut value: serde_json::Value) -> Result<String, CliError> {
-    let Some(object) = value.as_object_mut() else {
-        return Err(CliError::generic(
-            "workflow_run control response was not a JSON object",
-        ));
-    };
-    object
-        .entry("schema")
-        .or_insert_with(|| serde_json::json!(1));
-    object.insert("executor".to_string(), serde_json::json!("live"));
-    serde_json::to_string_pretty(&value)
+fn render_live_workflow_exec_response(response: WorkflowRunResponse) -> Result<String, CliError> {
+    serde_json::to_string_pretty(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|e| CliError::generic(e.to_string()))
 }
@@ -1513,12 +1504,12 @@ mod tests {
                     request.bindings,
                     HashMap::from([("reviewer".to_string(), "codex".to_string())])
                 );
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "run_id": "run-1",
-                    "blueprint_id": "autoreview",
-                    "run_dir": "<absolute-workspace-path>/logs/workflows/autoreview/run-1"
-                }))
+                Ok(WorkflowRunResponse::started(
+                    "live",
+                    "run-1",
+                    "autoreview",
+                    "<absolute-workspace-path>/logs/workflows/autoreview/run-1",
+                ))
             },
         )
         .unwrap();

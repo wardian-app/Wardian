@@ -279,7 +279,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             bindings,
             assignments,
         } => {
-            let result = crate::commands::workflow::workflow_run(
+            let result = crate::commands::workflow::workflow_run_from_control(
                 app.state::<AppState>(),
                 app.clone(),
                 path,
@@ -3117,9 +3117,12 @@ fn snapshot_agent(agent: &crate::state::ActiveAgent) -> AgentIdentity {
 mod tests {
     use super::*;
     use crate::state::ActiveAgent;
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
-    use wardian_core::models::AgentConfig;
+    use wardian_core::models::{
+        AgentConfig, AgentConversationMode, BusyPolicy, WorkflowRoleAssignment,
+    };
 
     struct TestWardianHome {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -3192,6 +3195,82 @@ mod tests {
         );
 
         drop(first);
+    }
+
+    #[tokio::test]
+    async fn workflow_run_control_dispatch_forwards_launch_options() {
+        let home = TestWardianHome::new();
+        let workflows_dir = home._temp.path().join("library").join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        let blueprint_path = workflows_dir.join("controlwf.md");
+        std::fs::write(
+            &blueprint_path,
+            r#"---
+schema: 2
+id: controlwf
+name: Control Workflow
+nodes:
+  - id: trigger
+    type: manual_trigger
+    fields: {}
+edges: []
+---
+
+# Control Workflow
+"#,
+        )
+        .unwrap();
+        let workspace = home._temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .manage(AppState::new())
+            .build(tauri::generate_context!())
+            .unwrap();
+        let mut assignments = wardian_core::models::WorkflowAssignments::new();
+        assignments.insert(
+            "reviewer".to_string(),
+            WorkflowRoleAssignment::Agent {
+                agent_id: "agent-1".to_string(),
+                conversation: AgentConversationMode::Current,
+                busy_policy: BusyPolicy::Fail,
+            },
+        );
+        let bindings = HashMap::from([("legacy".to_string(), "mock".to_string())]);
+        let expected_assignments = wardian_core::workflow::assignment::normalize_assignments(
+            Some(assignments.clone()),
+            &bindings,
+            wardian_core::models::InvocationKind::Manual,
+        );
+        let request = ControlRequest::WorkflowRun {
+            path: blueprint_path.to_string_lossy().to_string(),
+            provider: Some("mock".to_string()),
+            workspace: Some(workspace.to_string_lossy().to_string()),
+            input: Some(serde_json::json!({"target":"HEAD"})),
+            bindings: Some(bindings),
+            assignments: Some(assignments.clone()),
+        };
+
+        let response = dispatch_request(&serde_json::to_string(&request).unwrap(), app.handle())
+            .await
+            .unwrap();
+        let response: wardian_core::control::WorkflowRunResponse =
+            serde_json::from_str(&response).unwrap();
+
+        assert!(response.ok);
+        assert_eq!(response.executor, "live");
+        assert_eq!(response.blueprint_id.as_deref(), Some("controlwf"));
+        let run_dir = std::path::PathBuf::from(response.run_dir.unwrap());
+        assert!(run_dir.join("invocation.json").is_file());
+        assert!(run_dir.join("events.jsonl").is_file());
+        assert!(run_dir.join("state.json").is_file());
+        let invocation = crate::workflow::runs::read_run_invocation(&run_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(invocation.provider, "mock");
+        assert_eq!(invocation.workspace, workspace.to_string_lossy());
+        assert_eq!(invocation.bindings["legacy"], "mock");
+        assert_eq!(invocation.assignments, expected_assignments);
     }
 
     fn test_agent(session_id: &str, session_name: &str, agent_class: &str) -> ActiveAgent {

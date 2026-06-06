@@ -69,7 +69,7 @@ pub enum WorkflowCommand {
     },
     /// Validate a blueprint `.md` file and report diagnostics.
     Validate { path: String },
-    /// Execute a workflow blueprint headlessly and write a durable run.
+    /// Launch a workflow blueprint and write a durable run.
     Exec {
         path: String,
         /// Execution backend: live/real/full routes through the running app; mock runs locally.
@@ -81,7 +81,7 @@ pub enum WorkflowCommand {
         /// Default provider for unbound workflow roles.
         #[arg(long)]
         provider: Option<String>,
-        /// Workspace for live/headless workflow tasks.
+        /// Workspace for live workflow tasks.
         #[arg(long)]
         workspace: Option<String>,
         /// Role/class -> provider or agent-id binding, repeatable: --bind role=value
