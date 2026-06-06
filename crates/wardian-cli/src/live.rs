@@ -219,6 +219,8 @@ pub struct AskAgentResponse {
 
 pub struct WorkflowRunRequest {
     pub path: String,
+    pub provider: Option<String>,
+    pub workspace: Option<String>,
     pub input: serde_json::Value,
     pub bindings: std::collections::HashMap<String, String>,
 }
@@ -375,8 +377,8 @@ pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<serde_json::Value
         ControlOperation::WorkflowRun,
         send_request(ControlRequest::WorkflowRun {
             path: request.path,
-            provider: None,
-            workspace: None,
+            provider: request.provider,
+            workspace: request.workspace,
             input: Some(request.input),
             bindings: Some(request.bindings),
             assignments: None,

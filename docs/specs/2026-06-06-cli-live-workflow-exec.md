@@ -17,7 +17,8 @@ launch the app-owned full workflow runtime from automation.
 `wardian workflow exec <path>` now defaults to the app-backed live executor.
 `--executor live`, `--executor real`, and `--executor full` are aliases for the
 same control-endpoint launch path. The CLI sends a `workflow_run` request to the
-running Wardian app with the path, JSON input object, and role/class bindings.
+running Wardian app with the path, optional provider, optional workspace, JSON
+input object, and role/class bindings.
 
 `--executor mock` remains a local deterministic path for offline tests and run
 artifact round trips. It continues to use `MockExecutor` in the CLI process.
@@ -38,6 +39,9 @@ scheduler.
 - If the app is unavailable, the CLI returns `app_not_running`.
 - The live response includes `schema`, `ok`, `run_id`, `blueprint_id`,
   `run_dir`, and `executor: "live"`.
+- Use `--workspace <absolute-workspace-path>` when live/headless workflow tasks
+  should execute against a specific project checkout instead of the workflow run
+  directory.
 - Running `wardian workflow exec <path> --executor mock` does not contact the
   app and writes durable run artifacts under
   `<wardian-home>/logs/workflows/<blueprint-id>/<run-id>/`.
@@ -49,6 +53,9 @@ Bash:
 ```bash
 export WARDIAN_HOME="$PWD/.tmp/wardian-workflow"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md"
+wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" \
+  --workspace "<absolute-workspace-path>" \
+  --input '{"target":"PR #123","max_cycles":1}'
 wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" --executor mock
 ```
 
@@ -57,5 +64,8 @@ PowerShell:
 ```powershell
 $env:WARDIAN_HOME = "$PWD\.tmp\wardian-workflow"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md"
+wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" `
+  --workspace "<absolute-workspace-path>" `
+  --input '{"target":"PR #123","max_cycles":1}'
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" --executor mock
 ```

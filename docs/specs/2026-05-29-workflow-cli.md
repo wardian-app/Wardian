@@ -22,7 +22,7 @@ The workflow CLI verbs are:
 
 | Command | Purpose |
 |---|---|
-| `wardian workflow exec <path> [--executor live\|real\|full\|mock]` | Execute a workflow blueprint and write a durable run. |
+| `wardian workflow exec <path> [--executor live\|real\|full\|mock] [--provider <provider>] [--workspace <path>]` | Execute a workflow blueprint and write a durable run. |
 | `wardian workflow runs` | List durable workflow runs from `<wardian-home>/logs/workflows`. |
 | `wardian workflow run-show <blueprint-id> <run-id>` | Show one run's checkpoint state and event trace. |
 | `wardian workflow replay <blueprint-id> <run-id>` | Rebuild final state from the run event log without executing nodes. |
@@ -38,10 +38,11 @@ offline deterministic tests and local run-log inspection.
 ## Execution Decision
 
 Live execution is app-backed. The CLI sends a `workflow_run` control request
-with the blueprint path, input object, and role/class bindings. The app validates
-the blueprint, creates a caller-visible run id, spawns the live workflow driver
-task, and returns the durable run location. If the app is not running for the
-same `WARDIAN_HOME`, live execution returns `app_not_running`.
+with the blueprint path, optional provider, optional workspace, input object, and
+role/class bindings. The app validates the blueprint, creates a caller-visible
+run id, spawns the live workflow driver task, and returns the durable run
+location. If the app is not running for the same `WARDIAN_HOME`, live execution
+returns `app_not_running`.
 
 Mock execution is local. `exec --executor mock` validates the blueprint, creates
 a caller-visible run id, and drives
@@ -71,6 +72,7 @@ Bash:
 ```bash
 export WARDIAN_HOME="$PWD/.tmp/wardian-workflow"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/demo.md"
+wardian workflow exec "$WARDIAN_HOME/library/workflows/demo.md" --workspace "<absolute-workspace-path>"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/demo.md" --executor mock
 wardian workflow runs
 wardian workflow run-show demo <run-id>
@@ -85,6 +87,7 @@ PowerShell:
 ```powershell
 $env:WARDIAN_HOME = "$PWD\.tmp\wardian-workflow"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\demo.md"
+wardian workflow exec "$env:WARDIAN_HOME\library\workflows\demo.md" --workspace "<absolute-workspace-path>"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\demo.md" --executor mock
 wardian workflow runs
 wardian workflow run-show demo <run-id>

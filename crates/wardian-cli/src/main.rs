@@ -27,6 +27,16 @@ fn main() {
     std::process::exit(run());
 }
 
+#[cfg(test)]
+fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn run() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -349,8 +359,17 @@ fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
             path,
             executor,
             input,
+            provider,
+            workspace,
             bind,
-        } => render_workflow_exec(&path, &executor, input.as_deref(), &bind),
+        } => render_workflow_exec(
+            &path,
+            &executor,
+            input.as_deref(),
+            provider.as_deref(),
+            workspace.as_deref(),
+            &bind,
+        ),
         WorkflowCommand::Runs => render_workflow_runs(),
         WorkflowCommand::RunShow {
             blueprint_id,
@@ -405,9 +424,19 @@ fn render_workflow_exec(
     path: &str,
     executor: &str,
     input: Option<&str>,
+    provider: Option<&str>,
+    workspace: Option<&str>,
     bind: &[String],
 ) -> Result<String, CliError> {
-    render_workflow_exec_with_live_launcher(path, executor, input, bind, live::workflow_run)
+    render_workflow_exec_with_live_launcher(
+        path,
+        executor,
+        input,
+        provider,
+        workspace,
+        bind,
+        live::workflow_run,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +465,8 @@ fn render_workflow_exec_with_live_launcher(
     path: &str,
     executor: &str,
     input: Option<&str>,
+    provider: Option<&str>,
+    workspace: Option<&str>,
     bind: &[String],
     live_launcher: impl FnOnce(live::WorkflowRunRequest) -> std::io::Result<serde_json::Value>,
 ) -> Result<String, CliError> {
@@ -445,6 +476,8 @@ fn render_workflow_exec_with_live_launcher(
         WorkflowExecMode::Live => {
             let value = live_launcher(live::WorkflowRunRequest {
                 path: path.to_string(),
+                provider: provider.map(str::to_string),
+                workspace: workspace.map(str::to_string),
                 input,
                 bindings,
             })
@@ -1403,6 +1436,31 @@ fn identity_error(error: identity::IdentityError) -> CliError {
 mod tests {
     use super::*;
 
+    struct TestWardianHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl TestWardianHome {
+        fn new(path: &std::path::Path) -> Self {
+            let guard = Self {
+                _lock: crate::test_env_lock(),
+                previous_home: std::env::var_os("WARDIAN_HOME"),
+            };
+            std::env::set_var("WARDIAN_HOME", path);
+            guard
+        }
+    }
+
+    impl Drop for TestWardianHome {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn workflow_node_types_json_lists_task_type() {
         let out = render_workflow_node_types(true).unwrap();
@@ -1440,9 +1498,16 @@ mod tests {
             "wf.md",
             "real",
             Some(r#"{"target":"HEAD"}"#),
+            Some("codex"),
+            Some("<absolute-workspace-path>"),
             &["reviewer=codex".to_string()],
             |request| {
                 assert_eq!(request.path, "wf.md");
+                assert_eq!(request.provider.as_deref(), Some("codex"));
+                assert_eq!(
+                    request.workspace.as_deref(),
+                    Some("<absolute-workspace-path>")
+                );
                 assert_eq!(request.input, serde_json::json!({ "target": "HEAD" }));
                 assert_eq!(
                     request.bindings,
@@ -1467,6 +1532,8 @@ mod tests {
     #[test]
     fn workflow_exec_mock_stays_local_and_does_not_call_live_launcher() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _env = TestWardianHome::new(home.path());
         let path = dir.path().join("wf.md");
         std::fs::write(
             &path,
@@ -1478,6 +1545,8 @@ mod tests {
             path.to_str().unwrap(),
             "mock",
             None,
+            Some("codex"),
+            Some("<absolute-workspace-path>"),
             &[],
             |_| panic!("mock executor must not call live launcher"),
         )

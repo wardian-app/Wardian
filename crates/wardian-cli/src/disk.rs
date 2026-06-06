@@ -179,18 +179,36 @@ fn string_array(value: &serde_json::Value, key: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    struct WardianHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl WardianHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let guard = Self {
+                _lock: crate::test_env_lock(),
+                previous_home: std::env::var_os("WARDIAN_HOME"),
+            };
+            std::env::set_var("WARDIAN_HOME", path);
+            guard
+        }
+    }
+
+    impl Drop for WardianHomeGuard {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
     }
 
     #[test]
     fn load_watchlist_state_accepts_v2_teams_and_entries() {
-        let _guard = env_lock();
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _guard = WardianHomeGuard::set(temp.path());
         let dir = temp.path().join("watchlists");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -208,14 +226,12 @@ mod tests {
         assert_eq!(state.version, 2);
         assert_eq!(state.teams[0].agent_ids, vec!["agent-1", "agent-2"]);
         assert_eq!(state.watchlists[0].entries[0].team_id(), Some("team-1"));
-        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
     fn load_watchlist_state_accepts_legacy_array() {
-        let _guard = env_lock();
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _guard = WardianHomeGuard::set(temp.path());
         let dir = temp.path().join("watchlists");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -230,6 +246,5 @@ mod tests {
         assert!(state.teams.is_empty());
         assert_eq!(state.watchlists[0].agent_ids, vec!["agent-1"]);
         assert_eq!(state.watchlists[0].entries[0].agent_id(), Some("agent-1"));
-        std::env::remove_var("WARDIAN_HOME");
     }
 }

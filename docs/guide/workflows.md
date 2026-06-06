@@ -43,12 +43,17 @@ Manual input parameters appear in the dialog when the blueprint's entry trigger 
 `wardian workflow exec <path>` launches a live workflow through the running
 Wardian app. Use the same `WARDIAN_HOME` for the app and CLI so both processes
 share the control endpoint and run logs.
+Pass `--workspace <absolute-workspace-path>` when headless workflow tasks should
+run against a specific project checkout.
 
 Bash:
 
 ```bash
 export WARDIAN_HOME="$PWD/.tmp/wardian-workflow"
 wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md"
+wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" \
+  --workspace "<absolute-workspace-path>" \
+  --input '{"target":"PR #123","max_cycles":1}'
 wardian workflow exec "$WARDIAN_HOME/library/workflows/autoreview.md" --executor mock
 ```
 
@@ -57,6 +62,9 @@ PowerShell:
 ```powershell
 $env:WARDIAN_HOME = "$PWD\.tmp\wardian-workflow"
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md"
+wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" `
+  --workspace "<absolute-workspace-path>" `
+  --input '{"target":"PR #123","max_cycles":1}'
 wardian workflow exec "$env:WARDIAN_HOME\library\workflows\autoreview.md" --executor mock
 ```
 
