@@ -16,13 +16,15 @@ All Wardian-owned terminal and background process launches should be silent on W
 
 ## Design
 
-Wardian already patches `portable-pty` through `vendor/portable-pty`. Keep that Windows ConPTY patch focused on `STARTF_USESHOWWINDOW` and `SW_HIDE`; native validation showed that adding `CREATE_NO_WINDOW` to ConPTY child creation prevents the standalone user terminal from operating correctly. This is the PTY-specific boundary: ConPTY children remain hidden through the startup window hint, while non-PTY background process launches use `CREATE_NO_WINDOW`.
+Wardian already patches `portable-pty` through `vendor/portable-pty`. Keep that Windows ConPTY patch focused on `STARTF_USESHOWWINDOW` and `SW_HIDE`; direct validation showed that adding `CREATE_NO_WINDOW` to ConPTY child creation prevents the standalone user terminal from operating correctly. This is the PTY-specific boundary: direct ConPTY children remain hidden through the startup window hint, while non-PTY background process launches use `CREATE_NO_WINDOW`.
 
 For non-PTY processes, keep `src-tauri/src/utils/process.rs` as the central launcher policy. Captured commands should use `new_silent_command` or `new_silent_std_command` so `stdout` and `stderr` capture semantics stay intact while Windows uses `CREATE_NO_WINDOW`. Fire-and-forget commands should use `new_headless_command` or `new_headless_std_command`, which build on the same silent policy and explicitly null standard handles. Call sites that already need path-candidate fidelity can apply the shared silent-command policy functions to an existing `Command`. Existing GUI handoff call sites remain direct or use their existing handoff-specific flags so the refactor does not suppress user-visible file manager or editor behavior. External editor launches are the important exception: the opened editor or system-default application remains visible, but the Windows command wrapper uses the silent fire-and-forget policy.
 
 The Wardian desktop binary should also use the Windows GUI subsystem in development and release builds. Debug diagnostics should flow through Wardian logging and test output rather than an extra console window attached to the desktop process.
 
 Scripts launched by the Rust backend are part of the same process policy. If a production-reachable Node script starts its own package-manager or shell probes, those child-process calls should set `windowsHide` on Windows so the parent Rust no-window policy is not bypassed by a second-order `cmd.exe` launch.
+
+Provider-owned grandchildren are a separate boundary. Gemini's MCP stdio transport can start configured tools such as `npx chrome-devtools-mcp@latest`; on Windows that can resolve through npm `.cmd` shims even when the transport uses `shell: false`. Wardian cannot wrap those grandchildren directly, so Windows Gemini launches add a Wardian-owned Node preload through `NODE_OPTIONS`. The preload defines the narrow `process.type` marker that Gemini's bundled MCP transport already checks before enabling `windowsHide`, preserving Gemini's MCP behavior while suppressing provider-owned shim windows. The preload is written under `WARDIAN_HOME/runtime/gemini/` and is applied only to Wardian-launched Gemini processes.
 
 ## Non-Goals
 
@@ -34,6 +36,7 @@ Scripts launched by the Rust backend are part of the same process policy. If a p
 
 - Unit tests for the centralized Windows process flag helpers, launch specs, and captured stdout/stderr behavior.
 - Existing Rust tests around provider launch argument construction and shell selection.
+- Rust coverage for the Gemini runtime environment preload and `NODE_OPTIONS` preservation.
 - Native user-terminal smoke to prove the ConPTY path still runs commands after the process-creation policy change.
 - `cargo check`, `cargo test`, and `cargo clippy` in `src-tauri`.
 - Frontend validation remains unchanged because this is backend/runtime infrastructure only.

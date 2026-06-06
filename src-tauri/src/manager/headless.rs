@@ -318,6 +318,7 @@ pub async fn run_headless_with_options(
     }
     apply_headless_identity_env(&mut cmd, wardian_session_id);
     super::apply_managed_cli_path_to_process(&mut cmd);
+    super::apply_process_provider_runtime_env(provider_name, &mut cmd)?;
     if let Some(config) = effective_provider_config.as_ref() {
         for (key, value) in super::worktree_build_env(config) {
             cmd.env(key, value);
@@ -643,6 +644,7 @@ pub async fn obtain_session_id(
         apply_headless_identity_env(&mut cmd, bootstrap_session_id);
     }
     super::apply_managed_cli_path_to_process(&mut cmd);
+    super::apply_process_provider_runtime_env(provider_name, &mut cmd)?;
 
     if provider_name == "codex" {
         if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {

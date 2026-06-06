@@ -700,6 +700,116 @@ pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Comman
     }
 }
 
+pub(crate) fn apply_interactive_provider_runtime_env(
+    provider_name: &str,
+    cmd: &mut CommandBuilder,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    if provider_name == "gemini" {
+        let node_options = gemini_windows_node_options()?;
+        cmd.env("NODE_OPTIONS", node_options);
+    }
+
+    #[cfg(not(windows))]
+    let _ = (provider_name, cmd);
+
+    Ok(())
+}
+
+pub(crate) fn apply_process_provider_runtime_env(
+    provider_name: &str,
+    cmd: &mut tokio::process::Command,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    if provider_name == "gemini" {
+        let node_options = gemini_windows_node_options()?;
+        cmd.env("NODE_OPTIONS", node_options);
+    }
+
+    #[cfg(not(windows))]
+    let _ = (provider_name, cmd);
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn gemini_windows_node_options() -> Result<String, String> {
+    let preload = ensure_gemini_windows_node_preload()?;
+    let require_option = format!("--require {}", quote_node_options_path(&preload));
+    let existing = std::env::var("NODE_OPTIONS")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if let Some(existing) = existing {
+        if existing.contains(&preload.to_string_lossy().replace('\\', "/")) {
+            Ok(existing)
+        } else {
+            Ok(format!("{existing} {require_option}"))
+        }
+    } else {
+        Ok(require_option)
+    }
+}
+
+#[cfg(windows)]
+fn quote_node_options_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    if value.chars().any(char::is_whitespace) || value.contains('"') {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value
+    }
+}
+
+#[cfg(windows)]
+fn ensure_gemini_windows_node_preload() -> Result<std::path::PathBuf, String> {
+    let home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not resolve Wardian home for Gemini runtime preload".to_string())?;
+    let script = home
+        .join("runtime")
+        .join("gemini")
+        .join("wardian-node-preload.cjs");
+    let content = r#"'use strict';
+
+try {
+  if (!('type' in process)) {
+    Object.defineProperty(process, 'type', {
+      value: 'browser',
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+  }
+} catch {
+}
+"#;
+
+    if std::fs::read_to_string(&script).ok().as_deref() == Some(content) {
+        return Ok(script);
+    }
+
+    let parent = script
+        .parent()
+        .ok_or_else(|| format!("Invalid Gemini runtime preload path: {}", script.display()))?;
+    std::fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "Failed to create Gemini runtime preload directory {}: {}",
+            parent.display(),
+            err
+        )
+    })?;
+    std::fs::write(&script, content).map_err(|err| {
+        format!(
+            "Failed to write Gemini runtime preload {}: {}",
+            script.display(),
+            err
+        )
+    })?;
+
+    Ok(script)
+}
+
 #[cfg(windows)]
 pub(crate) fn quote_cmd_arg(value: &str) -> String {
     let escaped = value.replace('"', r#"\""#);
@@ -853,6 +963,46 @@ mod tests {
         match previous_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gemini_runtime_env_adds_wardian_node_preload_without_replacing_node_options() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_node_options = std::env::var_os("NODE_OPTIONS");
+        let home = tempfile::tempdir().unwrap();
+
+        std::env::set_var("WARDIAN_HOME", home.path());
+        std::env::set_var("NODE_OPTIONS", "--max-old-space-size=4096");
+
+        let mut cmd = CommandBuilder::new("node");
+        apply_interactive_provider_runtime_env("gemini", &mut cmd).unwrap();
+
+        let node_options = cmd
+            .get_env("NODE_OPTIONS")
+            .expect("NODE_OPTIONS env")
+            .to_string_lossy()
+            .to_string();
+
+        assert!(node_options.starts_with("--max-old-space-size=4096 "));
+        assert!(node_options.contains("--require "));
+        assert!(node_options.contains("wardian-node-preload.cjs"));
+        assert!(home
+            .path()
+            .join("runtime")
+            .join("gemini")
+            .join("wardian-node-preload.cjs")
+            .is_file());
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_node_options {
+            Some(value) => std::env::set_var("NODE_OPTIONS", value),
+            None => std::env::remove_var("NODE_OPTIONS"),
         }
     }
 
