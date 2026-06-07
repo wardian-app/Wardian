@@ -426,14 +426,59 @@ pub async fn drive_new_run_with_catalog_and_assignments(
     assignments: WorkflowAssignments,
     agent_catalog: HashMap<String, AgentBinding>,
 ) -> Result<(), String> {
-    let owner_id = format!("{}/{}", blueprint.id, run_id);
-    write_run_invocation(
+    let state = prepare_new_run_with_assignments(
+        &blueprint,
+        &run_id,
         &run_root,
-        &default_provider,
         &workspace,
+        &default_provider,
         &bindings,
         &assignments,
+        input,
     )?;
+    drive_started_run_with_catalog_and_assignments(
+        app,
+        blueprint,
+        state,
+        run_root,
+        workspace,
+        default_provider,
+        bindings,
+        assignments,
+        agent_catalog,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_new_run_with_assignments(
+    blueprint: &Blueprint,
+    run_id: &str,
+    run_root: &Path,
+    workspace: &Path,
+    default_provider: &str,
+    bindings: &HashMap<String, String>,
+    assignments: &WorkflowAssignments,
+    input: Value,
+) -> Result<wardian_core::engine::RunState, String> {
+    write_run_invocation(run_root, default_provider, workspace, bindings, assignments)?;
+    Engine::initialize_with_id(blueprint, run_id.to_string(), input, run_root)
+        .map_err(|err| err.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_started_run_with_catalog_and_assignments(
+    app: Option<tauri::AppHandle>,
+    blueprint: Blueprint,
+    state: wardian_core::engine::RunState,
+    run_root: PathBuf,
+    workspace: PathBuf,
+    default_provider: String,
+    bindings: HashMap<String, String>,
+    assignments: WorkflowAssignments,
+    agent_catalog: HashMap<String, AgentBinding>,
+) -> Result<(), String> {
+    let owner_id = format!("{}/{}", blueprint.id, state.run_id);
     let exec = if let Some(app) = app {
         live_executor_with_catalog_assignments_and_app(
             app,
@@ -453,7 +498,7 @@ pub async fn drive_new_run_with_catalog_and_assignments(
         )
     }
     .with_owner_id(owner_id);
-    Engine::start_with_id(&blueprint, run_id, input, &run_root, &exec)
+    Engine::drive_from_state(&blueprint, state, &run_root, &exec)
         .await
         .map(|_| ())
         .map_err(|err| err.to_string())
@@ -526,7 +571,7 @@ pub async fn drive_resume_with_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
     use wardian_core::engine::{event::EventKind, store::read_events, RunState, RunStatus};
     use wardian_core::models::{AgentConversationMode, BusyPolicy, WorkflowRoleAssignment};
 
@@ -563,14 +608,8 @@ edges:
 
     impl EnvGuard {
         fn set(home: &std::path::Path, mock_script: &std::path::Path) -> Self {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            let lock = LOCK
-                .get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-
             let guard = Self {
-                _lock: lock,
+                _lock: crate::utils::wardian_test_env_lock(),
                 previous_home: std::env::var_os("WARDIAN_HOME"),
                 previous_session_id: std::env::var_os("WARDIAN_SESSION_ID"),
                 previous_mock_scenario: std::env::var_os("WARDIAN_MOCK_SCENARIO"),
@@ -720,6 +759,41 @@ edges:
         assert_eq!(invocation.provider, "mock");
         assert_eq!(invocation.bindings, bindings);
         assert_eq!(invocation.assignments, assignments);
+    }
+
+    #[test]
+    fn prepare_new_run_writes_invocation_and_started_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("wf").join("run-1");
+        let blueprint = wardian_core::workflow::parse::parse_str(INVOKER_BLUEPRINT).unwrap();
+        let bindings = HashMap::from([("analyst".to_string(), "mock".to_string())]);
+        let assignments = wardian_core::workflow::assignment::normalize_assignments(
+            None,
+            &bindings,
+            InvocationKind::Manual,
+        );
+
+        let state = prepare_new_run_with_assignments(
+            &blueprint,
+            "run-1",
+            &run_root,
+            dir.path(),
+            "mock",
+            &bindings,
+            &assignments,
+            serde_json::json!({"symbol":"SPY"}),
+        )
+        .unwrap();
+
+        assert_eq!(state.run_id, "run-1");
+        assert!(run_root.join("invocation.json").is_file());
+        assert!(run_root.join("events.jsonl").is_file());
+        assert!(run_root.join("state.json").is_file());
+        let events = read_events(&run_root).unwrap();
+        assert!(matches!(
+            events.first().map(|event| &event.kind),
+            Some(EventKind::RunStarted { .. })
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

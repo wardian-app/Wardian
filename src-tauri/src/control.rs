@@ -271,6 +271,10 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             handle_agent_worktree_disable(app, &target).await
         }
 
+        request @ ControlRequest::WorkflowRun { .. } => {
+            handle_workflow_run_control(app, workflow_run_control_launch(request)?).await
+        }
+
         ControlRequest::SendMessage {
             target,
             message,
@@ -600,6 +604,60 @@ async fn clear_agent_after_worktree_move(
     )
     .await
     .map_err(ControlError::request_failed)
+}
+
+#[derive(Debug)]
+struct WorkflowRunControlLaunch {
+    path: String,
+    provider: Option<String>,
+    workspace: Option<String>,
+    input: Option<serde_json::Value>,
+    bindings: Option<std::collections::HashMap<String, String>>,
+    assignments: Option<wardian_core::models::WorkflowAssignments>,
+}
+
+fn workflow_run_control_launch(
+    request: ControlRequest,
+) -> Result<WorkflowRunControlLaunch, ControlError> {
+    match request {
+        ControlRequest::WorkflowRun {
+            path,
+            provider,
+            workspace,
+            input,
+            bindings,
+            assignments,
+        } => Ok(WorkflowRunControlLaunch {
+            path,
+            provider,
+            workspace,
+            input,
+            bindings,
+            assignments,
+        }),
+        _ => Err(ControlError::bad_request(
+            "expected workflow_run control request",
+        )),
+    }
+}
+
+async fn handle_workflow_run_control(
+    app: &AppHandle,
+    launch: WorkflowRunControlLaunch,
+) -> Result<String, ControlError> {
+    let result = crate::commands::workflow::workflow_run_from_control(
+        app.state::<AppState>(),
+        app.clone(),
+        launch.path,
+        launch.provider,
+        launch.workspace,
+        launch.input,
+        launch.bindings,
+        launch.assignments,
+    )
+    .await
+    .map_err(ControlError::request_failed)?;
+    ok_json(&result)
 }
 
 async fn agent_worktree_branch_name(
@@ -3094,8 +3152,41 @@ fn snapshot_agent(agent: &crate::state::ActiveAgent) -> AgentIdentity {
 mod tests {
     use super::*;
     use crate::state::ActiveAgent;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
-    use wardian_core::models::AgentConfig;
+    use wardian_core::models::{
+        AgentConfig, AgentConversationMode, BusyPolicy, WorkflowRoleAssignment,
+    };
+
+    struct TestWardianHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous_home: Option<OsString>,
+        _temp: tempfile::TempDir,
+    }
+
+    impl TestWardianHome {
+        fn new() -> Self {
+            let lock = crate::utils::wardian_test_env_lock();
+            let temp = tempfile::tempdir().expect("temp wardian home");
+            let previous_home = std::env::var_os("WARDIAN_HOME");
+            std::env::set_var("WARDIAN_HOME", temp.path());
+            Self {
+                _lock: lock,
+                previous_home,
+                _temp: temp,
+            }
+        }
+    }
+
+    impl Drop for TestWardianHome {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
 
     /// Regression test for the silent release-build crash where `claim_control_endpoint`
     /// was called from Tauri's `setup` hook (no Tokio runtime context), causing
@@ -3105,9 +3196,7 @@ mod tests {
     /// setup-hook environment. The claim must succeed without panicking.
     #[test]
     fn control_endpoint_claim_succeeds_without_ambient_tokio_runtime() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         assert!(
             tokio::runtime::Handle::try_current().is_err(),
@@ -3118,15 +3207,11 @@ mod tests {
         let claim =
             claim_control_endpoint().expect("claim must not panic or fail outside a runtime");
         drop(claim);
-
-        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[tokio::test]
     async fn control_endpoint_claim_is_exclusive_for_current_home() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let first = claim_control_endpoint().expect("first endpoint claim");
         let second = match claim_control_endpoint() {
@@ -3145,7 +3230,38 @@ mod tests {
         );
 
         drop(first);
-        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn workflow_run_control_launch_forwards_launch_options() {
+        let mut assignments = wardian_core::models::WorkflowAssignments::new();
+        assignments.insert(
+            "reviewer".to_string(),
+            WorkflowRoleAssignment::Agent {
+                agent_id: "agent-1".to_string(),
+                conversation: AgentConversationMode::Current,
+                busy_policy: BusyPolicy::Fail,
+            },
+        );
+        let bindings = HashMap::from([("legacy".to_string(), "mock".to_string())]);
+        let input = serde_json::json!({"target":"HEAD"});
+        let request = ControlRequest::WorkflowRun {
+            path: "/workflow/controlwf.md".to_string(),
+            provider: Some("mock".to_string()),
+            workspace: Some("/workspace".to_string()),
+            input: Some(input.clone()),
+            bindings: Some(bindings.clone()),
+            assignments: Some(assignments.clone()),
+        };
+
+        let launch = workflow_run_control_launch(request).unwrap();
+
+        assert_eq!(launch.path, "/workflow/controlwf.md");
+        assert_eq!(launch.provider.as_deref(), Some("mock"));
+        assert_eq!(launch.workspace.as_deref(), Some("/workspace"));
+        assert_eq!(launch.input, Some(input));
+        assert_eq!(launch.bindings, Some(bindings));
+        assert_eq!(launch.assignments, Some(assignments));
     }
 
     fn test_agent(session_id: &str, session_name: &str, agent_class: &str) -> ActiveAgent {
@@ -3346,6 +3462,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
         {
@@ -3382,10 +3499,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_queues_when_current_conversation_is_leased() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -3437,11 +3551,6 @@ mod tests {
         assert_eq!(delivery[0].delivery_state, "queued");
         assert_eq!(delivery[0].runtime_state, "conversation_leased");
         assert!(rx.try_recv().is_err());
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[test]
@@ -3748,6 +3857,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_writes_terminal_bytes_to_matched_agent() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -3818,6 +3928,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_prefixes_agent_origin_with_sender_name() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -3858,6 +3969,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_delivery_keeps_origin_unattributed_and_records_input_mode() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -3910,6 +4022,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_queues_bare_approval_responses_when_action_required() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -3951,6 +4064,7 @@ mod tests {
 
     #[tokio::test]
     async fn approval_action_delivery_sends_provider_approval_key() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -3991,6 +4105,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_submits_next_pending_message_when_target_is_idle() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4070,6 +4185,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_non_ready_state_queues_live_delivery_when_status_is_idle() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4114,6 +4230,7 @@ mod tests {
 
     #[tokio::test]
     async fn claude_idle_status_allows_live_delivery_despite_stale_readiness() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
         {
@@ -4159,6 +4276,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_can_complete_booting_provider_from_prompt_evidence() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4227,6 +4345,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_can_complete_booting_claude_from_idle_status() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
         {
@@ -4300,6 +4419,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_can_complete_booting_gemini_from_prompt_evidence() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "GeminiOne", "Coder").await;
         {
@@ -4365,6 +4485,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_can_complete_booting_antigravity_from_prompt_evidence() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "AntigravityOne", "Coder").await;
         {
@@ -4430,6 +4551,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_marks_provider_busy_after_one_submitted_message() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4520,6 +4642,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_non_ready_state_rejects_approval_action_instead_of_queueing() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4565,6 +4688,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_readiness_generation_does_not_drain_mailbox() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         state
@@ -4623,6 +4747,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_waits_until_target_is_idle() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
@@ -4661,10 +4786,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_waits_while_current_conversation_is_leased() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -4722,15 +4844,11 @@ mod tests {
             records[0].status,
             crate::state::MailboxMessageStatus::Pending
         );
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[tokio::test]
     async fn mailbox_drain_missing_sender_leaves_message_pending_for_retry() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4781,6 +4899,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_submit_key_failure_marks_failed_without_retry() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4867,6 +4986,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_drain_payload_send_failure_does_not_emit_submit_started() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         {
@@ -4941,6 +5061,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_prefixes_bare_approval_response_when_target_not_action_needed() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -5002,10 +5123,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_delivery_reports_agent_without_input_channel() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -5039,15 +5157,11 @@ mod tests {
             error.details().unwrap()["delivery"][0]["error"]["code"],
             "no_input_channel"
         );
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[tokio::test]
     async fn message_delivery_reports_partial_failures_after_successful_delivery() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         insert_test_agent(&state, "agent-2", "CoderTwo", "Coder").await;
@@ -5106,6 +5220,7 @@ mod tests {
 
     #[tokio::test]
     async fn delivery_attempt_records_watch_event() {
+        let _home = TestWardianHome::new();
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);

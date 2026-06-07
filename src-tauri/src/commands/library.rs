@@ -1487,7 +1487,7 @@ mod tests {
             } else if let Some(stripped) = path.strip_prefix(r"\\?\") {
                 path = stripped.to_string();
             }
-            return path.trim_end_matches('\\').to_ascii_lowercase();
+            path.trim_end_matches('\\').to_ascii_lowercase()
         }
 
         #[cfg(not(windows))]

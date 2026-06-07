@@ -10,7 +10,7 @@
 
 ## 1. Problem & goal
 
-The workflow durable engine (`wardian_core::engine`) executes a validated blueprint as a resumable run, but every side-effecting step goes through the dependency-inverted `StepExecutor` trait — and the only implementation today is `MockExecutor`. So workflow can author (builder), observe (run view), and mock-execute (CLI), but **nothing drives real agents**. old workflow system's `workflow_engine` is still the only thing that actually runs a workflow against live agents.
+The workflow durable engine (`wardian_core::engine`) executes a validated blueprint as a resumable run, but every side-effecting step goes through the dependency-inverted `StepExecutor` trait — and, at this point in the implementation history, the only implementation was `MockExecutor`. That mock executor existed to test the engine without depending on app/live runtime systems; it was not intended as a user-facing workflow launch mode. old workflow system's `workflow_engine` was still the only thing that actually ran a workflow against live agents.
 
 **Goal of 5a:** a real `StepExecutor` (`LiveStepExecutor`) in `src-tauri` that drives live work, plus the Tauri commands to launch / resume / cancel a run and pause for approval. This makes workflow actually execute and is the prerequisite for retiring old workflow system (5c) and unifying the workflow UI (5b).
 

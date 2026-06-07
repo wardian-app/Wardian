@@ -515,7 +515,13 @@ mod tests {
 
     #[tokio::test]
     async fn interactions_and_provider_state_hydrate_from_persistence() {
-        let _guard = crate::utils::wardian_test_env_lock();
+        struct TestEnvLock {
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+
+        let _guard = TestEnvLock {
+            _lock: crate::utils::wardian_test_env_lock(),
+        };
         let home = tempfile::tempdir().unwrap();
         wardian_core::db::init_db_at_path(&home.path().join("state.db")).unwrap();
 

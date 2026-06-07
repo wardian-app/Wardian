@@ -69,16 +69,22 @@ pub enum WorkflowCommand {
     },
     /// Validate a blueprint `.md` file and report diagnostics.
     Validate { path: String },
-    /// Execute a workflow blueprint headlessly and write a durable run.
+    /// Launch a workflow blueprint and write a durable run.
     Exec {
         path: String,
-        /// Execution backend. Only `mock` is available until the real executor lands.
-        #[arg(long, default_value = "mock")]
+        /// Execution backend: live/real/full routes through the running app; mock is reserved for engine tests.
+        #[arg(long, default_value = "live")]
         executor: String,
         /// JSON object of run input (entry input_schema values).
         #[arg(long)]
         input: Option<String>,
-        /// Role/class -> provider binding, repeatable: --bind role=provider
+        /// Default provider for unbound workflow roles.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Workspace for live workflow tasks.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Role/class -> provider or agent-id binding, repeatable: --bind role=value
         #[arg(long)]
         bind: Vec<String>,
     },
@@ -449,8 +455,11 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            WorkflowCommand::Exec { ref path, ref executor, .. }
-                if path == "wf.md" && executor == "mock"
+            WorkflowCommand::Exec { ref path, ref executor, ref provider, ref workspace, .. }
+                if path == "wf.md"
+                    && executor == "live"
+                    && provider.is_none()
+                    && workspace.is_none()
         ));
     }
 
@@ -478,8 +487,12 @@ mod tests {
             "wf.md",
             "--input",
             "{\"x\":1}",
+            "--provider",
+            "codex",
+            "--workspace",
+            ".",
             "--bind",
-            "role=claude",
+            "role=agent-123",
         ])
         .unwrap();
         let Command::Workflow(args) = cli.command else {
@@ -487,8 +500,11 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            WorkflowCommand::Exec { ref input, ref bind, .. }
-                if input.as_deref() == Some("{\"x\":1}") && bind == &vec!["role=claude".to_string()]
+            WorkflowCommand::Exec { ref input, ref provider, ref workspace, ref bind, .. }
+                if input.as_deref() == Some("{\"x\":1}")
+                    && provider.as_deref() == Some("codex")
+                    && workspace.as_deref() == Some(".")
+                    && bind == &vec!["role=agent-123".to_string()]
         ));
     }
 

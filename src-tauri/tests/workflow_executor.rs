@@ -1,4 +1,4 @@
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 use wardian_core::engine::{driver::new_run_id, Engine, RunStatus};
 
 const DEMO_BLUEPRINT: &str = r#"---
@@ -32,14 +32,8 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn set(home: &std::path::Path, mock_script: &std::path::Path) -> Self {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
         let guard = Self {
-            _lock: lock,
+            _lock: wardian_app_lib::utils::wardian_test_env_lock(),
             previous_home: std::env::var_os("WARDIAN_HOME"),
             previous_session_id: std::env::var_os("WARDIAN_SESSION_ID"),
             previous_mock_scenario: std::env::var_os("WARDIAN_MOCK_SCENARIO"),

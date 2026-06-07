@@ -9,6 +9,7 @@ use wardian_core::control::{
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
     ControlRequest, DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse,
     ReplyStatus, SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError,
+    WorkflowRunResponse,
 };
 use wardian_core::identity::AgentIdentity;
 
@@ -71,6 +72,7 @@ enum ControlOperation {
     AgentWorktreeEnable,
     AgentWorktreeJoin,
     AgentWorktreeDisable,
+    WorkflowRun,
     SendMessage,
     Ask {
         requested: Duration,
@@ -216,6 +218,14 @@ pub struct AskAgentResponse {
     pub watch: AgentWatchResponse,
 }
 
+pub struct WorkflowRunRequest {
+    pub path: String,
+    pub provider: Option<String>,
+    pub workspace: Option<String>,
+    pub input: serde_json::Value,
+    pub bindings: std::collections::HashMap<String, String>,
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -356,6 +366,23 @@ pub fn agent_worktree_disable(target: &str) -> io::Result<AgentWorktreeMutationR
         ControlOperation::AgentWorktreeDisable,
         send_request(ControlRequest::AgentWorktreeDisable {
             target: target.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<WorkflowRunResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::WorkflowRun,
+        send_request(ControlRequest::WorkflowRun {
+            path: request.path,
+            provider: request.provider,
+            workspace: request.workspace,
+            input: Some(request.input),
+            bindings: Some(request.bindings),
+            assignments: None,
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
@@ -724,6 +751,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentWorktreeEnable
         | ControlOperation::AgentWorktreeJoin
         | ControlOperation::AgentWorktreeDisable
+        | ControlOperation::WorkflowRun
         | ControlOperation::SendMessage
         | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,

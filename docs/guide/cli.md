@@ -82,10 +82,13 @@ wardian team list
 wardian team show <team-name-or-id>
 wardian watchlist list
 wardian watchlist show <watchlist-name-or-id>
-wardian workflow list
-wardian workflow show <id-or-name>
-wardian workflow run <id>
-wardian workflow stop <run-instance-id>
+wardian workflow node-types
+wardian workflow validate <path-to-workflow.md>
+wardian workflow exec <path-to-library-workflow.md> --provider codex --workspace <absolute-workspace-path>
+wardian workflow runs
+wardian workflow run-show <blueprint-id> <run-id>
+wardian workflow replay <blueprint-id> <run-id>
+wardian workflow schedule list
 wardian ask reviewer-a1 --stdin --timeout 10m
 wardian reply ask_0123456789abcdef --status done --stdin
 wardian send "review this" --to coder-a1
@@ -148,13 +151,36 @@ wardian agent watch Librarian --include raw_output --raw
 Run a saved workflow through the app-owned backend:
 
 ```bash
-wardian workflow list
-wardian workflow run workflow-id
+wardian workflow validate <absolute-workspace-path>/library/workflows/autoreview.md
+wardian workflow exec <absolute-workspace-path>/library/workflows/autoreview.md \
+  --provider codex \
+  --workspace <absolute-workspace-path> \
+  --input '{"target":"HEAD"}' \
+  --bind reviewer=codex
+wardian workflow runs
+wardian workflow run-show autoreview <run-id>
 ```
 
-Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, `workflow run`, `workflow stop`, and `send`.
+PowerShell:
 
-`workflow list` and `workflow show` try the running app first, then read workflow JSON files from disk when the app is unavailable.
+```powershell
+wardian workflow validate <absolute-workspace-path>\library\workflows\autoreview.md
+wardian workflow exec <absolute-workspace-path>\library\workflows\autoreview.md `
+  --provider codex `
+  --workspace <absolute-workspace-path> `
+  --input '{"target":"HEAD"}' `
+  --bind reviewer=codex
+wardian workflow runs
+wardian workflow run-show autoreview <run-id>
+```
+
+By default, `workflow exec` is a live-control command: it requires the desktop app to be running for the same `WARDIAN_HOME`, routes execution through app-owned runtime state, and accepts workflow files under `<wardian-home>/library/workflows`. The `mock` executor is reserved for workflow-engine fixture tests and should not be used as a normal CLI launch path.
+
+Use `workflow runs`, `workflow run-show <blueprint-id> <run-id>`, and `workflow replay <blueprint-id> <run-id>` to inspect durable run artifacts under `<wardian-home>/logs/workflows`.
+
+Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `workflow exec`, and `send`.
+
+`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, and `workflow replay` can run from disk without the desktop app.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
 
@@ -215,7 +241,7 @@ Default JSON is indented for terminal readability. It includes `schema: 1` and a
 
 ## Important Limits
 
-- The desktop app must be running for live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, `workflow run`, and `workflow stop`.
+- The desktop app must be running for live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, and default `workflow exec`.
 - `WARDIAN_HOME` must match between the app and CLI when you expect shared live state.
 - Team mutation and `send --to team:<name>` are not implemented yet.
 - Raw terminal output can include escape sequences; prefer transcript or sanitized output unless debugging PTY behavior.

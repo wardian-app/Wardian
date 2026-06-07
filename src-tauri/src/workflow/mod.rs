@@ -541,6 +541,35 @@ mod tests {
         AgentConfig, AgentConversationMode, BusyPolicy, WorkflowAssignments, WorkflowRoleAssignment,
     };
 
+    struct TestWardianHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _home: tempfile::TempDir,
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl TestWardianHome {
+        fn new() -> Self {
+            let lock = crate::utils::wardian_test_env_lock();
+            let home = tempfile::tempdir().expect("temp wardian home");
+            let previous_home = std::env::var_os("WARDIAN_HOME");
+            std::env::set_var("WARDIAN_HOME", home.path());
+            Self {
+                _lock: lock,
+                _home: home,
+                previous_home,
+            }
+        }
+    }
+
+    impl Drop for TestWardianHome {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
+
     fn exec_with(runner: FakeAgentRunner) -> LiveStepExecutor {
         LiveStepExecutor::new(
             Arc::new(runner),
@@ -717,10 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn bound_offline_agent_uses_headless_profile_runner() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let headless = Arc::new(FakeAgentRunner::new().with_response("plan", "{\"ok\":true}"));
         let live =
@@ -765,11 +791,6 @@ mod tests {
         assert_eq!(out.0["ok"], true);
         assert_eq!(headless.calls(), vec!["plan".to_string()]);
         assert_eq!(live.calls(), Vec::<String>::new());
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[tokio::test]
@@ -880,10 +901,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let mut assignments = WorkflowAssignments::new();
         assignments.insert(
@@ -931,19 +949,11 @@ mod tests {
 
         assert_eq!(out.0["ok"], true);
         assert!(wardian_core::conversation_lease::load_leases().is_empty());
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[tokio::test]
     async fn background_resume_requires_saved_provider_conversation() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let mut assignments = WorkflowAssignments::new();
         assignments.insert(
@@ -990,19 +1000,11 @@ mod tests {
             .expect_err("offline current conversation without resume_session should fail");
 
         assert!(err.to_string().contains("saved provider conversation"));
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[tokio::test]
     async fn legacy_agent_binding_uses_assignment_route_not_unleased_headless_fallback() {
-        let _guard = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = TestWardianHome::new();
 
         let mut bindings = HashMap::new();
         bindings.insert("Coder".to_string(), "agent-123".to_string());
@@ -1041,10 +1043,5 @@ mod tests {
             .expect_err("legacy binding should use current-conversation route semantics");
 
         assert!(err.to_string().contains("saved provider conversation"));
-
-        match previous_home {
-            Some(value) => std::env::set_var("WARDIAN_HOME", value),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 }
