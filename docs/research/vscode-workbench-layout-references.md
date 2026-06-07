@@ -1,4 +1,17 @@
-# VS Code Workbench Layout Implementation Breakdown
+# VS Code Workbench Layout References
+
+This document maps VS Code's workbench layout model to design patterns relevant
+to Wardian's constrained modular workspaces, editor-like agent surfaces, and
+extension-safe placement zones.
+
+This is not an endorsement, affiliation claim, product evaluation, or
+competitive teardown. The notes below describe public architecture and design
+pressure only.
+
+Last reviewed: 2026-06-07.
+
+Source basis: observations are based on `microsoft/vscode` commit `d40db46`
+and public VS Code user and extension documentation.
 
 ## Context
 
@@ -12,11 +25,6 @@ Secondary Side Bar, Panel, Activity Bar, editor groups, and auxiliary windows.
 That limitation is useful. VS Code shows how much leverage a product can get
 from a constrained, stable workbench skeleton with strong extension contracts
 and predictable placement zones.
-
-Source observations are based on:
-
-- `microsoft/vscode` commit `d40db46`
-- public VS Code user and extension documentation available on 2026-06-07
 
 ## Core Pattern
 

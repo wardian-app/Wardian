@@ -1,4 +1,17 @@
-# Blender Workspace Area Implementation Breakdown
+# Blender Workspace Area References
+
+This document maps Blender's workspace, screen, area, and region model to
+design patterns relevant to Wardian's tactile Habitat layout, durable surface
+slots, and registered surface types.
+
+This is not an endorsement, affiliation claim, product evaluation, or
+competitive teardown. The notes below describe public architecture and design
+pressure only.
+
+Last reviewed: 2026-06-07.
+
+Source basis: observations are based on `blender/blender` commit
+`bd0823aa964` and public Blender manual and Python API documentation.
 
 ## Context
 
@@ -13,11 +26,6 @@ Blender therefore centers on scene/object work, not terminals, markdown files,
 or code files. Its dynamic primitive is the editor area. The user manipulates a
 workspace made of editor slots, while the scene, active object, mode, workspace
 tools, and editor context create the feeling of a coherent shared environment.
-
-Source observations are based on:
-
-- `blender/blender` commit `bd0823aa964`
-- public Blender manual and Python API documentation available on 2026-06-07
 
 ## Core Pattern
 

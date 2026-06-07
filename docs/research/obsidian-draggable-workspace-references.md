@@ -1,4 +1,17 @@
-# Obsidian Draggable Workspace Implementation Breakdown
+# Obsidian Draggable Workspace References
+
+This document maps Obsidian's draggable workspace and pane model to design
+patterns relevant to Wardian's malleable surfaces, plugin-hosted views, and
+local-first workspace state.
+
+This is not an endorsement, affiliation claim, product evaluation, or
+competitive teardown. The notes below describe public architecture and design
+pressure only.
+
+Last reviewed: 2026-06-07.
+
+Source basis: observations are based on `obsidianmd/obsidian-api` commit
+`2e88986`, public Obsidian Help, and public Obsidian Developer Documentation.
 
 ## Context
 
@@ -12,12 +25,6 @@ public Obsidian help, official API type definitions, and developer docs. Where
 the exact private drag manager implementation is not exposed, this note labels
 the point as an implementation inference from the public API contract and DOM
 behavior.
-
-Source observations are based on:
-
-- `obsidianmd/obsidian-api` commit `2e88986`
-- public Obsidian Help and Developer Documentation pages available on
-  2026-06-07
 
 ## Core Pattern
 

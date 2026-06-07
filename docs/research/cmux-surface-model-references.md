@@ -1,4 +1,16 @@
-# cmux Multi-Surface Implementation Breakdown
+# cmux Multi-Surface GUI References
+
+This document maps cmux's multi-surface workspace model to design patterns
+relevant to Wardian's agent command center, split/tab surfaces, and
+multi-agent coding UI.
+
+This is not an endorsement, affiliation claim, product evaluation, or
+competitive teardown. The notes below describe public architecture and design
+pressure only.
+
+Last reviewed: 2026-06-07.
+
+Source basis: source observations are based on cmux commit `8c130f8`.
 
 ## Context
 
@@ -7,9 +19,6 @@ previews, markdown, and agent-oriented panels all share one workspace, pane, and
 surface model. The browser is not a secondary preview area, and files are not a
 separate viewer mode. They are peer panels inside the same split/tab graph as
 terminals.
-
-This note records the implementation pattern worth studying for Wardian. Source
-observations are based on cmux commit `8c130f8`.
 
 ## Core Pattern
 
