@@ -27,9 +27,9 @@ terminal.
 Research in `docs/research/malleable-gui-references/` suggests a better long
 term model. cmux is strongest for Wardian because it treats terminals, browser,
 files, markdown, and agent-oriented panels as peer surfaces in one split/tab
-workspace. Obsidian is the strongest reference for the layout boundary: a
-durable leaf moves through the workspace tree, while the view inside the leaf
-owns content state but not layout mechanics.
+surface area. Obsidian is the strongest reference for the layout boundary: a
+durable leaf moves through the layout tree, while the view inside the leaf owns
+content state but not layout mechanics.
 
 The risk is flattening Wardian's current product structure into vague
 "surfaces." Current main views, auxiliary panels, and agent session
@@ -46,12 +46,12 @@ concepts:
 
 ```text
 PerspectiveDefinition
-  -> creates or updates a Workspace
+  -> creates or updates a LayoutContext
 
-Workspace
-  -> owns ShellRegions and a MainWorkspace
+LayoutContext
+  -> owns ShellRegions and a SurfaceCanvas
 
-MainWorkspace
+SurfaceCanvas
   -> owns SurfaceLeaves
 
 SurfaceLeaf
@@ -70,7 +70,7 @@ ShellRegion:
   - titlebar
   - left-rail
   - left-dock
-  - main-workspace
+  - main-surface-area
   - right-dock
   - bottom-dock
   - modal-layer
@@ -89,22 +89,27 @@ level. Today they differ by product role, not by layout type:
 Perspectives replace the current titlebar `viewMode` concept, but they should
 not become a larger set of mutually exclusive global pages. A perspective is a
 definition or template: a saved, predefined, plugin-contributed, or user-created
-arrangement of shell regions, auxiliary panels, and main workspace surfaces.
+arrangement of shell regions, auxiliary panels, and central surfaces.
 
-The live object is the workspace. A workspace may be created from a perspective
-definition, may keep a base perspective identity for orientation, and may then
-diverge as the user opens surfaces, splits leaves, promotes panels, and pins
-tools.
+The live object is the layout context. A layout context may be created from a
+perspective definition, may keep a base perspective identity for orientation,
+and may then diverge as the user opens surfaces, splits leaves, promotes panels,
+switches watchlists, and pins tools.
+
+Do not call this object a workspace. In Wardian, an agent workspace already
+means the target project directory or worktree where the provider runs.
+Overloading that term would blur the difference between "where an agent is
+working on disk" and "how the user has arranged the command-center UI."
 
 ```text
 PerspectiveDefinition
   -> describes the kind of work and default layout
 
-Workspace
-  -> live/saved user context created from or associated with a perspective
+LayoutContext
+  -> live/saved UI context created from or associated with a perspective
 
 SurfaceTree
-  -> actual split/tab graph inside the workspace
+  -> actual split/tab graph inside the layout context
 ```
 
 Current main views map first to perspective definitions, not directly to
@@ -121,9 +126,9 @@ PerspectiveDefinition:
   - plugin-defined      // plugin-contributed templates
 ```
 
-The titlebar should eventually switch the current workspace context and expose a
-small pinned set of perspectives or workspaces. It should not list every main
-view, every plugin, or every open work object.
+The titlebar should eventually show the current layout context and expose a
+small pinned set of perspectives or saved layout contexts. It should not list
+every main view, every plugin, or every open work object.
 
 ### 3. Perspective Navigation Models
 
@@ -132,17 +137,18 @@ one global navigation primitive.
 
 ```text
 Home / start surface
-  -> launch perspective definitions, recent workspaces, saved layouts, and
-     plugin templates
+  -> launch perspective definitions, recent layout contexts, saved layouts,
+     and plugin templates
 
 Titlebar
-  -> show current workspace, a small pinned set, overflow, and quick switching
+  -> show current layout context, a small pinned set, overflow, and quick
+     switching
 
 Command palette / quick open
-  -> open or focus any perspective, workspace, surface, panel, or command
+  -> open or focus any perspective, layout context, surface, panel, or command
 
 Surface tabs and splits
-  -> manage the open work objects inside the active workspace
+  -> manage the open work objects inside the active layout context
 ```
 
 The current global topbar tabs are useful for a small fixed product, but they
@@ -155,7 +161,7 @@ Recommended model:
 
 ```text
 Home answers:       what kind of work do I want to start?
-Titlebar answers:   which workspace/context am I in?
+Titlebar answers:   which layout context am I in?
 Surface tabs answer: which work objects are open here?
 Quick open answers: where can I jump immediately?
 ```
@@ -163,14 +169,45 @@ Quick open answers: where can I jump immediately?
 This makes plugins more malleable without giving every plugin a permanent
 global tab. Plugins can contribute surface types, auxiliary panel types,
 commands, perspective definitions, and suggested default placements. Users can
-pin plugin perspectives, plugin surfaces, or saved plugin-heavy workspaces into
-the titlebar or Home.
+pin plugin perspectives, plugin surfaces, or saved plugin-heavy layout contexts
+into the titlebar or Home.
 
-### 4. Auxiliary Panels
+### 4. Watchlists as Working Sets
+
+Filtered watchlists and teams are already Wardian's closest analogue to the
+"workspace" concept in traditional IDEs. They define which agents are visible,
+targetable, grouped, and operationally relevant right now. That role should be
+preserved instead of replaced by a new IDE-style workspace layer.
+
+```text
+AgentWorkspace
+  -> filesystem path or worktree used by an agent/provider
+
+Watchlist / Team
+  -> durable agent working set and targeting scope
+
+LayoutContext
+  -> saved UI arrangement, active perspective lineage, open surfaces, docks,
+     and active watchlist/filter state
+```
+
+The right watchlist sidebar is therefore more than a passive roster. It is the
+active working-set selector for many Wardian tasks. Layout v2 should let a
+layout context remember the active watchlist, visible teams, collapsed team
+state, and selection where appropriate. A command-center layout for "Frontend
+Ops" can share the same perspective definition as "Review Lane" while using a
+different watchlist and different open surfaces.
+
+This also clarifies a limitation of watchlists: they organize agents, not the
+entire UI. They do not by themselves remember splits, open files, browser state,
+queue surfaces, or dock configuration. Layout contexts fill that gap without
+stealing the name or role of agent workspaces.
+
+### 5. Auxiliary Panels
 
 Auxiliary panels are docked tools. They live in left, right, or bottom regions
-by default. They may be promoted into the main workspace later, but they are not
-primary main surfaces by default.
+by default. They may be promoted into the main surface area later, but they are
+not primary main surfaces by default.
 
 ```text
 AuxiliaryPanelType:
@@ -202,10 +239,11 @@ The important correction is that the right agent watchlist is not a special
 main surface. It is an auxiliary panel, structurally comparable to the left
 side tools. It is more persistent because it is important for orientation.
 
-### 5. Main Workspace Surfaces
+### 6. Main Surface Area
 
-Main workspace surfaces are the cmux/Obsidian-style work objects: movable,
-tabbable, splittable, restorable leaves inside the main workspace.
+Surfaces in the main surface area are the cmux/Obsidian-style work objects:
+movable, tabbable, splittable, restorable leaves inside the central surface
+canvas.
 
 Core v2 surface candidates:
 
@@ -250,7 +288,7 @@ tabbed, split, saved, restored, and promoted according to their declared
 capabilities. They do not receive permanent global titlebar placement by
 default.
 
-### 6. Surface Modes and Regions
+### 7. Surface Modes and Regions
 
 Several current or proposed "surfaces" are better understood as modes or
 regions inside a larger surface.
@@ -345,14 +383,14 @@ UserTerminalPanel
 ## Early Data Model Sketch
 
 The exact schema will need a follow-up implementation spec. The shape should
-separate perspective definitions, live workspaces, docked panels, and main
-workspace leaves.
+separate perspective definitions, live layout contexts, docked panels, and
+central surface leaves.
 
 ```ts
 type LayoutV2State = {
   version: 1;
-  active_workspace_id: string;
-  workspaces: WorkspaceState[];
+  active_layout_context_id: string;
+  layout_contexts: LayoutContextState[];
   perspective_definitions: PerspectiveDefinition[];
   pinned_entries: PinnedNavigationEntry[];
 };
@@ -367,22 +405,23 @@ type PerspectiveDefinition = {
 
 type PerspectiveTemplate = {
   shell?: Partial<ShellRegionState>;
-  main_workspace: SurfaceTreeTemplate;
+  surface_canvas: SurfaceTreeTemplate;
   recommended_pins?: PinnedNavigationEntry[];
 };
 
 type SurfaceTreeTemplate = SurfaceTree;
 
-type WorkspaceState = {
+type LayoutContextState = {
   id: string;
   name: string;
   base_perspective_id?: string;
+  active_watchlist_id?: string;
   shell: ShellRegionState;
-  main_workspace: SurfaceTree;
+  surface_canvas: SurfaceTree;
 };
 
 type PinnedNavigationEntry =
-  | { type: "workspace"; workspace_id: string }
+  | { type: "layout-context"; layout_context_id: string }
   | { type: "perspective"; perspective_definition_id: string }
   | { type: "surface"; surface_view_id: string };
 
@@ -425,7 +464,7 @@ type SurfaceViewState =
 
 ## Design Rules
 
-- Perspectives define work arrangements; workspaces hold live work.
+- Perspectives define work arrangements; layout contexts hold live UI state.
 - Perspectives are templates and starting points, not necessarily mutually
   exclusive full-screen pages.
 - Auxiliary panels control, navigate, and inspect.
@@ -433,8 +472,9 @@ type SurfaceViewState =
 - Surface leaves own placement; surface views own content state.
 - Plugin surfaces get local surface tabs and splits by default. Global titlebar
   placement is user-pinned or core-curated, not automatic.
-- Home launches perspective definitions, recent workspaces, saved layouts, and
-  plugin templates. It should not be a mandatory route between normal tasks.
+- Home launches perspective definitions, recent layout contexts, saved layouts,
+  and plugin templates. It should not be a mandatory route between normal
+  tasks.
 - Multiple "perspectives" side by side should initially mean surfaces from
   different perspective definitions living in one surface tree.
 - Agent terminal/chat/transcript are modes or regions of an `agent-session`
@@ -447,13 +487,13 @@ type SurfaceViewState =
 ## Consequences
 
 - **Positive:** Aligns Wardian with the strongest cmux pattern: multiple tool
-  surfaces sharing one split/tab workspace.
+  surfaces sharing one split/tab surface area.
 - **Positive:** Preserves the strongest Obsidian pattern: layout leaves move
   independently from view content.
 - **Positive:** Avoids treating current main views, side panels, and
   presentation modes as the same object.
 - **Positive:** Keeps the current dense command-center shell recognizable while
-  creating a path toward more malleable workspaces.
+  creating a path toward more malleable layouts.
 - **Positive:** Allows Garden and Queue, or a plugin workbench and an agent
   session, to sit side by side without inventing nested global modes.
 - **Positive:** Gives plugins meaningful layout participation without letting
@@ -465,8 +505,8 @@ type SurfaceViewState =
 - **Negative:** A real `file-viewer` and browser surface require stronger
   lifecycle, focus, and persistence handling than placeholder panels.
 - **Negative:** Introduces more vocabulary. Product copy and developer APIs
-  must make the difference between perspective, workspace, panel, surface, and
-  mode obvious.
+  must make the difference between perspective, layout context, agent
+  workspace, watchlist, panel, surface, and mode obvious.
 - **Negative:** Plugin contribution governance becomes part of the layout
   system; otherwise plugins can degrade navigation quality.
 
@@ -477,9 +517,9 @@ type SurfaceViewState =
 Layout state should be versioned from the start. The first implementation can
 keep most state in the frontend store, but the schema should be backend-readable
 eventually so agents, CLI commands, and Markdown-backed project state can
-inspect open workspaces and surface handles. Migration should map the existing
-`viewMode` values into core `PerspectiveDefinition` entries and likely turn the
-current topbar choices into default pinned entries.
+inspect open layout contexts and surface handles. Migration should map the
+existing `viewMode` values into core `PerspectiveDefinition` entries and likely
+turn the current topbar choices into default pinned entries.
 
 ### Plugin Boundaries
 
@@ -506,11 +546,15 @@ palette actions, and future automation should be able to address:
 
 ```text
 workspace_id
+layout_context_id
 surface_leaf_id
 surface_view_id
 auxiliary_panel_id
 perspective_definition_id
 ```
+
+`workspace_id` or `workspace_path` should refer only to the agent/project
+workspace, never the UI layout context.
 
 This is especially important for multi-agent workflows where an agent might
 open a file viewer, focus a running terminal, request a browser surface, or
@@ -533,11 +577,11 @@ ARIA tab/menu patterns rather than custom click-only controls.
 
 ### Responsive Layout
 
-Small screens should emphasize perspective/workspace picking and one active
-surface at a time. Splits can collapse into tab stacks, side docks can become
-drawers, and Home can become more important as a launcher. The data model
-should survive these responsive transforms without creating a separate mobile
-layout concept.
+Small screens should emphasize perspective/layout-context picking and one
+active surface at a time. Splits can collapse into tab stacks, side docks can
+become drawers, and Home can become more important as a launcher. The data
+model should survive these responsive transforms without creating a separate
+mobile layout concept.
 
 ### Testing and Rollout
 
@@ -549,10 +593,11 @@ or provider session lifecycle claims are part of the change.
 
 ## Open Questions
 
-- Which first slice proves the model best: command-center workspace, workflows
-  workbench, or agent-graph plus queue side-by-side?
-- What should Home contain in v2: pinned perspectives only, recent workspaces,
-  active agent sessions, saved layouts, plugin templates, or all of these?
+- Which first slice proves the model best: command-center layout context,
+  workflows workbench, or agent-graph plus queue side-by-side?
+- What should Home contain in v2: pinned perspectives only, recent layout
+  contexts, active agent sessions, saved layouts, plugin templates, or all of
+  these?
 - Which titlebar entries should be pinned by default after migrating from the
   current global view tabs?
 - Should `user-terminal` remain bottom-dock-only for v2, or become a main
