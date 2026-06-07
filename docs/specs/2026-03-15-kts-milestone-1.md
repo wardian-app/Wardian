@@ -1,8 +1,7 @@
 # Knowledge Task System (KTS) Milestone 1
 
-* **Status:** Proposed
+* **Status:** Deprecated
 * **Date:** 2026-03-15
-* **Decider:** Architect
 
 > Note: This proposal is partially superseded by [Evidence-First Memory](./2026-04-17-evidence-first-memory.md). KTS remains valid as a promoted knowledge layer, but it is no longer the recommended base memory substrate.
 

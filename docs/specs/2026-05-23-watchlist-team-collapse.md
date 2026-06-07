@@ -1,8 +1,7 @@
 # Watchlist Team Collapse
 
-- **Status:** Planned
+- **Status:** Implemented
 - **Date:** 2026-05-23
-- **Decider:** Wardian maintainers
 
 ## Context and Problem Statement
 

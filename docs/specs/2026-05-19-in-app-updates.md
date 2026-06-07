@@ -1,8 +1,7 @@
 # In-App Updates
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-19
-- **Decider:** Wardian Codex and user
 
 ## Context and Problem Statement
 

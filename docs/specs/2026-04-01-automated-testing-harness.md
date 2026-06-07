@@ -1,8 +1,7 @@
 # Automated Testing Harness
 
-* **Status:** Accepted
+* **Status:** Implemented
 * **Date:** 2026-03-31
-* **Decider:** Architect
 
 ## Context and Problem Statement
 Wardian still depends heavily on manual verification for agent orchestration, workflow execution, PTY behavior, and provider-specific runtime behavior. That is slow, expensive, and risky because the current runtime shares the user's real `~/.wardian` state, real providers, and real agent sessions.

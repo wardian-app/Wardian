@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-05-23
-- **Decider:** Antigravity and Wardian maintainers
 
 ## Context
 

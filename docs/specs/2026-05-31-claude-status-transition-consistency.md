@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-05-31
-- **Decider:** User
 
 ## Context
 

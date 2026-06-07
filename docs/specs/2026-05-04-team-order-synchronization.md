@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-05-04
-- **Decider:** Wardian maintainers
 
 ## Context and Problem Statement
 

@@ -1,8 +1,7 @@
 # Agent Teams and Bulk Actions
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-04-19
-- **Decider:** User
 
 ## Context and Problem Statement
 

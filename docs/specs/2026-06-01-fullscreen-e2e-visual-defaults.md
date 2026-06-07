@@ -1,8 +1,7 @@
 # Fullscreen E2E Visual Defaults
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Date:** 2026-06-01
-- **Decider:** Tan Gemicioglu
 
 ## Context
 

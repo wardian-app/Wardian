@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-04-21
-- **Decider:** Wardian Claude
 
 ## Context and Problem Statement
 

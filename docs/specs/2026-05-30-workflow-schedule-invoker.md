@@ -1,6 +1,6 @@
 # Workflow Engine — Schedule Invoker (sub-project 6b) Design
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-30
 - **Part of:** [Workflow rework epic (#425)]; old-system parity track. Builds on 6a (invoker foundation, #456). Followed by 6c (monitoring sidebar — schedule-management UI) and 6d (old workflow system deletion).
 

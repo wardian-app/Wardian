@@ -1,8 +1,7 @@
 # Release System
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-04-19
-- **Decider:** Wardian Claude
 
 ## Context and Problem Statement
 

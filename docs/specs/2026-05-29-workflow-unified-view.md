@@ -1,6 +1,6 @@
 # Workflow Engine — Unified Workflows View (sub-project 5b) Design
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-29
 - **Part of:** [Workflow rework epic (#425)]; follows 1 (library/registry), 2 (engine), 3a (builder), 3b (run view), 4 (CLI), 5a (live executor, #448). Precedes 5c (old workflow system retirement + migration).
 

@@ -1,6 +1,6 @@
 # Workflow Engine — Trigger / Invoker Foundation (sub-project 6a) Design
 
-- **Status:** Implemented (6a)
+- **Status:** Implemented
 - **Date:** 2026-05-30
 - **Part of:** [Workflow rework epic (#425)]; old-system parity track. Foundation for 6b (schedule invoker), 6c (monitoring sidebar), 6d (old workflow system deletion). Builds on 5a (`workflow_run`) + 5b (Run dialog).
 

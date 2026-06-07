@@ -1,8 +1,7 @@
 # Agent Lifecycle Locking
 
-* **Status:** Accepted
+* **Status:** Implemented
 * **Date:** 2026-05-21
-* **Decider:** Core Runtime
 
 ## Context and Problem Statement
 
@@ -29,4 +28,3 @@ Lifecycle handlers follow this lock policy:
 * **Positive:** State-file writes no longer require the global agent lock to remain held during synchronous filesystem work in the touched lifecycle paths.
 * **Tradeoff:** The lifecycle lock registry retains one small mutex entry per session ID touched during an app run. The registry is reset when the app restarts.
 * **Tradeoff:** Persistence remains best-effort; failures to write `state.json` or SQLite metadata are logged or ignored consistently with existing behavior.
-

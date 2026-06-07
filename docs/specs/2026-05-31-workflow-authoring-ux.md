@@ -1,6 +1,6 @@
 # Workflow Authoring UX Refresh
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-31
 - **Branch:** `debug/workflow-crash`
 - **Scope:** Frontend authoring experience for workflow blueprints.

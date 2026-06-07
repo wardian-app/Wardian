@@ -1,6 +1,6 @@
 # Workflow Engine — Monitoring Sidebar + Schedule-Management UI (sub-project 6c) Design
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-30
 - **Part of:** [Workflow rework epic (#425)]; old-system parity track. The UI layer on 6a (invoker foundation, #456) + 6b (schedule invoker, #457). Last parity piece before 6d (old workflow system deletion).
 

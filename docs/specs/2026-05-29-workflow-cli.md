@@ -1,8 +1,7 @@
 # Workflow CLI Verbs
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Date:** 2026-05-29
-- **Decider:** User
 
 ## Context
 

@@ -2,7 +2,6 @@
 
 - **Status:** Implemented
 - **Date:** 2026-03-25
-- **Decider:** Architect
 
 ## Context and Problem Statement
 

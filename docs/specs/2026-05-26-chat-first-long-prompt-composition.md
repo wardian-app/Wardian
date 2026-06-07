@@ -1,8 +1,7 @@
 # Chat-First Long Prompt Composition
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-26
-- **Decider:** Product/Engineering
 
 ## Context
 

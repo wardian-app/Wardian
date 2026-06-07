@@ -1,8 +1,7 @@
 # OS Package Managers Phase 1
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Date:** 2026-05-20
-- **Decider:** Wardian Codex and user
 - **Issue:** [#325](https://github.com/wardian-app/Wardian/issues/325)
 - **Follow-up:** Linux package-manager publishing is tracked in [#324](https://github.com/wardian-app/Wardian/issues/324).
 

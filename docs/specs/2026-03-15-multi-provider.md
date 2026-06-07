@@ -2,7 +2,6 @@
 
 * **Status:** Implemented
 * **Date:** 2026-03-15
-* **Decider:** Architect
 
 ## Context and Problem Statement
 Currently, Wardian's backend logic in `manager.rs` is tightly coupled to the `gemini-cli`. To achieve our goal of being a universal agent habitat, we need to support multiple providers (Claude Code, Codex, OpenClaw, etc.) without rewriting the core spawning and telemetry logic.

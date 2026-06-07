@@ -1,6 +1,6 @@
 # Workflow Agent Session Semantics
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-06-01
 - **Branch:** `debug/v2-workflow-crash`
 - **Scope:** Workflow agent assignment, background execution, conversation leases, and `Headless` status semantics.

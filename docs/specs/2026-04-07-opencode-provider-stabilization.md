@@ -1,8 +1,7 @@
 # OpenCode Provider Stabilization
 
-* **Status:** Proposed
+* **Status:** Implemented
 * **Date:** 2026-04-06
-* **Decider:** Architect
 
 ## Context and Problem Statement
 

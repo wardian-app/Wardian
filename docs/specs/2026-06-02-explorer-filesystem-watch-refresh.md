@@ -1,8 +1,7 @@
 # Explorer Filesystem Watch Refresh
 
-* **Status:** Accepted
+* **Status:** Implemented
 * **Date:** 2026-06-02
-* **Decider:** User, Codex
 
 ## Context
 

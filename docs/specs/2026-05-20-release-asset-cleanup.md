@@ -1,8 +1,7 @@
 # Release Asset Cleanup
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Date:** 2026-05-20
-- **Decider:** Wardian Codex and user
 
 ## Context
 

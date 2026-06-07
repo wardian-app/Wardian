@@ -3,7 +3,6 @@
 - **Status:** Implemented
 - **Date:** 2026-05-20
 - **Issue:** #314
-- **Decider:** Wardian maintainers
 
 ## Context
 

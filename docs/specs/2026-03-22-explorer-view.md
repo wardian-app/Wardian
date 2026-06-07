@@ -2,7 +2,6 @@
 
 * **Status:** Implemented
 * **Date:** 2026-03-22
-* **Decider:** Architect
 
 ## Context and Problem Statement
 Agents often work within specific local directories, but there is currently no way for the user to visually browse the agent's workspace files within Wardian. A file explorer is a standard expectation for developer productivity tools.

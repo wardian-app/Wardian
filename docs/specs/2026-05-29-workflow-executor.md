@@ -1,6 +1,6 @@
 # Workflow Engine — Live Executor (sub-project 5a) Design
 
-- **Status:** Implemented (5a)
+- **Status:** Implemented
 - **Date:** 2026-05-29
 - **Part of:** [Workflow rework epic (#425)]; follows sub-projects 1 (library/registry), 2 (durable engine), 3a (builder), 3b (run view), 4 (CLI).
 

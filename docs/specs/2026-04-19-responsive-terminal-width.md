@@ -1,8 +1,7 @@
 # Responsive Terminal Width
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-04-19
-- **Decider:** Tan Gemicioglu
 
 ## Context and Problem Statement
 

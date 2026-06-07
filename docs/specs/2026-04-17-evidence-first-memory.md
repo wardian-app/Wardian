@@ -1,8 +1,7 @@
 # Evidence-First Memory
 
-- **Status:** Placeholder
+- **Status:** Proposed
 - **Date:** 2026-04-17
-- **Decider:** User
 
 ## Context and Problem Statement
 

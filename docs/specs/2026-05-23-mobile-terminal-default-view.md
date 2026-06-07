@@ -4,7 +4,6 @@ Filename: `2026-05-23-mobile-terminal-default-view.md`
 
 - **Status:** Implemented
 - **Date:** 2026-05-23
-- **Decider:** User
 
 ## Context and Problem Statement
 

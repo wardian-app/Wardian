@@ -1,8 +1,7 @@
 # Grid Chat Mode
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-21
-- **Decider:** Wardian maintainers
 
 ## Context
 
