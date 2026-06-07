@@ -5,14 +5,14 @@
 
 ## Context and Problem Statement
 
-Wardian's current desktop UI is a dense command-center shell:
+Wardian's current desktop UI is a dense multi-agent shell:
 
 ```text
 App shell
   -> titlebar view modes
   -> left activity rail and left contextual pane
   -> central main view
-  -> right agent watchlist
+  -> right agent roster
   -> optional bottom user terminal
   -> modal settings
 ```
@@ -21,8 +21,7 @@ The current titlebar view modes are implemented as full-screen main views:
 `grid`, `dashboard`, `queue`, `graph`, `garden`, `library`, and `workflows`.
 The left activity rail hosts contextual tools: explorer, source control, agent
 configuration/spawn, command broadcast, class manager, and workflow glance. The
-right side hosts the agent watchlist. The bottom area can host the user
-terminal.
+right side hosts the agent roster. The bottom area can host the user terminal.
 
 Research in `docs/research/malleable-gui-references/` suggests a better long
 term model. cmux is strongest for Wardian because it treats terminals, browser,
@@ -61,6 +60,54 @@ SurfaceView
   -> owns SurfaceModes and SurfaceRegions
 ```
 
+Internal model names and product labels do not need to be identical. The
+recommended user-facing term for `LayoutContext` is **Site**:
+
+```text
+LayoutContext     // internal/API term
+Site              // product label
+```
+
+A Site is a saved operating place inside Wardian's Habitat: active perspective
+lineage, surface canvas, dock state, and active Cohort. This keeps the
+ecological theme at the product level while avoiding the overloaded `workspace`
+term, which already means the project path or worktree used by an
+agent/provider.
+
+The broader hierarchy should be:
+
+```text
+Habitat
+  -> whole Wardian environment
+
+Garden
+  -> spatial overview of the Habitat
+
+Site
+  -> saved/focused operating place inside the Habitat
+
+Cohort
+  -> group of agents associated with or currently occupying a Site
+
+Surface
+  -> movable work object inside a Site
+```
+
+This makes Garden cleaner: an all-agents Garden can show multiple Sites, each
+with Cohorts arranged around or inside them. A Cohort-focused Garden can open a
+single Site for focused work.
+
+Alternatives considered:
+
+- `Workspace`: rejected because it conflicts with agent workspaces.
+- `Habitat`: too broad; it should remain the larger Wardian environment.
+- `Station`: too command-center oriented for Wardian's ecological theme.
+- `Desk`: familiar, but too generic and less ecological.
+- `Lens`: useful metaphor for filtering, but too narrow for a full saved
+  layout.
+- `Deck`: tactile, but can imply cards/trading and is less obvious than
+  Site.
+
 ### 1. Shell Regions
 
 Shell regions are stable placement zones. They are not surface types.
@@ -80,7 +127,7 @@ The left dock and right dock should be treated symmetrically at the architecture
 level. Today they differ by product role, not by layout type:
 
 - Left dock: contextual tools selected by the activity rail.
-- Right dock: persistent agent watchlist/roster.
+- Right dock: persistent agent roster.
 - Bottom dock: user terminal today; later also logs, queue, approvals, or run
   output.
 
@@ -94,7 +141,7 @@ arrangement of shell regions, auxiliary panels, and central surfaces.
 The live object is the layout context. A layout context may be created from a
 perspective definition, may keep a base perspective identity for orientation,
 and may then diverge as the user opens surfaces, splits leaves, promotes panels,
-switches watchlists, and pins tools.
+switches Cohorts, and pins tools.
 
 Do not call this object a workspace. In Wardian, an agent workspace already
 means the target project directory or worktree where the provider runs.
@@ -126,8 +173,8 @@ PerspectiveDefinition:
   - plugin-defined      // plugin-contributed templates
 ```
 
-The titlebar should eventually show the current layout context and expose a
-small pinned set of perspectives or saved layout contexts. It should not list
+The titlebar should eventually show the current Site and expose a small pinned
+set of perspectives or saved Sites. It should not list
 every main view, every plugin, or every open work object.
 
 ### 3. Perspective Navigation Models
@@ -137,18 +184,17 @@ one global navigation primitive.
 
 ```text
 Home / start surface
-  -> launch perspective definitions, recent layout contexts, saved layouts,
-     and plugin templates
+  -> launch perspective definitions, recent Sites, saved layouts, and
+     plugin templates
 
 Titlebar
-  -> show current layout context, a small pinned set, overflow, and quick
-     switching
+  -> show current Site, a small pinned set, overflow, and quick switching
 
 Command palette / quick open
-  -> open or focus any perspective, layout context, surface, panel, or command
+  -> open or focus any perspective, Site, surface, panel, or command
 
 Surface tabs and splits
-  -> manage the open work objects inside the active layout context
+  -> manage the open work objects inside the active Site
 ```
 
 The current global topbar tabs are useful for a small fixed product, but they
@@ -161,7 +207,7 @@ Recommended model:
 
 ```text
 Home answers:       what kind of work do I want to start?
-Titlebar answers:   which layout context am I in?
+Titlebar answers:   which Site am I in?
 Surface tabs answer: which work objects are open here?
 Quick open answers: where can I jump immediately?
 ```
@@ -169,41 +215,102 @@ Quick open answers: where can I jump immediately?
 This makes plugins more malleable without giving every plugin a permanent
 global tab. Plugins can contribute surface types, auxiliary panel types,
 commands, perspective definitions, and suggested default placements. Users can
-pin plugin perspectives, plugin surfaces, or saved plugin-heavy layout contexts
-into the titlebar or Home.
+pin plugin perspectives, plugin surfaces, or saved plugin-heavy Sites into
+the titlebar or Home.
 
-### 4. Watchlists as Working Sets
+### 4. Cohorts as Working Sets
 
-Filtered watchlists and teams are already Wardian's closest analogue to the
-"workspace" concept in traditional IDEs. They define which agents are visible,
-targetable, grouped, and operationally relevant right now. That role should be
-preserved instead of replaced by a new IDE-style workspace layer.
+Current watchlists and teams are already Wardian's closest analogue to the
+"workspace" concept in traditional IDEs. The v2 user-facing name should move
+away from **Watchlist**, which came from earlier TradingView-inspired drafting.
+The recommended replacement is **Cohort**.
+
+Cohorts define which agents are visible, targetable, grouped, and operationally
+relevant right now. That role should be preserved instead of replaced by a new
+IDE-style workspace layer.
+
+A Cohort should not be permanently owned by one Site. A Site can have an active
+Cohort, and a Cohort can be associated with multiple Sites over time. This
+keeps "Review Lane" or "Frontend Ops" reusable across different project
+moments instead of making the grouping inseparable from one saved layout.
 
 ```text
 AgentWorkspace
   -> filesystem path or worktree used by an agent/provider
 
-Watchlist / Team
+Cohort / Team
   -> durable agent working set and targeting scope
 
 LayoutContext
   -> saved UI arrangement, active perspective lineage, open surfaces, docks,
-     and active watchlist/filter state
+     and active Cohort/filter state
 ```
 
-The right watchlist sidebar is therefore more than a passive roster. It is the
-active working-set selector for many Wardian tasks. Layout v2 should let a
-layout context remember the active watchlist, visible teams, collapsed team
-state, and selection where appropriate. A command-center layout for "Frontend
-Ops" can share the same perspective definition as "Review Lane" while using a
-different watchlist and different open surfaces.
+The right roster sidebar is therefore more than a passive list. It is the active
+working-set selector for many Wardian tasks. Layout v2 should let a Site
+remember the active Cohort, visible teams, and collapsed team state. It
+should not persist selected agents, focused surface, or generic scroll state in
+the first slice; selected agents and focus are intertwined interaction state,
+while scroll restoration is extra complexity unless tied to a specific surface
+such as a terminal or file viewer.
 
-This also clarifies a limitation of watchlists: they organize agents, not the
+A Site for "Frontend Ops" can share the same perspective definition as "Review
+Lane" while using a different Cohort and different open surfaces.
+
+Switching Cohorts should be seamless. It should filter what is shown and
+targetable, not turn agents on or off, pause sessions, hide provider state from
+the backend, or destroy terminal surfaces. For v2, switching between
+substantially different working sets should usually switch the whole Site:
+the active Cohort, open surfaces, docks, and perspective lineage move
+together. This makes "Frontend Ops" and "Review Lane" feel like separate
+operating setups rather than one layout with a temporary filter applied.
+
+This also clarifies a limitation of Cohorts: they organize agents, not the
 entire UI. They do not by themselves remember splits, open files, browser state,
-queue surfaces, or dock configuration. Layout contexts fill that gap without
-stealing the name or role of agent workspaces.
+queue surfaces, or dock configuration. Sites fill that gap without stealing
+the name or role of agent workspaces.
 
-### 5. Auxiliary Panels
+Garden should use the same distinction. The all-agents Garden is the Habitat
+overview: multiple Sites visible, with Cohorts arranged around or inside each
+Site. A Cohort-focused Garden opens the one active Site for that Cohort and
+shows the local surfaces, queue, files, terminals, and state for focused work.
+
+### 5. Site Persistence Boundary
+
+A Site should remember the parts of the operating setup that make switching
+between working sets feel seamless:
+
+```text
+Site remembers:
+  - base perspective definition
+  - surface canvas tree
+  - open surface views and their surface-owned state
+  - shell region and dock sizes/collapsed state
+  - promoted auxiliary panels
+  - active Cohort
+  - visible teams and collapsed team state
+  - user pins relevant to the Site
+```
+
+A Site should not remember these in the first slice:
+
+```text
+Site does not remember:
+  - selected agents
+  - focused surface
+  - generic page scroll state
+  - agent lifecycle state
+  - provider session ownership
+  - agent/project workspace identity
+```
+
+Selected agents and focused surface are tightly coupled interaction state; they
+can be recomputed from the active Cohort and currently visible surfaces.
+Scroll state should be owned only by specific surfaces that need it, such as
+file viewers, browser surfaces, and terminal surfaces. Agent lifecycle and
+workspace identity remain backend/provider concerns, not layout concerns.
+
+### 6. Auxiliary Panels
 
 Auxiliary panels are docked tools. They live in left, right, or bottom regions
 by default. They may be promoted into the main surface area later, but they are
@@ -218,7 +325,7 @@ AuxiliaryPanelType:
   - command-broadcast
   - class-manager
   - workflow-glance
-  - agent-watchlist
+  - agent-roster
   - queue-glance
   - terminal-drawer
 ```
@@ -232,14 +339,14 @@ Current mapping:
 - `CommandPanel` -> `command-broadcast`
 - `ClassManagerPanel` -> `class-manager`
 - `WorkflowsGlancePane` -> `workflow-glance`
-- `AgentWatchlist` -> `agent-watchlist`
+- `AgentWatchlist` -> `agent-roster`
 - `UserTerminalPanel` -> `terminal-drawer` by default
 
-The important correction is that the right agent watchlist is not a special
-main surface. It is an auxiliary panel, structurally comparable to the left
-side tools. It is more persistent because it is important for orientation.
+The important correction is that the right agent roster is not a special main
+surface. It is an auxiliary panel, structurally comparable to the left side
+tools. It is more persistent because it is important for orientation.
 
-### 6. Main Surface Area
+### 7. Main Surface Area
 
 Surfaces in the main surface area are the cmux/Obsidian-style work objects:
 movable, tabbable, splittable, restorable leaves inside the central surface
@@ -273,7 +380,7 @@ surface when the user needs more space or wants it beside another work object.
 For example:
 
 - Source control can be promoted beside a file viewer.
-- Agent watchlist can be promoted for triage or team comparison.
+- Agent roster can be promoted for triage or team comparison.
 - Queue can be promoted during action-needed review.
 - Workflow glance can be promoted into the full workflow workbench.
 
@@ -288,7 +395,7 @@ tabbed, split, saved, restored, and promoted according to their declared
 capabilities. They do not receive permanent global titlebar placement by
 default.
 
-### 7. Surface Modes and Regions
+### 8. Surface Modes and Regions
 
 Several current or proposed "surfaces" are better understood as modes or
 regions inside a larger surface.
@@ -361,6 +468,10 @@ GraphView
 QueueView
   -> queue-inbox surface or queue-inbox perspective
 
+GardenView
+  -> garden perspective containing habitat-canvas surface; all-agents mode
+     shows multiple Sites, Cohort mode opens one Site
+
 WorkflowsView
   -> workflows perspective containing workflow-workbench surface
 
@@ -374,7 +485,7 @@ GitPanel
   -> source-control auxiliary panel; opens file-viewer or diff modes
 
 AgentWatchlist
-  -> agent-watchlist auxiliary panel; opens or focuses agent-session surfaces
+  -> agent-roster auxiliary panel; opens or focuses agent-session surfaces
 
 UserTerminalPanel
   -> terminal-drawer auxiliary panel by default; can later become user-terminal surface
@@ -414,8 +525,10 @@ type SurfaceTreeTemplate = SurfaceTree;
 type LayoutContextState = {
   id: string;
   name: string;
+  label: "Site";
   base_perspective_id?: string;
-  active_watchlist_id?: string;
+  active_cohort_id?: string;
+  collapsed_team_ids?: string[];
   shell: ShellRegionState;
   surface_canvas: SurfaceTree;
 };
@@ -465,6 +578,8 @@ type SurfaceViewState =
 ## Design Rules
 
 - Perspectives define work arrangements; layout contexts hold live UI state.
+- The user-facing label for a layout context should be Site unless product
+  testing finds a clearer term.
 - Perspectives are templates and starting points, not necessarily mutually
   exclusive full-screen pages.
 - Auxiliary panels control, navigate, and inspect.
@@ -472,9 +587,17 @@ type SurfaceViewState =
 - Surface leaves own placement; surface views own content state.
 - Plugin surfaces get local surface tabs and splits by default. Global titlebar
   placement is user-pinned or core-curated, not automatic.
-- Home launches perspective definitions, recent layout contexts, saved layouts,
-  and plugin templates. It should not be a mandatory route between normal
-  tasks.
+- Home launches perspective definitions, recent Sites, saved layouts, and
+  plugin templates. It should not be a mandatory route between normal tasks.
+- Sites remember active Cohort and collapsed team state. They should
+  not persist selected agents, focused surface, or generic scroll state in the
+  first slice.
+- Cohort switching filters visible/targetable agents. It must not turn
+  agents on/off or mutate provider lifecycle state.
+- Switching between materially different working sets should usually switch the
+  whole Site, not only apply a temporary cohort filter.
+- Garden can render an all-agents Habitat view as multiple Sites arranged with
+  their Cohorts, while a Cohort-focused Garden opens one Site.
 - Multiple "perspectives" side by side should initially mean surfaces from
   different perspective definitions living in one surface tree.
 - Agent terminal/chat/transcript are modes or regions of an `agent-session`
@@ -492,21 +615,27 @@ type SurfaceViewState =
   independently from view content.
 - **Positive:** Avoids treating current main views, side panels, and
   presentation modes as the same object.
-- **Positive:** Keeps the current dense command-center shell recognizable while
+- **Positive:** Keeps the current dense multi-agent shell recognizable while
   creating a path toward more malleable layouts.
 - **Positive:** Allows Garden and Queue, or a plugin workbench and an agent
   session, to sit side by side without inventing nested global modes.
 - **Positive:** Gives plugins meaningful layout participation without letting
   plugin count overwhelm the global titlebar.
+- **Positive:** Preserves the current roster/sidebar strength by treating
+  Cohorts as Wardian's agent working-set selector.
+- **Positive:** Gives Garden a clear ecological structure: Habitat overview,
+  Sites as places, and Cohorts as situated agent groups.
 - **Negative:** Requires a model migration from `viewMode` and the existing
   `useLayoutStore` shape.
+- **Negative:** Renaming Watchlists to Cohorts requires careful migration,
+  docs updates, and backwards-compatible persisted state handling.
 - **Negative:** Some current views may need to split into perspective,
   auxiliary-panel, and surface implementations.
 - **Negative:** A real `file-viewer` and browser surface require stronger
   lifecycle, focus, and persistence handling than placeholder panels.
 - **Negative:** Introduces more vocabulary. Product copy and developer APIs
   must make the difference between perspective, layout context, agent
-  workspace, watchlist, panel, surface, and mode obvious.
+  workspace, Site, Cohort, panel, surface, and mode obvious.
 - **Negative:** Plugin contribution governance becomes part of the layout
   system; otherwise plugins can degrade navigation quality.
 
@@ -591,13 +720,21 @@ splitting, tabbing, promoting, and restoring surfaces, and screenshot evidence
 for the changed navigation states. Native tests become necessary once terminal
 or provider session lifecycle claims are part of the change.
 
+Existing Watchlist persistence should migrate into Cohort language without
+breaking stored data or CLI compatibility. The implementation can keep legacy
+field names internally for one migration slice if needed, but the v2 UI should
+not continue exposing Watchlist as the product term.
+
 ## Open Questions
 
-- Which first slice proves the model best: command-center layout context,
-  workflows workbench, or agent-graph plus queue side-by-side?
-- What should Home contain in v2: pinned perspectives only, recent layout
-  contexts, active agent sessions, saved layouts, plugin templates, or all of
-  these?
+- Which first slice proves the model best: command-center Site, workflows
+  workbench, or agent-graph plus queue side-by-side?
+- What should Home contain in v2: pinned perspectives only, recent Sites,
+  active agent sessions, saved layouts, plugin templates, or all of these?
+- Is Site the right user-facing term for `LayoutContext`, or should the product
+  test Habitat, Plot, or another ecological label before implementation?
+- Should every Cohort switch restore a Site, or should Wardian also support
+  lightweight temporary Cohort filtering within the current Site?
 - Which titlebar entries should be pinned by default after migrating from the
   current global view tabs?
 - Should `user-terminal` remain bottom-dock-only for v2, or become a main
