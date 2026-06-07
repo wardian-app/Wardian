@@ -19,6 +19,7 @@ Last reviewed: 2026-06-07.
 | [cmux](./cmux-surface-model.md) | Multi-agent coding sessions and terminals. | Unified panels inside split/tab workspaces. | Treat terminal, browser, file, markdown, and agent surfaces as peers behind one panel protocol. |
 | [Obsidian](./obsidian-draggable-workspace.md) | Markdown files and plugin views. | Workspace leaves inside splits, side docks, tabs, and pop-out windows. | Separate durable layout slots from view state so panes can move without each view owning layout logic. |
 | [VS Code](./vscode-workbench-layout.md) | Code files and extension views. | Editor groups plus constrained workbench regions. | Use stable placement zones and registry services to make customization predictable rather than unbounded. |
+| [JupyterLab](./jupyterlab-computational-workspace.md) | Notebooks, kernels, terminals, and computational documents. | Lumino widgets inside named shell areas and a restorable dock panel. | Use command-created, context-bound surfaces with plugin-owned restoration and shell-owned placement. |
 | [Blender](./blender-workspace-area.md) | Scene/object work and task workspaces. | Screen areas hosting registered editor types and regions. | Make the manipulable unit a durable surface area with internal regions, not arbitrary floating components. |
 
 ## Cross-System Pattern
@@ -29,6 +30,7 @@ choose a durable workspace primitive and make that primitive feel physical:
 - cmux: panel/surface.
 - Obsidian: workspace leaf.
 - VS Code: editor group or contributed view.
+- JupyterLab: shell widget or document widget.
 - Blender: editor area.
 
 Across the four systems, the useful design pattern for Wardian is:
