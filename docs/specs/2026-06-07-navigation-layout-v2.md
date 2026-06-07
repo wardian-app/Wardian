@@ -45,9 +45,9 @@ concepts:
 
 ```text
 PerspectiveDefinition
-  -> creates or updates a LayoutContext
+  -> creates or updates a Site
 
-LayoutContext
+Site
   -> owns ShellRegions and a SurfaceCanvas
 
 SurfaceCanvas
@@ -60,42 +60,68 @@ SurfaceView
   -> owns SurfaceModes and SurfaceRegions
 ```
 
-Internal model names and product labels do not need to be identical. The
-recommended user-facing term for `LayoutContext` is **Site**:
-
-```text
-LayoutContext     // internal/API term
-Site              // product label
-```
-
-A Site is a saved operating place inside Wardian's Habitat: active perspective
-lineage, surface canvas, dock state, and active Cohort. This keeps the
-ecological theme at the product level while avoiding the overloaded `workspace`
-term, which already means the project path or worktree used by an
-agent/provider.
-
-The broader hierarchy should be:
+A **Site** is a saved operating place inside Wardian's Habitat: active
+perspective lineage, surface canvas, dock state, and active Cohort. It should
+be the product term and the internal domain term. Earlier drafts used
+`LayoutContext`; v2 should use `Site` in product copy, APIs, stores, persisted
+schema, and command handles to avoid unnecessary translation.
 
 ```text
 Habitat
-  -> whole Wardian environment
-
-Garden
-  -> spatial overview of the Habitat
+  -> whole Wardian environment and primitive graph
 
 Site
   -> saved/focused operating place inside the Habitat
 
 Cohort
-  -> group of agents associated with or currently occupying a Site
+  -> reusable group of agents associated with or currently occupying a Site
 
 Surface
   -> movable work object inside a Site
+
+Perspective
+  -> specialized way of viewing and working with Habitat primitives
 ```
 
-This makes Garden cleaner: an all-agents Garden can show multiple Sites, each
-with Cohorts arranged around or inside them. A Cohort-focused Garden can open a
-single Site for focused work.
+Garden is not a hierarchy parent. It is the core Wardian perspective over the
+Habitat primitive graph. It can show all major primitive types together and
+their relationships, including agents, Sites, Cohorts, skills, prompts, MCPs,
+classes, workflows, events, files/artifacts, memories, telemetry, and provider
+state. It is also an operating surface: users should be able to directly
+arrange, inspect, connect, and route work from it.
+
+```text
+Garden perspective
+  -> all Habitat primitives and relationships
+
+Agents perspective
+  -> agents; current Grid behavior becomes its default layout mode
+
+Dashboard perspective
+  -> aggregate telemetry, health, and status across agents, providers, runs,
+     and events
+
+Graph perspective
+  -> agent communication and rule topology: who can talk to whom, through what
+     channels, and under what constraints
+
+Queue perspective
+  -> events/signals/actions
+
+Library perspective
+  -> skills, prompts, MCPs, classes, workflows, and reusable catalog objects
+```
+
+This makes Garden cleaner: an all-Habitat Garden can show multiple Sites, each
+with Cohorts arranged around or inside them. A Cohort-focused Garden can focus
+one Site for work. Queue remains a perspective, not a primitive or an inbox;
+the underlying primitives are events/signals/actions.
+
+Garden and Graph are separate perspectives. Garden is the spatial operating
+view of the Habitat: where agents, Sites, Cohorts, reusable primitives,
+artifacts, events, telemetry, memories, and provider/runtime state become
+inspectable and movable. Graph is narrower: it focuses on communication,
+dependency, and rule topology between agents and related primitives.
 
 Alternatives considered:
 
@@ -107,6 +133,16 @@ Alternatives considered:
   layout.
 - `Deck`: tactile, but can imply cards/trading and is less obvious than
   Site.
+
+The internal namespace for this layer should be **HabitatLayout**, not
+`LayoutV2`. `HabitatLayout` names the UI arrangement layer for Sites,
+perspectives, surfaces, docks, and Cohort focus. It does not own agent
+lifecycle, provider state, project workspaces, or the full Habitat primitive
+graph.
+
+The system should use **Extensions** consistently for third-party or optional
+contributions. Do not split product and internal naming into separate terms
+unless a low-level package format absolutely requires it.
 
 ### 1. Shell Regions
 
@@ -135,13 +171,13 @@ level. Today they differ by product role, not by layout type:
 
 Perspectives replace the current titlebar `viewMode` concept, but they should
 not become a larger set of mutually exclusive global pages. A perspective is a
-definition or template: a saved, predefined, plugin-contributed, or user-created
+definition or template: a saved, predefined, extension-contributed, or user-created
 arrangement of shell regions, auxiliary panels, and central surfaces.
 
-The live object is the layout context. A layout context may be created from a
-perspective definition, may keep a base perspective identity for orientation,
-and may then diverge as the user opens surfaces, splits leaves, promotes panels,
-switches Cohorts, and pins tools.
+The live object is the Site. A Site may be created from a perspective
+definition, may keep a base perspective identity for orientation, and may then
+diverge as the user opens surfaces, splits leaves, switches Cohorts, and pins
+tools.
 
 Do not call this object a workspace. In Wardian, an agent workspace already
 means the target project directory or worktree where the provider runs.
@@ -152,11 +188,11 @@ working on disk" and "how the user has arranged the command-center UI."
 PerspectiveDefinition
   -> describes the kind of work and default layout
 
-LayoutContext
+Site
   -> live/saved UI context created from or associated with a perspective
 
 SurfaceTree
-  -> actual split/tab graph inside the layout context
+  -> actual split/tab graph inside the Site
 ```
 
 Current main views map first to perspective definitions, not directly to
@@ -164,59 +200,104 @@ primitive surface types:
 
 ```text
 PerspectiveDefinition:
-  - command-center      // current grid/dashboard lineage
-  - agent-graph         // current graph view
-  - queue-inbox         // current queue view
+  - agents              // current grid lineage; specializes in agents
+  - dashboard           // current dashboard view; telemetry/status/health
+  - graph               // current graph view; communication/rule topology
+  - queue               // current queue view; specializes in events/signals
   - workflows           // current workflows view
   - library             // current library view
-  - garden              // future habitat mode
-  - plugin-defined      // plugin-contributed templates
+  - garden              // core habitat graph perspective
+  - extension-defined   // extension-contributed perspectives
 ```
 
-The titlebar should eventually show the current Site and expose a small pinned
-set of perspectives or saved Sites. It should not list
-every main view, every plugin, or every open work object.
+The titlebar/top tab area should show open surfaces in the active Site, not a
+second set of launcher tabs. Perspective discovery belongs in Home/New Surface
+and quick open.
 
-### 3. Perspective Navigation Models
+### 3. Navigation Model
 
-Wardian should support several ways to reach a perspective instead of choosing
-one global navigation primitive.
+Wardian should use an Obsidian/JupyterLab-style model: tabs represent open
+surfaces inside the active Site. Perspectives can open as surfaces, but the
+top bar is not a fixed list of global perspective launchers.
 
 ```text
-Home / start surface
-  -> launch perspective definitions, recent Sites, saved layouts, and
-     plugin templates
+Startup
+  -> restore the last active Site; first-run behavior can use Home later
 
-Titlebar
-  -> show current Site, a small pinned set, overflow, and quick switching
+Right sidebar
+  -> switch Cohorts/Sites
 
-Command palette / quick open
-  -> open or focus any perspective, Site, surface, panel, or command
+Top tabs
+  -> open surfaces and perspective-surfaces in the active Site
+
++ tab
+  -> open Home/New Surface picker
+
+Home/New Surface
+  -> choose a perspective, surface type, or extension contribution
 
 Surface tabs and splits
   -> manage the open work objects inside the active Site
+
+Command palette / quick open
+  -> open or focus any perspective, Site, surface, panel, or command
 ```
 
 The current global topbar tabs are useful for a small fixed product, but they
-scale poorly once plugins can contribute surfaces and templates. A Home view is
-useful as a launcher, especially for empty states and saved layouts, but it
-should not become a mandatory hub that users must pass through during normal
-work.
+scale poorly once extensions can contribute surfaces and perspectives. Home
+should not become a mandatory hub that users pass through during normal work.
+It is a first-run, empty-Site, recovery, and new-surface picker.
 
 Recommended model:
 
 ```text
-Home answers:       what kind of work do I want to start?
-Titlebar answers:   which Site am I in?
-Surface tabs answer: which work objects are open here?
-Quick open answers: where can I jump immediately?
+Right sidebar answers: which Cohort/Site am I working in?
+Top tabs answer:      which surfaces are open in this Site?
++ / Home answers:     what should this new tab become?
+Quick open answers:   where can I jump immediately?
 ```
 
-This makes plugins more malleable without giving every plugin a permanent
-global tab. Plugins can contribute surface types, auxiliary panel types,
-commands, perspective definitions, and suggested default placements. Users can
-pin plugin perspectives, plugin surfaces, or saved plugin-heavy Sites into
-the titlebar or Home.
+The `+` picker should group entries by kind:
+
+```text
+Perspectives
+  - Garden
+  - Agents
+  - Dashboard
+  - Graph
+  - Queue
+  - Library
+  - Workflows
+
+Surfaces
+  - Agent session
+  - File
+  - Terminal
+  - Browser
+
+Extensions
+  - extension-contributed perspectives and surfaces
+```
+
+Do not include auxiliary panels such as Source Control or Extensions in the
+default surface picker. They live in the left dock and route users into central
+work surfaces.
+
+The target tab model is central pane-local tabs:
+
+```text
+SurfaceCanvas
+  -> split panes
+    -> each pane owns a local tab stack
+    -> tabs can move between central panes
+    -> tabs can split left/right/up/down
+```
+
+An early epic child issue may start with one central tab stack. Later child
+issues should add split panes and pane-local tabs. Wardian should not initially
+allow arbitrary tab movement into the left, right, or bottom docks; those docks
+remain auxiliary regions. Auxiliary panels route to central work surfaces rather
+than moving wholesale into the surface canvas.
 
 ### 4. Cohorts as Working Sets
 
@@ -241,16 +322,16 @@ AgentWorkspace
 Cohort / Team
   -> durable agent working set and targeting scope
 
-LayoutContext
+Site
   -> saved UI arrangement, active perspective lineage, open surfaces, docks,
      and active Cohort/filter state
 ```
 
 The right roster sidebar is therefore more than a passive list. It is the active
-working-set selector for many Wardian tasks. Layout v2 should let a Site
+working-set selector for many Wardian tasks. HabitatLayout should let a Site
 remember the active Cohort, visible teams, and collapsed team state. It
 should not persist selected agents, focused surface, or generic scroll state in
-the first slice; selected agents and focus are intertwined interaction state,
+the initial HabitatLayout work; selected agents and focus are intertwined interaction state,
 while scroll restoration is extra complexity unless tied to a specific surface
 such as a terminal or file viewer.
 
@@ -275,7 +356,49 @@ overview: multiple Sites visible, with Cohorts arranged around or inside each
 Site. A Cohort-focused Garden opens the one active Site for that Cohort and
 shows the local surfaces, queue, files, terminals, and state for focused work.
 
-### 5. Site Persistence Boundary
+### 5. Garden Operating Model
+
+Garden is both a perspective and an operating surface. It spatially shows the
+full Habitat plan:
+
+- agents
+- Sites
+- Cohorts
+- skills
+- prompts
+- MCPs
+- classes
+- workflows
+- files/artifacts
+- events/signals
+- telemetry
+- memories
+- provider/runtime state
+
+Sites should appear as containers or regions, not only as nodes. Cohorts and
+agents can be arranged inside or around Sites.
+
+Garden interactions should feel closer to a canvas or strategy game than a
+configuration form:
+
+- drag agents into Sites or Cohorts
+- rearrange Cohort placement
+- connect or inspect relationships
+- open related surfaces
+- trigger simple contextual actions
+- visually monitor state
+
+Detailed configuration stays in dedicated panels and surfaces such as Agent
+Config, Extensions, and Library editors. Garden should expose direct,
+spatially meaningful actions, not replace every specialized editor.
+
+Garden should not show raw terminal/session content by default. Agent nodes can
+show compact live summaries, latest status/thought/event, and attention
+markers. A focused agent can show a richer preview when useful, but full
+terminal, chat, transcript, or session inspection should open an `agent-session`
+surface in the Site.
+
+### 6. Site Persistence Boundary
 
 A Site should remember the parts of the operating setup that make switching
 between working sets feel seamless:
@@ -286,13 +409,12 @@ Site remembers:
   - surface canvas tree
   - open surface views and their surface-owned state
   - shell region and dock sizes/collapsed state
-  - promoted auxiliary panels
   - active Cohort
   - visible teams and collapsed team state
   - user pins relevant to the Site
 ```
 
-A Site should not remember these in the first slice:
+A Site should not remember these in the initial HabitatLayout work:
 
 ```text
 Site does not remember:
@@ -310,11 +432,65 @@ Scroll state should be owned only by specific surfaces that need it, such as
 file viewers, browser surfaces, and terminal surfaces. Agent lifecycle and
 workspace identity remain backend/provider concerns, not layout concerns.
 
-### 6. Auxiliary Panels
+### 7. Recovery and Reset
+
+HabitatLayout should recover to continuity first and reset only on explicit
+user action. Normal startup restores the last active Site. Home/New Surface is
+the fallback when there is no valid last Site, when the first Site has not been
+created, or when saved layout state cannot be restored cleanly.
+
+Recovery must be non-destructive to runtime state. A broken layout should not
+kill agents, stop PTYs, delete provider sessions, clear events, remove
+workspaces, or mutate Cohorts. It should only affect the view arrangement unless
+the user invokes a separate lifecycle command.
+
+The reset model should be scoped:
+
+```text
+Reset surface view
+  -> restore one surface's view-owned state
+  -> does not destroy backend/runtime state
+
+Close surface
+  -> remove one tab/leaf from the Site
+  -> does not kill an agent, PTY, browser session, or provider session
+
+Reset pane layout
+  -> collapse splits and tab stacks to the active pane or perspective default
+  -> preserve recoverable open surfaces in a simple tab stack
+
+Reset Site
+  -> restore shell regions, docks, and surface canvas from the base perspective
+  -> preserve active Cohort unless the user explicitly changes it
+
+Create fresh Site
+  -> start from a perspective definition and active Cohort
+  -> leave the previous Site intact
+
+Reset HabitatLayout
+  -> clear saved Sites, dock state, pins, and layout snapshots
+  -> preserve agents, Cohorts, project workspaces, provider state, and Habitat
+     primitives
+```
+
+If a saved Site references a missing surface type, disabled extension,
+unavailable perspective, or invalid split tree, Wardian should show a recovery
+placeholder instead of silently dropping the entry. The user should be able to
+close the broken surface, reset the Site, open Home/New Surface, or inspect the
+saved layout state on disk.
+
+HabitatLayout should keep enough versioned state to recover from bad migrations
+and partial writes. A future implementation can keep a last-known-good snapshot
+or transaction log, but the product contract is simpler: the app should always
+offer a usable Home/New Surface fallback and should never make users choose
+between opening Wardian and preserving their agents.
+
+### 8. Auxiliary Panels and Surface Routing
 
 Auxiliary panels are docked tools. They live in left, right, or bottom regions
-by default. They may be promoted into the main surface area later, but they are
-not primary main surfaces by default.
+by default. They open or focus central work surfaces, but they are not primary
+main surfaces by default. The initial HabitatLayout epic should not support
+dragging whole auxiliary panels into the main surface area.
 
 ```text
 AuxiliaryPanelType:
@@ -323,8 +499,8 @@ AuxiliaryPanelType:
   - agent-config
   - spawn-agent
   - command-broadcast
-  - class-manager
   - workflow-glance
+  - extensions
   - agent-roster
   - queue-glance
   - terminal-drawer
@@ -337,8 +513,8 @@ Current mapping:
 - `ConfigureAgentPanel` and `SpawnAgentPanel` -> `agent-config` /
   `spawn-agent`
 - `CommandPanel` -> `command-broadcast`
-- `ClassManagerPanel` -> `class-manager`
 - `WorkflowsGlancePane` -> `workflow-glance`
+- Extensions panel -> `extensions`
 - `AgentWatchlist` -> `agent-roster`
 - `UserTerminalPanel` -> `terminal-drawer` by default
 
@@ -346,7 +522,40 @@ The important correction is that the right agent roster is not a special main
 surface. It is an auxiliary panel, structurally comparable to the left side
 tools. It is more persistent because it is important for orientation.
 
-### 7. Main Surface Area
+Auxiliary panel routing should open work objects, not whole panels:
+
+```text
+Explorer
+  -> opens file-viewer surfaces
+
+Source Control
+  -> opens diff / file-review surfaces
+
+Agent Roster
+  -> opens agent-session surfaces
+  -> may open or focus Agents perspective for the active Cohort
+
+Queue Glance
+  -> opens or focuses Queue perspective surface
+
+Workflow Glance
+  -> opens workflow monitor, workflow runs, or workflow editor surfaces
+
+Extensions
+  -> opens extension-contributed surfaces
+  -> Extensions manager remains in the left dock
+
+Command Broadcast
+  -> targets active Cohort or selected agents; no central surface by default
+
+Agent Config / Spawn
+  -> panel/dialog flow; no central surface by default
+
+Class Manager
+  -> folds into Library; opens class catalog/editor surfaces through Library
+```
+
+### 9. Main Surface Area
 
 Surfaces in the main surface area are the cmux/Obsidian-style work objects:
 movable, tabbable, splittable, restorable leaves inside the central surface
@@ -370,32 +579,21 @@ SurfaceType:
   - agent-graph
   - habitat-canvas
   - library-browser
-  - queue-inbox
-  - plugin-surface
-  - promoted-panel
+  - queue
+  - extension-surface
 ```
 
-Promotion is explicit. A left or right auxiliary panel can become a main
-surface when the user needs more space or wants it beside another work object.
-For example:
-
-- Source control can be promoted beside a file viewer.
-- Agent roster can be promoted for triage or team comparison.
-- Queue can be promoted during action-needed review.
-- Workflow glance can be promoted into the full workflow workbench.
-
 Garden and Queue side by side should initially be represented as two surfaces
-in the same `SurfaceTree`, for example `habitat-canvas` beside `queue-inbox`.
-It should not require nested perspectives in the first implementation. A future
-`PerspectiveInstance` container could support that, but it should be deferred
-until the simpler surface-tree model proves insufficient.
+in the same `SurfaceTree`, for example `habitat-canvas` beside `queue`.
+It should not require nested perspectives in the initial HabitatLayout epic. A
+future `PerspectiveInstance` container could support that, but it should be
+deferred until the simpler surface-tree model proves insufficient.
 
-Plugin surfaces should behave like local work objects. They can be opened,
-tabbed, split, saved, restored, and promoted according to their declared
-capabilities. They do not receive permanent global titlebar placement by
-default.
+Extension surfaces should behave like local work objects. They can be opened,
+tabbed, split, saved, and restored according to their declared capabilities.
+They do not receive permanent global titlebar placement by default.
 
-### 8. Surface Modes and Regions
+### 10. Surface Modes and Regions
 
 Several current or proposed "surfaces" are better understood as modes or
 regions inside a larger surface.
@@ -457,20 +655,24 @@ FileViewerSurface:
 
 ```text
 GridView
-  -> command-center perspective containing agent-session surfaces
+  -> agents perspective containing agent-session surfaces; "grid" becomes a
+     layout mode, not the perspective name
 
 DashboardView
-  -> command-center overview mode, or later telemetry/agent-summary surface
+  -> dashboard perspective for aggregate telemetry, health, and status
 
 GraphView
-  -> agent-graph surface inside agent-graph perspective
+  -> graph perspective containing agent-graph surface; focuses on agent
+     communication, dependency, and rule topology
 
 QueueView
-  -> queue-inbox surface or queue-inbox perspective
+  -> queue perspective containing queue surface; specializes in events,
+     signals, and action-needed states
 
 GardenView
-  -> garden perspective containing habitat-canvas surface; all-agents mode
-     shows multiple Sites, Cohort mode opens one Site
+  -> garden perspective containing habitat-canvas surface; all-Habitat mode
+     shows primitives, Site regions, Cohorts, and live summaries, while
+     Cohort/Site modes focus spatial operation inside one Site
 
 WorkflowsView
   -> workflows perspective containing workflow-workbench surface
@@ -494,14 +696,14 @@ UserTerminalPanel
 ## Early Data Model Sketch
 
 The exact schema will need a follow-up implementation spec. The shape should
-separate perspective definitions, live layout contexts, docked panels, and
-central surface leaves.
+separate perspective definitions, live Sites, docked panels, and central
+surface leaves.
 
 ```ts
-type LayoutV2State = {
+type HabitatLayoutState = {
   version: 1;
-  active_layout_context_id: string;
-  layout_contexts: LayoutContextState[];
+  active_site_id: string;
+  sites: SiteState[];
   perspective_definitions: PerspectiveDefinition[];
   pinned_entries: PinnedNavigationEntry[];
 };
@@ -509,7 +711,7 @@ type LayoutV2State = {
 type PerspectiveDefinition = {
   id: string;
   name: string;
-  source: "core" | "plugin" | "user";
+  source: "core" | "extension" | "user";
   description?: string;
   template: PerspectiveTemplate;
 };
@@ -522,10 +724,9 @@ type PerspectiveTemplate = {
 
 type SurfaceTreeTemplate = SurfaceTree;
 
-type LayoutContextState = {
+type SiteState = {
   id: string;
   name: string;
-  label: "Site";
   base_perspective_id?: string;
   active_cohort_id?: string;
   collapsed_team_ids?: string[];
@@ -534,7 +735,7 @@ type LayoutContextState = {
 };
 
 type PinnedNavigationEntry =
-  | { type: "layout-context"; layout_context_id: string }
+  | { type: "site"; site_id: string }
   | { type: "perspective"; perspective_definition_id: string }
   | { type: "surface"; surface_view_id: string };
 
@@ -570,34 +771,59 @@ type SurfaceViewState =
   | AgentGraphSurfaceState
   | HabitatCanvasSurfaceState
   | LibraryBrowserSurfaceState
-  | QueueInboxSurfaceState
-  | PluginSurfaceState
-  | PromotedPanelSurfaceState;
+  | QueueSurfaceState
+  | ExtensionSurfaceState;
 ```
 
 ## Design Rules
 
-- Perspectives define work arrangements; layout contexts hold live UI state.
-- The user-facing label for a layout context should be Site unless product
-  testing finds a clearer term.
+- Perspectives define work arrangements; Sites hold live UI state.
 - Perspectives are templates and starting points, not necessarily mutually
   exclusive full-screen pages.
 - Auxiliary panels control, navigate, and inspect.
 - Surfaces are movable work objects.
 - Surface leaves own placement; surface views own content state.
-- Plugin surfaces get local surface tabs and splits by default. Global titlebar
-  placement is user-pinned or core-curated, not automatic.
-- Home launches perspective definitions, recent Sites, saved layouts, and
-  plugin templates. It should not be a mandatory route between normal tasks.
+- Runtime state belongs to backend/provider state, not tabs. Closing a surface
+  closes the view unless the user invokes an explicit lifecycle command.
+- Moving, splitting, or tabbing a surface is layout-only and must preserve
+  surface state according to its lifecycle policy.
+- Lifecycle policy attaches to concrete surface type or mode, not just to the
+  parent perspective.
+- Site layout changes should auto-save.
+- Startup restores the last active Site. Home/New Surface is the fallback for
+  first-run, empty-Site, and layout recovery states.
+- Recovery and reset are layout-scoped by default. They must not kill agents,
+  stop PTYs, delete provider sessions, clear events, remove workspaces, or
+  mutate Cohorts unless the user invokes an explicit lifecycle command.
+- Broken Sites and missing surface types should render recoverable placeholders
+  instead of being silently dropped from persisted state.
+- The top tab bar represents open surfaces in the active Site, not pinned
+  perspective launchers.
+- The target model is central pane-local tabs. An early epic child issue may
+  start with one central tab stack before adding split panes.
+- Home/New Surface launches perspective definitions, surface types, recent
+  Sites, and extension contributions. It should not be a mandatory route
+  between normal tasks.
+- Extensions live consistently under the Extension name. The Extensions panel
+  belongs in the left dock by default; extension-contributed surfaces can open
+  in the central surface canvas.
 - Sites remember active Cohort and collapsed team state. They should
   not persist selected agents, focused surface, or generic scroll state in the
-  first slice.
+  initial HabitatLayout work.
 - Cohort switching filters visible/targetable agents. It must not turn
   agents on/off or mutate provider lifecycle state.
 - Switching between materially different working sets should usually switch the
   whole Site, not only apply a temporary cohort filter.
 - Garden can render an all-agents Habitat view as multiple Sites arranged with
   their Cohorts, while a Cohort-focused Garden opens one Site.
+- Garden is a perspective and operating surface, not a parent container. It
+  should expose spatial actions while routing detailed editing to dedicated
+  panels or surfaces.
+- Garden shows Sites as containers/regions and should use compact agent
+  summaries by default; full chat, terminal, transcript, and session inspection
+  opens an `agent-session` surface.
+- Graph focuses on communication, dependency, and rule topology. It should not
+  become the full spatial Habitat view.
 - Multiple "perspectives" side by side should initially mean surfaces from
   different perspective definitions living in one surface tree.
 - Agent terminal/chat/transcript are modes or regions of an `agent-session`
@@ -617,14 +843,18 @@ type SurfaceViewState =
   presentation modes as the same object.
 - **Positive:** Keeps the current dense multi-agent shell recognizable while
   creating a path toward more malleable layouts.
-- **Positive:** Allows Garden and Queue, or a plugin workbench and an agent
+- **Positive:** Allows Garden and Queue, or an extension workbench and an agent
   session, to sit side by side without inventing nested global modes.
-- **Positive:** Gives plugins meaningful layout participation without letting
-  plugin count overwhelm the global titlebar.
+- **Positive:** Gives extensions meaningful layout participation without
+  letting extension count overwhelm the global titlebar.
+- **Positive:** Avoids duplicate top navigation by making the top tabs the
+  actual open surfaces, while Home/New Surface handles launching.
 - **Positive:** Preserves the current roster/sidebar strength by treating
   Cohorts as Wardian's agent working-set selector.
 - **Positive:** Gives Garden a clear ecological structure: Habitat overview,
   Sites as places, and Cohorts as situated agent groups.
+- **Positive:** Gives users a clear escape hatch from broken layouts without
+  conflating UI reset with runtime or workspace deletion.
 - **Negative:** Requires a model migration from `viewMode` and the existing
   `useLayoutStore` shape.
 - **Negative:** Renaming Watchlists to Cohorts requires careful migration,
@@ -634,28 +864,36 @@ type SurfaceViewState =
 - **Negative:** A real `file-viewer` and browser surface require stronger
   lifecycle, focus, and persistence handling than placeholder panels.
 - **Negative:** Introduces more vocabulary. Product copy and developer APIs
-  must make the difference between perspective, layout context, agent
-  workspace, Site, Cohort, panel, surface, and mode obvious.
-- **Negative:** Plugin contribution governance becomes part of the layout
-  system; otherwise plugins can degrade navigation quality.
+  must make the difference between perspective, Site, agent workspace, Cohort,
+  panel, surface, and mode obvious.
+- **Negative:** Extension contribution governance becomes part of the layout
+  system; otherwise extensions can degrade navigation quality.
 
 ## Additional Considerations
 
 ### Persistence and Migration
 
-Layout state should be versioned from the start. The first implementation can
-keep most state in the frontend store, but the schema should be backend-readable
-eventually so agents, CLI commands, and Markdown-backed project state can
-inspect open layout contexts and surface handles. Migration should map the
-existing `viewMode` values into core `PerspectiveDefinition` entries and likely
-turn the current topbar choices into default pinned entries.
+Layout state should be versioned from the start. The epic breakdown should
+decide whether early persistence stays frontend-only or starts
+backend-readable, but the schema should eventually be inspectable by agents,
+CLI commands, and Markdown-backed project state. Migration should map the
+existing `viewMode` values into core `PerspectiveDefinition` entries and
+convert the current topbar choices into perspective surfaces or Home/New
+Surface entries.
 
-### Plugin Boundaries
+### Deferred Extension Governance
 
-Plugins should declare what they contribute:
+Extension governance is out of scope for this exploratory spec. The current
+document only reserves the naming and placement boundary: Extensions can
+contribute surfaces, auxiliary panels, commands, perspective definitions, and
+suggested placements, but detailed contribution review, trust, versioning,
+permissioning, and marketplace behavior should be handled by a separate spec or
+epic.
+
+Extensions should declare what they contribute:
 
 ```text
-PluginContribution:
+ExtensionContribution:
   - surface type
   - auxiliary panel type
   - command
@@ -663,10 +901,10 @@ PluginContribution:
   - suggested default placement
 ```
 
-Core Wardian should validate contribution IDs, icons, labels, default placement,
-and persistence payloads. A plugin should not be able to silently reserve global
-navigation, override core perspectives, or store opaque layout state that cannot
-be migrated.
+Core Wardian should validate contribution IDs, icons, labels, default
+placement, and persistence payloads. An extension should not be able to
+silently reserve global navigation, override core perspectives, or store
+opaque layout state that cannot be migrated.
 
 ### Command and Addressing Model
 
@@ -675,7 +913,7 @@ palette actions, and future automation should be able to address:
 
 ```text
 workspace_id
-layout_context_id
+site_id
 surface_leaf_id
 surface_view_id
 auxiliary_panel_id
@@ -683,11 +921,11 @@ perspective_definition_id
 ```
 
 `workspace_id` or `workspace_path` should refer only to the agent/project
-workspace, never the UI layout context.
+workspace, never the UI Site.
 
 This is especially important for multi-agent workflows where an agent might
 open a file viewer, focus a running terminal, request a browser surface, or
-place a queue inbox beside the current session.
+place a Queue surface beside the current session.
 
 ### Surface Lifecycle and Fidelity
 
@@ -697,51 +935,113 @@ hidden tabs, background splits, suspended surfaces, restored PTYs, dirty files,
 and provider sessions. Smooth malleability will fail if moving a leaf destroys
 terminal scrollback, browser state, or file cursor state.
 
+Runtime ownership should stay with backend/provider state, not with tabs.
+Agents, PTYs, provider sessions, event streams, and agent workspaces continue
+to exist outside any particular surface. Closing a surface closes the view; it
+does not kill an agent, stop a PTY, delete an event, or destroy provider state
+unless the user invokes an explicit lifecycle command.
+
+Moving, splitting, or tabbing a surface is layout-only. It must preserve the
+surface's view state according to that surface's lifecycle policy. Site layout
+changes should auto-save so switching Sites feels continuous rather than
+document-like.
+
+Hidden heavy surfaces may suspend UI rendering, but their backend/runtime state
+must remain alive. This is especially important for terminals, agent sessions,
+browser sessions, and file edits.
+
+Lifecycle policy attaches to concrete surface types or modes, not only to a
+perspective:
+
+```text
+persistent-runtime
+  - agent-session
+  - user-terminal
+
+stateful-view
+  - browser
+  - file-viewer
+  - workflow-editor
+  - skill-editor
+  - prompt-editor
+  - class-editor
+  - mcp-editor
+
+recomputable-view
+  - garden
+  - agents overview
+  - dashboard
+  - graph
+  - queue
+  - library catalog
+  - workflow catalog
+  - workflow runs
+  - workflow monitor
+```
+
+Perspective surfaces are usually disposable/recomputable views over Habitat
+state. Editors are the exception: a Library or Workflows perspective can open
+stateful editor modes, but the catalog/monitor views themselves should be
+recomputed from durable state.
+
 ### Accessibility and Keyboard Use
 
 The v2 model needs keyboard-first navigation from the beginning: quick switcher,
 surface focus traversal, split movement, tab movement, dock toggles, and
-promotion/demotion commands. Surface tabs and dock selectors should map to real
-ARIA tab/menu patterns rather than custom click-only controls.
+surface-opening commands from auxiliary panels. Surface tabs and dock selectors
+should map to real ARIA tab/menu patterns rather than custom click-only
+controls.
 
 ### Responsive Layout
 
-Small screens should emphasize perspective/layout-context picking and one
-active surface at a time. Splits can collapse into tab stacks, side docks can
-become drawers, and Home can become more important as a launcher. The data
-model should survive these responsive transforms without creating a separate
-mobile layout concept.
+Small screens should emphasize perspective/Site picking and one active surface
+at a time. Splits can collapse into tab stacks, side docks can become drawers,
+and Home can become more important as a launcher. The data model should survive
+these responsive transforms without creating a separate mobile layout concept.
 
 ### Testing and Rollout
 
-The first implementation plan should include schema snapshot tests, migration
-tests from the existing layout store, browser E2E coverage for opening,
-splitting, tabbing, promoting, and restoring surfaces, and screenshot evidence
-for the changed navigation states. Native tests become necessary once terminal
-or provider session lifecycle claims are part of the change.
+The GitHub epic should cover the full HabitatLayout direction rather than a
+single narrow first slice. Child issues should still be staged, but the epic
+needs to preserve the end-to-end model: Sites, Cohorts, perspectives, central
+tabs/splits, auxiliary-panel routing, surface lifecycle, recovery/reset,
+migration, and testing.
+
+The implementation plan should include schema snapshot tests, migration tests
+from the existing layout store, browser E2E coverage for opening, splitting,
+tabbing, auxiliary-panel routing, resetting, and restoring surfaces, and
+screenshot evidence for the changed navigation states. Native tests become
+necessary once terminal or provider session lifecycle claims are part of the
+change.
 
 Existing Watchlist persistence should migrate into Cohort language without
 breaking stored data or CLI compatibility. The implementation can keep legacy
 field names internally for one migration slice if needed, but the v2 UI should
 not continue exposing Watchlist as the product term.
 
-## Open Questions
+## Epic Scoping Notes
 
-- Which first slice proves the model best: command-center Site, workflows
-  workbench, or agent-graph plus queue side-by-side?
-- What should Home contain in v2: pinned perspectives only, recent Sites,
-  active agent sessions, saved layouts, plugin templates, or all of these?
-- Is Site the right user-facing term for `LayoutContext`, or should the product
-  test Habitat, Plot, or another ecological label before implementation?
-- Should every Cohort switch restore a Site, or should Wardian also support
-  lightweight temporary Cohort filtering within the current Site?
-- Which titlebar entries should be pinned by default after migrating from the
-  current global view tabs?
-- Should `user-terminal` remain bottom-dock-only for v2, or become a main
-  surface immediately?
-- Which auxiliary panels should be promotable in the first slice?
-- Which plugin contribution types should be accepted first?
-- Are nested perspective instances worth supporting later, or should Wardian
-  keep all side-by-side composition at the surface-tree layer?
-- Should layout v2 persist only in frontend state for the first implementation,
-  or should it be backend-readable from the start?
+No major product-taxonomy questions remain in this exploratory spec. The next
+step is to scope the whole direction into a GitHub epic with staged child
+issues.
+
+The epic should turn these choices into implementation work:
+
+- define the `HabitatLayoutState`, `SiteState`, and migration path from current
+  `viewMode` and watchlist state
+- build Home/New Surface as the first-run, launcher, empty-Site, and recovery
+  fallback
+- replace global main-view tabs with open surface tabs inside the active Site
+- implement central surface tabs first, then split panes and pane-local tabs
+- route auxiliary panels into central surfaces without making panels draggable
+  in the first pass
+- implement Cohort-backed Site switching without mutating agent lifecycle
+- implement Garden as a spatial operating surface and Graph as communication
+  topology
+- implement recovery/reset scopes for surface view, pane layout, Site, and
+  HabitatLayout
+- decide whether `user-terminal` remains bottom-dock-first or becomes a main
+  surface during the epic breakdown
+- decide whether HabitatLayout persistence starts frontend-only or
+  backend-readable during the epic breakdown
+- defer detailed Extension governance to a separate spec/epic
