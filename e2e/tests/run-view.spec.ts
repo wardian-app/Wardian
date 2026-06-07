@@ -152,14 +152,14 @@ test("run view observes, scrubs, and inspects a failed run", async ({ page }) =>
   const nodeA = nodeById(page, "a");
   const nodeB = nodeById(page, "b");
 
-  await expect(nodeA).toContainText("completed");
-  await expect(nodeB).toContainText("failed");
+  await expect(nodeA.getByText("Completed")).toBeVisible();
+  await expect(nodeB.getByText("Failed")).toBeVisible();
   await expect(nodeA).toHaveAttribute("data-status", "completed");
   await expect(nodeB).toHaveAttribute("data-status", "failed");
 
   await scrubTo(page, 1);
-  await expect(nodeA).toContainText("running");
-  await expect(nodeB).toContainText("pending");
+  await expect(nodeA.getByText("Running")).toBeVisible();
+  await expect(nodeB.getByText("Pending")).toBeVisible();
   await expect(nodeA).toHaveAttribute("data-status", "running");
   await expect(nodeB).toHaveAttribute("data-status", "pending");
 
