@@ -1,6 +1,6 @@
 # Workflow CLI Verbs
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-29
 
 ## Context

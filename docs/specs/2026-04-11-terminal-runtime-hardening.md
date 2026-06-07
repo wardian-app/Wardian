@@ -1,6 +1,6 @@
 # Terminal Runtime Hardening
 
-* **Status:** Proposed
+* **Status:** Implemented
 * **Date:** 2026-04-09
 
 ## Context and Problem Statement

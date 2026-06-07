@@ -1,6 +1,6 @@
 # Explorer Filesystem Watch Refresh
 
-* **Status:** Proposed
+* **Status:** Implemented
 * **Date:** 2026-06-02
 
 ## Context

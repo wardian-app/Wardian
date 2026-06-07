@@ -1,6 +1,6 @@
 # Provider Readiness Gating
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-19
 
 ## Context and Problem Statement

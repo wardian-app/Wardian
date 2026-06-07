@@ -2,7 +2,7 @@
 
 Filename: `2026-05-21-pwa-remote-control-v1.md`
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-21
 
 ## Context and Problem Statement

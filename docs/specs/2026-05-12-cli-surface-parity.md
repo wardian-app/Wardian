@@ -1,6 +1,6 @@
 # CLI Surface Parity Matrix
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-12
 
 ## Context

@@ -1,6 +1,6 @@
 # Agent Delivery Transport
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-22
 
 ## Context and Problem Statement

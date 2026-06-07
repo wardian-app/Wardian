@@ -1,6 +1,6 @@
 # Old Workflow System Deletion (sub-project 6d) Design
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-30
 - **Part of:** [Workflow rework epic (#425)] — the FINAL parity-track step. Workflow reached parity across 6a (invoker foundation #456), 6b (schedule invoker #457), 6c (monitoring/schedule UI #458), and the 6b test cleanup (#459). 6d removes old workflow system; after it, the epic is complete.
 

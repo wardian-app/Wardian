@@ -1,6 +1,6 @@
 # Responsive Terminal Width
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-04-19
 
 ## Context and Problem Statement

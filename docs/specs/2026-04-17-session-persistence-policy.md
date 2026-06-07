@@ -1,6 +1,6 @@
 # Session Persistence Policy
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-04-17
 
 ## Context and Problem Statement

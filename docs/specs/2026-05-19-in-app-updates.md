@@ -1,6 +1,6 @@
 # In-App Updates
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-19
 
 ## Context and Problem Statement

@@ -1,6 +1,6 @@
 # Release Asset Cleanup
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-05-20
 
 ## Context
