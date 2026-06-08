@@ -65,6 +65,11 @@ export function shouldCollapseActivity(content: string): boolean {
   return countLines(content) > ACTIVITY_COLLAPSE_LINE_LIMIT || content.length > ACTIVITY_COLLAPSE_CHAR_LIMIT;
 }
 
+export function isGenericActivityTitle(title: string | null | undefined): boolean {
+  const normalized = title?.trim().toLowerCase();
+  return Boolean(normalized && GENERIC_TITLES.has(normalized));
+}
+
 export function classifyActivityLanguage(event: AgentChatEvent): string {
   if (event.language?.trim()) return normalizeLanguage(event.language);
 
@@ -101,7 +106,7 @@ export function toActivityBlock(event: AgentChatEvent): ActivityBlockModel {
 
 function activityTitle(event: AgentChatEvent): string {
   const title = event.title?.trim();
-  if (title && !GENERIC_TITLES.has(title.toLowerCase())) return title;
+  if (title && !isGenericActivityTitle(title)) return title;
   if (event.command?.trim()) return event.command.trim();
   if (event.kind === "message") return event.role ?? "message";
   if (title) return title.replace(/_/g, " ");
