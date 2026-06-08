@@ -4,7 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::{Arc, Mutex};
 
 use crate::control::{
-    InteractionBodyRef, InteractionKind, InteractionRecord, InteractionStatus,
+    DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
+    InteractionDeliveryAttemptRecord, InteractionKind, InteractionRecord, InteractionStatus,
     InteractionTriggerPolicy, ProviderInputReadiness, ProviderInputState, ProviderReadyEvidence,
     ReplyStatus, StructuredReply,
 };
@@ -134,6 +135,12 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(interaction_id) REFERENCES interactions(id)
         )",
         [],
+    )?;
+    ensure_column(
+        conn,
+        "interaction_delivery_attempts",
+        "transport",
+        "TEXT NOT NULL DEFAULT 'live_surface'",
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS interaction_events (
@@ -441,6 +448,135 @@ fn row_to_interaction_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Intera
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         completed_at: row.get(10)?,
+    })
+}
+
+pub fn upsert_interaction_delivery_attempt(
+    record: &InteractionDeliveryAttemptRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        upsert_interaction_delivery_attempt_with_conn(conn, record)?;
+        Ok(())
+    })
+}
+
+pub fn upsert_interaction_delivery_attempt_with_conn(
+    conn: &Connection,
+    record: &InteractionDeliveryAttemptRecord,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO interaction_delivery_attempts (
+            id,
+            interaction_id,
+            target_session_id,
+            transport,
+            generation,
+            runtime_state,
+            delivery_state,
+            delivery_phase,
+            observed_state,
+            reason,
+            error_code,
+            error_message,
+            created_at,
+            updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ON CONFLICT(id) DO UPDATE SET
+            transport = excluded.transport,
+            generation = excluded.generation,
+            runtime_state = excluded.runtime_state,
+            delivery_state = excluded.delivery_state,
+            delivery_phase = excluded.delivery_phase,
+            observed_state = excluded.observed_state,
+            reason = excluded.reason,
+            error_code = excluded.error_code,
+            error_message = excluded.error_message,
+            updated_at = excluded.updated_at",
+        params![
+            record.id,
+            record.interaction_id,
+            record.target_session_id,
+            enum_value(&record.transport)?,
+            record.generation as i64,
+            record.runtime_state,
+            record.delivery_state,
+            record.delivery_phase,
+            record.observed_state,
+            record.reason,
+            record.error.as_ref().map(|error| error.code.as_str()),
+            record.error.as_ref().map(|error| error.message.as_str()),
+            record.created_at,
+            record.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_interaction_delivery_attempts(
+    interaction_id: &str,
+) -> Result<Vec<InteractionDeliveryAttemptRecord>, Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        Ok(list_interaction_delivery_attempts_with_conn(
+            conn,
+            interaction_id,
+        )?)
+    })
+}
+
+pub fn list_interaction_delivery_attempts_with_conn(
+    conn: &Connection,
+    interaction_id: &str,
+) -> rusqlite::Result<Vec<InteractionDeliveryAttemptRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            id,
+            interaction_id,
+            target_session_id,
+            transport,
+            generation,
+            runtime_state,
+            delivery_state,
+            delivery_phase,
+            observed_state,
+            reason,
+            error_code,
+            error_message,
+            created_at,
+            updated_at
+         FROM interaction_delivery_attempts
+         WHERE interaction_id = ?1
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![interaction_id], row_to_delivery_attempt)?;
+    rows.collect()
+}
+
+fn row_to_delivery_attempt(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<InteractionDeliveryAttemptRecord> {
+    let transport: String = row.get(3)?;
+    let error_code: Option<String> = row.get(10)?;
+    let error_message: Option<String> = row.get(11)?;
+    let error = error_code.map(|code| DeliveryErrorDetail {
+        message: error_message.unwrap_or_else(|| code.clone()),
+        code,
+    });
+
+    Ok(InteractionDeliveryAttemptRecord {
+        id: row.get(0)?,
+        interaction_id: row.get(1)?,
+        target_session_id: row.get(2)?,
+        transport: enum_from_value::<DeliveryTransportKind>(&transport)?,
+        generation: row.get::<_, i64>(4)?.max(0) as u64,
+        runtime_state: row.get(5)?,
+        delivery_state: row.get(6)?,
+        delivery_phase: row.get(7)?,
+        observed_state: row.get(8)?,
+        reason: row.get(9)?,
+        error,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -919,5 +1055,49 @@ mod interaction_tests {
                 .unwrap();
             assert_eq!(count, 1, "{table} should exist");
         }
+    }
+
+    #[test]
+    fn delivery_attempt_round_trips_with_transport() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        init_db_at_path(&temp.path().join("state.db")).expect("init db");
+        let interaction = InteractionRecord {
+            id: "int_attempt_parent".to_string(),
+            kind: InteractionKind::Message,
+            sender_session_id: None,
+            target_session_ids: vec!["agent-1".to_string()],
+            status: InteractionStatus::Delivering,
+            trigger_policy: InteractionTriggerPolicy::StartTurn,
+            body_ref: InteractionBodyRef::Inline {
+                body: "hello".to_string(),
+            },
+            parent_interaction_id: None,
+            created_at: "2026-06-07T00:00:00.000Z".to_string(),
+            updated_at: "2026-06-07T00:00:00.000Z".to_string(),
+            completed_at: None,
+        };
+        upsert_interaction_record(&interaction).expect("insert interaction");
+
+        let attempt = InteractionDeliveryAttemptRecord {
+            id: "attempt_1".to_string(),
+            interaction_id: interaction.id.clone(),
+            target_session_id: "agent-1".to_string(),
+            transport: DeliveryTransportKind::LiveSurface,
+            generation: 1,
+            runtime_state: "live_pty_available".to_string(),
+            delivery_state: "submit_sent_unconfirmed".to_string(),
+            delivery_phase: Some("submit_key_sent".to_string()),
+            observed_state: Some("bytes_sent".to_string()),
+            reason: None,
+            error: None,
+            created_at: "2026-06-07T00:00:00.000Z".to_string(),
+            updated_at: "2026-06-07T00:00:00.000Z".to_string(),
+        };
+        upsert_interaction_delivery_attempt(&attempt).expect("insert attempt");
+
+        let attempts =
+            list_interaction_delivery_attempts(&interaction.id).expect("list delivery attempts");
+
+        assert_eq!(attempts, vec![attempt]);
     }
 }

@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use crate::workflow::{
     resolve::AgentBinding,
-    runner::{HeadlessAgentRunner, TauriLiveAgentRunner},
+    runner::{HeadlessAgentRunner, TauriHeadlessAgentRunner, TauriLiveAgentRunner},
     LiveStepExecutor,
 };
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,7 @@ pub fn live_executor_with_catalog_and_app(
     agent_catalog: HashMap<String, AgentBinding>,
 ) -> LiveStepExecutor {
     LiveStepExecutor::new_with_live_runner(
-        Arc::new(HeadlessAgentRunner),
+        Arc::new(TauriHeadlessAgentRunner::new(app.clone())),
         Some(Arc::new(TauriLiveAgentRunner::new(app))),
         workspace,
         default_provider,
@@ -179,7 +179,7 @@ pub fn live_executor_with_catalog_assignments_and_app(
     agent_catalog: HashMap<String, AgentBinding>,
 ) -> LiveStepExecutor {
     LiveStepExecutor::new_with_assignments_and_live_runner(
-        Arc::new(HeadlessAgentRunner),
+        Arc::new(TauriHeadlessAgentRunner::new(app.clone())),
         Some(Arc::new(TauriLiveAgentRunner::new(app))),
         workspace,
         default_provider,

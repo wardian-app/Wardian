@@ -3,6 +3,8 @@ use std::fmt;
 use std::future::Future;
 use tokio::sync::mpsc::Sender;
 
+pub const DELIVERY_STATE_SUBMIT_SENT_UNCONFIRMED: &str = "submit_sent_unconfirmed";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadKind {
     Literal,
@@ -135,7 +137,7 @@ where
     })?;
 
     Ok(TerminalDeliveryOutcome {
-        delivery_state: "submit_sent_unverified".to_string(),
+        delivery_state: DELIVERY_STATE_SUBMIT_SENT_UNCONFIRMED.to_string(),
         delivery_phase: "submit_key_sent".to_string(),
         observed_state: Some("bytes_sent".to_string()),
         reason: None,
@@ -222,7 +224,10 @@ mod tests {
 
         assert_eq!(rx.recv().await.expect("payload"), b"hello".to_vec());
         assert_eq!(rx.recv().await.expect("submit key"), b"\x1b[13u".to_vec());
-        assert_eq!(outcome.delivery_state, "submit_sent_unverified");
+        assert_eq!(
+            outcome.delivery_state,
+            DELIVERY_STATE_SUBMIT_SENT_UNCONFIRMED
+        );
         assert_eq!(outcome.delivery_phase, "submit_key_sent");
         assert_eq!(outcome.observed_state.as_deref(), Some("bytes_sent"));
         assert_eq!(outcome.reason, None);

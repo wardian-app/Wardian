@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 use tauri::{AppHandle, Emitter};
 
+#[cfg(test)]
 pub(crate) async fn submit_prompt_to_agent_with_codex_echo_guard(
     state: &AppState,
     session_id: &str,
@@ -41,44 +42,6 @@ pub(crate) async fn submit_prompt_to_agent_with_codex_echo_guard(
     .await
     .map(|_| ())
     .map_err(|error| error.to_string())
-}
-
-async fn wait_for_opencode_terminal_ready(
-    session_id: &str,
-    state: &AppState,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let started = std::time::Instant::now();
-    while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
-        let is_ready = {
-            let agents = state.agents.lock().await;
-            let agent = agents
-                .get(session_id)
-                .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
-            let title = agent
-                .terminal_title
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            title == "OpenCode" || title.starts_with("OC | ") || title.contains("Action Required")
-        };
-
-        if is_ready {
-            manager::log_debug(&format!(
-                "[Wardian] OpenCode terminal ready for session {}",
-                session_id
-            ));
-            return Ok(());
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    manager::log_debug(&format!(
-        "[Wardian] OpenCode terminal readiness timed out for session {}",
-        session_id
-    ));
-    Err("Timed out waiting for OpenCode terminal to become ready".to_string())
 }
 
 #[tauri::command]
@@ -187,48 +150,16 @@ pub async fn submit_prompt_to_agent(
     session_id: String,
     prompt: String,
     state: State<'_, AppState>,
-    _app: AppHandle,
-) -> Result<(), String> {
-    let (provider_name, tx) = {
-        let agents = state.agents.lock().await;
-        let agent = agents
-            .get(&session_id)
-            .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
-        let config = agent.config.lock().unwrap().clone();
-        let tx = state
-            .input_senders
-            .try_read()
-            .map_err(|_| "Input channel temporarily locked".to_string())?
-            .get(&session_id)
-            .cloned();
-        (config.provider.clone(), tx)
-    };
-
-    let tx = match tx {
-        Some(tx) => tx,
-        None => return Err(format!("Agent {} not found or is off", session_id)),
-    };
-
-    if provider_name == "opencode" {
-        wait_for_opencode_terminal_ready(&session_id, &state, 15000).await?;
-    }
-
-    {
-        let agents = state.agents.lock().await;
-        if let Some(agent) = agents.get(&session_id) {
-            if manager::mark_agent_prompt_started(agent) {
-                manager::set_agent_status(
-                    &_app,
-                    &session_id,
-                    &agent.current_status,
-                    "Processing...",
-                );
-            }
-        }
-    }
-
-    submit_prompt_to_agent_with_codex_echo_guard(&state, &session_id, &provider_name, &tx, &prompt)
-        .await
+    app: AppHandle,
+) -> Result<wardian_core::control::DeliveryDetail, String> {
+    crate::delivery::submit_live_surface_prompt(
+        Some(&app),
+        &state,
+        crate::delivery::LiveSurfacePromptRequest::message(session_id, prompt),
+    )
+    .await
+    .map_err(|error| error.to_string())
+    .map(|result| result.detail)
 }
 
 #[tauri::command]

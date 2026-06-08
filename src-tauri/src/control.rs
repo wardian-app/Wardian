@@ -11,10 +11,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, DeliveryDetail, DeliveryErrorDetail, InteractionBodyRef, MessageInputMode,
-    MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy,
-    ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
-    WatchDeliverySnapshot, WatchEvidenceError,
+    ControlRequest, DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
+    MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence,
+    QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
+    WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
 };
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
@@ -794,17 +794,6 @@ async fn deliver_message_to_target(
     }
 
     let target_infos = delivery_target_infos(state, &session_ids).await?;
-    let senders = {
-        let senders = state
-            .input_senders
-            .read()
-            .map_err(|_| ControlError::request_failed("input_senders lock poisoned"))?;
-        session_ids
-            .iter()
-            .map(|session_id| (session_id.clone(), senders.get(session_id).cloned()))
-            .collect::<std::collections::HashMap<_, _>>()
-    };
-
     let mut delivered = 0usize;
     let mut queued = 0usize;
     let mut failures = Vec::new();
@@ -818,6 +807,19 @@ async fn deliver_message_to_target(
             info.status == "action_required",
         )
         .await;
+        let sender_session_id =
+            origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+        let interaction = state
+            .interactions
+            .create_message(
+                sender_session_id,
+                vec![info.uuid.clone()],
+                InteractionBodyRef::Inline {
+                    body: outbound_message.clone(),
+                },
+            )
+            .await;
+        let interaction_id = interaction.id.clone();
         let route = if input_mode == MessageInputMode::ApprovalAction
             || matches!(queue_policy, QueuePolicy::MailboxOnly)
         {
@@ -854,6 +856,7 @@ async fn deliver_message_to_target(
                 let queued_status = info.status.clone();
                 let detail = enqueue_mailbox_delivery(
                     state,
+                    interaction_id.clone(),
                     info,
                     outbound_message,
                     input_mode,
@@ -861,6 +864,14 @@ async fn deliver_message_to_target(
                     approval_action,
                     origin,
                     runtime_state,
+                )
+                .await;
+                persist_interaction_delivery_attempt(
+                    state,
+                    &interaction_id,
+                    &detail.uuid,
+                    DeliveryTransportKind::LiveSurface,
+                    &detail,
                 )
                 .await;
                 record_delivery_attempt(state, &detail).await;
@@ -872,115 +883,71 @@ async fn deliver_message_to_target(
             DeliveryRoute::Reject { failure } => {
                 failures.push(format!("{}: {failure}", info.uuid));
                 let detail = rejected_delivery_detail(info, failure, input_mode, queue_policy);
+                persist_interaction_delivery_attempt(
+                    state,
+                    &interaction_id,
+                    &detail.uuid,
+                    DeliveryTransportKind::LiveSurface,
+                    &detail,
+                )
+                .await;
                 record_delivery_attempt(state, &detail).await;
                 delivery.push(detail);
             }
-            DeliveryRoute::Live => match senders.get(&info.uuid).and_then(Clone::clone) {
-                Some(tx) => {
-                    let profile = crate::utils::delivery_profile::delivery_profile(&info.provider);
-                    let delivery_lock = state.delivery_lock_for(&info.uuid).await;
-                    let _delivery_guard = delivery_lock.lock().await;
-                    let result = if let (MessageInputMode::ApprovalAction, Some(action)) =
-                        (input_mode, approval_action)
-                    {
-                        submit_approval_action_via_sender(&tx, &info.provider, action)
-                            .await
-                            .map_err(|error| error.to_string())
-                    } else {
-                        let payload_cursor =
-                            codex_payload_echo_cursor(state, &info.provider, &info.uuid).await;
-                        match wait_for_terminal_ready_for_control_send(state, &info).await {
-                            Ok(()) => {
-                                let wait_uuid = info.uuid.clone();
-                                let wait_provider = info.provider.clone();
-                                let wait_prompt = outbound_message.clone();
-                                crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
-                                &tx,
-                                &outbound_message,
-                                &info.provider,
-                                || async move {
-                                    wait_for_codex_payload_echo_before_submit(
-                                        state,
-                                        &wait_provider,
-                                        &wait_uuid,
-                                        payload_cursor.as_deref(),
-                                        &wait_prompt,
-                                    )
-                                    .await;
-                                },
-                            )
-                            .await
-                            .map_err(|error| error.to_string())
-                            }
-                            Err(error) => Err(error),
-                        }
-                    };
-                    match result {
-                        Ok(outcome) => {
-                            if input_mode == MessageInputMode::ApprovalAction
-                                && matches!(approval_action, Some(ApprovalAction::Accept))
-                            {
-                                mark_approval_accept_started(app, state, &info.uuid).await;
-                            }
-                            delivered += 1;
-                            let detail = DeliveryDetail {
-                                uuid: info.uuid,
-                                name: info.name,
-                                provider: info.provider,
-                                runtime_state: "live_pty_available".to_string(),
-                                delivery_state: outcome.delivery_state,
-                                input_mode,
-                                queue_policy,
-                                message_id: None,
-                                delivery_phase: Some(outcome.delivery_phase),
-                                observed_state: outcome.observed_state,
-                                reason: outcome.reason,
-                                profile: Some(profile.provider),
-                                error: None,
-                            };
-                            record_delivery_attempt(state, &detail).await;
-                            mark_delivered_agents_prompt_started(
-                                app,
-                                state,
-                                std::slice::from_ref(&detail.uuid),
-                            )
-                            .await;
+            DeliveryRoute::Live => {
+                let target_uuid = info.uuid.clone();
+                let result = crate::delivery::submit_live_surface_prompt(
+                    app,
+                    state,
+                    crate::delivery::LiveSurfacePromptRequest {
+                        session_id: target_uuid.clone(),
+                        prompt: outbound_message,
+                        interaction_id: Some(interaction_id.clone()),
+                        input_mode,
+                        queue_policy,
+                        approval_action: approval_action.cloned(),
+                        origin: origin.cloned(),
+                        runtime_state: "live_pty_available",
+                        mark_prompt_started: true,
+                        payload_sent_detail: None,
+                        delivery_message_id: None,
+                    },
+                )
+                .await;
+                match result {
+                    Ok(result) => {
+                        delivered += 1;
+                        delivery.push(result.detail);
+                    }
+                    Err(error) => {
+                        let error_message = error.to_string();
+                        failures.push(format!("{}: {error_message}", info.uuid));
+                        if let Some(detail) = error.detail {
                             delivery.push(detail);
-                        }
-                        Err(error) => {
-                            failures.push(format!("{}: {error}", info.uuid));
-                            let detail = failed_delivery_detail(
+                        } else {
+                            let mut detail = failed_delivery_detail(
                                 info,
                                 "live_pty_available",
                                 "send_failed",
-                                error,
+                                error_message,
                                 input_mode,
                                 queue_policy,
                             );
+                            detail.message_id = Some(interaction_id.clone());
+                            persist_interaction_delivery_attempt(
+                                state,
+                                &interaction_id,
+                                &target_uuid,
+                                DeliveryTransportKind::LiveSurface,
+                                &detail,
+                            )
+                            .await;
                             record_delivery_attempt(state, &detail).await;
                             delivery.push(detail);
                         }
                     }
                 }
-                None => {
-                    failures.push(format!("{}: no input channel", info.uuid));
-                    let runtime_state = if info.status == "off" {
-                        "target_off"
-                    } else {
-                        "restored_without_sender"
-                    };
-                    let detail = failed_delivery_detail(
-                        info,
-                        runtime_state,
-                        "no_input_channel",
-                        "missing sender",
-                        input_mode,
-                        queue_policy,
-                    );
-                    record_delivery_attempt(state, &detail).await;
-                    delivery.push(detail);
-                }
-            },
+            }
         }
     }
     if delivered + queued == 0 {
@@ -1108,7 +1075,7 @@ fn approval_action_bytes(provider: &str, action: &ApprovalAction) -> Vec<u8> {
     }
 }
 
-async fn submit_approval_action_via_sender(
+pub(crate) async fn submit_approval_action_via_sender(
     tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     provider: &str,
     action: &ApprovalAction,
@@ -1119,7 +1086,9 @@ async fn submit_approval_action_via_sender(
         .map_err(|_| "input channel closed".to_string())?;
     Ok(
         crate::utils::delivery_transaction::TerminalDeliveryOutcome {
-            delivery_state: "submit_sent_unverified".to_string(),
+            delivery_state:
+                crate::utils::delivery_transaction::DELIVERY_STATE_SUBMIT_SENT_UNCONFIRMED
+                    .to_string(),
             delivery_phase: "approval_key_sent".to_string(),
             observed_state: Some("bytes_sent".to_string()),
             reason: None,
@@ -1127,24 +1096,10 @@ async fn submit_approval_action_via_sender(
     )
 }
 
-async fn mark_approval_accept_started(app: Option<&AppHandle>, state: &AppState, session_id: &str) {
-    let Some(app) = app else {
-        return;
-    };
-    let current_status = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(session_id)
-            .map(|agent| agent.current_status.clone())
-    };
-    if let Some(current_status) = current_status {
-        manager::set_agent_status(app, session_id, &current_status, "Processing...");
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn enqueue_mailbox_delivery(
     state: &AppState,
+    interaction_id: String,
     info: DeliveryTargetInfo,
     body: String,
     input_mode: MessageInputMode,
@@ -1155,6 +1110,7 @@ async fn enqueue_mailbox_delivery(
 ) -> DeliveryDetail {
     let mut mailbox = state.mailbox.lock().await;
     let record = mailbox.enqueue(MailboxMessageDraft {
+        interaction_id,
         target_session_id: info.uuid.clone(),
         body,
         input_mode,
@@ -1630,7 +1586,7 @@ fn antigravity_ready_prompt_footer_line(line: &str) -> bool {
     line.contains("Press up to edit queued messages") || line.contains("? for shortcuts")
 }
 
-async fn mark_delivered_agents_prompt_started(
+pub(crate) async fn mark_delivered_agents_prompt_started(
     app: Option<&AppHandle>,
     state: &AppState,
     session_ids: &[String],
@@ -2729,6 +2685,76 @@ async fn record_delivery_attempt(state: &AppState, detail: &DeliveryDetail) {
     }
 }
 
+async fn persist_interaction_delivery_attempt(
+    state: &AppState,
+    interaction_id: &str,
+    target_session_id: &str,
+    transport: DeliveryTransportKind,
+    detail: &DeliveryDetail,
+) {
+    state
+        .interactions
+        .record_delivery_attempt(
+            interaction_id,
+            target_session_id,
+            transport,
+            state
+                .interactions
+                .current_provider_input_generation(target_session_id)
+                .await
+                .unwrap_or(0),
+            &detail.runtime_state,
+            &detail.delivery_state,
+            detail.delivery_phase.clone(),
+            detail.observed_state.clone(),
+            detail.reason.clone(),
+            detail.error.clone(),
+        )
+        .await;
+}
+
+pub(crate) async fn wait_for_terminal_ready_for_delivery_service(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), String> {
+    let info = delivery_target_infos(state, &[session_id.to_string()])
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("agent not found: {session_id}"))?;
+    wait_for_terminal_ready_for_control_send(state, &info).await
+}
+
+pub(crate) async fn submit_approval_action_for_delivery_service(
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    provider: &str,
+    action: &ApprovalAction,
+) -> Result<crate::utils::delivery_transaction::TerminalDeliveryOutcome, String> {
+    submit_approval_action_via_sender(tx, provider, action).await
+}
+
+pub(crate) async fn push_delivery_for_delivery_service(
+    state: &AppState,
+    session_id: &str,
+    detail: &DeliveryDetail,
+) {
+    let agents = state.agents.lock().await;
+    if let Some(agent) = agents.get(session_id) {
+        if let Ok(mut watch_state) = agent.watch_state.lock() {
+            watch_state.push_delivery(serde_json::json!(detail));
+        }
+    }
+}
+
+pub(crate) async fn mark_delivered_agents_prompt_started_for_delivery_service(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    session_ids: &[String],
+) {
+    mark_delivered_agents_prompt_started(app, state, session_ids).await;
+}
+
 pub(crate) fn spawn_mailbox_drain_if_idle(
     app: &AppHandle,
     session_id: &str,
@@ -2758,41 +2784,11 @@ fn spawn_delayed_mailbox_drain_retry(app: Option<&AppHandle>, session_id: &str) 
     });
 }
 
-enum MailboxSubmitError {
-    RetrySafe(String),
-    Terminal(crate::utils::delivery_transaction::TerminalDeliveryError),
-}
-
-impl MailboxSubmitError {
-    fn message(&self) -> String {
-        match self {
-            MailboxSubmitError::RetrySafe(message) => message.clone(),
-            MailboxSubmitError::Terminal(error) => error.to_string(),
-        }
-    }
-
-    fn phase(&self) -> Option<&'static str> {
-        match self {
-            MailboxSubmitError::RetrySafe(_) => None,
-            MailboxSubmitError::Terminal(error) => Some(error.phase),
-        }
-    }
-
-    fn retry_safe(&self) -> bool {
-        match self {
-            MailboxSubmitError::RetrySafe(_) => true,
-            MailboxSubmitError::Terminal(error) => error.retry_safe,
-        }
-    }
-}
-
 async fn drain_next_mailbox_message_for_idle_agent(
     app: Option<&AppHandle>,
     state: &AppState,
     session_id: &str,
 ) -> Result<Option<DeliveryDetail>, ControlError> {
-    let delivery_lock = state.delivery_lock_for(session_id).await;
-    let _delivery_guard = delivery_lock.lock().await;
     let info = delivery_target_infos(state, &[session_id.to_string()])
         .await?
         .into_iter()
@@ -2816,136 +2812,96 @@ async fn drain_next_mailbox_message_for_idle_agent(
         return Ok(None);
     };
 
-    let sender = state
-        .input_senders
-        .read()
-        .map_err(|_| ControlError::request_failed("input_senders lock poisoned"))?
-        .get(session_id)
-        .cloned();
-    let profile = crate::utils::delivery_profile::delivery_profile(&info.provider);
-    let payload_cursor = codex_payload_echo_cursor(state, &info.provider, session_id).await;
-    let detail = match sender {
-        Some(tx) => {
-            let result = match wait_for_terminal_ready_for_control_send(state, &info).await {
-                Ok(()) => {
-                    let submit_started = DeliveryDetail {
-                        uuid: info.uuid.clone(),
-                        name: info.name.clone(),
-                        provider: info.provider.clone(),
-                        runtime_state: "mailbox_drain".to_string(),
-                        delivery_state: "submit_started".to_string(),
-                        input_mode: record.input_mode,
-                        queue_policy: record.queue_policy,
-                        message_id: Some(record.id.clone()),
-                        delivery_phase: Some("payload_sent".to_string()),
-                        observed_state: Some("payload_sent".to_string()),
-                        reason: None,
-                        profile: Some(profile.provider.clone()),
-                        error: None,
-                    };
-                    let wait_provider = info.provider.clone();
-                    let wait_uuid = session_id.to_string();
-                    let wait_prompt = record.body.clone();
-                    crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
-                        &tx,
-                        &record.body,
-                        &info.provider,
-                        || {
-                            let submit_started = submit_started.clone();
-                            async move {
-                                record_delivery_attempt(state, &submit_started).await;
-                                wait_for_codex_payload_echo_before_submit(
-                                    state,
-                                    &wait_provider,
-                                    &wait_uuid,
-                                    payload_cursor.as_deref(),
-                                    &wait_prompt,
-                                )
-                                .await;
-                            }
-                        },
-                    )
-                    .await
-                    .map_err(MailboxSubmitError::Terminal)
-                }
-                Err(error) => Err(MailboxSubmitError::RetrySafe(error)),
-            };
-            match result {
-                Ok(outcome) => {
-                    state.mailbox.lock().await.mark_delivered(&record.id);
-                    let detail = DeliveryDetail {
-                        uuid: info.uuid,
-                        name: info.name,
-                        provider: info.provider,
-                        runtime_state: "mailbox_drain".to_string(),
-                        delivery_state: outcome.delivery_state,
-                        input_mode: record.input_mode,
-                        queue_policy: record.queue_policy,
-                        message_id: Some(record.id),
-                        delivery_phase: Some(outcome.delivery_phase),
-                        observed_state: outcome.observed_state,
-                        reason: outcome.reason,
-                        profile: Some(profile.provider),
-                        error: None,
-                    };
-                    record_delivery_attempt(state, &detail).await;
-                    mark_delivered_agents_prompt_started(app, state, &[session_id.to_string()])
-                        .await;
-                    detail
-                }
-                Err(error) => {
-                    if error.retry_safe() {
-                        state.mailbox.lock().await.mark_pending(&record.id);
-                    } else {
-                        state.mailbox.lock().await.mark_failed(&record.id);
-                    }
-                    let mut detail = failed_delivery_detail(
-                        info,
-                        "mailbox_drain",
-                        "send_failed",
-                        error.message(),
-                        record.input_mode,
-                        record.queue_policy,
-                    );
-                    detail.message_id = Some(record.id);
-                    detail.delivery_phase = Some(
-                        error
-                            .phase()
-                            .unwrap_or(if error.retry_safe() {
-                                "queued"
-                            } else {
-                                "terminal_state_unknown"
-                            })
-                            .to_string(),
-                    );
-                    detail.reason = Some(if error.retry_safe() {
-                        "queued message remains pending for retry".to_string()
-                    } else {
-                        "queued message marked failed because terminal state is partial or unknown"
-                            .to_string()
-                    });
-                    record_delivery_attempt(state, &detail).await;
-                    if error.retry_safe() {
-                        spawn_delayed_mailbox_drain_retry(app, session_id);
-                    }
-                    detail
-                }
-            }
+    let target_uuid = info.uuid.clone();
+    let submit_started = DeliveryDetail {
+        uuid: info.uuid.clone(),
+        name: info.name.clone(),
+        provider: info.provider.clone(),
+        runtime_state: "mailbox_drain".to_string(),
+        delivery_state: "submit_started".to_string(),
+        input_mode: record.input_mode,
+        queue_policy: record.queue_policy,
+        message_id: Some(record.id.clone()),
+        delivery_phase: Some("payload_sent".to_string()),
+        observed_state: Some("payload_sent".to_string()),
+        reason: None,
+        profile: Some(crate::utils::delivery_profile::delivery_profile(&info.provider).provider),
+        error: None,
+    };
+    let result = crate::delivery::submit_live_surface_prompt(
+        app,
+        state,
+        crate::delivery::LiveSurfacePromptRequest {
+            session_id: session_id.to_string(),
+            prompt: record.body.clone(),
+            interaction_id: Some(record.interaction_id.clone()),
+            input_mode: record.input_mode,
+            queue_policy: record.queue_policy,
+            approval_action: record.approval_action.clone(),
+            origin: record.origin.clone(),
+            runtime_state: "mailbox_drain",
+            mark_prompt_started: true,
+            payload_sent_detail: Some(submit_started),
+            delivery_message_id: Some(record.id.clone()),
+        },
+    )
+    .await;
+
+    let detail = match result {
+        Ok(result) => {
+            state.mailbox.lock().await.mark_delivered(&record.id);
+            let mut detail = result.detail;
+            detail.message_id = Some(record.id.clone());
+            detail
         }
-        None => {
-            state.mailbox.lock().await.mark_pending(&record.id);
-            let mut detail = failed_delivery_detail(
-                info,
-                "mailbox_drain",
-                "no_input_channel",
-                "missing sender",
-                record.input_mode,
-                record.queue_policy,
-            );
-            detail.message_id = Some(record.id);
-            detail.delivery_phase = Some("queued".to_string());
-            detail.reason = Some("queued message remains pending for retry".to_string());
-            record_delivery_attempt(state, &detail).await;
+        Err(error) => {
+            let retry_safe = error.retry_safe;
+            if retry_safe {
+                state.mailbox.lock().await.mark_pending(&record.id);
+            } else {
+                state.mailbox.lock().await.mark_failed(&record.id);
+            }
+            let service_recorded_detail = error.detail.is_some();
+            let mut detail = if let Some(detail) = error.detail {
+                detail
+            } else {
+                failed_delivery_detail(
+                    info,
+                    "mailbox_drain",
+                    "send_failed",
+                    error.to_string(),
+                    record.input_mode,
+                    record.queue_policy,
+                )
+            };
+            detail.message_id = Some(record.id.clone());
+            if detail.delivery_phase.is_none() {
+                detail.delivery_phase = Some(if retry_safe {
+                    "queued".to_string()
+                } else {
+                    "terminal_state_unknown".to_string()
+                });
+            }
+            detail.reason = Some(if retry_safe {
+                "queued message remains pending for retry".to_string()
+            } else {
+                "queued message marked failed because terminal state is partial or unknown"
+                    .to_string()
+            });
+            if !service_recorded_detail {
+                persist_interaction_delivery_attempt(
+                    state,
+                    &record.interaction_id,
+                    &target_uuid,
+                    DeliveryTransportKind::LiveSurface,
+                    &detail,
+                )
+                .await;
+                record_delivery_attempt(state, &detail).await;
+            }
+            if retry_safe {
+                spawn_delayed_mailbox_drain_retry(app, session_id);
+            }
             detail
         }
     };
@@ -3171,6 +3127,8 @@ mod tests {
             let temp = tempfile::tempdir().expect("temp wardian home");
             let previous_home = std::env::var_os("WARDIAN_HOME");
             std::env::set_var("WARDIAN_HOME", temp.path());
+            wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+                .expect("init test database");
             Self {
                 _lock: lock,
                 previous_home,
@@ -4096,7 +4054,7 @@ mod tests {
 
         assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
         assert_eq!(delivery[0].runtime_state, "live_pty_available");
-        assert_eq!(delivery[0].delivery_state, "submit_sent_unverified");
+        assert_eq!(delivery[0].delivery_state, "submit_sent_unconfirmed");
         assert_eq!(
             delivery[0].delivery_phase.as_deref(),
             Some("approval_key_sent")
@@ -4155,7 +4113,7 @@ mod tests {
         assert_eq!(rx.recv().await.unwrap(), expected[0]);
         assert_eq!(rx.recv().await.unwrap(), expected[1]);
         assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
         {
             let agents = state.agents.lock().await;
@@ -4169,6 +4127,12 @@ mod tests {
             assert!(snapshot.events.iter().any(|event| {
                 event.kind == "delivery"
                     && event.payload["delivery_state"] == "submit_started"
+                    && event.payload["message_id"] == message_id.as_str()
+            }));
+            assert!(snapshot.events.iter().any(|event| {
+                event.kind == "delivery"
+                    && event.payload["runtime_state"] == "mailbox_drain"
+                    && event.payload["delivery_state"] == "submit_sent_unconfirmed"
                     && event.payload["message_id"] == message_id.as_str()
             }));
         }
@@ -4330,7 +4294,7 @@ mod tests {
         assert_eq!(rx.recv().await.unwrap(), expected[0]);
         assert_eq!(rx.recv().await.unwrap(), expected[1]);
         assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
         let input_state = state
             .interactions
@@ -4395,7 +4359,7 @@ mod tests {
         .expect("drained message");
 
         assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
         assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
         assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
@@ -4468,7 +4432,7 @@ mod tests {
             .expect("drained message");
 
         assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
         assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
         assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
@@ -4534,7 +4498,7 @@ mod tests {
             .expect("drained message");
 
         assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
         assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
         assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
         assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
@@ -4623,7 +4587,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(drained.delivery_state, "submit_sent_unverified");
+        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
         assert!(blocked.is_none());
         let expected = expected_terminal_chunks("codex", "first queued work");
         assert_eq!(rx.try_recv().unwrap(), expected[0]);

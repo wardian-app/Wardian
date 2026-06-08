@@ -163,6 +163,7 @@ mod tests {
         let state = AppState::new();
         let _lock = state.delivery_lock_for("agent-1").await;
         state.mailbox.lock().await.enqueue(MailboxMessageDraft {
+            interaction_id: "int-agent-1-queued".to_string(),
             target_session_id: "agent-1".to_string(),
             body: "queued".to_string(),
             input_mode: MessageInputMode::Message,

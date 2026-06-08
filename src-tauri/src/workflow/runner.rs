@@ -81,6 +81,40 @@ impl AgentRunner for HeadlessAgentRunner {
 }
 
 #[derive(Clone)]
+pub struct TauriHeadlessAgentRunner {
+    app: tauri::AppHandle,
+}
+
+impl TauriHeadlessAgentRunner {
+    pub fn new(app: tauri::AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl AgentRunner for TauriHeadlessAgentRunner {
+    fn run(&self, spec: AgentRunSpec) -> AgentRunFuture<'_> {
+        Box::pin(async move {
+            let state = self.app.state::<crate::state::AppState>();
+            crate::delivery::run_headless_process_prompt(
+                &state,
+                crate::delivery::HeadlessProcessPromptRequest {
+                    node: spec.node,
+                    provider: spec.provider,
+                    cwd: spec.cwd,
+                    prompt: spec.prompt,
+                    session_id: spec.session_id,
+                    resume_session: spec.resume_session,
+                    config_override: spec.config_override,
+                    interaction_id: None,
+                },
+            )
+            .await
+            .map(|result| result.response)
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct TauriLiveAgentRunner {
     app: tauri::AppHandle,
 }
@@ -102,31 +136,15 @@ async fn run_live_agent_prompt(
     spec: LiveAgentRunSpec,
 ) -> Result<String, String> {
     let state = app.state::<crate::state::AppState>();
-    let delivery_lock = state.delivery_lock_for(&spec.session_id).await;
-    let _delivery_guard = delivery_lock.lock().await;
 
-    let (tx, watch_state, current_status, provider_name, should_mark_processing) = {
+    let (watch_state, current_status, should_mark_processing) = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&spec.session_id)
             .ok_or_else(|| format!("Agent {} not found or is off", spec.session_id))?;
-        let config = agent
-            .config
-            .lock()
-            .map_err(|_| format!("Agent {} config lock poisoned", spec.session_id))?
-            .clone();
-        let tx = state
-            .input_senders
-            .try_read()
-            .map_err(|_| "Input channel temporarily locked".to_string())?
-            .get(&spec.session_id)
-            .cloned()
-            .ok_or_else(|| format!("Agent {} not found or is off", spec.session_id))?;
         (
-            tx,
             agent.watch_state.clone(),
             agent.current_status.clone(),
-            config.provider,
             crate::manager::mark_agent_prompt_started(agent),
         )
     };
@@ -183,18 +201,29 @@ async fn run_live_agent_prompt(
         .await;
 
     let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
-    if let Err(error) = crate::commands::terminal::submit_prompt_to_agent_with_codex_echo_guard(
+    if let Err(error) = crate::delivery::submit_live_surface_prompt(
+        Some(app),
         &state,
-        &spec.session_id,
-        &provider_name,
-        &tx,
-        &prompt,
+        crate::delivery::LiveSurfacePromptRequest {
+            session_id: spec.session_id.clone(),
+            prompt,
+            interaction_id: Some(task.id.clone()),
+            input_mode: wardian_core::control::MessageInputMode::Message,
+            queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
+            approval_action: None,
+            origin: None,
+            runtime_state: "workflow_live_agent",
+            mark_prompt_started: false,
+            payload_sent_detail: None,
+            delivery_message_id: None,
+        },
     )
     .await
+    .map(|_| ())
     {
         let message = format!(
-            "failed to submit workflow node {} to live agent {}: {error}",
-            spec.node, spec.session_id
+            "failed to submit workflow node {} to live agent {}: {}",
+            spec.node, spec.session_id, error
         );
         fail_live_workflow_task(
             &state,
