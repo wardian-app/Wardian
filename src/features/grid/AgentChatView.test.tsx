@@ -176,6 +176,66 @@ describe("AgentChatView", () => {
     expect(await screen.findByText("failed")).toBeInTheDocument();
   });
 
+  it("shows a subtle working indicator while processing before visible work starts", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "user-before-thinking",
+        kind: "message",
+        role: "user",
+        text: "Draft a concise reply.",
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" status="Processing" />);
+
+    expect(await screen.findByText("Draft a concise reply.")).toBeInTheDocument();
+    expect(screen.getByText("Working...")).toBeInTheDocument();
+  });
+
+  it("renders the working ellipsis as inline animated period glyphs", async () => {
+    invokeMock.mockResolvedValue([]);
+
+    render(<AgentChatView sessionId="agent-1" status="Processing" />);
+
+    const workingRow = await screen.findByLabelText("agent working");
+    expect(within(workingRow).getByText("Working...")).toHaveClass("sr-only");
+
+    const animatedDots = within(workingRow).getByTestId("thinking-dots");
+    expect(animatedDots).toHaveTextContent("...");
+    expect(animatedDots).toHaveClass("wardian-thinking-dots");
+    expect(animatedDots).not.toHaveClass("wardian-thinking-dots-frame");
+
+    const dotGlyphs = animatedDots.querySelectorAll(".wardian-thinking-dot");
+    expect(dotGlyphs).toHaveLength(3);
+    dotGlyphs.forEach((dot) => expect(dot).toHaveTextContent("."));
+  });
+
+  it("keeps the subtle working indicator as the latest row when a running tool row is visible", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "user-before-tool",
+        kind: "message",
+        role: "user",
+        text: "Run the tests.",
+        sequence: 1,
+      }),
+      event({
+        id: "running-tool",
+        kind: "tool_call",
+        title: "Run command",
+        command: "npm run test",
+        status: "running",
+        sequence: 2,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" status="Processing" />);
+
+    expect(await screen.findByText("Run command")).toBeInTheDocument();
+    expect(screen.getByText("Working...")).toBeInTheDocument();
+  });
+
   it("hides empty running tool placeholders", async () => {
     invokeMock.mockResolvedValue([
       event({
@@ -1163,6 +1223,47 @@ describe("AgentChatView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(screen.getAllByText("run tests")).toHaveLength(3));
+  });
+
+  it("clears an optimistic prompt when the matching transcript prompt is renumbered below the send snapshot", async () => {
+    let loadCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_transcript") {
+        loadCount += 1;
+        const baseEvents = [
+          event({
+            id: "assistant-before-send",
+            kind: "message",
+            role: "assistant",
+            text: "Ready.",
+            sequence: 50,
+          }),
+        ];
+        if (loadCount === 1) return Promise.resolve(baseEvents);
+        return Promise.resolve([
+          ...baseEvents,
+          event({
+            id: "renumbered-user-message",
+            kind: "message",
+            role: "user",
+            text: "Summarize my status.",
+            sequence: 2,
+          }),
+        ]);
+      }
+      if (command === "submit_prompt_to_agent") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+    const input = await screen.findByLabelText("Message agent");
+    fireEvent.change(input, { target: { value: "Summarize my status." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(loadCount).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(screen.getAllByText("Summarize my status.")).toHaveLength(1));
+    expect(screen.getByText("Working...")).toBeInTheDocument();
   });
 
   it("disables chat input while the agent is busy but allows action required responses", async () => {

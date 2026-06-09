@@ -228,6 +228,10 @@ Map:
 - `USER_INPUT` records from explicit user sources to user message events.
 - `MODEL` `PLANNER_RESPONSE` records with `DONE` status to assistant message
   events.
+- Planner `tool_calls` entries to tool-call activity rows.
+- Model action records such as `RUN_COMMAND`, `VIEW_FILE`, `CODE_ACTION`,
+  `SEARCH_WEB`, `LIST_DIRECTORY`, `GREP_SEARCH`, `READ_URL_CONTENT`,
+  `ASK_QUESTION`, and `GENERIC` to tool-result activity rows.
 - Planner responses without `DONE` status to processing status.
 - System/history records to status or ignored metadata unless they are useful to
   users.
@@ -314,6 +318,9 @@ Rules:
   transcript confirms the message.
 - The composer is disabled while the agent is off, paused, headless, in an
   error state, or actively processing.
+- While the agent is actively processing or chat mode is awaiting the first
+  response after a submitted prompt, chat mode appends a subtle latest
+  `Working...` row in the transcript.
 - The terminal remains the authoritative fallback for provider states that
   require raw keyboard interaction.
 - Action-required states may be answered through the composer, but dedicated

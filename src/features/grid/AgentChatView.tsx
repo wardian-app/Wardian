@@ -61,6 +61,7 @@ const TONE_CLASSES: Record<ActivityTone, string> = {
 type ChatRow = PresentedChatRow;
 
 type ApprovalChoice = { value: string; label: string };
+type AwaitingResponseMarker = { id: string; response_count_after: number };
 type ToolDisplayKind = "diff" | "file" | "permission" | "search" | "shell" | "todo" | "generic";
 type ToolPresentation = {
   kind: ToolDisplayKind;
@@ -91,6 +92,7 @@ export function AgentChatView({
 }: AgentChatViewProps) {
   const [events, setEvents] = useState<AgentChatEvent[]>([]);
   const [pendingMessages, setPendingMessages] = useState<AgentChatEvent[]>([]);
+  const [awaitingResponse, setAwaitingResponse] = useState<AwaitingResponseMarker | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -115,6 +117,7 @@ export function AgentChatView({
       prependScrollSnapshotRef.current = null;
       setEvents([]);
       setPendingMessages([]);
+      setAwaitingResponse(null);
       setLoadState("ready");
       setError(null);
       setSubmitError(null);
@@ -158,6 +161,7 @@ export function AgentChatView({
           }
           setEvents(nextEvents);
           setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
+          setAwaitingResponse((marker) => clearAwaitingResponseWhenAnswered(nextEvents, marker));
           setLoadState("ready");
           setError(null);
         })
@@ -179,17 +183,30 @@ export function AgentChatView({
   }, [sessionId, reloadKey, refreshIntervalMs]);
 
   const mergedEvents = useMemo(() => mergePendingMessages(events, pendingMessages), [events, pendingMessages]);
-  const chatRows = useMemo(() => derivePresentedChatRows(sortTranscriptEvents(mergedEvents).filter(shouldShowChatEvent)), [mergedEvents]);
+  const activeStatus = status ?? telemetry?.current_status ?? null;
+  const showThinking = isProcessingAgentStatus(activeStatus) || awaitingResponse !== null || pendingMessages.length > 0;
+  const displayEvents = useMemo(
+    () =>
+      appendThinkingIndicator(
+        mergedEvents,
+        sessionId,
+        agent?.provider ?? provider ?? providerFromEvents(mergedEvents),
+        showThinking,
+      ),
+    [agent?.provider, mergedEvents, provider, sessionId, showThinking],
+  );
+  const chatRows = useMemo(() => derivePresentedChatRows(sortTranscriptEvents(displayEvents).filter(shouldShowChatEvent)), [displayEvents]);
   const hiddenOlderRowCount = Math.max(0, chatRows.length - visibleRowLimit);
   const visibleChatRows = useMemo(() => chatRows.slice(hiddenOlderRowCount), [chatRows, hiddenOlderRowCount]);
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
-  const disabledReason = inputDisabledReason(status ?? telemetry?.current_status ?? null, isSubmitting);
+  const disabledReason = inputDisabledReason(activeStatus, isSubmitting);
 
   useEffect(() => {
     stickToLatestRef.current = true;
     prependScrollSnapshotRef.current = null;
     setVisibleRowLimit(CHAT_INITIAL_ROW_LIMIT);
+    setAwaitingResponse(null);
   }, [sessionId]);
 
   useLayoutEffect(() => {
@@ -222,8 +239,18 @@ export function AgentChatView({
       if (clearDraft) setActiveDraft("");
       setPendingMessages((pending) => [
         ...pending,
-        createPendingUserMessage(sessionId, agent?.provider ?? provider ?? providerFromEvents(events), prompt, maxSequence(events)),
+        createPendingUserMessage(
+          sessionId,
+          agent?.provider ?? provider ?? providerFromEvents(events),
+          prompt,
+          maxSequence(events),
+          matchingUserMessageCount(events, prompt),
+        ),
       ]);
+      setAwaitingResponse({
+        id: `awaiting-response-${sessionId}-${Date.now()}`,
+        response_count_after: responseEventCount(events),
+      });
       setReloadKey((key) => key + 1);
     } catch (reason) {
       setSubmitError(errorMessage(reason));
@@ -382,9 +409,29 @@ function ActivityEvent({
   onApprovalSubmit: (response: string) => void;
 }) {
   const block = entry?.block ?? toActivityBlock(event);
+  if (isThinkingIndicator(event)) return <ThinkingRow />;
   if (event.kind === "status") return <StatusRow event={event} block={block} />;
   if (event.kind === "terminal_output") return <TerminalFallback block={block} />;
   return <ActivityRow event={event} entry={entry} block={block} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />;
+}
+
+function ThinkingRow() {
+  return (
+    <article aria-label="agent working" className="flex justify-start">
+      <div className="inline-flex items-center gap-1.5 px-1 py-0.5 text-[12px] leading-5 text-muted-neutral">
+        <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-wardian-processing)]" aria-hidden="true" />
+        <span className="sr-only">Working...</span>
+        <span aria-hidden="true">
+          Working
+          <span data-testid="thinking-dots" className="wardian-thinking-dots">
+            <span className="wardian-thinking-dot wardian-thinking-dot-1">.</span>
+            <span className="wardian-thinking-dot wardian-thinking-dot-2">.</span>
+            <span className="wardian-thinking-dot wardian-thinking-dot-3">.</span>
+          </span>
+        </span>
+      </div>
+    </article>
+  );
 }
 
 function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }) {
@@ -987,12 +1034,69 @@ function mergePendingMessages(events: AgentChatEvent[], pendingMessages: AgentCh
   return [...events, ...unconfirmed.map((message, index) => ({ ...message, sequence: pendingSequence(events, index) }))];
 }
 
+function appendThinkingIndicator(
+  events: AgentChatEvent[],
+  sessionId: string,
+  provider: string,
+  showThinking: boolean,
+): AgentChatEvent[] {
+  if (!showThinking) return events;
+
+  const sequence = pendingSequence(events, 0);
+  return [
+    ...events,
+    {
+      id: `thinking-${sessionId}`,
+      session_id: sessionId,
+      provider,
+      kind: "status",
+      role: null,
+      text: "Working...",
+      title: "Working...",
+      status: "processing",
+      turn_id: null,
+      source: "chat_ui",
+      command: null,
+      exit_code: null,
+      path: null,
+      language: null,
+      created_at: null,
+      sequence,
+      metadata: { chat_thinking_indicator: true },
+    },
+  ];
+}
+
+function isThinkingIndicator(event: AgentChatEvent): boolean {
+  return event.kind === "status" && event.metadata?.chat_thinking_indicator === true;
+}
+
+function clearAwaitingResponseWhenAnswered(
+  events: AgentChatEvent[],
+  marker: AwaitingResponseMarker | null,
+): AwaitingResponseMarker | null {
+  if (!marker) return null;
+  return responseEventCount(events) > marker.response_count_after ? null : marker;
+}
+
 function unconfirmedPendingMessages(events: AgentChatEvent[], pendingMessages: AgentChatEvent[]): AgentChatEvent[] {
   const consumedEventIndexes = new Set<number>();
+  const consumedTranscriptMatchesByText = new Map<string, number>();
 
   return pendingMessages.filter((message) => {
     const pendingText = normalizePromptText(message.text ?? "");
     if (!pendingText) return false;
+    const confirmAfterMatchingCount = pendingConfirmAfterMatchingUserCount(message);
+    if (confirmAfterMatchingCount !== null) {
+      const consumed = consumedTranscriptMatchesByText.get(pendingText) ?? 0;
+      const matchingCount = matchingUserMessageCount(events, pendingText);
+      if (matchingCount > confirmAfterMatchingCount + consumed) {
+        consumedTranscriptMatchesByText.set(pendingText, consumed + 1);
+        return false;
+      }
+      return true;
+    }
+
     const confirmAfterSequence = pendingConfirmAfterSequence(message);
     const matchingIndex = events.findIndex((event, index) => {
       if (consumedEventIndexes.has(index)) return false;
@@ -1015,7 +1119,18 @@ function pendingConfirmAfterSequence(pendingMessage: AgentChatEvent): number {
   return typeof value === "number" ? value : 0;
 }
 
-function createPendingUserMessage(sessionId: string, provider: string, text: string, confirmAfterSequence: number): AgentChatEvent {
+function pendingConfirmAfterMatchingUserCount(pendingMessage: AgentChatEvent): number | null {
+  const value = pendingMessage.metadata?.confirm_after_matching_user_count;
+  return typeof value === "number" ? value : null;
+}
+
+function createPendingUserMessage(
+  sessionId: string,
+  provider: string,
+  text: string,
+  confirmAfterSequence: number,
+  confirmAfterMatchingUserCount: number,
+): AgentChatEvent {
   const createdAt = new Date().toISOString();
   return {
     id: `pending-user-${sessionId}-${createdAt}`,
@@ -1034,7 +1149,11 @@ function createPendingUserMessage(sessionId: string, provider: string, text: str
     language: null,
     created_at: createdAt,
     sequence: null,
-    metadata: { optimistic: true, confirm_after_sequence: confirmAfterSequence },
+    metadata: {
+      optimistic: true,
+      confirm_after_sequence: confirmAfterSequence,
+      confirm_after_matching_user_count: confirmAfterMatchingUserCount,
+    },
   };
 }
 
@@ -1050,6 +1169,20 @@ function normalizePromptText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function matchingUserMessageCount(events: AgentChatEvent[], text: string): number {
+  const normalized = normalizePromptText(text);
+  if (!normalized) return 0;
+  return events.filter((event) => event.kind === "message" && event.role === "user" && normalizePromptText(event.text ?? "") === normalized)
+    .length;
+}
+
+function responseEventCount(events: AgentChatEvent[]): number {
+  return events.filter((event) => {
+    if (event.kind === "message") return event.role === "assistant" || event.role === "system" || event.role === "tool";
+    return event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "approval" || event.kind === "terminal_output" || event.kind === "error";
+  }).length;
+}
+
 function inputDisabledReason(status: string | null, isSubmitting: boolean): string | null {
   if (isSubmitting) return "Sending...";
   const normalized = (status ?? "").toLowerCase();
@@ -1061,6 +1194,11 @@ function inputDisabledReason(status: string | null, isSubmitting: boolean): stri
   if (normalized.includes("error")) return "Agent is in an error state";
   if (normalized.includes("processing") || normalized.includes("running")) return "Agent is processing";
   return null;
+}
+
+function isProcessingAgentStatus(status: string | null): boolean {
+  const normalized = (status ?? "").toLowerCase();
+  return normalized.includes("processing") || normalized.includes("running");
 }
 
 function sortTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[] {
@@ -1090,6 +1228,7 @@ function shouldShowChatEvent(event: AgentChatEvent): boolean {
     return false;
   }
   if (event.kind !== "status") return true;
+  if (isThinkingIndicator(event)) return true;
   return shouldShowStatusEvent(event);
 }
 

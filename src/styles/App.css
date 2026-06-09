@@ -641,6 +641,49 @@
   animation: float 4s ease-in-out infinite;
 }
 
+/* ── Chat Activity Hints ─────────────────────────────── */
+@keyframes wardian-thinking-dot-2 {
+  0%,
+  32% {
+    opacity: 0;
+  }
+  33%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes wardian-thinking-dot-3 {
+  0%,
+  65% {
+    opacity: 0;
+  }
+  66%,
+  100% {
+    opacity: 1;
+  }
+}
+
+.wardian-thinking-dots,
+.wardian-thinking-dot {
+  display: inline;
+}
+
+.wardian-thinking-dot-2 {
+  animation: wardian-thinking-dot-2 1.2s steps(1, end) infinite;
+}
+
+.wardian-thinking-dot-3 {
+  animation: wardian-thinking-dot-3 1.2s steps(1, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wardian-thinking-dot-2,
+  .wardian-thinking-dot-3 {
+    animation: none;
+  }
+}
+
 /* ── Workflow Edge Animations ─────────────────────────── */
 @keyframes edge-strobe {
   0% { stroke-width: 2; opacity: 1; }
