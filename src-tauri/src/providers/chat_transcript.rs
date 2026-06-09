@@ -648,6 +648,11 @@ fn normalize_antigravity(
             if str_field(parsed, "source") != Some("MODEL") {
                 return None;
             }
+            if let Some(tool_call) =
+                antigravity_tool_call_event(session_id, provider, parsed, sequence)
+            {
+                return Some(tool_call);
+            }
             if str_field(parsed, "status") != Some("DONE") {
                 return Some(status_event(
                     session_id,
@@ -669,7 +674,84 @@ fn normalize_antigravity(
                 msg_type,
             )
         }
+        "ASK_QUESTION" | "CODE_ACTION" | "GENERIC" | "GREP_SEARCH" | "LIST_DIRECTORY"
+        | "READ_URL_CONTENT" | "RUN_COMMAND" | "SEARCH_WEB" | "VIEW_FILE" => {
+            antigravity_tool_result_event(session_id, provider, parsed, sequence, msg_type)
+        }
         _ => None,
+    }
+}
+
+fn antigravity_tool_call_event(
+    session_id: &str,
+    provider: &str,
+    parsed: &Value,
+    sequence: u64,
+) -> Option<AgentChatEvent> {
+    let tool_call = parsed
+        .get("tool_calls")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.iter().find(|item| item.is_object()))?;
+    let tool_name = str_field(tool_call, "name").unwrap_or("tool_call");
+    let args = tool_call.get("args");
+    let command = args
+        .and_then(|value| value.get("command"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let text = command.clone().or_else(|| args.and_then(compact_json_text));
+
+    Some(tool_call_event(
+        session_id,
+        provider,
+        sequence,
+        tool_name.to_string(),
+        step_index(parsed),
+        command,
+        text,
+        antigravity_tool_title(tool_name),
+        AgentChatStatus::Running,
+    ))
+}
+
+fn antigravity_tool_result_event(
+    session_id: &str,
+    provider: &str,
+    parsed: &Value,
+    sequence: u64,
+    msg_type: &str,
+) -> Option<AgentChatEvent> {
+    Some(event(
+        session_id,
+        provider,
+        sequence,
+        AgentChatEventKind::ToolResult,
+        EventFields {
+            text: text_from_value(parsed),
+            title: Some(antigravity_tool_title(msg_type).to_string()),
+            status: status_from_str(str_field(parsed, "status")).or(Some(AgentChatStatus::Unknown)),
+            turn_id: step_index(parsed),
+            source: Some(msg_type.to_string()),
+            created_at: created_at(parsed),
+            metadata: json!({"raw_type": msg_type}),
+            ..Default::default()
+        },
+    ))
+}
+
+fn antigravity_tool_title(tool_name: &str) -> &'static str {
+    match tool_name {
+        "ASK_QUESTION" => "Ask question",
+        "CODE_ACTION" => "Code action",
+        "GENERIC" => "Generic action",
+        "GREP_SEARCH" => "Search files",
+        "LIST_DIRECTORY" => "List directory",
+        "READ_URL_CONTENT" => "Read URL",
+        "RUN_COMMAND" => "Run command",
+        "SEARCH_WEB" => "Search web",
+        "VIEW_FILE" => "View file",
+        _ => "Tool call",
     }
 }
 
@@ -1069,6 +1151,11 @@ fn text_from_value(value: &Value) -> Option<String> {
     None
 }
 
+fn compact_json_text(value: &Value) -> Option<String> {
+    let text = serde_json::to_string(value).ok()?;
+    (!text.trim().is_empty() && text != "null").then_some(text)
+}
+
 fn text_from_array(items: &[Value]) -> Option<String> {
     let parts = items
         .iter()
@@ -1429,6 +1516,33 @@ mod tests {
         assert_eq!(assistant.role, Some(AgentChatRole::Assistant));
         assert_eq!(assistant.text.as_deref(), Some("Antigravity answer"));
         assert_eq!(assistant.source.as_deref(), Some("transcript"));
+    }
+
+    #[test]
+    fn antigravity_planner_tool_calls_are_normalized() {
+        let tool = one(
+            "antigravity",
+            r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"RUN_COMMAND","args":{"command":"npm run test -- --run"}}]}"#,
+        );
+
+        assert_eq!(tool.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(tool.title.as_deref(), Some("Run command"));
+        assert_eq!(tool.command.as_deref(), Some("npm run test -- --run"));
+        assert_eq!(tool.turn_id.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn antigravity_model_action_records_are_normalized_as_tool_results() {
+        let result = one(
+            "antigravity",
+            r#"{"step_index":4,"source":"MODEL","type":"RUN_COMMAND","status":"DONE","content":"3 tests passed"}"#,
+        );
+
+        assert_eq!(result.kind, AgentChatEventKind::ToolResult);
+        assert_eq!(result.title.as_deref(), Some("Run command"));
+        assert_eq!(result.text.as_deref(), Some("3 tests passed"));
+        assert_eq!(result.status, Some(AgentChatStatus::Succeeded));
+        assert_eq!(result.turn_id.as_deref(), Some("4"));
     }
 
     #[test]

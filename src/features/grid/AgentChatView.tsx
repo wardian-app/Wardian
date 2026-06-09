@@ -1,13 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Check, Copy, FileText, GitCompare, ListChecks, Loader2, Search, SendHorizontal, ShieldAlert, Terminal, Wrench } from "lucide-react";
+import { Check, FileText, GitCompare, ListChecks, Loader2, Search, SendHorizontal, ShieldAlert, Terminal, Wrench } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent } from "react";
 import type { AgentChatEvent, AgentChatRole, AgentConfig, AgentTelemetry } from "../../types";
 import { submitInputToAgent } from "../../utils/terminalInput";
-import { toActivityBlock, type ActivityBlockModel, type ActivityTone } from "./activityBlocks";
+import { isGenericActivityTitle, toActivityBlock, type ActivityBlockModel, type ActivityTone } from "./activityBlocks";
+import { CodePanel, renderHighlightedCode } from "./chatCode";
+import { CopyIconButton } from "./chatCopy";
+import { ChatMarkdown } from "./markdown/ChatMarkdown";
+import {
+  changedPathsFromEvents,
+  derivePresentedChatRows,
+  formatPresentedEntryForCopy,
+  formatPresentedWorkGroupForCopy,
+  shouldShowStatusEvent,
+  type PresentedChatRow,
+  type PresentedWorkEntry,
+} from "./workLogPresentation";
 
 interface AgentChatViewBaseProps {
   sessionId: string;
@@ -47,18 +58,10 @@ const TONE_CLASSES: Record<ActivityTone, string> = {
   warning: "border-[var(--color-wardian-warning)]",
 };
 
-type MessageBlock =
-  | { kind: "paragraph"; content: string }
-  | { kind: "heading"; level: number; content: string }
-  | { kind: "list"; ordered: boolean; items: string[] }
-  | { kind: "code"; language: string | null; content: string };
+type ChatRow = PresentedChatRow;
 
-type ChatRow =
-  | { kind: "event"; event: AgentChatEvent }
-  | { kind: "work_group"; id: string; events: AgentChatEvent[]; changedPaths: string[] };
-
-type CopyState = "idle" | "copied" | "error";
 type ApprovalChoice = { value: string; label: string };
+type AwaitingResponseMarker = { id: string; response_count_after: number };
 type ToolDisplayKind = "diff" | "file" | "permission" | "search" | "shell" | "todo" | "generic";
 type ToolPresentation = {
   kind: ToolDisplayKind;
@@ -71,7 +74,6 @@ type ToolPresentation = {
 const CHAT_INITIAL_ROW_LIMIT = 80;
 const CHAT_ROW_PAGE_SIZE = 60;
 const CHAT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
-const WORK_GROUP_MIN_EVENTS = 4;
 
 export function AgentChatView({
   sessionId,
@@ -90,6 +92,7 @@ export function AgentChatView({
 }: AgentChatViewProps) {
   const [events, setEvents] = useState<AgentChatEvent[]>([]);
   const [pendingMessages, setPendingMessages] = useState<AgentChatEvent[]>([]);
+  const [awaitingResponse, setAwaitingResponse] = useState<AwaitingResponseMarker | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -114,6 +117,7 @@ export function AgentChatView({
       prependScrollSnapshotRef.current = null;
       setEvents([]);
       setPendingMessages([]);
+      setAwaitingResponse(null);
       setLoadState("ready");
       setError(null);
       setSubmitError(null);
@@ -157,6 +161,7 @@ export function AgentChatView({
           }
           setEvents(nextEvents);
           setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
+          setAwaitingResponse((marker) => clearAwaitingResponseWhenAnswered(nextEvents, marker));
           setLoadState("ready");
           setError(null);
         })
@@ -178,17 +183,30 @@ export function AgentChatView({
   }, [sessionId, reloadKey, refreshIntervalMs]);
 
   const mergedEvents = useMemo(() => mergePendingMessages(events, pendingMessages), [events, pendingMessages]);
-  const chatRows = useMemo(() => deriveChatRows(sortTranscriptEvents(mergedEvents).filter(shouldShowChatEvent)), [mergedEvents]);
+  const activeStatus = status ?? telemetry?.current_status ?? null;
+  const showThinking = isProcessingAgentStatus(activeStatus) || awaitingResponse !== null || pendingMessages.length > 0;
+  const displayEvents = useMemo(
+    () =>
+      appendThinkingIndicator(
+        mergedEvents,
+        sessionId,
+        agent?.provider ?? provider ?? providerFromEvents(mergedEvents),
+        showThinking,
+      ),
+    [agent?.provider, mergedEvents, provider, sessionId, showThinking],
+  );
+  const chatRows = useMemo(() => derivePresentedChatRows(sortTranscriptEvents(displayEvents).filter(shouldShowChatEvent)), [displayEvents]);
   const hiddenOlderRowCount = Math.max(0, chatRows.length - visibleRowLimit);
   const visibleChatRows = useMemo(() => chatRows.slice(hiddenOlderRowCount), [chatRows, hiddenOlderRowCount]);
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
-  const disabledReason = inputDisabledReason(status ?? telemetry?.current_status ?? null, isSubmitting);
+  const disabledReason = inputDisabledReason(activeStatus, isSubmitting);
 
   useEffect(() => {
     stickToLatestRef.current = true;
     prependScrollSnapshotRef.current = null;
     setVisibleRowLimit(CHAT_INITIAL_ROW_LIMIT);
+    setAwaitingResponse(null);
   }, [sessionId]);
 
   useLayoutEffect(() => {
@@ -221,8 +239,18 @@ export function AgentChatView({
       if (clearDraft) setActiveDraft("");
       setPendingMessages((pending) => [
         ...pending,
-        createPendingUserMessage(sessionId, agent?.provider ?? provider ?? providerFromEvents(events), prompt, maxSequence(events)),
+        createPendingUserMessage(
+          sessionId,
+          agent?.provider ?? provider ?? providerFromEvents(events),
+          prompt,
+          maxSequence(events),
+          matchingUserMessageCount(events, prompt),
+        ),
       ]);
+      setAwaitingResponse({
+        id: `awaiting-response-${sessionId}-${Date.now()}`,
+        response_count_after: responseEventCount(events),
+      });
       setReloadKey((key) => key + 1);
     } catch (reason) {
       setSubmitError(errorMessage(reason));
@@ -292,6 +320,7 @@ export function AgentChatView({
                   <WorkGroupRow row={row} />
                 ) : (
                   <TranscriptEvent
+                    entry={row.entry}
                     event={row.event}
                     isSubmitting={isSubmitting}
                     onApprovalSubmit={handleApprovalSubmit}
@@ -327,24 +356,25 @@ function isNearTranscriptBottom(scrollRegion: HTMLElement): boolean {
 
 function TranscriptEvent({
   event,
+  entry,
   isSubmitting,
   onApprovalSubmit,
 }: {
   event: AgentChatEvent;
+  entry?: PresentedWorkEntry;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
 }) {
   return event.kind === "message" ? (
     <MessageEvent event={event} />
   ) : (
-    <ActivityEvent event={event} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />
+    <ActivityEvent event={event} entry={entry} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />
   );
 }
 
 function MessageEvent({ event }: { event: AgentChatEvent }) {
   const role = event.role ?? "assistant";
   const text = event.text?.trimEnd() || event.title || "";
-  const blocks = parseMessageBlocks(text);
   const isUser = role === "user";
 
   return (
@@ -357,12 +387,8 @@ function MessageEvent({ event }: { event: AgentChatEvent }) {
             <CopyIconButton label="Copy message" value={text} />
           </div>
         ) : null}
-        {blocks.length > 0 ? (
-          <div className="space-y-2 text-[13px] leading-5 text-primary">
-            {blocks.map((block, index) => (
-              <MessageBlockView block={block} key={`${block.kind}-${index}`} />
-            ))}
-          </div>
+        {text ? (
+          <ChatMarkdown source={text} />
         ) : (
           <div className="text-[13px] leading-5 text-muted-neutral">No message content</div>
         )}
@@ -371,66 +397,49 @@ function MessageEvent({ event }: { event: AgentChatEvent }) {
   );
 }
 
-function MessageBlockView({ block }: { block: MessageBlock }) {
-  if (block.kind === "code") {
-    return (
-      <div className="relative">
-        <div className="absolute right-1.5 top-1.5 z-10">
-          <CopyIconButton label="Copy code block" value={block.content} />
-        </div>
-        <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] p-2 pr-9 text-[12px] leading-5 text-primary">
-          <code data-language={block.language ?? "text"}>{renderHighlightedCode(block.content, block.language ?? "text")}</code>
-        </pre>
-      </div>
-    );
-  }
-
-  if (block.kind === "heading") {
-    const className =
-      block.level <= 2
-        ? "mt-1 text-[14px] font-bold leading-5 text-primary"
-        : "mt-1 text-[13px] font-bold leading-5 text-primary";
-    return <div className={className}>{renderInlineMarkdown(block.content)}</div>;
-  }
-
-  if (block.kind === "list") {
-    const ListTag = block.ordered ? "ol" : "ul";
-    return (
-      <ListTag className={`${block.ordered ? "list-decimal" : "list-disc"} space-y-1 pl-5 marker:text-muted-neutral`}>
-        {block.items.map((item, index) => (
-          <li className="break-words" key={`${index}-${item.slice(0, 24)}`}>
-            {renderInlineMarkdown(item)}
-          </li>
-        ))}
-      </ListTag>
-    );
-  }
-
-  return <div className="break-words">{renderInlineMarkdown(block.content)}</div>;
-}
-
 function ActivityEvent({
   event,
+  entry,
   isSubmitting,
   onApprovalSubmit,
 }: {
   event: AgentChatEvent;
+  entry?: PresentedWorkEntry;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
 }) {
-  const block = toActivityBlock(event);
+  const block = entry?.block ?? toActivityBlock(event);
+  if (isThinkingIndicator(event)) return <ThinkingRow />;
   if (event.kind === "status") return <StatusRow event={event} block={block} />;
   if (event.kind === "terminal_output") return <TerminalFallback block={block} />;
-  return <ActivityRow event={event} block={block} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />;
+  return <ActivityRow event={event} entry={entry} block={block} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />;
+}
+
+function ThinkingRow() {
+  return (
+    <article aria-label="agent working" className="flex justify-start">
+      <div className="inline-flex items-center gap-1.5 px-1 py-0.5 text-[12px] leading-5 text-muted-neutral">
+        <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-wardian-processing)]" aria-hidden="true" />
+        <span className="sr-only">Working...</span>
+        <span aria-hidden="true">
+          Working
+          <span data-testid="thinking-dots" className="wardian-thinking-dots">
+            <span className="wardian-thinking-dot wardian-thinking-dot-1">.</span>
+            <span className="wardian-thinking-dot wardian-thinking-dot-2">.</span>
+            <span className="wardian-thinking-dot wardian-thinking-dot-3">.</span>
+          </span>
+        </span>
+      </div>
+    </article>
+  );
 }
 
 function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }) {
   const [expanded, setExpanded] = useState(false);
-  const entries = row.events.map((event) => ({ event, block: toActivityBlock(event) }));
-  const visibleEntries = expanded ? entries : entries.slice(-6);
-  const hiddenCount = entries.length - visibleEntries.length;
-  const title = workGroupTitle(row.events);
-  const copyValue = formatWorkGroupForCopy(entries, row.changedPaths);
+  const visibleEntries = expanded ? row.entries : row.entries.slice(-6);
+  const hiddenCount = row.entries.length - visibleEntries.length;
+  const title = workGroupTitleFromEntries(row.entries);
+  const copyValue = formatPresentedWorkGroupForCopy(row);
 
   return (
     <article className="border-l-2 border-wardian-light bg-[color-mix(in_srgb,var(--color-wardian-card-bg-muted),transparent_18%)] px-3 py-2">
@@ -438,13 +447,13 @@ function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }
         <div className="min-w-0 flex-1">
           <div className="truncate text-[12px] font-semibold leading-5 text-primary">{title}</div>
           <div className="text-[11px] leading-4 text-muted-neutral">
-            {entries.length} {entries.length === 1 ? "event" : "events"}
+            {row.entries.length} {row.entries.length === 1 ? "event" : "events"}
             {hiddenCount > 0 ? ` - showing latest ${visibleEntries.length}` : ""}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <CopyIconButton label="Copy work log" value={copyValue} />
-          {entries.length > visibleEntries.length || expanded ? (
+          {row.entries.length > visibleEntries.length || expanded ? (
             <button
               type="button"
               className="rounded border border-wardian-light px-2 py-1 text-[11px] font-semibold leading-4 text-muted-neutral hover:text-primary"
@@ -459,12 +468,18 @@ function WorkGroupRow({ row }: { row: Extract<ChatRow, { kind: "work_group" }> }
       {row.changedPaths.length > 0 ? <ChangedFiles paths={row.changedPaths} /> : null}
 
       <div className="mt-2 space-y-1">
-        {visibleEntries.map(({ event, block }) => (
-          <WorkEntry block={block} event={event} key={block.id} />
+        {visibleEntries.map((entry) => (
+          <WorkEntry entry={entry} key={entry.id} />
         ))}
       </div>
     </article>
   );
+}
+
+function workGroupTitleFromEntries(entries: PresentedWorkEntry[]): string {
+  if (entries.some((entry) => entry.primary_event.kind === "error" || entry.primary_event.status === "failed")) return "Work log with error";
+  if (entries.some((entry) => entry.primary_event.status === "action_required")) return "Work log needs attention";
+  return "Work log";
 }
 
 function ChangedFiles({ paths }: { paths: string[] }) {
@@ -488,18 +503,18 @@ function ChangedFiles({ paths }: { paths: string[] }) {
   );
 }
 
-function WorkEntry({ event, block }: { event: AgentChatEvent; block: ActivityBlockModel }) {
-  const summary = workEntrySummary(event, block);
+function WorkEntry({ entry }: { entry: PresentedWorkEntry }) {
   return (
     <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 rounded border border-transparent py-1 text-[12px] leading-4">
-      <span className={`mt-1 h-1.5 w-1.5 rounded-full ${toneDotClass(block.tone)}`} aria-hidden="true" />
+      <span className={`mt-1 h-1.5 w-1.5 rounded-full ${toneDotClass(entry.block.tone)}`} aria-hidden="true" />
       <div className="min-w-0">
-        <div className="truncate font-medium text-primary">{block.title}</div>
-        {summary ? (
-          <div className="truncate font-mono text-[11px] text-muted-neutral" title={summary}>
-            {summary}
+        <div className="truncate font-medium text-primary">{entry.title}</div>
+        {entry.summary ? (
+          <div className="truncate font-mono text-[11px] text-muted-neutral" title={entry.summary}>
+            {entry.summary}
           </div>
         ) : null}
+        {entry.details.length > 0 ? <div className="truncate text-[11px] text-muted-neutral">{entry.details.join(" - ")}</div> : null}
       </div>
     </div>
   );
@@ -520,11 +535,13 @@ function StatusRow({ event, block }: { event: AgentChatEvent; block: ActivityBlo
 
 function ActivityRow({
   event,
+  entry,
   block,
   isSubmitting,
   onApprovalSubmit,
 }: {
   event: AgentChatEvent;
+  entry?: PresentedWorkEntry;
   block: ActivityBlockModel;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
@@ -534,9 +551,11 @@ function ActivityRow({
   const isApproval = block.kind === "approval" || block.tone === "warning";
   const approvalChoices = isApproval ? parseApprovalChoices(event.text ?? block.content) : [];
   const presentation = toolPresentation(event, block);
+  const details = entry?.details ?? presentation.details;
   const Icon = presentation.icon;
   const output = outputWithoutCommandPrefix(block.content, event.command);
   const changedPaths = changedPathsFromEvents([event]);
+  const copyValue = entry && entry.merged_result_events.length > 0 ? formatPresentedEntryForCopy(entry) : block.content;
 
   return (
     <article className={`border-l-2 bg-[var(--color-wardian-card-bg-muted)] px-3 py-2 ${TONE_CLASSES[block.tone]}`}>
@@ -549,7 +568,7 @@ function ActivityRow({
             <div className="min-w-0">
               <div className="truncate text-[12px] font-semibold leading-5 text-primary">{presentation.title}</div>
               <div className="truncate text-[11px] leading-4 text-muted-neutral">
-                {presentation.details.join(" - ")}
+                {details.join(" - ")}
               </div>
             </div>
           </div>
@@ -563,7 +582,7 @@ function ActivityRow({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <CopyIconButton label="Copy activity output" value={block.content} />
+          <CopyIconButton label="Copy activity output" value={copyValue} />
           {block.defaultCollapsed ? (
             <button
               type="button"
@@ -668,14 +687,6 @@ function ToolBody({
   return <CodePanel content={safeContent} language={block.language} />;
 }
 
-function CodePanel({ content, language }: { content: string; language: string }) {
-  return (
-    <pre className="mt-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-words rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)] p-2 text-[12px] leading-5 text-primary">
-      <code data-language={language}>{renderHighlightedCode(content, language)}</code>
-    </pre>
-  );
-}
-
 function toolPresentation(event: AgentChatEvent, block: ActivityBlockModel): ToolPresentation {
   const rawType = stringMetadata(event.metadata, "raw_type");
   const toolName = toolNameFromEvent(event);
@@ -729,7 +740,7 @@ function readableToolTitle(event: AgentChatEvent, fallback: string): string {
   const title = event.title?.trim();
   const toolName = toolNameFromEvent(event);
   const command = event.command?.trim();
-  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return title.replace(/_/g, " ");
+  if (title && !isGenericActivityTitle(title)) return title.replace(/_/g, " ");
   if (toolName) return toolName.replace(/_/g, " ");
   if (command) return commandName(command);
   return fallback;
@@ -743,7 +754,7 @@ function commandName(command: string): string {
 
 function toolLabelFromEvent(event: AgentChatEvent, rawType: string | null, toolName: string | null): string | null {
   const title = event.title?.trim();
-  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return title.replace(/_/g, " ");
+  if (title && !isGenericActivityTitle(title)) return title.replace(/_/g, " ");
   if (toolName) return toolName.replace(/_/g, " ");
   if (rawType) return rawType.replace(/_/g, " ");
   if (event.kind === "tool_call") return "tool call";
@@ -889,39 +900,6 @@ function TerminalFallback({ block }: { block: ActivityBlockModel }) {
   );
 }
 
-function CopyIconButton({ label, value }: { label: string; value: string }) {
-  const [state, setState] = useState<CopyState>("idle");
-  const copy = async () => {
-    if (!value) return;
-    try {
-      await writeText(value);
-      setState("copied");
-      window.setTimeout(() => setState("idle"), 1400);
-    } catch {
-      setState("error");
-      window.setTimeout(() => setState("idle"), 2200);
-    }
-  };
-
-  return (
-    <button
-      type="button"
-      aria-label={state === "copied" ? `${label} copied` : state === "error" ? `${label} failed` : label}
-      title={state === "copied" ? "Copied" : state === "error" ? "Copy failed" : label}
-      className={`inline-flex h-6 w-6 items-center justify-center rounded border text-muted-neutral transition-colors ${
-        state === "copied"
-          ? "border-[color-mix(in_srgb,var(--color-wardian-success),transparent_40%)] bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_86%)] text-[var(--color-wardian-success)]"
-          : state === "error"
-            ? "border-[color-mix(in_srgb,var(--color-wardian-error),transparent_40%)] bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_88%)] text-[var(--color-wardian-error)]"
-            : "border-wardian-light bg-[var(--color-wardian-card-bg-muted)] hover:text-primary"
-      }`}
-      onClick={copy}
-    >
-      {state === "copied" ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
-    </button>
-  );
-}
-
 function ChatComposer({
   autoFocus,
   disabledReason,
@@ -1056,12 +1034,69 @@ function mergePendingMessages(events: AgentChatEvent[], pendingMessages: AgentCh
   return [...events, ...unconfirmed.map((message, index) => ({ ...message, sequence: pendingSequence(events, index) }))];
 }
 
+function appendThinkingIndicator(
+  events: AgentChatEvent[],
+  sessionId: string,
+  provider: string,
+  showThinking: boolean,
+): AgentChatEvent[] {
+  if (!showThinking) return events;
+
+  const sequence = pendingSequence(events, 0);
+  return [
+    ...events,
+    {
+      id: `thinking-${sessionId}`,
+      session_id: sessionId,
+      provider,
+      kind: "status",
+      role: null,
+      text: "Working...",
+      title: "Working...",
+      status: "processing",
+      turn_id: null,
+      source: "chat_ui",
+      command: null,
+      exit_code: null,
+      path: null,
+      language: null,
+      created_at: null,
+      sequence,
+      metadata: { chat_thinking_indicator: true },
+    },
+  ];
+}
+
+function isThinkingIndicator(event: AgentChatEvent): boolean {
+  return event.kind === "status" && event.metadata?.chat_thinking_indicator === true;
+}
+
+function clearAwaitingResponseWhenAnswered(
+  events: AgentChatEvent[],
+  marker: AwaitingResponseMarker | null,
+): AwaitingResponseMarker | null {
+  if (!marker) return null;
+  return responseEventCount(events) > marker.response_count_after ? null : marker;
+}
+
 function unconfirmedPendingMessages(events: AgentChatEvent[], pendingMessages: AgentChatEvent[]): AgentChatEvent[] {
   const consumedEventIndexes = new Set<number>();
+  const consumedTranscriptMatchesByText = new Map<string, number>();
 
   return pendingMessages.filter((message) => {
     const pendingText = normalizePromptText(message.text ?? "");
     if (!pendingText) return false;
+    const confirmAfterMatchingCount = pendingConfirmAfterMatchingUserCount(message);
+    if (confirmAfterMatchingCount !== null) {
+      const consumed = consumedTranscriptMatchesByText.get(pendingText) ?? 0;
+      const matchingCount = matchingUserMessageCount(events, pendingText);
+      if (matchingCount > confirmAfterMatchingCount + consumed) {
+        consumedTranscriptMatchesByText.set(pendingText, consumed + 1);
+        return false;
+      }
+      return true;
+    }
+
     const confirmAfterSequence = pendingConfirmAfterSequence(message);
     const matchingIndex = events.findIndex((event, index) => {
       if (consumedEventIndexes.has(index)) return false;
@@ -1084,7 +1119,18 @@ function pendingConfirmAfterSequence(pendingMessage: AgentChatEvent): number {
   return typeof value === "number" ? value : 0;
 }
 
-function createPendingUserMessage(sessionId: string, provider: string, text: string, confirmAfterSequence: number): AgentChatEvent {
+function pendingConfirmAfterMatchingUserCount(pendingMessage: AgentChatEvent): number | null {
+  const value = pendingMessage.metadata?.confirm_after_matching_user_count;
+  return typeof value === "number" ? value : null;
+}
+
+function createPendingUserMessage(
+  sessionId: string,
+  provider: string,
+  text: string,
+  confirmAfterSequence: number,
+  confirmAfterMatchingUserCount: number,
+): AgentChatEvent {
   const createdAt = new Date().toISOString();
   return {
     id: `pending-user-${sessionId}-${createdAt}`,
@@ -1103,7 +1149,11 @@ function createPendingUserMessage(sessionId: string, provider: string, text: str
     language: null,
     created_at: createdAt,
     sequence: null,
-    metadata: { optimistic: true, confirm_after_sequence: confirmAfterSequence },
+    metadata: {
+      optimistic: true,
+      confirm_after_sequence: confirmAfterSequence,
+      confirm_after_matching_user_count: confirmAfterMatchingUserCount,
+    },
   };
 }
 
@@ -1119,6 +1169,20 @@ function normalizePromptText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function matchingUserMessageCount(events: AgentChatEvent[], text: string): number {
+  const normalized = normalizePromptText(text);
+  if (!normalized) return 0;
+  return events.filter((event) => event.kind === "message" && event.role === "user" && normalizePromptText(event.text ?? "") === normalized)
+    .length;
+}
+
+function responseEventCount(events: AgentChatEvent[]): number {
+  return events.filter((event) => {
+    if (event.kind === "message") return event.role === "assistant" || event.role === "system" || event.role === "tool";
+    return event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "approval" || event.kind === "terminal_output" || event.kind === "error";
+  }).length;
+}
+
 function inputDisabledReason(status: string | null, isSubmitting: boolean): string | null {
   if (isSubmitting) return "Sending...";
   const normalized = (status ?? "").toLowerCase();
@@ -1130,6 +1194,11 @@ function inputDisabledReason(status: string | null, isSubmitting: boolean): stri
   if (normalized.includes("error")) return "Agent is in an error state";
   if (normalized.includes("processing") || normalized.includes("running")) return "Agent is processing";
   return null;
+}
+
+function isProcessingAgentStatus(status: string | null): boolean {
+  const normalized = (status ?? "").toLowerCase();
+  return normalized.includes("processing") || normalized.includes("running");
 }
 
 function sortTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[] {
@@ -1159,153 +1228,20 @@ function shouldShowChatEvent(event: AgentChatEvent): boolean {
     return false;
   }
   if (event.kind !== "status") return true;
-  return event.status === "failed" || event.status === "cancelled" || event.status === "action_required";
+  if (isThinkingIndicator(event)) return true;
+  return shouldShowStatusEvent(event);
 }
 
 function hasMeaningfulToolIdentity(event: AgentChatEvent): boolean {
   const title = event.title?.trim();
-  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return true;
+  if (title && !isGenericActivityTitle(title)) return true;
   return Boolean(toolNameFromEvent(event));
-}
-
-function deriveChatRows(events: AgentChatEvent[]): ChatRow[] {
-  const rows: ChatRow[] = [];
-  let pendingWorkEvents: AgentChatEvent[] = [];
-
-  const flushPendingWork = () => {
-    if (pendingWorkEvents.length === 0) return;
-
-    if (pendingWorkEvents.length < WORK_GROUP_MIN_EVENTS) {
-      pendingWorkEvents.forEach((event) => rows.push({ kind: "event", event }));
-    } else {
-      const first = pendingWorkEvents[0];
-      const last = pendingWorkEvents[pendingWorkEvents.length - 1];
-      rows.push({
-        kind: "work_group",
-        id: `work-group-${first.id}-${last.id}`,
-        events: pendingWorkEvents,
-        changedPaths: changedPathsFromEvents(pendingWorkEvents),
-      });
-    }
-
-    pendingWorkEvents = [];
-  };
-
-  events.forEach((event) => {
-    if (isGroupableWorkEvent(event)) {
-      pendingWorkEvents.push(event);
-      return;
-    }
-
-    flushPendingWork();
-    rows.push({ kind: "event", event });
-  });
-
-  flushPendingWork();
-  return rows;
-}
-
-function isGroupableWorkEvent(event: AgentChatEvent): boolean {
-  if (event.status === "action_required") return false;
-  return event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "error";
-}
-
-function changedPathsFromEvents(events: AgentChatEvent[]): string[] {
-  const paths = new Set<string>();
-
-  events.forEach((event) => {
-    addPath(paths, event.path);
-    extractMetadataPaths(event.metadata).forEach((path) => addPath(paths, path));
-  });
-
-  return [...paths];
-}
-
-function extractMetadataPaths(metadata: Record<string, unknown>): string[] {
-  const paths: string[] = [];
-  const pathKeys = new Set(["changed_files", "changedFiles", "file", "file_path", "filePath", "files", "path", "paths"]);
-
-  Object.entries(metadata).forEach(([key, value]) => {
-    if (pathKeys.has(key)) collectPathValues(value, paths);
-  });
-
-  return paths;
-}
-
-function collectPathValues(value: unknown, paths: string[]) {
-  if (typeof value === "string") {
-    if (looksLikePath(value)) paths.push(value);
-    return;
-  }
-
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectPathValues(item, paths));
-    return;
-  }
-
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    ["path", "file", "file_path", "filePath"].forEach((key) => collectPathValues(record[key], paths));
-  }
-}
-
-function addPath(paths: Set<string>, value: string | null) {
-  const path = value?.trim();
-  if (path && looksLikePath(path)) paths.add(path);
-}
-
-function looksLikePath(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 300) return false;
-  if (/^https?:\/\//i.test(trimmed)) return false;
-  return /[\\/]/.test(trimmed) || /(^|[A-Za-z0-9_-])\.[A-Za-z0-9]{1,8}$/.test(trimmed);
-}
-
-function workGroupTitle(events: AgentChatEvent[]): string {
-  if (events.some((event) => event.kind === "error" || event.status === "failed")) return "Work log with error";
-  if (events.some((event) => event.status === "action_required")) return "Work log needs attention";
-  return "Work log";
 }
 
 function compactPath(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 2) return path;
   return `.../${parts.slice(-2).join("/")}`;
-}
-
-function firstContentLine(content: string): string {
-  const line = content
-    .split(/\r\n|\r|\n/)
-    .map((part) => part.trim())
-    .find(Boolean);
-  if (!line) return "";
-  return line.length > 140 ? `${line.slice(0, 137)}...` : line;
-}
-
-function workEntrySummary(event: AgentChatEvent, block: ActivityBlockModel): string {
-  const command = event.command?.trim();
-  if (command) return command.length > 140 ? `${command.slice(0, 137)}...` : command;
-
-  const content = firstContentLine(block.content);
-  const status = formatStatus(event.status);
-  if (content && content !== status) return content;
-
-  if (typeof event.exit_code === "number") return `Exit code: ${event.exit_code}`;
-  return "";
-}
-
-function formatWorkGroupForCopy(entries: Array<{ event: AgentChatEvent; block: ActivityBlockModel }>, changedPaths: string[]): string {
-  const sections = entries.map(({ event, block }) => {
-    const header = [block.title, block.subtitle].filter(Boolean).join(" - ");
-    const content = event.command?.trim() && !block.content.includes(event.command.trim()) ? `$ ${event.command.trim()}\n\n${block.content}` : block.content;
-    return `${header}\n${content}`.trim();
-  });
-
-  if (changedPaths.length > 0) {
-    sections.push(`Changed files\n${changedPaths.join("\n")}`);
-  }
-
-  return sections.join("\n\n---\n\n");
 }
 
 function previewContent(content: string): string {
@@ -1322,237 +1258,6 @@ function compactTerminalPreview(content: string): string {
     .filter(Boolean)
     .slice(0, 2)
     .join("  ");
-}
-
-function parseMessageBlocks(text: string): MessageBlock[] {
-  if (!text.trim()) return [];
-
-  const blocks: MessageBlock[] = [];
-  const fencePattern = /```([A-Za-z0-9_-]+)?\n([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = fencePattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      blocks.push(...parseMarkdownTextBlocks(text.slice(lastIndex, match.index)));
-    }
-    blocks.push({
-      kind: "code",
-      language: match[1]?.trim() || null,
-      content: match[2].replace(/\n$/, ""),
-    });
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    blocks.push(...parseMarkdownTextBlocks(text.slice(lastIndex)));
-  }
-
-  return blocks;
-}
-
-function parseMarkdownTextBlocks(content: string): MessageBlock[] {
-  const lines = content.replace(/\r\n|\r/g, "\n").split("\n");
-  const blocks: MessageBlock[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line.trim());
-    if (heading) {
-      blocks.push({ kind: "heading", level: heading[1].length, content: heading[2].trim() });
-      index += 1;
-      continue;
-    }
-
-    const unordered = /^\s*[-*+]\s+(.+)$/.exec(line);
-    const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
-    if (unordered || ordered) {
-      const orderedList = Boolean(ordered);
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = orderedList ? /^\s*\d+[.)]\s+(.+)$/.exec(lines[index]) : /^\s*[-*+]\s+(.+)$/.exec(lines[index]);
-        if (!item) break;
-        items.push(item[1].trim());
-        index += 1;
-      }
-      blocks.push({ kind: "list", ordered: orderedList, items });
-      continue;
-    }
-
-    const paragraph: string[] = [];
-    while (index < lines.length) {
-      const next = lines[index];
-      if (!next.trim()) break;
-      if (/^(#{1,6})\s+/.test(next.trim()) || /^\s*([-*+]|\d+[.)])\s+/.test(next)) break;
-      paragraph.push(next.trimEnd());
-      index += 1;
-    }
-    blocks.push({ kind: "paragraph", content: paragraph.join("\n").trim() });
-  }
-
-  return blocks.filter((block) => block.kind !== "paragraph" || block.content.length > 0);
-}
-
-function renderInlineMarkdown(content: string): ReactNode {
-  const parts: ReactNode[] = [];
-  const pattern = /\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`|\*\*\s*([^*]+?)\s*\*\*|__\s*([^_]+?)\s*__/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(renderTextWithBreaks(content.slice(lastIndex, match.index), `text-${lastIndex}`));
-    }
-    if (match[3]) {
-      parts.push(
-        <code className="rounded bg-[var(--color-wardian-sidebar-primary)] px-1 py-0.5 text-[12px]" key={`code-${match.index}`}>
-          {match[3]}
-        </code>,
-      );
-    } else if (match[4] || match[5]) {
-      parts.push(
-        <strong className="font-semibold text-primary" key={`strong-${match.index}`}>
-          {match[4] ?? match[5]}
-        </strong>,
-      );
-    } else {
-      const safeUrl = safeMarkdownLinkUrl(match[2]);
-      if (!safeUrl) {
-        parts.push(renderTextWithBreaks(match[0], `unsafe-link-${match.index}`));
-        lastIndex = match.index + match[0].length;
-        continue;
-      }
-      parts.push(
-        <a
-          className="break-all font-medium text-[var(--color-wardian-accent)] underline decoration-[color-mix(in_srgb,var(--color-wardian-accent),transparent_55%)] underline-offset-2"
-          href={safeUrl}
-          key={`link-${match.index}`}
-          rel="noreferrer"
-          target="_blank"
-        >
-          {match[1]}
-        </a>,
-      );
-    }
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < content.length) {
-    parts.push(renderTextWithBreaks(content.slice(lastIndex), `text-${lastIndex}`));
-  }
-
-  return parts.length > 0 ? parts : content;
-}
-
-function safeMarkdownLinkUrl(rawUrl: string | undefined): string | null {
-  if (!rawUrl) return null;
-  try {
-    const url = new URL(rawUrl, window.location.href);
-    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "file:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
-function renderTextWithBreaks(content: string, keyPrefix: string): ReactNode {
-  const lines = content.split("\n");
-  if (lines.length === 1) return content;
-  return lines.flatMap((line, index) => (index === 0 ? [line] : [<br key={`${keyPrefix}-br-${index}`} />, line]));
-}
-
-function renderHighlightedCode(content: string, language: string): ReactNode {
-  const normalized = language.toLowerCase();
-  const lines = content.split("\n");
-  return lines.flatMap((line, index) => {
-    const tokens = highlightLine(line, normalized, index);
-    return index === lines.length - 1 ? tokens : [...tokens, "\n"];
-  });
-}
-
-function highlightLine(line: string, language: string, lineIndex: number): ReactNode[] {
-  if (language === "diff") return highlightDiffLine(line, lineIndex);
-  if (language === "json") return highlightJsonLine(line, lineIndex);
-  if (language === "shell" || language === "powershell" || language === "batch" || language === "terminal") {
-    return highlightShellLine(line, lineIndex);
-  }
-  if (language === "rust" || language === "typescript" || language === "javascript" || language === "python") {
-    return highlightCodeLine(line, lineIndex);
-  }
-  return [line];
-}
-
-function highlightDiffLine(line: string, lineIndex: number): ReactNode[] {
-  if (/^\+[^+]/.test(line)) return [<span className="text-[var(--color-wardian-success)]" data-token="diff-add" key={`diff-${lineIndex}`}>{line}</span>];
-  if (/^-[^-]/.test(line)) return [<span className="text-[var(--color-wardian-error)]" data-token="diff-remove" key={`diff-${lineIndex}`}>{line}</span>];
-  if (/^@@/.test(line)) return [<span className="text-[var(--color-wardian-accent)]" data-token="diff-hunk" key={`diff-${lineIndex}`}>{line}</span>];
-  return [line];
-}
-
-function highlightShellLine(line: string, lineIndex: number): ReactNode[] {
-  const prompt = /^(\s*(?:\$|>|PS [^>]+>)\s+)(.*)$/.exec(line);
-  if (!prompt) return [line];
-  return [
-    <span className="text-[var(--color-wardian-accent)]" data-token="shell-prompt" key={`shell-prompt-${lineIndex}`}>
-      {prompt[1]}
-    </span>,
-    <span data-token="shell-command" key={`shell-command-${lineIndex}`}>
-      {prompt[2]}
-    </span>,
-  ];
-}
-
-function highlightCodeLine(line: string, lineIndex: number): ReactNode[] {
-  const pattern = /\b(const|let|var|fn|pub|struct|enum|impl|use|import|from|return|if|else|for|while|async|await|class|def)\b/g;
-  const tokens: ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(line)) !== null) {
-    if (match.index > lastIndex) tokens.push(line.slice(lastIndex, match.index));
-    tokens.push(
-      <span className="text-[var(--color-wardian-accent)]" data-token="keyword" key={`kw-${lineIndex}-${match.index}`}>
-        {match[0]}
-      </span>,
-    );
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < line.length) tokens.push(line.slice(lastIndex));
-  return tokens.length > 0 ? tokens : [line];
-}
-
-function highlightJsonLine(line: string, lineIndex: number): ReactNode[] {
-  const pattern = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\b\d+(?:\.\d+)?\b/g;
-  const tokens: ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(line)) !== null) {
-    if (match.index > lastIndex) tokens.push(line.slice(lastIndex, match.index));
-    const value = match[0];
-    const token = match[2] ? "json-key" : match[3] ? "json-literal" : /^-?\d/.test(value) ? "json-number" : "json-string";
-    const className =
-      token === "json-key"
-        ? "text-[var(--color-wardian-accent)]"
-        : token === "json-string"
-          ? "text-[var(--color-wardian-success)]"
-          : "text-[var(--color-wardian-warning)]";
-    tokens.push(
-      <span className={className} data-token={token} key={`json-${lineIndex}-${match.index}`}>
-        {value}
-      </span>,
-    );
-    lastIndex = match.index + value.length;
-  }
-
-  if (lastIndex < line.length) tokens.push(line.slice(lastIndex));
-  return tokens.length > 0 ? tokens : [line];
 }
 
 function toneDotClass(tone: ActivityTone): string {

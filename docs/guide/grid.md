@@ -34,6 +34,8 @@ Change the default globally in **Settings > Grid > Grid card display**. Each car
 
 Chat mode sends ordinary text through the same provider submit path used by Wardian's command tools. Use **Enter** to send and **Shift+Enter** for a newline in the composer. When Wardian recognizes an action-required prompt with approval choices, Chat mode renders those choices as buttons that submit the matching response. Switch back to Terminal mode when you need raw TUI controls, provider-specific keybindings, or detailed terminal behavior.
 
+Chat mode renders common GitHub-flavored Markdown in agent messages, including tables, task lists, nested lists, blockquotes, strikethrough, autolinks, and fenced code blocks. Tool activity is summarized for scanning: empty successful tool results are folded into their command rows, while failures, changed files, command output, approvals, and errors remain visible.
+
 In Terminal mode, Wardian follows conservative terminal shortcut handling. On macOS, **Cmd+A** selects the visible terminal buffer. Windows and Linux control-key combinations, including **Ctrl+A** and **Ctrl+Shift+A**, continue through to the shell or provider TUI by default.
 
 Terminal output can also expose clickable HTTP/HTTPS URLs and workspace file paths. URL links open in the system browser, while file path links use the external editor behavior configured in Settings.

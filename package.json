@@ -64,6 +64,8 @@
     "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "sigma": "^3.0.3",
     "zustand": "^5.0.11"
   },

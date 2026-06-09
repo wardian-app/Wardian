@@ -176,6 +176,66 @@ describe("AgentChatView", () => {
     expect(await screen.findByText("failed")).toBeInTheDocument();
   });
 
+  it("shows a subtle working indicator while processing before visible work starts", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "user-before-thinking",
+        kind: "message",
+        role: "user",
+        text: "Draft a concise reply.",
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" status="Processing" />);
+
+    expect(await screen.findByText("Draft a concise reply.")).toBeInTheDocument();
+    expect(screen.getByText("Working...")).toBeInTheDocument();
+  });
+
+  it("renders the working ellipsis as inline animated period glyphs", async () => {
+    invokeMock.mockResolvedValue([]);
+
+    render(<AgentChatView sessionId="agent-1" status="Processing" />);
+
+    const workingRow = await screen.findByLabelText("agent working");
+    expect(within(workingRow).getByText("Working...")).toHaveClass("sr-only");
+
+    const animatedDots = within(workingRow).getByTestId("thinking-dots");
+    expect(animatedDots).toHaveTextContent("...");
+    expect(animatedDots).toHaveClass("wardian-thinking-dots");
+    expect(animatedDots).not.toHaveClass("wardian-thinking-dots-frame");
+
+    const dotGlyphs = animatedDots.querySelectorAll(".wardian-thinking-dot");
+    expect(dotGlyphs).toHaveLength(3);
+    dotGlyphs.forEach((dot) => expect(dot).toHaveTextContent("."));
+  });
+
+  it("keeps the subtle working indicator as the latest row when a running tool row is visible", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "user-before-tool",
+        kind: "message",
+        role: "user",
+        text: "Run the tests.",
+        sequence: 1,
+      }),
+      event({
+        id: "running-tool",
+        kind: "tool_call",
+        title: "Run command",
+        command: "npm run test",
+        status: "running",
+        sequence: 2,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" status="Processing" />);
+
+    expect(await screen.findByText("Run command")).toBeInTheDocument();
+    expect(screen.getByText("Working...")).toBeInTheDocument();
+  });
+
   it("hides empty running tool placeholders", async () => {
     invokeMock.mockResolvedValue([
       event({
@@ -396,6 +456,69 @@ describe("AgentChatView", () => {
     expect(within(article).getByText("cargo test -p Wardian commands::terminal::tests")).toBeInTheDocument();
     expect(within(article).getByText("npm run test -- src/features/grid/AgentChatView.test.tsx")).toBeInTheDocument();
     expect(within(article).queryAllByText("running")).toHaveLength(0);
+  });
+
+  it("hides empty successful tool result rows in grouped work logs", async () => {
+    invokeMock.mockResolvedValue([
+      event({ id: "call-1", kind: "tool_call", title: "shell_command", command: "git status --short --branch", sequence: 1 }),
+      event({ id: "result-1", kind: "tool_result", title: "Tool result", status: "succeeded", exit_code: 0, sequence: 2 }),
+      event({ id: "call-2", kind: "tool_call", title: "shell_command", command: "git log -1 --oneline --decorate", sequence: 3 }),
+      event({ id: "result-2", kind: "tool_result", title: "Tool result", status: "succeeded", exit_code: 0, sequence: 4 }),
+      event({ id: "call-3", kind: "tool_call", title: "shell_command", command: "npm run docs:build", sequence: 5 }),
+      event({ id: "result-3", kind: "tool_result", title: "Tool result", status: "succeeded", exit_code: 0, text: "build complete", sequence: 6 }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    const group = await screen.findByText("Work log");
+    const article = group.closest("article") as HTMLElement;
+
+    expect(within(article).getByText("4 events")).toBeInTheDocument();
+    expect(within(article).getByText("git status --short --branch")).toBeInTheDocument();
+    expect(within(article).getByText("git log -1 --oneline --decorate")).toBeInTheDocument();
+    expect(within(article).getByText("npm run docs:build")).toBeInTheDocument();
+    expect(within(article).queryAllByText("Tool result")).toHaveLength(0);
+    expect(within(article).queryAllByText("Exit code: 0")).toHaveLength(0);
+  });
+
+  it("copies merged result metadata from individual command rows", async () => {
+    writeTextMock.mockResolvedValue(undefined);
+    invokeMock.mockResolvedValue([
+      event({
+        id: "call-1",
+        kind: "tool_call",
+        title: "shell_command",
+        command: "git status --short --branch",
+        text: "## docs/chat-markdown-renderer-spec...origin/main [ahead 9]",
+        sequence: 1,
+      }),
+      event({
+        id: "result-1",
+        kind: "tool_result",
+        title: "Tool result",
+        status: "succeeded",
+        exit_code: 0,
+        sequence: 2,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    const activityArticle = (await screen.findByText("git status --short --branch")).closest("article") as HTMLElement;
+    fireEvent.click(within(activityArticle).getByRole("button", { name: "Copy activity output" }));
+
+    await waitFor(() =>
+      expect(writeTextMock).toHaveBeenLastCalledWith(
+        [
+          "shell_command - succeeded - exit 0 - 3 lines",
+          "$ git status --short --branch",
+          "",
+          "## docs/chat-markdown-renderer-spec...origin/main [ahead 9]",
+          "Diagnostics",
+          "Tool result - succeeded - exit 0",
+        ].join("\n"),
+      ),
+    );
   });
 
   it("renders diff stats and todo tools as specialized activity", async () => {
@@ -689,9 +812,18 @@ describe("AgentChatView", () => {
         text: [
           "### Focus Area: `01-generalist`",
           "",
-          "- [AGENTS.md](file:///tmp/AGENTS.md): Defines the core mission",
-          "- [GEMINI.md](file:///tmp/GEMINI.md): Points at `CLAUDE.md`",
-          "- **00-common**: Contains the wardian-cli skill",
+          "| # | Subject | From | Received |",
+          "|---|---------|------|----------|",
+          "| 1 | RE: Synthetic compliance question for TEST-123 | Alex Reviewer | 2026-06-06 |",
+          "| 8 | | Morgan Coordinator | 2026-06-05 |",
+          "",
+          "1. Inspect renderer",
+          "   - [x] Existing markdown behavior",
+          "   - [ ] GFM table coverage",
+          "",
+          "> quoted detail",
+          "",
+          "Safe [AGENTS.md](file:///tmp/AGENTS.md) and ~~old~~ text.",
           "",
           "```ts",
           "const ready = true;",
@@ -706,9 +838,12 @@ describe("AgentChatView", () => {
     expect(await screen.findByText("Focus Area:")).toBeInTheDocument();
     expect(screen.getByLabelText("assistant message")).toBeInTheDocument();
     expect(screen.getByText("01-generalist")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "RE: Synthetic compliance question for TEST-123" })).toBeInTheDocument();
+    expect(screen.getByText("Existing markdown behavior")).toBeInTheDocument();
+    expect(screen.getByText("quoted detail")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "AGENTS.md" })).toHaveAttribute("href", "file:///tmp/AGENTS.md");
-    expect(screen.getAllByRole("list")).toHaveLength(2);
-    expect(screen.getByText("00-common").tagName).toBe("STRONG");
+    expect(screen.getByText("old").tagName).toBe("DEL");
     expect(screen.getByText("const ready = true;")).toBeInTheDocument();
   });
 
@@ -727,7 +862,28 @@ describe("AgentChatView", () => {
 
     expect(await screen.findByRole("link", { name: "docs" })).toHaveAttribute("href", "https://example.test/docs");
     expect(screen.queryByRole("link", { name: "run" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("assistant message")).toHaveTextContent("[run](javascript:alert)");
+    expect(screen.getByLabelText("assistant message")).toHaveTextContent("run");
+  });
+
+  it("keeps changed-file metadata visible on otherwise empty successful tool results", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "changed-files-result",
+        kind: "tool_result",
+        role: null,
+        title: "Tool result",
+        status: "succeeded",
+        exit_code: 0,
+        metadata: { changed_files: ["src/features/grid/AgentChatView.tsx"] },
+        sequence: 1,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByText("Tool result")).toBeInTheDocument();
+    expect(screen.getByText("Changed files")).toBeInTheDocument();
+    expect(screen.getByText(".../grid/AgentChatView.tsx")).toBeInTheDocument();
   });
 
   it("copies messages, code blocks, activity output, and grouped file paths", async () => {
@@ -1067,6 +1223,47 @@ describe("AgentChatView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(screen.getAllByText("run tests")).toHaveLength(3));
+  });
+
+  it("clears an optimistic prompt when the matching transcript prompt is renumbered below the send snapshot", async () => {
+    let loadCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_transcript") {
+        loadCount += 1;
+        const baseEvents = [
+          event({
+            id: "assistant-before-send",
+            kind: "message",
+            role: "assistant",
+            text: "Ready.",
+            sequence: 50,
+          }),
+        ];
+        if (loadCount === 1) return Promise.resolve(baseEvents);
+        return Promise.resolve([
+          ...baseEvents,
+          event({
+            id: "renumbered-user-message",
+            kind: "message",
+            role: "user",
+            text: "Summarize my status.",
+            sequence: 2,
+          }),
+        ]);
+      }
+      if (command === "submit_prompt_to_agent") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+    const input = await screen.findByLabelText("Message agent");
+    fireEvent.change(input, { target: { value: "Summarize my status." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(loadCount).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(screen.getAllByText("Summarize my status.")).toHaveLength(1));
+    expect(screen.getByText("Working...")).toBeInTheDocument();
   });
 
   it("disables chat input while the agent is busy but allows action required responses", async () => {
