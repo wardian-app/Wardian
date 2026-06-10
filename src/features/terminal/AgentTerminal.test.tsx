@@ -2148,6 +2148,7 @@ describe("AgentTerminal scrollback", () => {
     instance.write.mockClear();
     instance.reset.mockClear();
     instance.refresh.mockClear();
+    instance.buffer.active.cursorY = 12;
     mockInvoke.mockClear();
     view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
 
@@ -2188,6 +2189,12 @@ describe("AgentTerminal scrollback", () => {
         expect.stringContaining("\u001b[48;2;41;41;41m\u001b[38;2;238;242;238m\u001b[2K"),
         expect.any(Function),
       );
+      const composerBlockWrite = instance.write.mock.calls.find(([data]: [string]) =>
+        data.includes("\u001b[12;1H") &&
+        data.includes("\u001b[13;1H") &&
+        data.includes("\u001b[14;1H"),
+      );
+      expect(composerBlockWrite).toBeDefined();
     });
   });
 

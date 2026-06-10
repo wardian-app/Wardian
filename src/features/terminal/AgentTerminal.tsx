@@ -1040,7 +1040,7 @@ function rgbTripletFromHex(hex: string, fallback: string) {
   return values.every(Number.isFinite) ? values.join(";") : fallback;
 }
 
-function codexVisibleComposerRowRepaint(entry: TerminalSessionEntry) {
+function codexVisibleComposerBlockRepaint(entry: TerminalSessionEntry) {
   const renderer = entry.renderer;
   if (!renderer) {
     return null;
@@ -1049,15 +1049,22 @@ function codexVisibleComposerRowRepaint(entry: TerminalSessionEntry) {
   const term = renderer.term;
   const buffer = term.buffer.active;
   const cursorY = Math.max(0, Math.min(term.rows - 1, buffer.cursorY ?? term.rows - 1));
-  const row = cursorY + 1;
-  const lineIndex = (buffer.baseY ?? 0) + cursorY;
-  const lineText = buffer.getLine(lineIndex)?.translateToString(false) ?? "";
-  const visibleText = lineText.slice(0, term.cols).padEnd(term.cols, " ");
+  const firstRow = Math.max(0, cursorY - 1);
+  const lastRow = Math.min(term.rows - 1, cursorY + 1);
   const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
   const background = termTheme === LIGHT_TERM_THEME ? "242;240;235" : "41;41;41";
   const foreground = rgbTripletFromHex(termTheme.foreground, "238;242;238");
+  const rows = [];
+  for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex += 1) {
+    const lineIndex = (buffer.baseY ?? 0) + rowIndex;
+    const lineText = buffer.getLine(lineIndex)?.translateToString(false) ?? "";
+    const visibleText = lineText.slice(0, term.cols).padEnd(term.cols, " ");
+    rows.push(
+      `\u001b[${rowIndex + 1};1H\u001b[48;2;${background}m\u001b[38;2;${foreground}m\u001b[2K${visibleText}`,
+    );
+  }
 
-  return `\u001b7\u001b[?25l\u001b[${row};1H\u001b[48;2;${background}m\u001b[38;2;${foreground}m\u001b[2K${visibleText}\u001b[m\u001b8\u001b[?25h`;
+  return `\u001b7\u001b[?25l${rows.join("")}\u001b[m\u001b8\u001b[?25h`;
 }
 
 async function writeTerminalOutputBatch(
@@ -1196,7 +1203,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
         await writeTerminalControl(entry.renderer.term, themedState);
         entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
       }
-      const rowRepaint = codexVisibleComposerRowRepaint(entry);
+      const rowRepaint = codexVisibleComposerBlockRepaint(entry);
       if (rowRepaint && entry.renderer && !entry.disposed) {
         await writeTerminalControl(entry.renderer.term, rowRepaint);
         entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
@@ -1223,7 +1230,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
     if (entry.renderer && !entry.disposed) {
       entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
     }
-    const rowRepaint = codexVisibleComposerRowRepaint(entry);
+    const rowRepaint = codexVisibleComposerBlockRepaint(entry);
     if (rowRepaint && entry.renderer && !entry.disposed) {
       await writeTerminalControl(entry.renderer.term, rowRepaint);
       entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
