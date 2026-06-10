@@ -65,9 +65,26 @@ fn restored_agent_without_process(
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;
 
-    // Use new_all() to ensure we have process and environment data
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    // Only process environment blocks are needed here; a full refresh_all()
+    // would also sample CPU, memory, and command lines for every process.
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+
+    // Index WARDIAN_SESSION_ID values in one pass instead of rescanning every
+    // process's environment once per agent.
+    let mut session_pids: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for process in sys.processes().values() {
+        for env_var in process.environ() {
+            let env_str = env_var.to_string_lossy();
+            if let Some(session_id) = env_str.strip_prefix("WARDIAN_SESSION_ID=") {
+                session_pids.insert(session_id.trim().to_string(), process.pid().as_u32());
+            }
+        }
+    }
 
     let agents = wardian_core::db::get_all_agents()?;
     for agent in agents {
@@ -75,26 +92,10 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
             continue;
         }
 
-        let mut found_alive = false;
-        for process in sys.processes().values() {
-            for env_var in process.environ() {
-                let env_str = env_var.to_string_lossy();
-                if env_str.contains("WARDIAN_SESSION_ID=") && env_str.contains(&agent.session_id) {
-                    found_alive = true;
-                    let _ = wardian_core::db::update_agent_status(
-                        &agent.session_id,
-                        "Headless",
-                        Some(process.pid().as_u32()),
-                    );
-                    break;
-                }
-            }
-            if found_alive {
-                break;
-            }
-        }
-
-        if !found_alive && agent.last_status.as_deref() != Some("Off") {
+        if let Some(pid) = session_pids.get(&agent.session_id) {
+            let _ =
+                wardian_core::db::update_agent_status(&agent.session_id, "Headless", Some(*pid));
+        } else if agent.last_status.as_deref() != Some("Off") {
             let _ = wardian_core::db::update_agent_status(&agent.session_id, "Off", None);
         }
     }
@@ -238,8 +239,26 @@ pub fn run() {
                     let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
-                            let mut agents_map = state.agents.lock().await;
-                            let mut order_map = state.agent_order.lock().await;
+                            // Insert each restored agent as it becomes ready instead of
+                            // holding the agents/order locks across every provider spawn;
+                            // otherwise list_agents (and the whole UI) blocks until the
+                            // last agent has been restored.
+                            let insert_restored_agent =
+                                |session_id: String, agent: crate::state::ActiveAgent| {
+                                    let app_handle = app_handle.clone();
+                                    async move {
+                                        let state = app_handle.state::<AppState>();
+                                        let mut agents_map = state.agents.lock().await;
+                                        let mut order_map = state.agent_order.lock().await;
+                                        if !order_map.contains(&session_id) {
+                                            order_map.push(session_id.clone());
+                                        }
+                                        agents_map.insert(session_id, agent);
+                                        drop(agents_map);
+                                        drop(order_map);
+                                        let _ = app_handle.emit("agents-updated", ());
+                                    }
+                                };
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
                             let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();
@@ -252,6 +271,13 @@ pub fn run() {
                                     })
                                     .collect();
 
+                            // Pass 1: prepare every config and publish the full roster
+                            // immediately. Headless agents are final; PTY agents appear
+                            // as inert "Restoring" placeholders so the watchlist shows
+                            // the complete list instead of agents streaming in one by
+                            // one as each provider spawn completes.
+                            type PendingSpawn = (AgentConfig, Option<String>);
+                            let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
                             for mut config in configs {
                                 // Sanitize name
                                 let mut sanitized_name = config
@@ -305,57 +331,72 @@ pub fn run() {
                                         last_pid,
                                         last_born,
                                     );
-                                    order_map.push(config.session_id.clone());
-                                    agents_map.insert(config.session_id.clone(), agent);
+                                    insert_restored_agent(config.session_id.clone(), agent).await;
                                 } else {
-                                    let spawn_result = manager::spawn_agent(
-                                        app_handle.clone(),
+                                    let placeholder = restored_agent_without_process(
                                         config.clone(),
-                                        true,
+                                        "Restoring",
+                                        String::new(),
+                                        None,
                                         last_born.clone(),
-                                    )
-                                    .await;
-                                    match spawn_result {
-                                        Ok(agent) => {
-                                            if let Some(ref tx) = agent.stdin_tx {
-                                                if let Ok(mut senders) = state.input_senders.write()
-                                                {
-                                                    senders.insert(
-                                                        config.session_id.clone(),
-                                                        tx.clone(),
-                                                    );
-                                                }
+                                    );
+                                    insert_restored_agent(config.session_id.clone(), placeholder)
+                                        .await;
+                                    pending_spawns.push((config, last_born));
+                                }
+                            }
+
+                            // Pass 2: spawn PTY agents sequentially, replacing each
+                            // placeholder in place as its provider becomes ready.
+                            for (config, last_born) in pending_spawns {
+                                let spawn_result = manager::spawn_agent(
+                                    app_handle.clone(),
+                                    config.clone(),
+                                    true,
+                                    last_born.clone(),
+                                )
+                                .await;
+                                match spawn_result {
+                                    Ok(agent) => {
+                                        if let Some(ref tx) = agent.stdin_tx {
+                                            if let Ok(mut senders) = state.input_senders.write() {
+                                                senders
+                                                    .insert(config.session_id.clone(), tx.clone());
                                             }
-                                            order_map.push(config.session_id.clone());
-                                            agents_map.insert(config.session_id.clone(), agent);
                                         }
-                                        Err(error) => {
-                                            eprintln!(
-                                                "Failed to restore agent {}: {}",
-                                                config.session_id, error
-                                            );
-                                            let _ = wardian_core::db::update_agent_status(
-                                                &config.session_id,
-                                                "Error",
-                                                None,
-                                            );
-                                            let agent = restored_agent_without_process(
-                                                config.clone(),
-                                                "Error",
-                                                format!(
-                                                    "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
-                                                    error
-                                                ),
-                                                None,
-                                                last_born,
-                                            );
-                                            order_map.push(config.session_id.clone());
-                                            agents_map.insert(config.session_id.clone(), agent);
-                                        }
+                                        insert_restored_agent(config.session_id.clone(), agent)
+                                            .await;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Failed to restore agent {}: {}",
+                                            config.session_id, error
+                                        );
+                                        let _ = wardian_core::db::update_agent_status(
+                                            &config.session_id,
+                                            "Error",
+                                            None,
+                                        );
+                                        let agent = restored_agent_without_process(
+                                            config.clone(),
+                                            "Error",
+                                            format!(
+                                                "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
+                                                error
+                                            ),
+                                            None,
+                                            last_born,
+                                        );
+                                        insert_restored_agent(config.session_id.clone(), agent)
+                                            .await;
                                     }
                                 }
                             }
+                            let agents_map = state.agents.lock().await;
+                            let order_map = state.agent_order.lock().await;
                             manager::save_state(&app_handle, &agents_map, &order_map);
+                            drop(agents_map);
+                            drop(order_map);
                             let _ = app_handle.emit("agents-updated", ());
                         }
                     }

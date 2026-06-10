@@ -12,11 +12,28 @@ fn debug_log_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("wardian_debug.log"))
 }
 
+/// Rotate the debug log once it grows past this size so it cannot grow
+/// without bound across long-running sessions.
+const DEBUG_LOG_ROTATE_BYTES: u64 = 16 * 1024 * 1024;
+
+fn rotate_debug_log_if_needed(path: &std::path::Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() < DEBUG_LOG_ROTATE_BYTES {
+        return;
+    }
+    let rotated = path.with_extension("log.old");
+    let _ = std::fs::remove_file(&rotated);
+    let _ = std::fs::rename(path, &rotated);
+}
+
 pub fn log_debug(msg: &str) {
     let path = debug_log_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    rotate_debug_log_if_needed(&path);
     for _ in 0..5 {
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let _ = writeln!(file, "{}", msg);

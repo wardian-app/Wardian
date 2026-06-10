@@ -1034,9 +1034,16 @@ pub async fn spawn_agent(
             .map(|path| path.to_string_lossy().to_string());
 
         std::thread::spawn(move || {
+            // Tail-follow the resolved session log every iteration, but run
+            // session discovery (which walks and samples every rollout file in
+            // the agent's codex home) only on this interval.
+            const CODEX_SESSION_DISCOVERY_INTERVAL: std::time::Duration =
+                std::time::Duration::from_secs(5);
             let mut offset: u64 = 0;
             let mut last_lookup_session = String::new();
             let mut positioned_initial_log = !watcher_skip_existing_log;
+            let mut cached_latest_session: Option<String> = None;
+            let mut last_discovery: Option<std::time::Instant> = None;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -1047,10 +1054,16 @@ pub async fn spawn_agent(
                 }
 
                 let path = {
-                    let latest_session = latest_codex_session_index_entry(&watcher_session)
-                        .ok()
-                        .flatten()
-                        .map(|(session_id, _updated_at)| session_id);
+                    let discovery_due = last_discovery
+                        .is_none_or(|at| at.elapsed() >= CODEX_SESSION_DISCOVERY_INTERVAL);
+                    if discovery_due {
+                        cached_latest_session = latest_codex_session_index_entry(&watcher_session)
+                            .ok()
+                            .flatten()
+                            .map(|(session_id, _updated_at)| session_id);
+                        last_discovery = Some(std::time::Instant::now());
+                    }
+                    let latest_session = cached_latest_session.clone();
                     let lookup_session = watcher_config.lock().ok().and_then(|mut cfg| {
                         let previous_resume = cfg.resume_session.clone();
                         let previous_cleared = codex_cleared_provider_sessions(&cfg);

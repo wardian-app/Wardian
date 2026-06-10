@@ -94,17 +94,56 @@ pub(crate) fn cleanup_stale_persisted_session_processes() {
         .map(|agent| (agent.session_id, agent.last_status))
         .collect::<std::collections::HashMap<_, _>>();
 
-    for config in configs {
-        if config.is_off
-            || db_status_map
-                .get(&config.session_id)
-                .and_then(|status| status.as_deref())
-                == Some("Headless")
-        {
-            continue;
-        }
+    let sessions: Vec<(String, String)> = configs
+        .into_iter()
+        .filter(|config| {
+            !config.is_off
+                && db_status_map
+                    .get(&config.session_id)
+                    .and_then(|status| status.as_deref())
+                    != Some("Headless")
+        })
+        .map(|config| (config.session_id, config.provider))
+        .collect();
+    if sessions.is_empty() {
+        return;
+    }
 
-        cleanup_stale_session_processes(&config.session_id, &config.provider);
+    // One system scan covers all sessions; scanning per session reads every
+    // process's environment block once per agent and dominates startup time.
+    let session_ids: Vec<String> = sessions.iter().map(|(id, _)| id.clone()).collect();
+    let mut attempted = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let roots_by_session =
+            crate::utils::process::find_wardian_session_process_roots_for_sessions(
+                &session_ids,
+                Some(std::process::id()),
+            );
+        let mut killed_any = false;
+        for (session_id, provider) in &sessions {
+            for pid in roots_by_session
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|pid| attempted.insert(*pid))
+            {
+                killed_any = true;
+                log_debug(&format!(
+                    "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
+                    provider, session_id, pid
+                ));
+                if let Err(err) = force_kill_process_tree(pid) {
+                    log_debug(&format!(
+                        "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
+                        session_id, pid, err
+                    ));
+                }
+            }
+        }
+        if !killed_any {
+            break;
+        }
     }
 }
 

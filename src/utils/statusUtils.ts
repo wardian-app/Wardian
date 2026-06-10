@@ -8,13 +8,14 @@ export function deriveEffectiveStatus(
   currentThought: string | undefined,
   metricsStatus: string | undefined,
   isOff?: boolean,
-): "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" {
+): "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" | "Restoring" {
   if (isOff) return "Off";
 
   let effectiveStatus: string = metricsStatus || "Pending...";
 
-  // Backend "Headless" status is authoritative — pass it through unchanged.
+  // Backend "Headless" and "Restoring" statuses are authoritative — pass them through unchanged.
   if (effectiveStatus === "Headless") return "Headless";
+  if (effectiveStatus === "Restoring") return "Restoring";
 
   // Title-based overrides. "Action Required" always upgrades status.
   // "◇ / Ready / Idle" can only set Idle when the backend hasn't reported an active state —
@@ -42,7 +43,7 @@ export function deriveEffectiveStatus(
   // A live thought signals activity, but must not override an explicit "Action Needed".
   if (currentThought && effectiveStatus !== "Action Needed") effectiveStatus = "Processing...";
 
-  return effectiveStatus as "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless";
+  return effectiveStatus as "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" | "Restoring";
 }
 
 /**
@@ -66,7 +67,7 @@ export function deriveCurrentThought(
   liveThought: string | undefined,
   metrics: AgentTelemetry | undefined,
   isOff?: boolean,
-): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" } {
+): { thought: string; status: "Idle" | "Processing..." | "Action Needed" | "Pending..." | "Off" | "Headless" | "Restoring" } {
   let effectiveStatus = deriveEffectiveStatus(rawTitle, liveThought, metrics?.current_status, isOff);
   let currentThought = cleanThought(liveThought || rawTitle.trim());
 
@@ -76,6 +77,12 @@ export function deriveCurrentThought(
 
   if (isOff) {
     return { thought: "Off", status: "Off" };
+  }
+
+  // Restoring placeholders have no live PTY yet — skip the uptime-based
+  // "Ready"/"Booting..." fallbacks that would mislabel them as Idle.
+  if (effectiveStatus === "Restoring") {
+    return { thought: "Restoring...", status: "Restoring" };
   }
 
   // Fallback chain when no live thought
@@ -320,6 +327,9 @@ export function getStatusColorClass(effectiveStatus: string): string {
   }
   if (effectiveStatus === "Off") {
     return "bg-wardian-off shadow-none";
+  }
+  if (effectiveStatus === "Restoring") {
+    return "bg-wardian-off animate-pulse";
   }
   return "bg-wardian-off flex-shrink-0";
 }
