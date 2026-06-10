@@ -1,6 +1,7 @@
 use crate::utils::OnboardingHintsState;
 use crate::utils::{AppSettingsDocument, ShellOption, ShellSettings, ShellSettingsDocument};
 use serde::Serialize;
+use tauri::State;
 use wardian_core::models::AgentSessionPersistence;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -711,7 +712,11 @@ pub fn save_agent_session_persistence(
 }
 
 #[tauri::command]
-pub fn sync_provider_theme_settings(theme: String) -> Result<(), String> {
+pub fn sync_provider_theme_settings(
+    theme: String,
+    state: State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    state.set_terminal_theme(&theme);
     crate::utils::sync_provider_theme_settings(&theme)
 }
 

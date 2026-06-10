@@ -2035,6 +2035,169 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("replies to Codex OSC 10/11 probes during the initial preview window", async () => {
+    const probe = "\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          if (
+            typeof args === "object" &&
+            args !== null &&
+            "options" in args &&
+            typeof args.options === "object" &&
+            args.options !== null &&
+            "peek" in args.options &&
+            args.options.peek === true
+          ) {
+            return probe;
+          }
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="codex-theme-probe" provider="codex" theme="light" />);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-theme-probe",
+        input: "\u001b]10;rgb:11/18/27\u001b\\",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-theme-probe",
+        input: "\u001b]11;rgb:fc/fa/f5\u001b\\",
+      });
+    });
+  });
+
+  it("renders Codex's dark composer background as a light-mode fill", async () => {
+    const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          if (
+            typeof args === "object" &&
+            args !== null &&
+            "options" in args &&
+            typeof args.options === "object" &&
+            args.options !== null &&
+            "peek" in args.options &&
+            args.options.peek === true
+          ) {
+            return codexComposerFrame;
+          }
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="codex-light-composer" provider="codex" theme="light" />);
+
+    await waitFor(() => {
+      const instance = getLatestTerminalInstance();
+      expect(instance.write).toHaveBeenCalledWith(expect.stringContaining("\u001b[48;2;242;240;235m"), expect.any(Function));
+      expect(instance.write).not.toHaveBeenCalledWith(expect.stringContaining("\u001b[48;2;41;41;41m"), expect.any(Function));
+    });
+  });
+
+  it("pushes updated Codex terminal colors when Wardian switches back to dark mode", async () => {
+    const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
+    let peekCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          if (
+            typeof args === "object" &&
+            args !== null &&
+            "options" in args &&
+            typeof args.options === "object" &&
+            args.options !== null &&
+            "peek" in args.options &&
+            args.options.peek === true
+          ) {
+            peekCount += 1;
+            return peekCount === 1 ? codexComposerFrame : null;
+          }
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    const view = render(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="light" />);
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance()).toBeTruthy();
+    });
+
+    const instance = getLatestTerminalInstance();
+    await waitFor(() => {
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;242;240;235m"),
+        expect.any(Function),
+      );
+    });
+    instance.write.mockClear();
+    instance.reset.mockClear();
+    instance.refresh.mockClear();
+    instance.buffer.active.cursorY = 12;
+    mockInvoke.mockClear();
+    view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: "\u001b[?997;1n",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: "\u001b]11;rgb:02/04/02\u001b\\",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: "\u001b]10;rgb:EE/F2/EE\u001b\\",
+      });
+    });
+
+    await waitFor(() => {
+      expect(instance.reset).toHaveBeenCalled();
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;41;41;41m"),
+        expect.any(Function),
+      );
+      expect(instance.write).not.toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;242;240;235m"),
+        expect.any(Function),
+      );
+      const darkWriteOrder = instance.write.mock.invocationCallOrder.find(
+        (_order: number, index: number) =>
+          String(instance.write.mock.calls[index]?.[0] ?? "").includes("\u001b[48;2;41;41;41m"),
+      );
+      expect(darkWriteOrder).toBeDefined();
+      expect(
+        instance.refresh.mock.invocationCallOrder.some((order: number) => order > darkWriteOrder!),
+      ).toBe(true);
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;41;41;41m\u001b[38;2;238;242;238m\u001b[2K"),
+        expect.any(Function),
+      );
+      const composerBlockWrite = instance.write.mock.calls.find(([data]: [string]) =>
+        data.includes("\u001b[12;1H") &&
+        data.includes("\u001b[13;1H") &&
+        data.includes("\u001b[14;1H"),
+      );
+      expect(composerBlockWrite).toBeDefined();
+    });
+  });
+
   it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {

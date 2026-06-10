@@ -9,6 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
+  normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
   shouldHomeCursorBeforeTransientResize,
@@ -722,9 +723,14 @@ function syncParserViewportToRenderer(entry: TerminalSessionEntry) {
   (entry.parser as unknown as { scrollToLine?: (line: number) => void }).scrollToLine?.(rendererViewportY);
 }
 
-function queueTerminalCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
+function planTerminalOutputChunk(
+  sessionId: string,
+  data: string,
+  entry: TerminalSessionEntry,
+  options?: { queueCapabilityResponses?: boolean },
+) {
   if (!data) {
-    return;
+    return data;
   }
   const { row, col } = terminalCursorPositionReply(entry);
   const { width, height } = terminalPixelSizeReply(entry);
@@ -753,9 +759,13 @@ function queueTerminalCapabilityResponses(sessionId: string, data: string, entry
   });
 
   entry.opencodeFocusReported = plan.focusReported;
-  for (const input of plan.outgoingInputs) {
-    queueAgentInput(sessionId, input);
+  if (options?.queueCapabilityResponses !== false) {
+    for (const input of plan.outgoingInputs) {
+      queueAgentInput(sessionId, input);
+    }
   }
+
+  return plan.normalizedOutput;
 }
 
 function disposeTerminalSession(sessionId: string) {
@@ -1020,6 +1030,43 @@ function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
   entry.existingKnownLines = undefined;
 }
 
+function rgbTripletFromHex(hex: string, fallback: string) {
+  const cleaned = String(hex ?? "").replace("#", "");
+  if (cleaned.length !== 6) {
+    return fallback;
+  }
+  const values = [cleaned.slice(0, 2), cleaned.slice(2, 4), cleaned.slice(4, 6)]
+    .map((component) => Number.parseInt(component, 16));
+  return values.every(Number.isFinite) ? values.join(";") : fallback;
+}
+
+function codexVisibleComposerBlockRepaint(entry: TerminalSessionEntry) {
+  const renderer = entry.renderer;
+  if (!renderer) {
+    return null;
+  }
+
+  const term = renderer.term;
+  const buffer = term.buffer.active;
+  const cursorY = Math.max(0, Math.min(term.rows - 1, buffer.cursorY ?? term.rows - 1));
+  const firstRow = Math.max(0, cursorY - 1);
+  const lastRow = Math.min(term.rows - 1, cursorY + 1);
+  const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+  const background = termTheme === LIGHT_TERM_THEME ? "242;240;235" : "41;41;41";
+  const foreground = rgbTripletFromHex(termTheme.foreground, "238;242;238");
+  const rows = [];
+  for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex += 1) {
+    const lineIndex = (buffer.baseY ?? 0) + rowIndex;
+    const lineText = buffer.getLine(lineIndex)?.translateToString(false) ?? "";
+    const visibleText = lineText.slice(0, term.cols).padEnd(term.cols, " ");
+    rows.push(
+      `\u001b[${rowIndex + 1};1H\u001b[48;2;${background}m\u001b[38;2;${foreground}m\u001b[2K${visibleText}`,
+    );
+  }
+
+  return `\u001b7\u001b[?25l${rows.join("")}\u001b[m\u001b8\u001b[?25h`;
+}
+
 async function writeTerminalOutputBatch(
   sessionId: string,
   entry: TerminalSessionEntry,
@@ -1038,9 +1085,11 @@ async function writeTerminalOutputBatch(
     resetTerminalOutputBuffers(entry);
   }
 
-  if (options?.queueCapabilityResponses !== false) {
-    rawChunks.forEach((data) => queueTerminalCapabilityResponses(sessionId, data, entry));
-  }
+  const renderChunks = rawChunks.map((data) =>
+    planTerminalOutputChunk(sessionId, data, entry, {
+      queueCapabilityResponses: options?.queueCapabilityResponses,
+    }),
+  );
 
   rawChunks.forEach((data) => {
     entry.recentWritePreviews.push(
@@ -1056,7 +1105,7 @@ async function writeTerminalOutputBatch(
   }
 
   entry.existingKnownLines = readParserKnownLineSet(entry);
-  const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
+  const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
   const rendererWasAtBottom = entry.renderer
     ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
     : false;
@@ -1114,6 +1163,80 @@ async function writeTerminalOutputBatch(
     if (!entry.disposed && rendererWasAtBottom) {
       entry.renderer?.term.scrollToBottom();
     }
+  }
+}
+
+async function replayCodexTerminalPreviewWithCurrentTheme(
+  sessionId: string,
+  entry: TerminalSessionEntry,
+) {
+  const generation = entry.generation;
+  try {
+    const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+    const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
+    const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
+    const backgroundRgb =
+      background.length === 6
+        ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
+        : "02/04/02";
+    const foregroundRgb =
+      foreground.length === 6
+        ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
+        : "ee/f2/ee";
+    const serializedState =
+      entry.renderer?.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES }) ||
+      entry.parserSerializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES });
+    if (serializedState) {
+      const themedState = normalizeCodexComposerBackgroundForTheme(serializedState, {
+        cursorRow: 1,
+        cursorCol: 1,
+        pixelWidth: 1,
+        pixelHeight: 1,
+        backgroundRgb,
+        foregroundRgb,
+        prefersLight: termTheme === LIGHT_TERM_THEME,
+        focusReported: entry.opencodeFocusReported,
+      });
+      resetTerminalOutputBuffers(entry);
+      await writeTerminalControl(entry.parser, themedState);
+      if (entry.renderer && !entry.disposed) {
+        await writeTerminalControl(entry.renderer.term, themedState);
+        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      }
+      const rowRepaint = codexVisibleComposerBlockRepaint(entry);
+      if (rowRepaint && entry.renderer && !entry.disposed) {
+        await writeTerminalControl(entry.renderer.term, rowRepaint);
+        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      }
+      return;
+    }
+
+    const preview = await readAgentPty(sessionId, {
+      max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
+      peek: true,
+    });
+    if (
+      !preview ||
+      entry.disposed ||
+      entry.generation !== generation ||
+      terminalSessionMap.get(sessionId) !== entry
+    ) {
+      return;
+    }
+    await writeTerminalOutputBatch(sessionId, entry, [preview], {
+      resetBeforeWrite: true,
+      recordOutput: false,
+    });
+    if (entry.renderer && !entry.disposed) {
+      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    }
+    const rowRepaint = codexVisibleComposerBlockRepaint(entry);
+    if (rowRepaint && entry.renderer && !entry.disposed) {
+      await writeTerminalControl(entry.renderer.term, rowRepaint);
+      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    }
+  } catch (error) {
+    console.warn("Codex terminal theme replay failed:", error);
   }
 }
 
@@ -1205,7 +1328,6 @@ async function drainPty(sessionId: string) {
       if (preview) {
         await writeTerminalOutputBatch(sessionId, entry, [preview], {
           recordOutput: false,
-          queueCapabilityResponses: false,
         });
       }
 
@@ -1562,6 +1684,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
+  const lastThemeSignalRef = useRef<typeof DARK_TERM_THEME | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
@@ -1652,6 +1775,7 @@ export const AgentTerminal = memo(function AgentTerminal({
           onOpenError: setLinkOpenError,
         };
         session.currentTheme = termTheme;
+        lastThemeSignalRef.current = termTheme;
 
         const renderer = mountRenderer(sessionId, session, terminalRef.current);
         if (!renderer) {
@@ -1733,8 +1857,10 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry) {
       return;
     }
+    const previousSignaledTheme = lastThemeSignalRef.current;
+    lastThemeSignalRef.current = termTheme;
     entry.currentTheme = termTheme;
-    if (entry.provider === "opencode") {
+    if (entry.provider === "opencode" || entry.provider === "codex") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
@@ -1744,12 +1870,15 @@ export const AgentTerminal = memo(function AgentTerminal({
       const background = toRgbTriplet(termTheme.background, "02/04/02");
       const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
       const prefersLight = termTheme === LIGHT_TERM_THEME;
-      // OpenTUI treats ?997 as a request to infer mode from subsequent OSC
-      // color replies, so send it before the current Wardian colors.
+      // TUIs that probe terminal colors infer their visible mode from ?997 and
+      // subsequent OSC color replies, so send mode first and colors second.
       queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
+      if (entry.provider === "codex" && previousSignaledTheme !== null && previousSignaledTheme !== termTheme) {
+        void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
+      }
     }
   }, [sessionId, termTheme]);
 

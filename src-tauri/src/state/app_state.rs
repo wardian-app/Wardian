@@ -58,6 +58,9 @@ pub struct AppState {
     // PTY at the user's actual terminal dimensions instead of the 80x24 default,
     // which otherwise causes deformed/duplicated TUI output across clear/resume.
     pub pty_sizes: RwLock<HashMap<String, (u16, u16)>>,
+    // Last frontend-reported effective theme. The frontend resolves "system"
+    // before updating this so native PTY fallbacks can answer light/dark probes.
+    pub terminal_theme: RwLock<String>,
     // Lazy remote terminal attach state. This remains idle unless a remote
     // terminal opens an interactive attachment for an agent.
     pub terminal_attach: Arc<TerminalAttachState>,
@@ -106,6 +109,26 @@ impl AppState {
         sequences.insert(target_session_id.to_string(), next);
         next
     }
+
+    pub fn set_terminal_theme(&self, theme: &str) {
+        if let Ok(mut current) = self.terminal_theme.write() {
+            *current = normalize_terminal_theme(theme);
+        }
+    }
+
+    pub fn terminal_theme(&self) -> String {
+        self.terminal_theme
+            .read()
+            .map(|theme| theme.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+}
+
+fn normalize_terminal_theme(theme: &str) -> String {
+    match theme.trim() {
+        "light" => "light".to_string(),
+        _ => "dark".to_string(),
+    }
 }
 
 impl Default for AppState {
@@ -136,6 +159,7 @@ impl Default for AppState {
             interactions: InteractionState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             pty_sizes: RwLock::new(HashMap::new()),
+            terminal_theme: RwLock::new("dark".to_string()),
             terminal_attach: Arc::new(TerminalAttachState::default()),
         }
     }
@@ -152,10 +176,22 @@ mod tests {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
         assert!(state.terminal_attach.snapshot("missing-agent").is_none());
+        assert_eq!(state.terminal_theme(), "dark");
         assert!(!state
             .workflow_schedules_paused
             .load(std::sync::atomic::Ordering::SeqCst));
         drop(state);
+    }
+
+    #[test]
+    fn terminal_theme_tracks_frontend_effective_theme() {
+        let state = AppState::new();
+
+        state.set_terminal_theme("light");
+        assert_eq!(state.terminal_theme(), "light");
+
+        state.set_terminal_theme("system");
+        assert_eq!(state.terminal_theme(), "dark");
     }
 
     #[tokio::test]
