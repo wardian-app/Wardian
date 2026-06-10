@@ -12,10 +12,10 @@ import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
 
 const DARK_TERM_THEME = {
-  background: "#020402",
-  foreground: "#EEF2EE",
+  background: "#1f1f1f",
+  foreground: "#e6e6e6",
   cursor: "#F1D382",
-  selectionBackground: "#1E261E",
+  selectionBackground: "#3a3a3a",
 };
 
 const LIGHT_TERM_THEME = {

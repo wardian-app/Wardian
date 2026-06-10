@@ -1985,15 +1985,15 @@ describe("AgentTerminal scrollback", () => {
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b]4;0;rgb:02/04/02\u001b\\",
+      input: "\u001b]4;0;rgb:1f/1f/1f\u001b\\",
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b]10;rgb:EE/F2/EE\u001b\\",
+      input: "\u001b]10;rgb:e6/e6/e6\u001b\\",
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b]11;rgb:02/04/02\u001b\\",
+      input: "\u001b]11;rgb:1f/1f/1f\u001b\\",
     });
   });
 
@@ -2159,11 +2159,11 @@ describe("AgentTerminal scrollback", () => {
       });
       expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
         sessionId: "codex-live-theme",
-        input: "\u001b]11;rgb:02/04/02\u001b\\",
+        input: "\u001b]11;rgb:1f/1f/1f\u001b\\",
       });
       expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
         sessionId: "codex-live-theme",
-        input: "\u001b]10;rgb:EE/F2/EE\u001b\\",
+        input: "\u001b]10;rgb:e6/e6/e6\u001b\\",
       });
     });
 
@@ -2186,7 +2186,7 @@ describe("AgentTerminal scrollback", () => {
         instance.refresh.mock.invocationCallOrder.some((order: number) => order > darkWriteOrder!),
       ).toBe(true);
       expect(instance.write).toHaveBeenCalledWith(
-        expect.stringContaining("\u001b[48;2;41;41;41m\u001b[38;2;238;242;238m\u001b[2K"),
+        expect.stringContaining("\u001b[48;2;41;41;41m\u001b[38;2;230;230;230m\u001b[2K"),
         expect.any(Function),
       );
       const composerBlockWrite = instance.write.mock.calls.find(([data]: [string]) =>

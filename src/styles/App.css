@@ -268,33 +268,35 @@
   color: #fff;
 }
 
+/* Neutral dark palette modeled on modern IDEs (VS Code Dark Modern):
+   pure gray surfaces, no green/blue tints, text at AA+ contrast. */
 [data-theme='dark'] {
-  --color-wardian-bg: #040804;
-  --color-wardian-card: #0a120a;
-  --color-wardian-text: #e8f2e8;
-  --color-wardian-text-muted: #88a088;
-  --color-wardian-text-muted-neutral: #9ca3af;
-  --color-wardian-text-bright: #d1d5db;
+  --color-wardian-bg: #1f1f1f;
+  --color-wardian-card: #262626;
+  --color-wardian-text: #e6e6e6;
+  --color-wardian-text-muted: #a8a8a8;
+  --color-wardian-text-muted-neutral: #9b9b9b;
+  --color-wardian-text-bright: #cfcfcf;
   --color-wardian-accent: #d4af37;
-  --color-wardian-accent-hover: #b8860b;
-  --color-wardian-border: #1b261b;
-  --color-wardian-border-heavy: #2d2d44;
-  --color-wardian-border-light: #374151;
-  
+  --color-wardian-accent-hover: #e3c04f;
+  --color-wardian-border: #2e2e2e;
+  --color-wardian-border-heavy: #404040;
+  --color-wardian-border-light: #383838;
+
   /* Semantic Statuses for Dark Mode */
   --color-wardian-success: #10b981;
   --color-wardian-processing: #22d3ee;
   --color-wardian-warning: #f59e0b;
   --color-wardian-error: #ef4444;
-  --color-wardian-off: #4b5563;
+  --color-wardian-off: #6e7681;
   --color-wardian-headless: #a78bfa;
 
   /* Structural Components for Dark Mode */
-  --color-wardian-sidebar-primary: #111827;
-  --color-wardian-sidebar-secondary: #0f172a;
-  --color-wardian-input-bg: rgba(31, 41, 55, 0.5);
-  --color-wardian-input-bg-rgb: 31, 41, 55;
-  --color-wardian-card-bg-muted: rgba(31, 41, 55, 0.3);
+  --color-wardian-sidebar-primary: #181818;
+  --color-wardian-sidebar-secondary: #1c1c1c;
+  --color-wardian-input-bg: rgba(50, 50, 50, 0.5);
+  --color-wardian-input-bg-rgb: 50, 50, 50;
+  --color-wardian-card-bg-muted: rgba(255, 255, 255, 0.05);
   --color-wardian-overlay: rgba(0, 0, 0, 0.55);
 
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
@@ -708,7 +710,7 @@
 /* ── Custom Select (macOS Polished) ─────────────────── */
 select {
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%2388a088' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23909090' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.75rem center;
   background-size: 1rem;
