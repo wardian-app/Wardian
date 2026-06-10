@@ -250,7 +250,9 @@ pub fn run() {
                                         let state = app_handle.state::<AppState>();
                                         let mut agents_map = state.agents.lock().await;
                                         let mut order_map = state.agent_order.lock().await;
-                                        order_map.push(session_id.clone());
+                                        if !order_map.contains(&session_id) {
+                                            order_map.push(session_id.clone());
+                                        }
                                         agents_map.insert(session_id, agent);
                                         drop(agents_map);
                                         drop(order_map);
@@ -269,6 +271,13 @@ pub fn run() {
                                     })
                                     .collect();
 
+                            // Pass 1: prepare every config and publish the full roster
+                            // immediately. Headless agents are final; PTY agents appear
+                            // as inert "Restoring" placeholders so the watchlist shows
+                            // the complete list instead of agents streaming in one by
+                            // one as each provider spawn completes.
+                            type PendingSpawn = (AgentConfig, Option<String>);
+                            let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
                             for mut config in configs {
                                 // Sanitize name
                                 let mut sanitized_name = config
@@ -324,50 +333,62 @@ pub fn run() {
                                     );
                                     insert_restored_agent(config.session_id.clone(), agent).await;
                                 } else {
-                                    let spawn_result = manager::spawn_agent(
-                                        app_handle.clone(),
+                                    let placeholder = restored_agent_without_process(
                                         config.clone(),
-                                        true,
+                                        "Restoring",
+                                        String::new(),
+                                        None,
                                         last_born.clone(),
-                                    )
-                                    .await;
-                                    match spawn_result {
-                                        Ok(agent) => {
-                                            if let Some(ref tx) = agent.stdin_tx {
-                                                if let Ok(mut senders) = state.input_senders.write()
-                                                {
-                                                    senders.insert(
-                                                        config.session_id.clone(),
-                                                        tx.clone(),
-                                                    );
-                                                }
+                                    );
+                                    insert_restored_agent(config.session_id.clone(), placeholder)
+                                        .await;
+                                    pending_spawns.push((config, last_born));
+                                }
+                            }
+
+                            // Pass 2: spawn PTY agents sequentially, replacing each
+                            // placeholder in place as its provider becomes ready.
+                            for (config, last_born) in pending_spawns {
+                                let spawn_result = manager::spawn_agent(
+                                    app_handle.clone(),
+                                    config.clone(),
+                                    true,
+                                    last_born.clone(),
+                                )
+                                .await;
+                                match spawn_result {
+                                    Ok(agent) => {
+                                        if let Some(ref tx) = agent.stdin_tx {
+                                            if let Ok(mut senders) = state.input_senders.write() {
+                                                senders
+                                                    .insert(config.session_id.clone(), tx.clone());
                                             }
-                                            insert_restored_agent(config.session_id.clone(), agent)
-                                                .await;
                                         }
-                                        Err(error) => {
-                                            eprintln!(
-                                                "Failed to restore agent {}: {}",
-                                                config.session_id, error
-                                            );
-                                            let _ = wardian_core::db::update_agent_status(
-                                                &config.session_id,
-                                                "Error",
-                                                None,
-                                            );
-                                            let agent = restored_agent_without_process(
-                                                config.clone(),
-                                                "Error",
-                                                format!(
-                                                    "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
-                                                    error
-                                                ),
-                                                None,
-                                                last_born,
-                                            );
-                                            insert_restored_agent(config.session_id.clone(), agent)
-                                                .await;
-                                        }
+                                        insert_restored_agent(config.session_id.clone(), agent)
+                                            .await;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Failed to restore agent {}: {}",
+                                            config.session_id, error
+                                        );
+                                        let _ = wardian_core::db::update_agent_status(
+                                            &config.session_id,
+                                            "Error",
+                                            None,
+                                        );
+                                        let agent = restored_agent_without_process(
+                                            config.clone(),
+                                            "Error",
+                                            format!(
+                                                "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
+                                                error
+                                            ),
+                                            None,
+                                            last_born,
+                                        );
+                                        insert_restored_agent(config.session_id.clone(), agent)
+                                            .await;
                                     }
                                 }
                             }
