@@ -445,6 +445,7 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
     .filter((run) => run.status === 'running' || run.status === 'awaiting_approval')
     .sort(compareRunRecency);
   const activeBlueprintIds = new Set(activeRuns.map((run) => run.blueprint_id));
+  const activeScheduleIds = new Set(activeRuns.map((run) => run.schedule_id).filter(isPresent));
   const scheduleBlueprintIds = new Set(schedules.map((schedule) => schedule.blueprint_id));
   const scheduleCounts = schedules.reduce<Record<string, number>>((counts, schedule) => {
     counts[schedule.blueprint_id] = (counts[schedule.blueprint_id] ?? 0) + 1;
@@ -455,7 +456,10 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
     const workflowSchedules = schedules
       .filter((schedule) => schedule.blueprint_id === run.blueprint_id)
       .sort(compareScheduleRecency);
-    const unambiguousSchedule = workflowSchedules.length === 1 ? workflowSchedules[0] : null;
+    const matchingSchedule = run.schedule_id
+      ? workflowSchedules.find((schedule) => schedule.id === run.schedule_id) ?? null
+      : null;
+    const unambiguousSchedule = matchingSchedule ?? (workflowSchedules.length === 1 ? workflowSchedules[0] : null);
     activities.push(activityFromParts({
       activityId: `run:${run.run_id}`,
       blueprintId: run.blueprint_id,
@@ -468,8 +472,9 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
   }
 
   for (const schedule of schedules) {
+    if (activeScheduleIds.has(schedule.id)) continue;
     if (activeBlueprintIds.has(schedule.blueprint_id) && scheduleCounts[schedule.blueprint_id] === 1) continue;
-    const workflowRuns = runs.filter((run) => run.blueprint_id === schedule.blueprint_id);
+    const workflowRuns = runs.filter((run) => runBelongsToSchedule(run, schedule, scheduleCounts[schedule.blueprint_id] ?? 0));
     const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
     activities.push(activityFromParts({
       activityId: `schedule:${schedule.id}`,
@@ -499,6 +504,16 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
   }
 
   return activities.sort(compareActivities);
+}
+
+function runBelongsToSchedule(run: RunSummary, schedule: WorkflowSchedule, scheduleCount: number) {
+  if (run.blueprint_id !== schedule.blueprint_id) return false;
+  if (run.schedule_id) return run.schedule_id === schedule.id;
+  return scheduleCount === 1;
+}
+
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
 }
 
 function activityFromParts(parts: {

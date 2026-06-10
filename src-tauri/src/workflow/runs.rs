@@ -22,6 +22,8 @@ pub struct WorkflowRunInvocation {
     pub schema: u8,
     pub provider: String,
     pub workspace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
     #[serde(default)]
     pub bindings: HashMap<String, String>,
     #[serde(default)]
@@ -200,12 +202,31 @@ pub fn write_run_invocation(
     bindings: &HashMap<String, String>,
     assignments: &WorkflowAssignments,
 ) -> Result<(), String> {
+    write_run_invocation_with_schedule_id(
+        run_root,
+        provider,
+        workspace,
+        bindings,
+        assignments,
+        None,
+    )
+}
+
+pub fn write_run_invocation_with_schedule_id(
+    run_root: &Path,
+    provider: &str,
+    workspace: &Path,
+    bindings: &HashMap<String, String>,
+    assignments: &WorkflowAssignments,
+    schedule_id: Option<String>,
+) -> Result<(), String> {
     std::fs::create_dir_all(run_root)
         .map_err(|error| format!("failed to create run directory: {error}"))?;
     let invocation = WorkflowRunInvocation {
         schema: 1,
         provider: provider.to_string(),
         workspace: workspace.to_string_lossy().to_string(),
+        schedule_id,
         bindings: bindings.clone(),
         assignments: assignments.clone(),
     };
@@ -462,6 +483,30 @@ pub fn prepare_new_run_with_assignments(
     input: Value,
 ) -> Result<wardian_core::engine::RunState, String> {
     write_run_invocation(run_root, default_provider, workspace, bindings, assignments)?;
+    Engine::initialize_with_id(blueprint, run_id.to_string(), input, run_root)
+        .map_err(|err| err.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_new_scheduled_run_with_assignments(
+    blueprint: &Blueprint,
+    run_id: &str,
+    run_root: &Path,
+    workspace: &Path,
+    default_provider: &str,
+    bindings: &HashMap<String, String>,
+    assignments: &WorkflowAssignments,
+    schedule_id: &str,
+    input: Value,
+) -> Result<wardian_core::engine::RunState, String> {
+    write_run_invocation_with_schedule_id(
+        run_root,
+        default_provider,
+        workspace,
+        bindings,
+        assignments,
+        Some(schedule_id.to_string()),
+    )?;
     Engine::initialize_with_id(blueprint, run_id.to_string(), input, run_root)
         .map_err(|err| err.to_string())
 }

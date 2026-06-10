@@ -385,6 +385,54 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByText('Reviewer Heartbeat')).toBeInTheDocument();
   });
 
+  it('associates active scheduled runs with the matching schedule instance', () => {
+    scheduleState.schedules = [
+      {
+        id: 'schedule-trader',
+        blueprint_id: 'passive-heartbeat',
+        name: 'Trader Heartbeat',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+      },
+      {
+        id: 'schedule-reviewer',
+        blueprint_id: 'passive-heartbeat',
+        name: 'Reviewer Heartbeat',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 360, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 17, 0, 0),
+      },
+    ];
+    runState.runs = [{
+      run_id: 'run-trader',
+      blueprint_id: 'passive-heartbeat',
+      schedule_id: 'schedule-trader',
+      status: 'running',
+      node_count: 2,
+      path: '/runs/trader',
+    } as RunSummary];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    const rows = screen.getAllByTestId('workflow-activity-row-passive-heartbeat');
+    expect(rows).toHaveLength(2);
+    const traderRow = rows.find((row) => row.textContent?.includes('Trader Heartbeat'));
+    const reviewerRow = rows.find((row) => row.textContent?.includes('Reviewer Heartbeat'));
+    expect(traderRow).toBeDefined();
+    expect(reviewerRow).toBeDefined();
+    expect(traderRow).toHaveTextContent('Trader Heartbeat');
+    expect(traderRow).toHaveTextContent('Running');
+    expect(traderRow).toHaveTextContent('run-trader');
+    expect(reviewerRow).toHaveTextContent('Reviewer Heartbeat');
+    expect(reviewerRow).toHaveTextContent('Scheduled');
+    expect(reviewerRow).toHaveTextContent('No runs yet');
+  });
+
   it('renders activity actions inside responsive rows instead of a fixed actions table', () => {
     scheduleState.schedules = [{
       id: 'schedule-1',
