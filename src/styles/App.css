@@ -55,6 +55,7 @@
 
   /* Global Shadows */
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 85%);
+  --shadow-wardian-card: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 /* ── Custom Title Bar ────────────────────────────────── */
@@ -269,19 +270,21 @@
 }
 
 /* Neutral dark palette modeled on modern IDEs (VS Code Dark Modern):
-   pure gray surfaces, no green/blue tints, text at AA+ contrast. */
+   pure gray surfaces, no green/blue tints, text at AA+ contrast.
+   The surface ramp is deliberately spread (sidebar #141414 → bg #191919 →
+   card #212121) so panels read as distinct elevation layers. */
 [data-theme='dark'] {
-  --color-wardian-bg: #1f1f1f;
-  --color-wardian-card: #262626;
-  --color-wardian-text: #e6e6e6;
-  --color-wardian-text-muted: #a8a8a8;
-  --color-wardian-text-muted-neutral: #9b9b9b;
-  --color-wardian-text-bright: #cfcfcf;
-  --color-wardian-accent: #d4af37;
-  --color-wardian-accent-hover: #e3c04f;
-  --color-wardian-border: #2e2e2e;
-  --color-wardian-border-heavy: #404040;
-  --color-wardian-border-light: #383838;
+  --color-wardian-bg: #191919;
+  --color-wardian-card: #212121;
+  --color-wardian-text: #ececec;
+  --color-wardian-text-muted: #ababab;
+  --color-wardian-text-muted-neutral: #9e9e9e;
+  --color-wardian-text-bright: #d6d6d6;
+  --color-wardian-accent: #f2c14e;
+  --color-wardian-accent-hover: #ffd470;
+  --color-wardian-border: #2f2f2f;
+  --color-wardian-border-heavy: #454545;
+  --color-wardian-border-light: #3a3a3a;
 
   /* Semantic Statuses for Dark Mode */
   --color-wardian-success: #10b981;
@@ -292,14 +295,15 @@
   --color-wardian-headless: #a78bfa;
 
   /* Structural Components for Dark Mode */
-  --color-wardian-sidebar-primary: #181818;
-  --color-wardian-sidebar-secondary: #1c1c1c;
-  --color-wardian-input-bg: rgba(50, 50, 50, 0.5);
-  --color-wardian-input-bg-rgb: 50, 50, 50;
-  --color-wardian-card-bg-muted: rgba(255, 255, 255, 0.05);
+  --color-wardian-sidebar-primary: #141414;
+  --color-wardian-sidebar-secondary: #181818;
+  --color-wardian-input-bg: rgba(48, 48, 48, 0.55);
+  --color-wardian-input-bg-rgb: 48, 48, 48;
+  --color-wardian-card-bg-muted: rgba(255, 255, 255, 0.06);
   --color-wardian-overlay: rgba(0, 0, 0, 0.55);
 
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
+  --shadow-wardian-card: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
 :root {
@@ -464,10 +468,12 @@
 /* Grid Adjustments for Dashboard vs Grid */
 .dashboard-agent-card {
   min-height: 80px;
+  box-shadow: var(--shadow-wardian-card);
 }
 
 .grid-agent-card {
   height: 500px;
+  box-shadow: var(--shadow-wardian-card);
 }
 
 /* ── Watchlist Tab Pills ──────────────────────────────── */
@@ -491,7 +497,7 @@
 .watchlist-tab.active {
   color: var(--color-wardian-accent);
   border-color: var(--color-wardian-accent);
-  background: rgba(212, 175, 55, 0.08);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
 }
 
 /* ── Watchlist Agent Row ──────────────────────────────── */
@@ -607,7 +613,7 @@
 .placeholder-view {
   background: radial-gradient(
     circle at center,
-    rgba(212, 175, 55, 0.03) 0%,
+    color-mix(in srgb, var(--color-wardian-accent), transparent 97%) 0%,
     transparent 70%
   );
 }
@@ -725,7 +731,7 @@ select {
 
 select:focus {
   border-color: var(--color-wardian-accent) !important;
-  box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.15);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-wardian-accent), transparent 85%);
 }
 
 select optgroup {

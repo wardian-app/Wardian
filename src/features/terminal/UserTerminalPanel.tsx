@@ -11,19 +11,7 @@ import { DocsLink } from "../../components/DocsLink";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
 
-const DARK_TERM_THEME = {
-  background: "#1f1f1f",
-  foreground: "#e6e6e6",
-  cursor: "#F1D382",
-  selectionBackground: "#3a3a3a",
-};
-
-const LIGHT_TERM_THEME = {
-  background: "#fcfaf5",
-  foreground: "#111827",
-  cursor: "#b8860b",
-  selectionBackground: "#e5e7eb",
-};
+import { DARK_TERM_THEME, LIGHT_TERM_THEME } from "./terminalThemes";
 
 const MIN_TERMINAL_COLS = 80;
 const MIN_TERMINAL_ROWS = 24;

@@ -20,20 +20,7 @@ import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
-
-const DARK_TERM_THEME = {
-  background: "#1f1f1f",
-  foreground: "#e6e6e6",
-  cursor: "#F1D382",
-  selectionBackground: "#3a3a3a",
-};
-
-const LIGHT_TERM_THEME = {
-  background: "#fcfaf5",
-  foreground: "#111827",
-  cursor: "#b8860b",
-  selectionBackground: "#e5e7eb",
-};
+import { DARK_TERM_THEME, LIGHT_TERM_THEME } from "./terminalThemes";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -741,11 +728,11 @@ function planTerminalOutputChunk(
   const backgroundRgb =
     background.length === 6
       ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
-      : "1f/1f/1f";
+      : "1a/1a/1a";
   const foregroundRgb =
     foreground.length === 6
       ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
-      : "e6/e6/e6";
+      : "eb/eb/eb";
 
   const plan = planTerminalCapabilityResponses(entry.provider, data, {
     cursorRow: row,
@@ -1053,7 +1040,7 @@ function codexVisibleComposerBlockRepaint(entry: TerminalSessionEntry) {
   const lastRow = Math.min(term.rows - 1, cursorY + 1);
   const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
   const background = termTheme === LIGHT_TERM_THEME ? "242;240;235" : "41;41;41";
-  const foreground = rgbTripletFromHex(termTheme.foreground, "230;230;230");
+  const foreground = rgbTripletFromHex(termTheme.foreground, "235;235;235");
   const rows = [];
   for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex += 1) {
     const lineIndex = (buffer.baseY ?? 0) + rowIndex;
@@ -1178,11 +1165,11 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
     const backgroundRgb =
       background.length === 6
         ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
-        : "1f/1f/1f";
+        : "1a/1a/1a";
     const foregroundRgb =
       foreground.length === 6
         ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
-        : "e6/e6/e6";
+        : "eb/eb/eb";
     const serializedState =
       entry.renderer?.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES }) ||
       entry.parserSerializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES });
@@ -1867,8 +1854,8 @@ export const AgentTerminal = memo(function AgentTerminal({
           ? `${cleaned.slice(0, 2)}/${cleaned.slice(2, 4)}/${cleaned.slice(4, 6)}`
           : fallback;
       };
-      const background = toRgbTriplet(termTheme.background, "1f/1f/1f");
-      const foreground = toRgbTriplet(termTheme.foreground, "e6/e6/e6");
+      const background = toRgbTriplet(termTheme.background, "1a/1a/1a");
+      const foreground = toRgbTriplet(termTheme.foreground, "eb/eb/eb");
       const prefersLight = termTheme === LIGHT_TERM_THEME;
       // TUIs that probe terminal colors infer their visible mode from ?997 and
       // subsequent OSC color replies, so send mode first and colors second.

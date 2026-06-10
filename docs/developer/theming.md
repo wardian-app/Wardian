@@ -17,7 +17,7 @@ The `App.tsx` component manages the active theme state and persists it to `local
 - **Data Attribute**: The active theme is applied to the `<html>` element via the `data-theme` attribute (e.g., `<html data-theme="dark">`).
 
 ### Dark Mode Palette Philosophy
-Dark mode uses a **neutral gray scale** modeled on modern IDEs (VS Code Dark Modern): pure gray surfaces (`#1f1f1f` background, `#181818` sidebars, `#262626` cards) with no green or blue tints, and text tones chosen for AA+ contrast (`#e6e6e6` primary). Brand identity in dark mode is carried by the gold accent and the semantic status colors, not by tinted surfaces. Light mode retains the warm parchment palette.
+Dark mode uses a **neutral gray scale** modeled on modern IDEs (VS Code Dark Modern): pure gray surfaces spread across a deliberate elevation ramp (`#141414` sidebars → `#191919` background → `#212121` cards, terminals inset at `#1a1a1a`) with no green or blue tints, and text tones chosen for AA+ contrast (`#ececec` primary). Brand identity in dark mode is carried by a bright gold accent (`#f2c14e`) and the semantic status colors, not by tinted surfaces. Light mode retains the warm parchment palette. Terminal ANSI colors live in `src/features/terminal/terminalThemes.ts`.
 
 ## 🎨 Design Tokens
 
