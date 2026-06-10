@@ -2106,6 +2106,43 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("pushes updated Codex terminal colors when Wardian switches back to dark mode", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    const view = render(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="light" />);
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance()).toBeTruthy();
+    });
+
+    mockInvoke.mockClear();
+    view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: "\u001b[?997;1n",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: "\u001b]11;rgb:02/04/02\u001b\\",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: "\u001b]10;rgb:EE/F2/EE\u001b\\",
+      });
+    });
+  });
+
   it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {

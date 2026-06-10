@@ -19,3 +19,4 @@ The terminal render path now writes the planner-normalized PTY chunk to xterm. I
 - Codex 0.138.0 and 0.139.0 composer rows follow Wardian light mode instead of staying black.
 - Existing provider-specific terminal capability behavior stays scoped; Codex does not receive unrelated terminal control replies.
 - Backend/native agent startup stores the frontend's effective terminal theme so early Codex color probes can be answered before the frontend terminal settles.
+- Already-mounted Codex terminals receive the same mode and color refresh when Wardian's effective theme changes, so switching back to dark mode does not require restarting the agent.

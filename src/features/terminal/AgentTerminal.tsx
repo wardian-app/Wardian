@@ -1744,7 +1744,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       return;
     }
     entry.currentTheme = termTheme;
-    if (entry.provider === "opencode") {
+    if (entry.provider === "opencode" || entry.provider === "codex") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
@@ -1754,8 +1754,8 @@ export const AgentTerminal = memo(function AgentTerminal({
       const background = toRgbTriplet(termTheme.background, "02/04/02");
       const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
       const prefersLight = termTheme === LIGHT_TERM_THEME;
-      // OpenTUI treats ?997 as a request to infer mode from subsequent OSC
-      // color replies, so send it before the current Wardian colors.
+      // TUIs that probe terminal colors infer their visible mode from ?997 and
+      // subsequent OSC color replies, so send mode first and colors second.
       queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
