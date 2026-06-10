@@ -20,7 +20,7 @@ import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
-import { DARK_TERM_THEME, LIGHT_TERM_THEME } from "./terminalThemes";
+import { DARK_TERM_THEME, LIGHT_TERM_THEME, TERMINAL_MINIMUM_CONTRAST_RATIO } from "./terminalThemes";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -1478,6 +1478,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   const { terminalFontFamily, terminalFontSize } = useSettingsStore.getState();
   const term = new Terminal({
     theme: entry.currentTheme,
+    minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST_RATIO,
     fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
     fontSize: terminalFontSize,
     customGlyphs: true,

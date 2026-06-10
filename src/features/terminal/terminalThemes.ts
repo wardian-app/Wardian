@@ -18,6 +18,14 @@ export type WardianTerminalTheme = ITheme & {
   selectionBackground: string;
 };
 
+/**
+ * Matches VS Code's `terminal.integrated.minimumContrastRatio` default.
+ * TUIs (Claude Code, Antigravity) emit truecolor/256-color dim grays that no
+ * 16-color theme can reach; xterm lightens any foreground that falls below
+ * this ratio against the background.
+ */
+export const TERMINAL_MINIMUM_CONTRAST_RATIO = 4.5;
+
 export const DARK_TERM_THEME: WardianTerminalTheme = {
   background: "#1a1a1a",
   foreground: "#ebebeb",

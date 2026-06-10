@@ -11,7 +11,7 @@ import { DocsLink } from "../../components/DocsLink";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
 
-import { DARK_TERM_THEME, LIGHT_TERM_THEME } from "./terminalThemes";
+import { DARK_TERM_THEME, LIGHT_TERM_THEME, TERMINAL_MINIMUM_CONTRAST_RATIO } from "./terminalThemes";
 
 const MIN_TERMINAL_COLS = 80;
 const MIN_TERMINAL_ROWS = 24;
@@ -147,6 +147,7 @@ export function UserTerminalPanel({
       fontSize: terminalFontSize,
       scrollback: 2_000,
       theme: termTheme,
+      minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST_RATIO,
     });
     installConservativeTerminalShortcuts(term);
     installTerminalLinkProvider(term, {

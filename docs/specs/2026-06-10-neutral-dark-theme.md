@@ -57,6 +57,11 @@ Companion changes outside the CSS variable layer:
   explicit 16-color ANSI palette: TUIs like Claude Code and Antigravity
   render most body text in dim and bright-black tones, and xterm's default
   ANSI ramp left that text illegibly dark on the new background.
+- Renderer terminals set `minimumContrastRatio: 4.5` (VS Code's default for
+  `terminal.integrated.minimumContrastRatio`). The themed 16-color palette
+  cannot reach truecolor/256-color dim grays that TUIs emit directly
+  (e.g. Claude Code's secondary text); xterm lightens any foreground below
+  this ratio against the background at render time.
 - Dashboard/grid agent cards get `--shadow-wardian-card` elevation (the
   token was referenced by `.graph-tooltip` but never defined; it now exists
   in both themes) so panels separate from the background without relying on
