@@ -239,8 +239,24 @@ pub fn run() {
                     let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
-                            let mut agents_map = state.agents.lock().await;
-                            let mut order_map = state.agent_order.lock().await;
+                            // Insert each restored agent as it becomes ready instead of
+                            // holding the agents/order locks across every provider spawn;
+                            // otherwise list_agents (and the whole UI) blocks until the
+                            // last agent has been restored.
+                            let insert_restored_agent =
+                                |session_id: String, agent: crate::state::ActiveAgent| {
+                                    let app_handle = app_handle.clone();
+                                    async move {
+                                        let state = app_handle.state::<AppState>();
+                                        let mut agents_map = state.agents.lock().await;
+                                        let mut order_map = state.agent_order.lock().await;
+                                        order_map.push(session_id.clone());
+                                        agents_map.insert(session_id, agent);
+                                        drop(agents_map);
+                                        drop(order_map);
+                                        let _ = app_handle.emit("agents-updated", ());
+                                    }
+                                };
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
                             let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();
@@ -306,8 +322,7 @@ pub fn run() {
                                         last_pid,
                                         last_born,
                                     );
-                                    order_map.push(config.session_id.clone());
-                                    agents_map.insert(config.session_id.clone(), agent);
+                                    insert_restored_agent(config.session_id.clone(), agent).await;
                                 } else {
                                     let spawn_result = manager::spawn_agent(
                                         app_handle.clone(),
@@ -327,8 +342,8 @@ pub fn run() {
                                                     );
                                                 }
                                             }
-                                            order_map.push(config.session_id.clone());
-                                            agents_map.insert(config.session_id.clone(), agent);
+                                            insert_restored_agent(config.session_id.clone(), agent)
+                                                .await;
                                         }
                                         Err(error) => {
                                             eprintln!(
@@ -350,13 +365,17 @@ pub fn run() {
                                                 None,
                                                 last_born,
                                             );
-                                            order_map.push(config.session_id.clone());
-                                            agents_map.insert(config.session_id.clone(), agent);
+                                            insert_restored_agent(config.session_id.clone(), agent)
+                                                .await;
                                         }
                                     }
                                 }
                             }
+                            let agents_map = state.agents.lock().await;
+                            let order_map = state.agent_order.lock().await;
                             manager::save_state(&app_handle, &agents_map, &order_map);
+                            drop(agents_map);
+                            drop(order_map);
                             let _ = app_handle.emit("agents-updated", ());
                         }
                     }

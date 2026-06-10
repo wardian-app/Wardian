@@ -168,6 +168,34 @@ fn discover_gemini_log_in_tmp(
         })
 }
 
+/// Provider logs are re-parsed whenever they change and grow to hundreds of
+/// megabytes for long-lived codex sessions. Status is derived from the most
+/// recent lines, so parsing is capped to this tail; files under the cap are
+/// read whole (gemini legacy logs are a single JSON document and stay intact).
+/// For capped files the query count is tail-bounded and the init timestamp
+/// falls back to the persisted Born time.
+const LOG_PARSE_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_log_bounded(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len <= LOG_PARSE_TAIL_BYTES {
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        return Ok(content);
+    }
+    file.seek(SeekFrom::Start(len - LOG_PARSE_TAIL_BYTES))?;
+    let mut bytes = Vec::with_capacity(LOG_PARSE_TAIL_BYTES as usize);
+    file.read_to_end(&mut bytes)?;
+    let content = String::from_utf8_lossy(&bytes);
+    // Drop the first (possibly partial) line so parsing starts on a boundary.
+    Ok(content
+        .split_once('\n')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default())
+}
+
 fn gemini_fallback_scan_due(session_id: &str) -> bool {
     let attempts = GEMINI_FALLBACK_SCAN_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut attempts) = attempts.lock() else {
@@ -1124,7 +1152,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     }
 
                     if should_parse {
-                        if let Ok(content) = std::fs::read_to_string(path) {
+                        if let Ok(content) = read_log_bounded(path) {
                             if let Some(mtime) = new_mtime {
                                 *snap.log_last_modified.lock().unwrap() = Some(mtime);
                             }
