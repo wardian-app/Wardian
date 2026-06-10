@@ -397,7 +397,7 @@ async fn wait_for_live_agent_provider_ready(
 async fn wait_for_live_agent_reply(
     app_state: &crate::state::AppState,
     watch_state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
-    since: String,
+    mut since: String,
     request_id: &str,
     _target_session_id: &str,
     timeout: Duration,
@@ -411,10 +411,15 @@ async fn wait_for_live_agent_reply(
             let guard = watch_state
                 .lock()
                 .map_err(|_| "watch state lock poisoned".to_string())?;
-            guard
-                .snapshot_since(Some(&since), Some(128 * 1024))
-                .map_err(|error| format!("watch state error: {}", error.code()))?
+            match guard.snapshot_since(Some(&since), Some(128 * 1024)) {
+                Ok(snapshot) => snapshot,
+                Err(error) if error.code() == "cursor_expired" => guard
+                    .snapshot_since(None, Some(128 * 1024))
+                    .map_err(|error| format!("watch state error: {}", error.code()))?,
+                Err(error) => return Err(format!("watch state error: {}", error.code())),
+            }
         };
+        since = snapshot.cursor.clone();
         if let Some(error) = live_agent_terminal_failure(&snapshot) {
             return Err(error);
         }
@@ -732,6 +737,72 @@ mod tests {
             .structured_reply(&task_id)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn live_agent_reply_wait_survives_watch_cursor_rollover() {
+        let app_state = crate::state::AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            2,
+            4096,
+        )));
+        let since = watch_state
+            .lock()
+            .expect("watch state lock")
+            .latest_cursor();
+        let task = app_state
+            .interactions
+            .create_task_with_id(
+                "wf_test_cursor_rollover".to_string(),
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "write the file".to_string(),
+                },
+            )
+            .await;
+        let task_id = task.id.clone();
+        {
+            let mut guard = watch_state.lock().expect("watch state lock");
+            guard.push_event("status", serde_json::json!({ "status": "processing" }));
+            guard.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "working".to_string(),
+                provider: "mock".to_string(),
+                turn_id: None,
+                source: None,
+            });
+            guard.push_output(b"still working");
+        }
+
+        let wait = wait_for_live_agent_reply(
+            &app_state,
+            watch_state,
+            since,
+            &task_id,
+            "agent-1",
+            Duration::from_secs(1),
+        );
+        let complete = async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            app_state
+                .interactions
+                .complete_task_with_reply(
+                    &task_id,
+                    Some("agent-1"),
+                    ReplyStatus::Done,
+                    "{\"ok\":true}",
+                )
+                .await
+                .expect("complete workflow task")
+        };
+
+        let (reply, _) = tokio::join!(wait, complete);
+
+        let reply = reply.expect("cursor rollover should not fail structured reply waits");
+        assert_eq!(reply.status, ReplyStatus::Done);
+        assert_eq!(reply.body, "{\"ok\":true}");
     }
 
     #[tokio::test]
