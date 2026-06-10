@@ -1150,6 +1150,9 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
       resetBeforeWrite: true,
       recordOutput: false,
     });
+    if (entry.renderer && !entry.disposed) {
+      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    }
   } catch (error) {
     console.warn("Codex terminal theme replay failed:", error);
   }

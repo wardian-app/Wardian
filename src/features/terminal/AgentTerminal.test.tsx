@@ -2171,6 +2171,14 @@ describe("AgentTerminal scrollback", () => {
         expect.stringContaining("\u001b[48;2;242;240;235m"),
         expect.any(Function),
       );
+      const darkWriteOrder = instance.write.mock.invocationCallOrder.find(
+        (_order: number, index: number) =>
+          String(instance.write.mock.calls[index]?.[0] ?? "").includes("\u001b[48;2;41;41;41m"),
+      );
+      expect(darkWriteOrder).toBeDefined();
+      expect(
+        instance.refresh.mock.invocationCallOrder.some((order: number) => order > darkWriteOrder!),
+      ).toBe(true);
     });
   });
 
