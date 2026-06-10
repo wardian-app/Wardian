@@ -76,6 +76,12 @@ restored agent), and the residual idle CPU.
    the first line) instead of reading whole logs, and the codex watcher
    thread runs discovery at most every 5 s while keeping its 250 ms
    incremental tail-follow of the resolved log.
+7. **Full roster on launch.** Startup restore pre-inserts every persisted
+   agent before the sequential provider spawn loop: headless agents are
+   inserted final, PTY agents as inert `"Restoring"` placeholders (gray
+   pulsing indicator in the UI) that are replaced in place as each spawn
+   completes. The watchlist and views show the complete agent list
+   immediately instead of agents streaming in one by one.
 
 ## Consequences
 
