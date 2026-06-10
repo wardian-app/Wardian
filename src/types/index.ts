@@ -3,6 +3,25 @@ export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravit
 
 export type GridCardDisplayMode = "terminal" | "chat";
 
+export interface PromptDeliveryDetail {
+    uuid: string;
+    name: string;
+    provider: string;
+    runtime_state: string;
+    delivery_state: string;
+    input_mode?: "message" | "command" | "approval_action";
+    queue_policy?: "queue_if_busy" | "live_only" | "mailbox_only";
+    message_id?: string;
+    delivery_phase?: string;
+    observed_state?: string;
+    reason?: string;
+    profile?: string;
+    error?: {
+        code: string;
+        message: string;
+    };
+}
+
 export type AgentChatEventKind =
     | "message"
     | "tool_call"

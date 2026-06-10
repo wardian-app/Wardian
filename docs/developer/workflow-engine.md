@@ -96,10 +96,10 @@ Active-agent execution uses the visible agent PTY, but completion is still an
 explicit structured contract. Wardian creates a task interaction for the
 workflow node, appends a `wardian reply <request-id> --status ... --stdin`
 instruction to the delivered prompt, and waits for that reply before completing
-the node. Terminal `idle` status alone is not completion; it only allows Wardian
-to check transcript-marker compatibility for agents that echoed the reply
-command instead of submitting it through the control endpoint. `blocked` and
-`failed` replies fail the node with the reply body as the diagnostic.
+the node. Terminal `idle` status alone is not completion, and a printed
+`wardian reply ...` command in the transcript is treated as ordinary assistant
+text. `blocked` and `failed` replies fail the node with the reply body as the
+diagnostic.
 
 ## Old Workflow System
 

@@ -330,6 +330,37 @@ pub struct InteractionRecord {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum DeliveryTransportKind {
+    LiveSurface,
+    HeadlessProcess,
+    ProviderHook,
+    ProviderPlugin,
+    LocalControl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractionDeliveryAttemptRecord {
+    pub id: String,
+    pub interaction_id: String,
+    pub target_session_id: String,
+    pub transport: DeliveryTransportKind,
+    pub generation: u64,
+    pub runtime_state: String,
+    pub delivery_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DeliveryErrorDetail>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderInputReadiness {
     Unknown,
     Booting,
@@ -1156,5 +1187,37 @@ mod tests {
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""delivery_state":"submitted""#));
         assert!(json.contains(r#""input_mode":"command""#));
+    }
+
+    #[test]
+    fn delivery_attempt_record_serializes_transport_kind() {
+        let record = InteractionDeliveryAttemptRecord {
+            id: "attempt_1".to_string(),
+            interaction_id: "int_1".to_string(),
+            target_session_id: "agent-1".to_string(),
+            transport: DeliveryTransportKind::LiveSurface,
+            generation: 7,
+            runtime_state: "live_pty_available".to_string(),
+            delivery_state: "submit_sent_unconfirmed".to_string(),
+            delivery_phase: Some("submit_key_sent".to_string()),
+            observed_state: Some("bytes_sent".to_string()),
+            reason: None,
+            error: None,
+            created_at: "2026-06-07T00:00:00.000Z".to_string(),
+            updated_at: "2026-06-07T00:00:00.000Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&record).expect("serialize attempt");
+
+        assert!(json.contains(r#""transport":"live_surface""#));
+        assert!(json.contains(r#""delivery_state":"submit_sent_unconfirmed""#));
+    }
+
+    #[test]
+    fn delivery_transport_kind_deserializes_headless_process() {
+        let value: DeliveryTransportKind =
+            serde_json::from_str(r#""headless_process""#).expect("deserialize transport kind");
+
+        assert_eq!(value, DeliveryTransportKind::HeadlessProcess);
     }
 }

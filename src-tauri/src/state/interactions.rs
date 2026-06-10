@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use tokio::sync::Mutex;
 use wardian_core::control::{
-    InteractionBodyRef, InteractionKind, InteractionRecord, InteractionStatus,
+    DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
+    InteractionDeliveryAttemptRecord, InteractionKind, InteractionRecord, InteractionStatus,
     InteractionTriggerPolicy, ProviderInputReadiness, ProviderInputState, ProviderReadyEvidence,
     ReplyStatus, StructuredReply,
 };
@@ -59,6 +60,108 @@ impl InteractionState {
             .insert(record.id.clone(), record.clone());
         let _ = wardian_core::db::upsert_interaction_record(&record);
         record
+    }
+
+    pub async fn create_message(
+        &self,
+        sender_session_id: Option<String>,
+        target_session_ids: Vec<String>,
+        body_ref: InteractionBodyRef,
+    ) -> InteractionRecord {
+        let record = message_record(
+            new_interaction_id(),
+            sender_session_id,
+            target_session_ids,
+            body_ref,
+        );
+        self.records
+            .lock()
+            .await
+            .insert(record.id.clone(), record.clone());
+        let _ = wardian_core::db::upsert_interaction_record(&record);
+        record
+    }
+
+    pub async fn create_message_durable(
+        &self,
+        sender_session_id: Option<String>,
+        target_session_ids: Vec<String>,
+        body_ref: InteractionBodyRef,
+    ) -> Result<InteractionRecord, String> {
+        let record = message_record(
+            new_interaction_id(),
+            sender_session_id,
+            target_session_ids,
+            body_ref,
+        );
+        wardian_core::db::upsert_interaction_record(&record)
+            .map_err(|error| format!("failed to persist interaction: {error}"))?;
+        self.records
+            .lock()
+            .await
+            .insert(record.id.clone(), record.clone());
+        Ok(record)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_delivery_attempt(
+        &self,
+        interaction_id: &str,
+        target_session_id: &str,
+        transport: DeliveryTransportKind,
+        generation: u64,
+        runtime_state: &str,
+        delivery_state: &str,
+        delivery_phase: Option<String>,
+        observed_state: Option<String>,
+        reason: Option<String>,
+        error: Option<DeliveryErrorDetail>,
+    ) -> InteractionDeliveryAttemptRecord {
+        let attempt = delivery_attempt_record(
+            interaction_id,
+            target_session_id,
+            transport,
+            generation,
+            runtime_state,
+            delivery_state,
+            delivery_phase,
+            observed_state,
+            reason,
+            error,
+        );
+        let _ = wardian_core::db::upsert_interaction_delivery_attempt(&attempt);
+        attempt
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_delivery_attempt_durable(
+        &self,
+        interaction_id: &str,
+        target_session_id: &str,
+        transport: DeliveryTransportKind,
+        generation: u64,
+        runtime_state: &str,
+        delivery_state: &str,
+        delivery_phase: Option<String>,
+        observed_state: Option<String>,
+        reason: Option<String>,
+        error: Option<DeliveryErrorDetail>,
+    ) -> Result<InteractionDeliveryAttemptRecord, String> {
+        let attempt = delivery_attempt_record(
+            interaction_id,
+            target_session_id,
+            transport,
+            generation,
+            runtime_state,
+            delivery_state,
+            delivery_phase,
+            observed_state,
+            reason,
+            error,
+        );
+        wardian_core::db::upsert_interaction_delivery_attempt(&attempt)
+            .map_err(|error| format!("failed to persist delivery attempt: {error}"))?;
+        Ok(attempt)
     }
 
     pub async fn record_provider_input_state(
@@ -343,6 +446,66 @@ fn new_interaction_id() -> String {
     format!("int_{millis:013}_{counter:06}")
 }
 
+fn message_record(
+    id: String,
+    sender_session_id: Option<String>,
+    target_session_ids: Vec<String>,
+    body_ref: InteractionBodyRef,
+) -> InteractionRecord {
+    let now = now_rfc3339_millis();
+    InteractionRecord {
+        id,
+        kind: InteractionKind::Message,
+        sender_session_id,
+        target_session_ids,
+        status: InteractionStatus::Queued,
+        trigger_policy: InteractionTriggerPolicy::StartTurn,
+        body_ref,
+        parent_interaction_id: None,
+        created_at: now.clone(),
+        updated_at: now,
+        completed_at: None,
+    }
+}
+
+fn new_delivery_attempt_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let millis = chrono::Utc::now().timestamp_millis();
+    format!("attempt_{millis:013}_{counter:06}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn delivery_attempt_record(
+    interaction_id: &str,
+    target_session_id: &str,
+    transport: DeliveryTransportKind,
+    generation: u64,
+    runtime_state: &str,
+    delivery_state: &str,
+    delivery_phase: Option<String>,
+    observed_state: Option<String>,
+    reason: Option<String>,
+    error: Option<DeliveryErrorDetail>,
+) -> InteractionDeliveryAttemptRecord {
+    let now = now_rfc3339_millis();
+    InteractionDeliveryAttemptRecord {
+        id: new_delivery_attempt_id(),
+        interaction_id: interaction_id.to_string(),
+        target_session_id: target_session_id.to_string(),
+        transport,
+        generation,
+        runtime_state: runtime_state.to_string(),
+        delivery_state: delivery_state.to_string(),
+        delivery_phase,
+        observed_state,
+        reason,
+        error,
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
 fn now_rfc3339_millis() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -358,6 +521,15 @@ fn keep_existing_provider_input_state(
     }
     if generation > existing.generation {
         return false;
+    }
+    if existing.state == next_state && existing.ready_evidence == next_evidence {
+        return true;
+    }
+    if existing.state == next_state
+        && existing.ready_evidence == Some(ProviderReadyEvidence::ProviderEvent)
+        && next_evidence.is_none()
+    {
+        return true;
     }
     next_state == ProviderInputReadiness::Ready
         && !matches!(next_evidence, Some(ProviderReadyEvidence::ProviderEvent))
@@ -392,6 +564,61 @@ mod tests {
             record.trigger_policy,
             InteractionTriggerPolicy::ReplyRequired
         );
+    }
+
+    #[tokio::test]
+    async fn create_message_records_start_turn_interaction() {
+        let state = InteractionState::default();
+
+        let record = state
+            .create_message(
+                Some("source-agent".to_string()),
+                vec!["target-agent".to_string()],
+                InteractionBodyRef::Inline {
+                    body: "hello".to_string(),
+                },
+            )
+            .await;
+
+        assert_eq!(record.kind, InteractionKind::Message);
+        assert_eq!(record.status, InteractionStatus::Queued);
+        assert_eq!(record.trigger_policy, InteractionTriggerPolicy::StartTurn);
+        assert_eq!(record.sender_session_id.as_deref(), Some("source-agent"));
+        assert_eq!(record.target_session_ids, vec!["target-agent".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn record_delivery_attempt_generates_stable_attempt_record() {
+        let state = InteractionState::default();
+        let interaction = state
+            .create_message(
+                None,
+                vec!["agent-1".to_string()],
+                InteractionBodyRef::Inline {
+                    body: "hello".to_string(),
+                },
+            )
+            .await;
+
+        let attempt = state
+            .record_delivery_attempt(
+                &interaction.id,
+                "agent-1",
+                DeliveryTransportKind::LiveSurface,
+                1,
+                "live_pty_available",
+                "submit_sent_unconfirmed",
+                Some("submit_key_sent".to_string()),
+                Some("bytes_sent".to_string()),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(attempt.id.starts_with("attempt_"));
+        assert_eq!(attempt.interaction_id, interaction.id);
+        assert_eq!(attempt.transport, DeliveryTransportKind::LiveSurface);
+        assert_eq!(attempt.delivery_state, "submit_sent_unconfirmed");
     }
 
     #[tokio::test]
@@ -480,6 +707,36 @@ mod tests {
             current.ready_evidence,
             Some(ProviderReadyEvidence::ProviderEvent)
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_provider_readiness_observation_reuses_existing_state() {
+        let state = InteractionState::default();
+        let initial = state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+
+        let repeated = state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+
+        assert!(keep_existing_provider_input_state(
+            &initial,
+            1,
+            ProviderInputReadiness::Ready,
+            Some(ProviderReadyEvidence::ProviderEvent)
+        ));
+        assert_eq!(repeated.observed_at, initial.observed_at);
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ Wardian needs a backend-owned request/reply primitive so managed agents can comp
 
 Add a live-control structured ask/reply path:
 
-- `wardian ask <agent>` creates a backend-owned `request_id` and sends the prompt with an explicit instruction to respond with `wardian reply <request-id> --status done --stdin`.
+- `wardian ask <agent>` creates a backend-owned `request_id` and sends the prompt with an explicit instruction to execute `wardian reply <request-id> --status done --stdin`.
 - `wardian reply <request-id> --status done|blocked|failed --stdin` records the reply through the live control endpoint.
 - Default `wardian ask` waits for the structured reply event and returns `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output.
 - Explicit `wardian ask --until output:<token>` remains as the output-matching fallback for manual compatibility.
@@ -40,4 +40,3 @@ Duplicate replies are rejected with `duplicate_reply`. Unknown request ids are r
 The previous Codex repaint echo guard is retained for explicit `--until output:<token>` waits. It is still needed because output matching remains supported and may be used with agents or workflows that cannot call `wardian reply`.
 
 No provider runtime arguments, session resume behavior, sandbox policy, projected homes, or clear-session behavior are changed by this decision.
-

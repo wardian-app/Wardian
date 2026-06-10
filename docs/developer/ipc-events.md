@@ -97,7 +97,7 @@ The CLI live-control `agent_watch`, `ask`, `send_message`, and `submit_reply` pa
     "uuid": "uuid-1",
     "provider": "codex",
     "runtime_state": "provider_input_ready",
-    "delivery_state": "submit_sent_unverified",
+    "delivery_state": "submit_sent_unconfirmed",
     "input_mode": "message",
     "delivery_phase": "submit_key_sent"
   }
