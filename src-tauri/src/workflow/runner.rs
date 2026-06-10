@@ -137,16 +137,12 @@ async fn run_live_agent_prompt(
 ) -> Result<String, String> {
     let state = app.state::<crate::state::AppState>();
 
-    let (watch_state, current_status, should_mark_processing) = {
+    let watch_state = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&spec.session_id)
             .ok_or_else(|| format!("Agent {} not found or is off", spec.session_id))?;
-        (
-            agent.watch_state.clone(),
-            agent.current_status.clone(),
-            crate::manager::mark_agent_prompt_started(agent),
-        )
+        agent.watch_state.clone()
     };
 
     let initial_cursor = watch_state
@@ -192,31 +188,11 @@ async fn run_live_agent_prompt(
         return Err(error);
     }
 
-    if should_mark_processing {
-        crate::manager::set_agent_status(app, &spec.session_id, &current_status, "Processing...");
-    }
-    let provider_input = state
-        .interactions
-        .start_provider_input_generation(&spec.session_id, ProviderInputReadiness::Busy, None)
-        .await;
-
     let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
     if let Err(error) = crate::delivery::submit_live_surface_prompt(
         Some(app),
         &state,
-        crate::delivery::LiveSurfacePromptRequest {
-            session_id: spec.session_id.clone(),
-            prompt,
-            interaction_id: Some(task.id.clone()),
-            input_mode: wardian_core::control::MessageInputMode::Message,
-            queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
-            approval_action: None,
-            origin: None,
-            runtime_state: "workflow_live_agent",
-            mark_prompt_started: false,
-            payload_sent_detail: None,
-            delivery_message_id: None,
-        },
+        workflow_live_surface_prompt_request(&spec.session_id, prompt, &task.id),
     )
     .await
     .map(|_| ())
@@ -231,11 +207,16 @@ async fn run_live_agent_prompt(
             &task.id,
             &spec.session_id,
             &message,
-            true,
+            false,
         )
         .await;
         return Err(message);
     }
+    let provider_input_generation = state
+        .interactions
+        .current_provider_input_generation(&spec.session_id)
+        .await
+        .unwrap_or(0);
 
     let reply = match wait_for_live_agent_reply(
         &state,
@@ -280,7 +261,7 @@ async fn run_live_agent_prompt(
     } else if let Err(error) = wait_for_live_agent_provider_ready(
         &state,
         &spec.session_id,
-        provider_input.generation,
+        provider_input_generation,
         Duration::from_secs(30),
     )
     .await
@@ -296,6 +277,26 @@ fn prompt_with_structured_reply_instruction(prompt: &str, request_id: &str) -> S
     format!(
         "{prompt}\n\nWardian workflow request id: {request_id}\nWhen this workflow node is fully complete, execute this command from your shell/tool with the final workflow output on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
     )
+}
+
+fn workflow_live_surface_prompt_request(
+    session_id: &str,
+    prompt: String,
+    interaction_id: &str,
+) -> crate::delivery::LiveSurfacePromptRequest {
+    crate::delivery::LiveSurfacePromptRequest {
+        session_id: session_id.to_string(),
+        prompt,
+        interaction_id: Some(interaction_id.to_string()),
+        input_mode: wardian_core::control::MessageInputMode::Message,
+        queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
+        approval_action: None,
+        origin: None,
+        runtime_state: "workflow_live_agent",
+        mark_prompt_started: true,
+        payload_sent_detail: None,
+        delivery_message_id: None,
+    }
 }
 
 async fn fail_live_workflow_task(
@@ -921,5 +922,21 @@ mod tests {
         assert!(prompt.contains("execute this command"));
         assert!(prompt.contains("wardian reply wf_test --status done --stdin"));
         assert!(prompt.contains("Do not print the command"));
+    }
+
+    #[test]
+    fn workflow_live_surface_request_marks_prompt_started_after_delivery() {
+        let request = workflow_live_surface_prompt_request(
+            "agent-1",
+            "prompt".to_string(),
+            "wf_test_processing",
+        );
+
+        assert!(request.mark_prompt_started);
+        assert_eq!(request.runtime_state, "workflow_live_agent");
+        assert_eq!(
+            request.queue_policy,
+            wardian_core::control::QueuePolicy::LiveOnly
+        );
     }
 }
