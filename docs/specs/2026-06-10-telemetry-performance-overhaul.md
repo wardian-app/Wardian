@@ -36,6 +36,19 @@ installation found:
   `try_lock` on the shared `System` and reported a literal 0 — precisely
   when the app was busiest.
 
+### Second root cause: codex session-watcher rollout scans
+
+After the fixes above, live measurement still showed ~3.3 GB/s of steady
+main-process reads (~3,000 ops/s, ~1.1 MB average op). Causal isolation by
+pausing individual codex agents (read rate dropped proportionally to that
+agent's codex-home size and recovered on resume) identified the codex
+session watcher thread: it ran `latest_codex_session_index_entry` on every
+250 ms iteration, and `latest_codex_session_from_logs` read **every rollout
+`.jsonl` in the agent's codex home in full** per call. With 12 live codex
+agents holding 16-235 MB of rollout logs each, this alone produced the
+multi-GB/s read load, the relaunch disk thrash (initial discovery per
+restored agent), and the residual idle CPU.
+
 ## Proposed Decision
 
 1. **Targeted process refresh.** The telemetry tick now refreshes only CPU
@@ -58,6 +71,11 @@ installation found:
    pass.
 5. **Debug log rotation.** `wardian_debug.log` rotates to `.log.old` at
    16 MB; it previously grew without bound (35 MB on the profiled machine).
+6. **Bounded codex session discovery.** `latest_codex_session_from_logs`
+   identifies rollout sessions from a 16 KB prefix read (`session_meta` is
+   the first line) instead of reading whole logs, and the codex watcher
+   thread runs discovery at most every 5 s while keeping its 250 ms
+   incremental tail-follow of the resolved log.
 
 ## Consequences
 

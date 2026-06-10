@@ -156,6 +156,38 @@ fn latest_codex_session_from_history(
     }))
 }
 
+/// Rollout files write their `session_meta` line first, so a bounded prefix
+/// read is enough to identify a session. Reading whole rollout logs here is
+/// prohibitively expensive: discovery runs repeatedly per agent and session
+/// logs grow to hundreds of megabytes.
+const CODEX_ROLLOUT_META_PREFIX_BYTES: u64 = 16 * 1024;
+
+fn codex_rollout_session_meta(path: &std::path::Path) -> Option<(String, String)> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut prefix = Vec::new();
+    file.take(CODEX_ROLLOUT_META_PREFIX_BYTES)
+        .read_to_end(&mut prefix)
+        .ok()?;
+    let content = String::from_utf8_lossy(&prefix);
+    content.lines().find_map(|line| {
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        if parsed.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+            return None;
+        }
+        let payload = parsed.get("payload")?;
+        let session_id = payload.get("id")?.as_str()?.trim();
+        let updated_at = payload
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if session_id.is_empty() || updated_at.is_empty() {
+            return None;
+        }
+        Some((session_id.to_string(), updated_at.to_string()))
+    })
+}
+
 fn latest_codex_session_from_logs(
     codex_home: &std::path::Path,
 ) -> Result<Option<(String, String)>, String> {
@@ -180,25 +212,7 @@ fn latest_codex_session_from_logs(
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Some((session_id, updated_at)) = content.lines().find_map(|line| {
-                let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-                if parsed.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
-                    return None;
-                }
-                let payload = parsed.get("payload")?;
-                let session_id = payload.get("id")?.as_str()?.trim();
-                let updated_at = payload
-                    .get("timestamp")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                if session_id.is_empty() || updated_at.is_empty() {
-                    return None;
-                }
-                Some((session_id.to_string(), updated_at.to_string()))
-            }) else {
+            let Some((session_id, updated_at)) = codex_rollout_session_meta(&path) else {
                 continue;
             };
             if latest
@@ -423,6 +437,45 @@ mod tests {
             latest_codex_session_entry_in(codex_home).expect("latest entry"),
             None
         );
+    }
+
+    #[test]
+    fn rollout_session_meta_reads_first_line_without_scanning_full_log() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("rollout-big.jsonl");
+        let mut content = String::from(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"prefix-session\",\"timestamp\":\"2026-06-10T00:00:00.000Z\"}}\n",
+        );
+        for _ in 0..1000 {
+            content.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"");
+            content.push_str(&"x".repeat(512));
+            content.push_str("\"}}\n");
+        }
+        std::fs::write(&path, content).expect("write rollout");
+
+        assert_eq!(
+            super::codex_rollout_session_meta(&path),
+            Some((
+                "prefix-session".to_string(),
+                "2026-06-10T00:00:00.000Z".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rollout_session_meta_is_none_when_meta_lies_beyond_prefix_window() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("rollout-late-meta.jsonl");
+        let mut content = String::new();
+        while content.len() < super::CODEX_ROLLOUT_META_PREFIX_BYTES as usize {
+            content.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"filler\"}}\n");
+        }
+        content.push_str(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"late-session\",\"timestamp\":\"2026-06-10T00:00:00.000Z\"}}\n",
+        );
+        std::fs::write(&path, content).expect("write rollout");
+
+        assert_eq!(super::codex_rollout_session_meta(&path), None);
     }
 
     #[test]
