@@ -65,9 +65,26 @@ fn restored_agent_without_process(
 pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
     use sysinfo::System;
 
-    // Use new_all() to ensure we have process and environment data
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    // Only process environment blocks are needed here; a full refresh_all()
+    // would also sample CPU, memory, and command lines for every process.
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+
+    // Index WARDIAN_SESSION_ID values in one pass instead of rescanning every
+    // process's environment once per agent.
+    let mut session_pids: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for process in sys.processes().values() {
+        for env_var in process.environ() {
+            let env_str = env_var.to_string_lossy();
+            if let Some(session_id) = env_str.strip_prefix("WARDIAN_SESSION_ID=") {
+                session_pids.insert(session_id.trim().to_string(), process.pid().as_u32());
+            }
+        }
+    }
 
     let agents = wardian_core::db::get_all_agents()?;
     for agent in agents {
@@ -75,26 +92,10 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
             continue;
         }
 
-        let mut found_alive = false;
-        for process in sys.processes().values() {
-            for env_var in process.environ() {
-                let env_str = env_var.to_string_lossy();
-                if env_str.contains("WARDIAN_SESSION_ID=") && env_str.contains(&agent.session_id) {
-                    found_alive = true;
-                    let _ = wardian_core::db::update_agent_status(
-                        &agent.session_id,
-                        "Headless",
-                        Some(process.pid().as_u32()),
-                    );
-                    break;
-                }
-            }
-            if found_alive {
-                break;
-            }
-        }
-
-        if !found_alive && agent.last_status.as_deref() != Some("Off") {
+        if let Some(pid) = session_pids.get(&agent.session_id) {
+            let _ =
+                wardian_core::db::update_agent_status(&agent.session_id, "Headless", Some(*pid));
+        } else if agent.last_status.as_deref() != Some("Off") {
             let _ = wardian_core::db::update_agent_status(&agent.session_id, "Off", None);
         }
     }

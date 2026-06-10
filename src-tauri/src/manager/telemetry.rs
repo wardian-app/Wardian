@@ -22,7 +22,166 @@ use crate::providers::antigravity::AntigravityProvider;
 
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Reading every process's command line and environment block (PEB reads on
+/// Windows) is far too expensive to do on every 5s tick, so marker-based
+/// session-root discovery runs at most this often.
+#[cfg(windows)]
+const SESSION_ROOT_DISCOVERY_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The gemini fallback scan walks every chat file under ~/.gemini/tmp, which
+/// can be hundreds of thousands of files. Retry it at most this often per
+/// agent when no matching log has been found.
+const GEMINI_FALLBACK_SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 static TELEMETRY_AGENT_WORK_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+static GEMINI_FALLBACK_SCAN_ATTEMPTS: OnceLock<Mutex<HashMap<String, std::time::Instant>>> =
+    OnceLock::new();
+
+static LAST_APP_TELEMETRY: OnceLock<Mutex<AppTelemetry>> = OnceLock::new();
+
+fn last_app_telemetry_cache() -> &'static Mutex<AppTelemetry> {
+    LAST_APP_TELEMETRY.get_or_init(|| {
+        Mutex::new(AppTelemetry {
+            cpu_usage: 0.0,
+            memory_mb: 0.0,
+        })
+    })
+}
+
+#[cfg(windows)]
+struct SessionRootsCache {
+    roots: HashMap<String, Vec<u32>>,
+    refreshed_at: std::time::Instant,
+    session_key: Vec<String>,
+}
+
+#[cfg(windows)]
+static SESSION_ROOTS_CACHE: OnceLock<Mutex<Option<SessionRootsCache>>> = OnceLock::new();
+
+#[cfg(windows)]
+fn session_roots_cache() -> &'static Mutex<Option<SessionRootsCache>> {
+    SESSION_ROOTS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(windows)]
+fn sorted_session_key(session_ids: &[String]) -> Vec<String> {
+    let mut key = session_ids.to_vec();
+    key.sort_unstable();
+    key
+}
+
+#[cfg(windows)]
+fn session_root_discovery_due(session_ids: &[String]) -> bool {
+    let Ok(cache) = session_roots_cache().lock() else {
+        return true;
+    };
+    match cache.as_ref() {
+        Some(cache) => {
+            cache.refreshed_at.elapsed() >= SESSION_ROOT_DISCOVERY_TTL
+                || cache.session_key != sorted_session_key(session_ids)
+        }
+        None => true,
+    }
+}
+
+#[cfg(windows)]
+fn cached_session_roots() -> HashMap<String, Vec<u32>> {
+    session_roots_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref().map(|cache| cache.roots.clone()))
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn store_session_roots(session_ids: &[String], roots: HashMap<String, Vec<u32>>) {
+    if let Ok(mut cache) = session_roots_cache().lock() {
+        *cache = Some(SessionRootsCache {
+            roots,
+            refreshed_at: std::time::Instant::now(),
+            session_key: sorted_session_key(session_ids),
+        });
+    }
+}
+
+/// Cap the fallback scan to the most recently modified chat files; a session
+/// being discovered was active recently, and unbounded scans have to read
+/// every chat file ever written (gigabytes on long-lived machines).
+const GEMINI_FALLBACK_SCAN_MAX_FILES: usize = 128;
+
+/// Gemini chat logs carry their `sessionId` near the start of the file, so a
+/// bounded prefix read is enough to reject non-matching candidates without
+/// reading whole multi-megabyte transcripts.
+const GEMINI_LOG_SESSION_PREFIX_BYTES: u64 = 64 * 1024;
+
+fn gemini_log_prefix_contains(path: &std::path::Path, target_id: &str) -> bool {
+    use std::io::Read;
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut prefix = Vec::new();
+    if file
+        .take(GEMINI_LOG_SESSION_PREFIX_BYTES)
+        .read_to_end(&mut prefix)
+        .is_err()
+    {
+        return false;
+    }
+    String::from_utf8_lossy(&prefix).contains(target_id)
+}
+
+fn discover_gemini_log_in_tmp(
+    tmp_dir: &std::path::Path,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(tmp_dir).ok()?.flatten() {
+        let chat_dir = entry.path().join("chats");
+        let Ok(chat_files) = std::fs::read_dir(chat_dir) else {
+            continue;
+        };
+        for chat_file in chat_files.flatten() {
+            let modified = chat_file
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            candidates.push((modified, chat_file.path()));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates
+        .into_iter()
+        .take(GEMINI_FALLBACK_SCAN_MAX_FILES)
+        .map(|(_, path)| path)
+        .find(|path| {
+            // Cheap prefix rejection first; confirm probable hits with the
+            // full session check so match semantics stay unchanged.
+            gemini_log_prefix_contains(path, session_id)
+                && std::fs::read_to_string(path)
+                    .is_ok_and(|content| gemini_log_matches_session(&content, session_id))
+        })
+}
+
+fn gemini_fallback_scan_due(session_id: &str) -> bool {
+    let attempts = GEMINI_FALLBACK_SCAN_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut attempts) = attempts.lock() else {
+        return true;
+    };
+    let now = std::time::Instant::now();
+    match attempts.get(session_id) {
+        Some(last) if now.duration_since(*last) < GEMINI_FALLBACK_SCAN_TTL => false,
+        _ => {
+            attempts.insert(session_id.to_string(), now);
+            true
+        }
+    }
+}
 
 fn normalize_cpu_usage(raw_cpu_usage: f32, logical_cpu_count: usize) -> f32 {
     let divisor = logical_cpu_count.max(1) as f32;
@@ -283,8 +442,26 @@ fn refresh_system_process_snapshot(
             return None;
         }
     };
+    // A full refresh_all() walks every process's command line and environment
+    // block, which costs over a second per tick on busy systems. Sample only
+    // CPU and memory each tick; marker data is fetched on TTL'd discovery
+    // passes below (OnlyIfNotSet keeps already-fetched markers cached inside
+    // sysinfo, so even discovery passes only read new processes).
+    #[cfg(windows)]
+    let discovery_due = session_root_discovery_due(session_ids);
+    let refresh_kind = sysinfo::ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory();
+    #[cfg(windows)]
+    let refresh_kind = if discovery_due {
+        refresh_kind
+            .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
+            .with_environ(sysinfo::UpdateKind::OnlyIfNotSet)
+    } else {
+        refresh_kind
+    };
     let sys_refresh_started = std::time::Instant::now();
-    sys.refresh_all();
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, refresh_kind);
     let sys_refresh = sys_refresh_started.elapsed();
     let logical_cpu_count = sys.cpus().len();
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -306,7 +483,7 @@ fn refresh_system_process_snapshot(
             },
         );
         #[cfg(windows)]
-        {
+        if discovery_due {
             process_markers.push(ProcessMarkerSnapshot {
                 pid,
                 process_name: process.name().to_string_lossy().to_string(),
@@ -325,13 +502,22 @@ fn refresh_system_process_snapshot(
         }
     }
 
+    #[cfg(windows)]
+    let session_roots = if discovery_due {
+        let roots = discover_session_roots_from_process_markers(session_ids, &process_markers);
+        store_session_roots(session_ids, roots.clone());
+        roots
+    } else {
+        cached_session_roots()
+    };
+
     Some(SystemProcessSnapshot {
         logical_cpu_count,
         children_map,
         processes,
         sys_refresh,
         #[cfg(windows)]
-        session_roots: discover_session_roots_from_process_markers(session_ids, &process_markers),
+        session_roots,
     })
 }
 
@@ -762,10 +948,23 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
 
                 if snap.provider == "gemini" {
+                    // Re-verifying the session id requires reading the whole
+                    // log, so only do it when the file changed (or vanished)
+                    // since the last parse; unchanged content cannot go stale.
+                    let last_parsed_mtime = snap
+                        .log_last_modified
+                        .lock()
+                        .ok()
+                        .and_then(|last| *last);
                     let stale_gemini_log = log_path_lock.as_ref().is_some_and(|path| {
-                        std::fs::read_to_string(path).ok().is_none_or(|content| {
-                            !gemini_log_matches_session(&content, gemini_session_id)
-                        })
+                        let current_mtime =
+                            std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+                        match (current_mtime, last_parsed_mtime) {
+                            (Some(current), Some(last)) if current == last => false,
+                            _ => std::fs::read_to_string(path).ok().is_none_or(|content| {
+                                !gemini_log_matches_session(&content, gemini_session_id)
+                            }),
+                        }
                     });
                     if stale_gemini_log {
                         *log_path_lock = None;
@@ -885,31 +1084,18 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                             }
                         }
                         _ => {
-                            // Gemini: scan ~/.gemini/tmp for chat log files
-                            if let Some(home) = dirs::home_dir() {
+                            // Gemini: scan ~/.gemini/tmp for chat log files.
+                            // Bounded to recent candidates with prefix reads,
+                            // and retried only after the backoff TTL when
+                            // nothing matched.
+                            if let Some(home) = dirs::home_dir()
+                                .filter(|_| gemini_fallback_scan_due(&snap.session_id))
+                            {
                                 let tmp_dir = home.join(".gemini").join("tmp");
-                                if let Ok(entries) = std::fs::read_dir(tmp_dir) {
-                                    for entry in entries.flatten() {
-                                        let chat_dir = entry.path().join("chats");
-                                        if let Ok(chat_files) = std::fs::read_dir(chat_dir) {
-                                            for chat_file in chat_files.flatten() {
-                                                if let Ok(content) =
-                                                    std::fs::read_to_string(chat_file.path())
-                                                {
-                                                    if gemini_log_matches_session(
-                                                        &content,
-                                                        gemini_session_id,
-                                                    ) {
-                                                        *log_path_lock = Some(chat_file.path());
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if log_path_lock.is_some() {
-                                            break;
-                                        }
-                                    }
+                                if let Some(path) =
+                                    discover_gemini_log_in_tmp(&tmp_dir, gemini_session_id)
+                                {
+                                    *log_path_lock = Some(path);
                                 }
                             }
                         }
@@ -1186,18 +1372,19 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
         // Refreshing again immediately would reset sysinfo's CPU deltas.
         let Ok(sys) = sys_metrics.try_lock() else {
             crate::utils::logging::log_debug(
-                "[Wardian] App telemetry skipped because system sampling is still running",
+                "[Wardian] App telemetry reusing last sample because system sampling is still running",
             );
-            return AppTelemetry {
-                cpu_usage: 0.0,
-                memory_mb: 0.0,
-            };
+            return last_app_telemetry_cache()
+                .lock()
+                .map(|telemetry| telemetry.clone())
+                .unwrap_or(AppTelemetry {
+                    cpu_usage: 0.0,
+                    memory_mb: 0.0,
+                });
         };
         let logical_cpu_count = sys.cpus().len();
 
         let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
-        #[cfg(windows)]
-        let mut process_markers = Vec::new();
         for (pid, process) in sys.processes() {
             if let Some(parent) = process.parent() {
                 children_map
@@ -1205,35 +1392,14 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
                     .or_default()
                     .push(pid.as_u32());
             }
-            #[cfg(windows)]
-            {
-                process_markers.push(ProcessMarkerSnapshot {
-                    pid: pid.as_u32(),
-                    process_name: process.name().to_string_lossy().to_string(),
-                    command_line: process
-                        .cmd()
-                        .iter()
-                        .map(|part| part.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    environ: process
-                        .environ()
-                        .iter()
-                        .map(|entry| entry.to_string_lossy().to_string())
-                        .collect::<Vec<_>>(),
-                });
-            }
         }
 
         let mut excluded_roots: BTreeSet<u32> = BTreeSet::new();
+        // Reuse the marker-discovered roots cached by the telemetry loop;
+        // rebuilding them here would re-convert every process's environment
+        // block on each tick.
         #[cfg(windows)]
-        let session_roots = {
-            let session_ids = agent_roots
-                .iter()
-                .map(|(session_id, _)| session_id.clone())
-                .collect::<Vec<_>>();
-            discover_session_roots_from_process_markers(&session_ids, &process_markers)
-        };
+        let session_roots = cached_session_roots();
         for (session_id, process_id) in &agent_roots {
             excluded_roots.insert(*process_id);
             #[cfg(not(windows))]
@@ -1261,10 +1427,14 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
             }
         }
 
-        AppTelemetry {
+        let telemetry = AppTelemetry {
             cpu_usage: normalize_cpu_usage(raw_cpu, logical_cpu_count),
             memory_mb: bytes_to_mib(memory_bytes),
+        };
+        if let Ok(mut last) = last_app_telemetry_cache().lock() {
+            *last = telemetry.clone();
         }
+        telemetry
     })
     .await
     .unwrap_or(AppTelemetry {
@@ -1597,6 +1767,41 @@ mod tests {
             "gemini-session-1"
         ));
         assert!(!super::gemini_log_matches_session(content, "other-session"));
+    }
+
+    #[test]
+    fn discover_gemini_log_finds_matching_chat_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let chats = temp.path().join("project-a").join("chats");
+        std::fs::create_dir_all(&chats).expect("chats dir");
+        std::fs::write(
+            chats.join("other.json"),
+            r#"{"sessionId":"other-session","messages":[]}"#,
+        )
+        .expect("write other chat");
+        std::fs::write(
+            chats.join("target.json"),
+            r#"{"sessionId":"gemini-session-1","messages":[]}"#,
+        )
+        .expect("write target chat");
+
+        let found = super::discover_gemini_log_in_tmp(temp.path(), "gemini-session-1")
+            .expect("matching chat file");
+        assert!(found.ends_with("target.json"));
+        assert!(super::discover_gemini_log_in_tmp(temp.path(), "missing-session").is_none());
+    }
+
+    #[test]
+    fn gemini_log_prefix_rejects_id_beyond_prefix_window() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("big.json");
+        let mut content = String::from("{\"messages\":[\"");
+        content.push_str(&"x".repeat(super::GEMINI_LOG_SESSION_PREFIX_BYTES as usize));
+        content.push_str("gemini-session-1\"]}");
+        std::fs::write(&path, content).expect("write big chat");
+
+        assert!(!super::gemini_log_prefix_contains(&path, "gemini-session-1"));
+        assert!(!super::gemini_log_prefix_contains(&path, ""));
     }
 
     #[test]

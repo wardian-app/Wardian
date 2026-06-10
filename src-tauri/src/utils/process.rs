@@ -296,10 +296,35 @@ pub fn is_wardian_session_environment_candidate(environ: &[String], session_id: 
 
 #[cfg(windows)]
 pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<u32>) -> Vec<u32> {
-    let mut sys = sysinfo::System::new_all();
-    sys.refresh_all();
+    find_wardian_session_process_roots_for_sessions(
+        std::slice::from_ref(&session_id.to_string()),
+        exclude_pid,
+    )
+    .remove(session_id)
+    .unwrap_or_default()
+}
 
-    let mut matches = Vec::new();
+/// Find candidate root processes for several sessions with a single system
+/// scan. Reading every process's command line and environment block is the
+/// expensive part, so callers with many sessions must not scan per session.
+#[cfg(windows)]
+pub fn find_wardian_session_process_roots_for_sessions(
+    session_ids: &[String],
+    exclude_pid: Option<u32>,
+) -> std::collections::HashMap<String, Vec<u32>> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
+            .with_environ(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+
+    let mut matches: std::collections::HashMap<String, Vec<u32>> = session_ids
+        .iter()
+        .map(|session_id| (session_id.clone(), Vec::new()))
+        .collect();
     for (pid, process) in sys.processes() {
         let pid_u32 = pid.as_u32();
         if exclude_pid == Some(pid_u32) {
@@ -319,15 +344,19 @@ pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<
             .map(|entry| entry.to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
-        if is_wardian_session_environment_candidate(&environ, session_id)
-            || is_wardian_session_process_candidate(&process_name, &command_line, session_id)
-        {
-            matches.push(pid_u32);
+        for session_id in session_ids {
+            if is_wardian_session_environment_candidate(&environ, session_id)
+                || is_wardian_session_process_candidate(&process_name, &command_line, session_id)
+            {
+                matches.entry(session_id.clone()).or_default().push(pid_u32);
+            }
         }
     }
 
-    matches.sort_unstable();
-    matches.dedup();
+    for pids in matches.values_mut() {
+        pids.sort_unstable();
+        pids.dedup();
+    }
     matches
 }
 
