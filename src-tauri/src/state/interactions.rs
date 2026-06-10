@@ -522,6 +522,15 @@ fn keep_existing_provider_input_state(
     if generation > existing.generation {
         return false;
     }
+    if existing.state == next_state && existing.ready_evidence == next_evidence {
+        return true;
+    }
+    if existing.state == next_state
+        && existing.ready_evidence == Some(ProviderReadyEvidence::ProviderEvent)
+        && next_evidence.is_none()
+    {
+        return true;
+    }
     next_state == ProviderInputReadiness::Ready
         && !matches!(next_evidence, Some(ProviderReadyEvidence::ProviderEvent))
         && matches!(
@@ -698,6 +707,36 @@ mod tests {
             current.ready_evidence,
             Some(ProviderReadyEvidence::ProviderEvent)
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_provider_readiness_observation_reuses_existing_state() {
+        let state = InteractionState::default();
+        let initial = state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+
+        let repeated = state
+            .record_provider_input_state(
+                "agent-1",
+                1,
+                ProviderInputReadiness::Ready,
+                Some(ProviderReadyEvidence::ProviderEvent),
+            )
+            .await;
+
+        assert!(keep_existing_provider_input_state(
+            &initial,
+            1,
+            ProviderInputReadiness::Ready,
+            Some(ProviderReadyEvidence::ProviderEvent)
+        ));
+        assert_eq!(repeated.observed_at, initial.observed_at);
     }
 
     #[tokio::test]
