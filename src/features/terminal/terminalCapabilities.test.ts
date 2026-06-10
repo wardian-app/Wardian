@@ -107,6 +107,16 @@ describe("terminal capability broker", () => {
     expect(plan.normalizedOutput).toBe(data);
   });
 
+  it("remaps Codex's light composer background back to dark mode", () => {
+    const plan = planTerminalCapabilityResponses("codex", "\u001b[48;2;242;240;235m\n\u001b[K", {
+      ...baseContext,
+      prefersLight: false,
+      backgroundRgb: "02/04/02",
+    });
+
+    expect(plan.normalizedOutput).toBe("\u001b[48;2;41;41;41m\n\u001b[K");
+  });
+
   it("strips OpenTUI theme notification enablement from rendered output", () => {
     expect(normalizeOpenCodeOutput("\u001b[?2031hready\u001b[?2031l", "opencode")).toBe("ready");
   });

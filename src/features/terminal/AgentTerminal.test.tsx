@@ -2108,6 +2108,7 @@ describe("AgentTerminal scrollback", () => {
 
   it("pushes updated Codex terminal colors when Wardian switches back to dark mode", async () => {
     const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
+    let peekCount = 0;
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {
         case "read_agent_pty":
@@ -2120,7 +2121,8 @@ describe("AgentTerminal scrollback", () => {
             "peek" in args.options &&
             args.options.peek === true
           ) {
-            return codexComposerFrame;
+            peekCount += 1;
+            return peekCount === 1 ? codexComposerFrame : null;
           }
           return null;
         case "resize_agent_terminal":
@@ -2137,8 +2139,15 @@ describe("AgentTerminal scrollback", () => {
     });
 
     const instance = getLatestTerminalInstance();
+    await waitFor(() => {
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;242;240;235m"),
+        expect.any(Function),
+      );
+    });
     instance.write.mockClear();
     instance.reset.mockClear();
+    instance.refresh.mockClear();
     mockInvoke.mockClear();
     view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
 
@@ -2158,10 +2167,6 @@ describe("AgentTerminal scrollback", () => {
     });
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("read_agent_pty", {
-        sessionId: "codex-live-theme",
-        options: expect.objectContaining({ peek: true }),
-      });
       expect(instance.reset).toHaveBeenCalled();
       expect(instance.write).toHaveBeenCalledWith(
         expect.stringContaining("\u001b[48;2;41;41;41m"),

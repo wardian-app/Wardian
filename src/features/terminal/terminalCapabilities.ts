@@ -14,6 +14,7 @@ const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
 const CODEX_DARK_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;41;41;41m/g;
+const CODEX_LIGHT_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;242;240;235m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
@@ -162,15 +163,15 @@ function codexLightUserMessageBackground(backgroundRgb: string) {
   return [r, g, b].map((component) => Math.round(component * 0.96)).join(";");
 }
 
-function normalizeCodexLightModeBackground(data: string, context: TerminalCapabilityContext) {
-  if (!context.prefersLight) {
-    return data;
+export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
+  if (context.prefersLight) {
+    return data.replace(
+      CODEX_DARK_USER_MESSAGE_BACKGROUND,
+      `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`,
+    );
   }
 
-  return data.replace(
-    CODEX_DARK_USER_MESSAGE_BACKGROUND,
-    `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`,
-  );
+  return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, "\u001b[48;2;41;41;41m");
 }
 
 function stripCursorStyleControls(data: string) {
@@ -481,7 +482,7 @@ export function planTerminalCapabilityResponses(
       provider === "opencode"
         ? normalizeOpenCodeOutput(data, "opencode")
         : provider === "codex"
-          ? normalizeCodexLightModeBackground(data, context)
+          ? normalizeCodexComposerBackgroundForTheme(data, context)
           : data,
     focusReported,
   };

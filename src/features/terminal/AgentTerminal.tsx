@@ -9,6 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
+  normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
   shouldHomeCursorBeforeTransientResize,
@@ -1134,6 +1135,40 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
 ) {
   const generation = entry.generation;
   try {
+    const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+    const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
+    const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
+    const backgroundRgb =
+      background.length === 6
+        ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
+        : "02/04/02";
+    const foregroundRgb =
+      foreground.length === 6
+        ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
+        : "ee/f2/ee";
+    const serializedState =
+      entry.renderer?.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES }) ||
+      entry.parserSerializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES });
+    if (serializedState) {
+      const themedState = normalizeCodexComposerBackgroundForTheme(serializedState, {
+        cursorRow: 1,
+        cursorCol: 1,
+        pixelWidth: 1,
+        pixelHeight: 1,
+        backgroundRgb,
+        foregroundRgb,
+        prefersLight: termTheme === LIGHT_TERM_THEME,
+        focusReported: entry.opencodeFocusReported,
+      });
+      resetTerminalOutputBuffers(entry);
+      await writeTerminalControl(entry.parser, themedState);
+      if (entry.renderer && !entry.disposed) {
+        await writeTerminalControl(entry.renderer.term, themedState);
+        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      }
+      return;
+    }
+
     const preview = await readAgentPty(sessionId, {
       max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
       peek: true,
