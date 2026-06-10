@@ -1128,6 +1128,33 @@ async function writeTerminalOutputBatch(
   }
 }
 
+async function replayCodexTerminalPreviewWithCurrentTheme(
+  sessionId: string,
+  entry: TerminalSessionEntry,
+) {
+  const generation = entry.generation;
+  try {
+    const preview = await readAgentPty(sessionId, {
+      max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
+      peek: true,
+    });
+    if (
+      !preview ||
+      entry.disposed ||
+      entry.generation !== generation ||
+      terminalSessionMap.get(sessionId) !== entry
+    ) {
+      return;
+    }
+    await writeTerminalOutputBatch(sessionId, entry, [preview], {
+      resetBeforeWrite: true,
+      recordOutput: false,
+    });
+  } catch (error) {
+    console.warn("Codex terminal theme replay failed:", error);
+  }
+}
+
 async function drainInitialPtyBackfill(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
   if (!entry || entry.disposed || !entry.initialPtyBackfillInFlight) {
@@ -1572,6 +1599,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
+  const lastThemeSignalRef = useRef<typeof DARK_TERM_THEME | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
@@ -1662,6 +1690,7 @@ export const AgentTerminal = memo(function AgentTerminal({
           onOpenError: setLinkOpenError,
         };
         session.currentTheme = termTheme;
+        lastThemeSignalRef.current = termTheme;
 
         const renderer = mountRenderer(sessionId, session, terminalRef.current);
         if (!renderer) {
@@ -1743,6 +1772,8 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry) {
       return;
     }
+    const previousSignaledTheme = lastThemeSignalRef.current;
+    lastThemeSignalRef.current = termTheme;
     entry.currentTheme = termTheme;
     if (entry.provider === "opencode" || entry.provider === "codex") {
       const toRgbTriplet = (hex: string, fallback: string) => {
@@ -1760,6 +1791,9 @@ export const AgentTerminal = memo(function AgentTerminal({
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
+      if (entry.provider === "codex" && previousSignaledTheme !== null && previousSignaledTheme !== termTheme) {
+        void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
+      }
     }
   }, [sessionId, termTheme]);
 

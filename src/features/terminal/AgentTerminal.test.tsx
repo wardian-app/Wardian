@@ -2107,9 +2107,21 @@ describe("AgentTerminal scrollback", () => {
   });
 
   it("pushes updated Codex terminal colors when Wardian switches back to dark mode", async () => {
-    mockInvoke.mockImplementation(async (cmd: string) => {
+    const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {
         case "read_agent_pty":
+          if (
+            typeof args === "object" &&
+            args !== null &&
+            "options" in args &&
+            typeof args.options === "object" &&
+            args.options !== null &&
+            "peek" in args.options &&
+            args.options.peek === true
+          ) {
+            return codexComposerFrame;
+          }
           return null;
         case "resize_agent_terminal":
           return null;
@@ -2124,6 +2136,9 @@ describe("AgentTerminal scrollback", () => {
       expect(getLatestTerminalInstance()).toBeTruthy();
     });
 
+    const instance = getLatestTerminalInstance();
+    instance.write.mockClear();
+    instance.reset.mockClear();
     mockInvoke.mockClear();
     view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
 
@@ -2140,6 +2155,22 @@ describe("AgentTerminal scrollback", () => {
         sessionId: "codex-live-theme",
         input: "\u001b]10;rgb:EE/F2/EE\u001b\\",
       });
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("read_agent_pty", {
+        sessionId: "codex-live-theme",
+        options: expect.objectContaining({ peek: true }),
+      });
+      expect(instance.reset).toHaveBeenCalled();
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;41;41;41m"),
+        expect.any(Function),
+      );
+      expect(instance.write).not.toHaveBeenCalledWith(
+        expect.stringContaining("\u001b[48;2;242;240;235m"),
+        expect.any(Function),
+      );
     });
   });
 
