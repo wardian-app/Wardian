@@ -26,6 +26,14 @@ export type WardianTerminalTheme = ITheme & {
  */
 export const TERMINAL_MINIMUM_CONTRAST_RATIO = 4.5;
 
+/**
+ * Antigravity renders nearly all body text in dim grays, so the 4.5 floor
+ * that suits Claude Code still reads murky there; lift it to AAA (7:1).
+ */
+export function terminalMinimumContrastRatio(provider?: string): number {
+  return provider === "antigravity" ? 7 : TERMINAL_MINIMUM_CONTRAST_RATIO;
+}
+
 export const DARK_TERM_THEME: WardianTerminalTheme = {
   background: "#1a1a1a",
   foreground: "#ebebeb",

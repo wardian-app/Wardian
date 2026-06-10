@@ -20,7 +20,7 @@ import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
-import { DARK_TERM_THEME, LIGHT_TERM_THEME, TERMINAL_MINIMUM_CONTRAST_RATIO } from "./terminalThemes";
+import { DARK_TERM_THEME, LIGHT_TERM_THEME, terminalMinimumContrastRatio } from "./terminalThemes";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -92,12 +92,14 @@ type TerminalOptionTarget = {
   options: {
     scrollOnUserInput?: boolean;
     scrollOnEraseInDisplay?: boolean;
+    minimumContrastRatio?: number;
     windowsPty?: { backend?: "conpty" | "winpty"; buildNumber?: number };
   };
 };
 
 function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: string) {
   term.options.scrollOnEraseInDisplay = provider === "codex";
+  term.options.minimumContrastRatio = terminalMinimumContrastRatio(provider);
 }
 
 function providerFromAgentConfig(agent: AgentConfig | undefined) {
@@ -1478,7 +1480,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   const { terminalFontFamily, terminalFontSize } = useSettingsStore.getState();
   const term = new Terminal({
     theme: entry.currentTheme,
-    minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST_RATIO,
+    minimumContrastRatio: terminalMinimumContrastRatio(entry.provider),
     fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
     fontSize: terminalFontSize,
     customGlyphs: true,

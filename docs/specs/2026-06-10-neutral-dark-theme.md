@@ -31,8 +31,8 @@ status colors rather than in tinted surfaces. Light mode is unchanged.
 | `--color-wardian-sidebar-secondary` | `#0f172a` (blue) | `#181818` | Same family as primary sidebar |
 | `--color-wardian-text` | `#e8f2e8` (green) | `#ececec` | Neutral, ~13:1 contrast on `#191919` |
 | `--color-wardian-text-bright` | `#d1d5db` | `#d6d6d6` | Neutralized |
-| `--color-wardian-text-muted` | `#88a088` (green) | `#ababab` | Neutral, ~6.5:1 contrast |
-| `--color-wardian-text-muted-neutral` | `#9ca3af` (blue) | `#9e9e9e` | Neutralized |
+| `--color-wardian-text-muted` | `#88a088` (green) | `#b4b4b4` | Neutral, ~7.5:1 contrast |
+| `--color-wardian-text-muted-neutral` | `#9ca3af` (blue) | `#a9a9a9` | Neutralized |
 | `--color-wardian-border` | `#1b261b` (green) | `#2f2f2f` | Visible seams on neutral surfaces |
 | `--color-wardian-border-heavy` | `#2d2d44` (blue) | `#454545` | Neutralized, higher visibility |
 | `--color-wardian-border-light` | `#374151` (blue) | `#3a3a3a` | Neutralized |
@@ -61,7 +61,9 @@ Companion changes outside the CSS variable layer:
   `terminal.integrated.minimumContrastRatio`). The themed 16-color palette
   cannot reach truecolor/256-color dim grays that TUIs emit directly
   (e.g. Claude Code's secondary text); xterm lightens any foreground below
-  this ratio against the background at render time.
+  this ratio against the background at render time. Antigravity renders
+  nearly all body text in dim grays, so its agent terminals use a 7:1
+  (AAA) floor via the provider-aware `terminalMinimumContrastRatio()`.
 - Dashboard/grid agent cards get `--shadow-wardian-card` elevation (the
   token was referenced by `.graph-tooltip` but never defined; it now exists
   in both themes) so panels separate from the background without relying on
