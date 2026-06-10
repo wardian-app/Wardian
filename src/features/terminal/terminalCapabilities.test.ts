@@ -59,13 +59,52 @@ describe("terminal capability broker", () => {
     expect(plan.focusReported).toBe(true);
   });
 
-  it("does not answer Codex terminal probes from the frontend", () => {
+  it("answers Codex terminal color probes from the Wardian theme", () => {
+    const data = "\u001b[?996n\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+      foregroundRgb: "11/18/27",
+    });
+
+    expect(plan.outgoingInputs).toEqual([
+      "\u001b[?997;2n",
+      "\u001b]10;rgb:11/18/27\u001b\\",
+      "\u001b]11;rgb:fc/fa/f5\u001b\\",
+    ]);
+    expect(plan.normalizedOutput).toBe(data);
+    expect(plan.focusReported).toBe(false);
+  });
+
+  it("does not answer non-color Codex terminal probes from the frontend", () => {
     const data = "\u001b[6n\u001b[14t\u001b[?1004h";
     const plan = planTerminalCapabilityResponses("codex", data, baseContext);
 
     expect(plan.outgoingInputs).toEqual([]);
     expect(plan.normalizedOutput).toBe(data);
     expect(plan.focusReported).toBe(false);
+  });
+
+  it("remaps Codex's dark composer background in light mode", () => {
+    const plan = planTerminalCapabilityResponses("codex", "\u001b[48;2;41;41;41m\n\u001b[K", {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe("\u001b[48;2;242;240;235m\n\u001b[K");
+  });
+
+  it("keeps Codex's dark composer background in dark mode", () => {
+    const data = "\u001b[48;2;41;41;41m\n\u001b[K";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: false,
+      backgroundRgb: "02/04/02",
+    });
+
+    expect(plan.normalizedOutput).toBe(data);
   });
 
   it("strips OpenTUI theme notification enablement from rendered output", () => {

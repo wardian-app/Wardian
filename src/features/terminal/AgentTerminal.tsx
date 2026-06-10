@@ -722,9 +722,14 @@ function syncParserViewportToRenderer(entry: TerminalSessionEntry) {
   (entry.parser as unknown as { scrollToLine?: (line: number) => void }).scrollToLine?.(rendererViewportY);
 }
 
-function queueTerminalCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
+function planTerminalOutputChunk(
+  sessionId: string,
+  data: string,
+  entry: TerminalSessionEntry,
+  options?: { queueCapabilityResponses?: boolean },
+) {
   if (!data) {
-    return;
+    return data;
   }
   const { row, col } = terminalCursorPositionReply(entry);
   const { width, height } = terminalPixelSizeReply(entry);
@@ -753,9 +758,13 @@ function queueTerminalCapabilityResponses(sessionId: string, data: string, entry
   });
 
   entry.opencodeFocusReported = plan.focusReported;
-  for (const input of plan.outgoingInputs) {
-    queueAgentInput(sessionId, input);
+  if (options?.queueCapabilityResponses !== false) {
+    for (const input of plan.outgoingInputs) {
+      queueAgentInput(sessionId, input);
+    }
   }
+
+  return plan.normalizedOutput;
 }
 
 function disposeTerminalSession(sessionId: string) {
@@ -1038,9 +1047,11 @@ async function writeTerminalOutputBatch(
     resetTerminalOutputBuffers(entry);
   }
 
-  if (options?.queueCapabilityResponses !== false) {
-    rawChunks.forEach((data) => queueTerminalCapabilityResponses(sessionId, data, entry));
-  }
+  const renderChunks = rawChunks.map((data) =>
+    planTerminalOutputChunk(sessionId, data, entry, {
+      queueCapabilityResponses: options?.queueCapabilityResponses,
+    }),
+  );
 
   rawChunks.forEach((data) => {
     entry.recentWritePreviews.push(
@@ -1056,7 +1067,7 @@ async function writeTerminalOutputBatch(
   }
 
   entry.existingKnownLines = readParserKnownLineSet(entry);
-  const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
+  const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
   const rendererWasAtBottom = entry.renderer
     ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
     : false;
@@ -1205,7 +1216,6 @@ async function drainPty(sessionId: string) {
       if (preview) {
         await writeTerminalOutputBatch(sessionId, entry, [preview], {
           recordOutput: false,
-          queueCapabilityResponses: false,
         });
       }
 

@@ -13,6 +13,7 @@ const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
+const CODEX_DARK_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;41;41;41m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
@@ -152,6 +153,26 @@ function stripProviderScrollbackErase(data: string, provider?: string) {
   return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
 }
 
+function codexLightUserMessageBackground(backgroundRgb: string) {
+  const [r, g, b] = backgroundRgb.split("/").map((component) => Number.parseInt(component, 16));
+  if (![r, g, b].every(Number.isFinite)) {
+    return "242;240;235";
+  }
+
+  return [r, g, b].map((component) => Math.round(component * 0.96)).join(";");
+}
+
+function normalizeCodexLightModeBackground(data: string, context: TerminalCapabilityContext) {
+  if (!context.prefersLight) {
+    return data;
+  }
+
+  return data.replace(
+    CODEX_DARK_USER_MESSAGE_BACKGROUND,
+    `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`,
+  );
+}
+
 function stripCursorStyleControls(data: string) {
   return data.replace(CURSOR_STYLE_SEQUENCE, "");
 }
@@ -199,6 +220,10 @@ function shouldReconstructProviderLine(provider: string | undefined) {
 
 function supportsTerminalCapabilityResponses(provider: string | undefined) {
   return provider === "opencode" || provider === "antigravity";
+}
+
+function supportsTerminalThemeResponses(provider: string | undefined) {
+  return provider === "opencode" || provider === "antigravity" || provider === "codex";
 }
 
 function isCodexTransientUiLine(line: string) {
@@ -380,7 +405,7 @@ export function planTerminalCapabilityResponses(
   data: string,
   context: TerminalCapabilityContext,
 ): TerminalCapabilityPlan {
-  if (!supportsTerminalCapabilityResponses(provider) || !data) {
+  if ((!supportsTerminalCapabilityResponses(provider) && !supportsTerminalThemeResponses(provider)) || !data) {
     return {
       outgoingInputs: [],
       normalizedOutput: data,
@@ -391,49 +416,57 @@ export function planTerminalCapabilityResponses(
   const outgoingInputs: string[] = [];
   let focusReported = context.focusReported;
 
-  if (data.includes(DEVICE_STATUS_REPORT_QUERY)) {
+  if (supportsTerminalCapabilityResponses(provider) && data.includes(DEVICE_STATUS_REPORT_QUERY)) {
     outgoingInputs.push(`\u001b[${context.cursorRow};${context.cursorCol}R`);
   }
 
-  if (data.includes(XTVERSION_QUERY)) {
+  if (supportsTerminalCapabilityResponses(provider) && data.includes(XTVERSION_QUERY)) {
     outgoingInputs.push("\u001bP>|xterm.js 6.0.0\u001b\\");
   }
 
-  if (data.includes(KITTY_KEYBOARD_QUERY)) {
+  if (supportsTerminalCapabilityResponses(provider) && data.includes(KITTY_KEYBOARD_QUERY)) {
     outgoingInputs.push("\u001b[?0u");
   }
 
-  if (data.includes(LIGHT_DARK_QUERY)) {
+  if (supportsTerminalThemeResponses(provider) && data.includes(LIGHT_DARK_QUERY)) {
     outgoingInputs.push(`\u001b[?997;${context.prefersLight ? 2 : 1}n`);
   }
 
-  for (const match of data.matchAll(DECRQM_QUERY)) {
-    const param = Number(match[1]);
-    if (!Number.isFinite(param)) {
-      continue;
-    }
-    if (SUPPORTED_RESET_DECRQM_PARAMS.has(param)) {
-      outgoingInputs.push(`\u001b[?${param};2$y`);
-      continue;
-    }
-    if (UNSUPPORTED_RESET_DECRQM_PARAMS.has(param)) {
-      outgoingInputs.push(`\u001b[?${param};0$y`);
+  if (supportsTerminalCapabilityResponses(provider)) {
+    for (const match of data.matchAll(DECRQM_QUERY)) {
+      const param = Number(match[1]);
+      if (!Number.isFinite(param)) {
+        continue;
+      }
+      if (SUPPORTED_RESET_DECRQM_PARAMS.has(param)) {
+        outgoingInputs.push(`\u001b[?${param};2$y`);
+        continue;
+      }
+      if (UNSUPPORTED_RESET_DECRQM_PARAMS.has(param)) {
+        outgoingInputs.push(`\u001b[?${param};0$y`);
+      }
     }
   }
 
-  if (data.includes("\u001b[14t")) {
+  if (supportsTerminalCapabilityResponses(provider) && data.includes("\u001b[14t")) {
     outgoingInputs.push(`\u001b[4;${context.pixelHeight};${context.pixelWidth}t`);
   }
 
-  if (data.includes(OSC_PALETTE_QUERY)) {
+  if (supportsTerminalThemeResponses(provider) && data.includes(OSC_PALETTE_QUERY)) {
     outgoingInputs.push(`\u001b]4;0;rgb:${context.backgroundRgb}\u001b\\`);
   }
 
-  if (data.includes(OSC_FOREGROUND_QUERY_BEL) || data.includes(OSC_FOREGROUND_QUERY_ST)) {
+  if (
+    supportsTerminalThemeResponses(provider) &&
+    (data.includes(OSC_FOREGROUND_QUERY_BEL) || data.includes(OSC_FOREGROUND_QUERY_ST))
+  ) {
     outgoingInputs.push(`\u001b]10;rgb:${context.foregroundRgb}\u001b\\`);
   }
 
-  if (data.includes(OSC_BACKGROUND_QUERY_BEL) || data.includes(OSC_BACKGROUND_QUERY_ST)) {
+  if (
+    supportsTerminalThemeResponses(provider) &&
+    (data.includes(OSC_BACKGROUND_QUERY_BEL) || data.includes(OSC_BACKGROUND_QUERY_ST))
+  ) {
     outgoingInputs.push(`\u001b]11;rgb:${context.backgroundRgb}\u001b\\`);
   }
 
@@ -444,9 +477,12 @@ export function planTerminalCapabilityResponses(
 
   return {
     outgoingInputs,
-    normalizedOutput: supportsTerminalCapabilityResponses(provider)
-      ? normalizeOpenCodeOutput(data, "opencode")
-      : data,
+    normalizedOutput:
+      provider === "opencode"
+        ? normalizeOpenCodeOutput(data, "opencode")
+        : provider === "codex"
+          ? normalizeCodexLightModeBackground(data, context)
+          : data,
     focusReported,
   };
 }
