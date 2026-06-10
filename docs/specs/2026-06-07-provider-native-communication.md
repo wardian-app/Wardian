@@ -222,9 +222,10 @@ the transport attempt type must differ:
 
 Workflow live-agent execution already approximates this split: it creates a
 Wardian interaction task, submits the prompt to the active PTY, then completes
-only when a structured `wardian reply` or compatible transcript marker appears.
-The provider-native communication work should generalize that model for all
-live sends while preserving the existing headless process boundary.
+only when a structured `wardian reply` is recorded through the control plane.
+Printed reply commands in the transcript are not completion evidence. The
+provider-native communication work should generalize that model for all live
+sends while preserving the existing headless process boundary.
 
 ## Provider Matrix
 

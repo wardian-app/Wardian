@@ -1820,7 +1820,7 @@ async fn ask_fallback_agent_snapshot(
 
 fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
     format!(
-        "{message}\n\nWardian request id: {request_id}\nRespond to this request with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the reply body on stdin."
+        "{message}\n\nWardian request id: {request_id}\nWhen finished, execute this command from your shell/tool with the reply body on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
     )
 }
 
@@ -5266,6 +5266,8 @@ mod tests {
         assert!(delivery
             .prompt
             .contains(&format!("wardian reply {request_id} --status done --stdin")));
+        assert!(delivery.prompt.contains("execute this command"));
+        assert!(delivery.prompt.contains("Do not print the command"));
         assert!(
             !delivery
                 .prompt

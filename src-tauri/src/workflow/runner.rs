@@ -43,8 +43,8 @@ pub trait AgentRunner: Send + Sync {
 
 /// Boundary for active-agent execution. Unlike headless runs, this uses the
 /// existing live PTY and completes only through the structured `wardian reply`
-/// contract. Idle terminal status is not completion; it is only a signal that
-/// transcript marker compatibility can be checked.
+/// contract. Idle terminal status and printed reply commands are not
+/// completion evidence.
 pub trait LiveAgentRunner: Send + Sync {
     fn run_live(&self, spec: LiveAgentRunSpec) -> LiveAgentRunFuture<'_>;
 }
@@ -294,7 +294,7 @@ async fn run_live_agent_prompt(
 
 fn prompt_with_structured_reply_instruction(prompt: &str, request_id: &str) -> String {
     format!(
-        "{prompt}\n\nWardian workflow request id: {request_id}\nWhen this workflow node is fully complete, respond with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the final workflow output on stdin."
+        "{prompt}\n\nWardian workflow request id: {request_id}\nWhen this workflow node is fully complete, execute this command from your shell/tool with the final workflow output on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
     )
 }
 
@@ -399,7 +399,7 @@ async fn wait_for_live_agent_reply(
     watch_state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
     since: String,
     request_id: &str,
-    target_session_id: &str,
+    _target_session_id: &str,
     timeout: Duration,
 ) -> Result<wardian_core::control::StructuredReply, String> {
     let started = std::time::Instant::now();
@@ -418,17 +418,6 @@ async fn wait_for_live_agent_reply(
         if let Some(error) = live_agent_terminal_failure(&snapshot) {
             return Err(error);
         }
-        if latest_terminal_status(&snapshot).as_deref() == Some("idle") {
-            if let Some((status, body)) = structured_reply_marker(&snapshot, request_id) {
-                return app_state
-                    .interactions
-                    .complete_task_with_reply(request_id, Some(target_session_id), status, &body)
-                    .await
-                    .map_err(|error| {
-                        format!("failed to record live agent workflow reply {request_id}: {error}")
-                    });
-            }
-        }
         let elapsed = started.elapsed();
         if elapsed >= timeout {
             return Err(format!(
@@ -437,52 +426,6 @@ async fn wait_for_live_agent_reply(
         }
         tokio::time::sleep((timeout - elapsed).min(Duration::from_millis(25))).await;
     }
-}
-
-fn structured_reply_marker(
-    snapshot: &crate::state::agent_watch::WatchSnapshot,
-    request_id: &str,
-) -> Option<(ReplyStatus, String)> {
-    snapshot
-        .transcript
-        .messages
-        .iter()
-        .rev()
-        .filter(|message| matches!(message.role.as_str(), "assistant" | "model"))
-        .find_map(|message| parse_structured_reply_marker(&message.text, request_id))
-}
-
-fn parse_structured_reply_marker(text: &str, request_id: &str) -> Option<(ReplyStatus, String)> {
-    let marker = format!("wardian reply {request_id}");
-    let lines = text.lines().collect::<Vec<_>>();
-    let marker_line_index = lines.iter().position(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with(&marker)
-            && trimmed
-                .get(marker.len()..)
-                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
-    })?;
-    let command = lines[marker_line_index].trim();
-    if !command.contains("--stdin") {
-        return None;
-    }
-    let status = if command.contains("--status blocked") {
-        ReplyStatus::Blocked
-    } else if command.contains("--status failed") {
-        ReplyStatus::Failed
-    } else if command.contains("--status done") {
-        ReplyStatus::Done
-    } else {
-        return None;
-    };
-    let leading_body = lines[..marker_line_index].join("\n").trim().to_string();
-    let trailing_body = lines[marker_line_index + 1..].join("\n");
-    let body = if leading_body.is_empty() {
-        trailing_body.trim().to_string()
-    } else {
-        leading_body
-    };
-    (!body.is_empty()).then_some((status, body))
 }
 
 #[cfg(test)]
@@ -735,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_agent_reply_wait_accepts_explicit_transcript_marker_after_idle() {
+    async fn live_agent_reply_wait_ignores_printed_reply_command_after_idle() {
         let app_state = crate::state::AppState::new();
         let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
             "agent-1".to_string(),
@@ -772,24 +715,23 @@ mod tests {
             guard.push_event("status", serde_json::json!({ "status": "idle" }));
         }
 
-        let reply = wait_for_live_agent_reply(
+        let error = wait_for_live_agent_reply(
             &app_state,
             watch_state,
             since,
             &task_id,
             "agent-1",
-            Duration::from_secs(1),
+            Duration::from_millis(10),
         )
         .await
-        .expect("marker should complete workflow task");
+        .expect_err("printed reply command should not complete workflow task");
 
-        assert_eq!(reply.status, ReplyStatus::Done);
-        assert_eq!(reply.body, "Final workflow output");
+        assert!(error.contains("timed out waiting for live agent workflow reply"));
         assert!(app_state
             .interactions
             .structured_reply(&task_id)
             .await
-            .is_some());
+            .is_none());
     }
 
     #[tokio::test]
@@ -902,36 +844,11 @@ mod tests {
     }
 
     #[test]
-    fn structured_reply_marker_requires_body_and_status() {
-        assert!(parse_structured_reply_marker(
-            "wardian reply wf_test --status done --stdin",
-            "wf_test"
-        )
-        .is_none());
-        assert!(
-            parse_structured_reply_marker("body\nwardian reply wf_test --stdin", "wf_test")
-                .is_none()
-        );
-    }
+    fn workflow_prompt_tells_agent_to_execute_reply_command() {
+        let prompt = prompt_with_structured_reply_instruction("write the file", "wf_test");
 
-    #[test]
-    fn structured_reply_marker_accepts_body_after_command() {
-        let (status, body) = parse_structured_reply_marker(
-            "wardian reply wf_test --status done --stdin\nSummary written.",
-            "wf_test",
-        )
-        .expect("marker-first reply should parse");
-
-        assert_eq!(status, ReplyStatus::Done);
-        assert_eq!(body, "Summary written.");
-    }
-
-    #[test]
-    fn structured_reply_marker_ignores_embedded_command_text() {
-        assert!(parse_structured_reply_marker(
-            "Please run wardian reply wf_test --status done --stdin after the work.\nSummary.",
-            "wf_test",
-        )
-        .is_none());
+        assert!(prompt.contains("execute this command"));
+        assert!(prompt.contains("wardian reply wf_test --status done --stdin"));
+        assert!(prompt.contains("Do not print the command"));
     }
 }
