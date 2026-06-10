@@ -2784,6 +2784,14 @@ fn spawn_delayed_mailbox_drain_retry(app: Option<&AppHandle>, session_id: &str) 
     });
 }
 
+pub(crate) async fn drain_mailbox_for_idle_agent_from_status_observation(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    session_id: &str,
+) {
+    let _ = drain_next_mailbox_message_for_idle_agent(app, state, session_id).await;
+}
+
 async fn drain_next_mailbox_message_for_idle_agent(
     app: Option<&AppHandle>,
     state: &AppState,

@@ -19,6 +19,7 @@ use super::opencode::{
     opencode_should_fallback_to_idle,
 };
 use crate::providers::antigravity::AntigravityProvider;
+use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -173,6 +174,7 @@ struct AgentSnapshot {
     provider: String,
     folder: String,
     resume_session: Option<String>,
+    provider_generation: u64,
     process_id: Option<u32>,
     query_count: Arc<Mutex<usize>>,
     init_timestamp: Arc<Mutex<Option<String>>>,
@@ -182,6 +184,18 @@ struct AgentSnapshot {
     last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
     log_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
+}
+
+#[derive(Default)]
+struct TelemetryPassResult {
+    metrics: Vec<AgentTelemetry>,
+    provider_statuses: Vec<TelemetryProviderStatus>,
+}
+
+struct TelemetryProviderStatus {
+    session_id: String,
+    generation: u64,
+    status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -646,7 +660,7 @@ fn collect_app_process_pids(
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
-    let snapshots: Vec<AgentSnapshot> = {
+    let mut snapshots: Vec<AgentSnapshot> = {
         let agents = state.agents.lock().await;
         agents
             .iter()
@@ -657,6 +671,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     provider: config.provider.clone(),
                     folder: config.folder.clone(),
                     resume_session: config.resume_session.clone(),
+                    provider_generation: 0,
                     process_id: agent.process_id,
                     query_count: agent.query_count.clone(),
                     init_timestamp: agent.init_timestamp.clone(),
@@ -670,9 +685,16 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             })
             .collect()
     };
+    for snapshot in &mut snapshots {
+        snapshot.provider_generation = state
+            .interactions
+            .current_provider_input_generation(&snapshot.session_id)
+            .await
+            .unwrap_or(0);
+    }
 
     let sys_metrics = state.system_metrics.clone();
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let session_ids = snapshots
             .iter()
             .map(|snap| snap.session_id.clone())
@@ -681,6 +703,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         let lease_now = chrono::Utc::now().to_rfc3339();
         let pass_started = std::time::Instant::now();
         let mut results = Vec::new();
+        let mut provider_statuses = Vec::new();
         let system_snapshot = refresh_system_process_snapshot(&sys_metrics, &session_ids);
         let mut slow_agents = Vec::new();
 
@@ -1130,6 +1153,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             } else {
                 snap.current_status.lock().unwrap().clone()
             };
+            provider_statuses.push(TelemetryProviderStatus {
+                session_id: snap.session_id.clone(),
+                generation: snap.provider_generation,
+                status: snap.current_status.lock().unwrap().clone(),
+            });
 
             results.push(AgentTelemetry {
                 session_id: snap.session_id.clone(),
@@ -1162,10 +1190,53 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         if let Some(message) = timings.slow_log_message(TELEMETRY_SLOW_PASS_THRESHOLD) {
             crate::utils::logging::log_debug(&message);
         }
-        results
+        TelemetryPassResult {
+            metrics: results,
+            provider_statuses,
+        }
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_default();
+    apply_provider_status_observations(state, &result.provider_statuses).await;
+    result.metrics
+}
+
+async fn apply_provider_status_observations(
+    state: &AppState,
+    observations: &[TelemetryProviderStatus],
+) {
+    for observation in observations {
+        let readiness = provider_readiness_from_status(&observation.status);
+        let ready_evidence = (readiness == ProviderInputReadiness::Ready)
+            .then_some(ProviderReadyEvidence::ProviderEvent);
+        state
+            .interactions
+            .record_provider_input_state(
+                &observation.session_id,
+                observation.generation,
+                readiness,
+                ready_evidence,
+            )
+            .await;
+        if readiness == ProviderInputReadiness::Ready {
+            crate::control::drain_mailbox_for_idle_agent_from_status_observation(
+                None,
+                state,
+                &observation.session_id,
+            )
+            .await;
+        }
+    }
+}
+
+fn provider_readiness_from_status(status: &str) -> ProviderInputReadiness {
+    match wardian_core::identity::normalize_status(status).as_str() {
+        "idle" => ProviderInputReadiness::Ready,
+        "processing" => ProviderInputReadiness::Busy,
+        "action_required" => ProviderInputReadiness::ActionRequired,
+        "off" | "error" => ProviderInputReadiness::Unavailable,
+        _ => ProviderInputReadiness::Unknown,
+    }
 }
 
 pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
@@ -1278,6 +1349,8 @@ mod tests {
     use super::{AgentSnapshot, TelemetryPassTimings, TelemetrySlowAgent};
     use std::collections::{BTreeSet, HashMap};
     use std::sync::{Arc, Mutex};
+    use wardian_core::control::ProviderInputReadiness;
+    use wardian_core::models::AgentConfig;
 
     fn test_snapshot(status: &str) -> AgentSnapshot {
         AgentSnapshot {
@@ -1285,6 +1358,7 @@ mod tests {
             provider: "opencode".to_string(),
             folder: "D:/work".to_string(),
             resume_session: None,
+            provider_generation: 0,
             process_id: Some(1234),
             query_count: Arc::new(Mutex::new(0)),
             init_timestamp: Arc::new(Mutex::new(None)),
@@ -1298,6 +1372,40 @@ mod tests {
             last_output_at: Arc::new(Mutex::new(None)),
             log_path: Arc::new(Mutex::new(None)),
             log_last_modified: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn test_active_agent(status: &str, provider: &str) -> crate::state::ActiveAgent {
+        crate::state::ActiveAgent {
+            config: Arc::new(Mutex::new(AgentConfig {
+                session_id: "agent-1".to_string(),
+                session_name: "OpenCodeOne".to_string(),
+                agent_class: "Coder".to_string(),
+                provider: provider.to_string(),
+                folder: "D:/work".to_string(),
+                ..Default::default()
+            })),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: Arc::new(Mutex::new(String::new())),
+            process_id: None,
+            query_count: Arc::new(Mutex::new(0)),
+            init_timestamp: Arc::new(Mutex::new(None)),
+            current_status: Arc::new(Mutex::new(status.to_string())),
+            last_status_at: Arc::new(Mutex::new(None)),
+            watch_state: Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+                "agent-1".to_string(),
+                16,
+                1024,
+            ))),
+            terminal_title: Arc::new(Mutex::new(String::new())),
+            last_output_at: Arc::new(Mutex::new(None)),
+            log_path: Arc::new(Mutex::new(None)),
+            log_last_modified: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
         }
     }
 
@@ -1415,6 +1523,96 @@ mod tests {
             .snapshot_since(None, None)
             .unwrap();
         assert!(snapshot.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn telemetry_idle_fallback_records_provider_input_ready() {
+        let state = crate::state::AppState::new();
+        let agent = test_active_agent("Processing...", "opencode");
+        *agent.last_output_at.lock().unwrap() =
+            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(10));
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+        state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
+            .await;
+
+        let metrics = super::get_all_metrics(&state).await;
+
+        assert_eq!(metrics[0].current_status, "Idle");
+        let input = state
+            .interactions
+            .provider_input_state("agent-1")
+            .await
+            .expect("provider input state");
+        assert_eq!(input.state, ProviderInputReadiness::Ready);
+    }
+
+    #[tokio::test]
+    async fn telemetry_idle_fallback_drains_pending_mailbox() {
+        let state = crate::state::AppState::new();
+        let agent = test_active_agent("Processing...", "opencode");
+        *agent.last_output_at.lock().unwrap() =
+            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(10));
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+        state
+            .interactions
+            .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .input_senders
+            .write()
+            .unwrap()
+            .insert("agent-1".to_string(), tx);
+        let interaction = state
+            .interactions
+            .create_message(
+                None,
+                vec!["agent-1".to_string()],
+                wardian_core::control::InteractionBodyRef::Inline {
+                    body: "queued telemetry delivery".to_string(),
+                },
+            )
+            .await;
+        state
+            .mailbox
+            .lock()
+            .await
+            .enqueue(crate::state::MailboxMessageDraft {
+                interaction_id: interaction.id,
+                target_session_id: "agent-1".to_string(),
+                body: "queued telemetry delivery".to_string(),
+                input_mode: wardian_core::control::MessageInputMode::Message,
+                queue_policy: wardian_core::control::QueuePolicy::QueueIfBusy,
+                approval_action: None,
+                origin: None,
+            });
+
+        let metrics = super::get_all_metrics(&state).await;
+
+        assert_eq!(metrics[0].current_status, "Idle");
+        let mut delivered = Vec::new();
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+        {
+            delivered.extend(chunk);
+            if String::from_utf8_lossy(&delivered).contains("queued telemetry delivery") {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&delivered).contains("queued telemetry delivery"),
+            "queued message should drain after telemetry marks input ready"
+        );
     }
 
     #[test]
