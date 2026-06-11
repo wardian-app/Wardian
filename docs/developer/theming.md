@@ -16,6 +16,9 @@ The `App.tsx` component manages the active theme state and persists it to `local
 - **System Sync**: Uses `window.matchMedia("(prefers-color-scheme: light)")` to automatically switch between light and dark modes when the "System" theme is selected.
 - **Data Attribute**: The active theme is applied to the `<html>` element via the `data-theme` attribute (e.g., `<html data-theme="dark">`).
 
+### Dark Mode Palette Philosophy
+Dark mode uses a **neutral gray scale** modeled on modern IDEs (VS Code Dark Modern): pure gray surfaces spread across a deliberate elevation ramp (`#141414` sidebars → `#191919` background → `#212121` cards, terminals inset at `#1a1a1a`) with no green or blue tints, and text tones chosen for AA+ contrast (`#ececec` primary). Brand identity in dark mode is carried by a bright gold accent (`#f2c14e`) and the semantic status colors, not by tinted surfaces. Light mode retains the warm parchment palette. Terminal ANSI colors live in `src/features/terminal/terminalThemes.ts`.
+
 ## 🎨 Design Tokens
 
 ### Semantic Statuses
@@ -26,7 +29,7 @@ Always use these tokens for status indicators to ensure consistency across theme
 | Processing | `--color-wardian-processing` | `#22d3ee` | `#0891b2` |
 | Warning | `--color-wardian-warning` | `#f59e0b` | `#d97706` |
 | Error | `--color-wardian-error` | `#ef4444` | `#dc2626` |
-| Off | `--color-wardian-off` | `#4b5563` | `#4b5563` |
+| Off | `--color-wardian-off` | `#6e7681` | `#4b5563` |
 
 ### Workflow Colors
 Specific colors are reserved for the Visual Builder nodes:

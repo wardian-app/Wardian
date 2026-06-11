@@ -55,6 +55,7 @@
 
   /* Global Shadows */
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 85%);
+  --shadow-wardian-card: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 /* ── Custom Title Bar ────────────────────────────────── */
@@ -268,36 +269,41 @@
   color: #fff;
 }
 
+/* Neutral dark palette modeled on modern IDEs (VS Code Dark Modern):
+   pure gray surfaces, no green/blue tints, text at AA+ contrast.
+   The surface ramp is deliberately spread (sidebar #141414 → bg #191919 →
+   card #212121) so panels read as distinct elevation layers. */
 [data-theme='dark'] {
-  --color-wardian-bg: #040804;
-  --color-wardian-card: #0a120a;
-  --color-wardian-text: #e8f2e8;
-  --color-wardian-text-muted: #88a088;
-  --color-wardian-text-muted-neutral: #9ca3af;
-  --color-wardian-text-bright: #d1d5db;
-  --color-wardian-accent: #d4af37;
-  --color-wardian-accent-hover: #b8860b;
-  --color-wardian-border: #1b261b;
-  --color-wardian-border-heavy: #2d2d44;
-  --color-wardian-border-light: #374151;
-  
+  --color-wardian-bg: #191919;
+  --color-wardian-card: #212121;
+  --color-wardian-text: #ececec;
+  --color-wardian-text-muted: #b4b4b4;
+  --color-wardian-text-muted-neutral: #a9a9a9;
+  --color-wardian-text-bright: #d6d6d6;
+  --color-wardian-accent: #f2c14e;
+  --color-wardian-accent-hover: #ffd470;
+  --color-wardian-border: #2f2f2f;
+  --color-wardian-border-heavy: #454545;
+  --color-wardian-border-light: #3a3a3a;
+
   /* Semantic Statuses for Dark Mode */
   --color-wardian-success: #10b981;
   --color-wardian-processing: #22d3ee;
   --color-wardian-warning: #f59e0b;
   --color-wardian-error: #ef4444;
-  --color-wardian-off: #4b5563;
+  --color-wardian-off: #6e7681;
   --color-wardian-headless: #a78bfa;
 
   /* Structural Components for Dark Mode */
-  --color-wardian-sidebar-primary: #111827;
-  --color-wardian-sidebar-secondary: #0f172a;
-  --color-wardian-input-bg: rgba(31, 41, 55, 0.5);
-  --color-wardian-input-bg-rgb: 31, 41, 55;
-  --color-wardian-card-bg-muted: rgba(31, 41, 55, 0.3);
+  --color-wardian-sidebar-primary: #141414;
+  --color-wardian-sidebar-secondary: #181818;
+  --color-wardian-input-bg: rgba(48, 48, 48, 0.55);
+  --color-wardian-input-bg-rgb: 48, 48, 48;
+  --color-wardian-card-bg-muted: rgba(255, 255, 255, 0.06);
   --color-wardian-overlay: rgba(0, 0, 0, 0.55);
 
   --shadow-wardian-accent: 0 0 15px color-mix(in srgb, var(--color-wardian-accent), transparent 90%);
+  --shadow-wardian-card: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
 :root {
@@ -462,10 +468,12 @@
 /* Grid Adjustments for Dashboard vs Grid */
 .dashboard-agent-card {
   min-height: 80px;
+  box-shadow: var(--shadow-wardian-card);
 }
 
 .grid-agent-card {
   height: 500px;
+  box-shadow: var(--shadow-wardian-card);
 }
 
 /* ── Watchlist Tab Pills ──────────────────────────────── */
@@ -489,7 +497,7 @@
 .watchlist-tab.active {
   color: var(--color-wardian-accent);
   border-color: var(--color-wardian-accent);
-  background: rgba(212, 175, 55, 0.08);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
 }
 
 /* ── Watchlist Agent Row ──────────────────────────────── */
@@ -605,7 +613,7 @@
 .placeholder-view {
   background: radial-gradient(
     circle at center,
-    rgba(212, 175, 55, 0.03) 0%,
+    color-mix(in srgb, var(--color-wardian-accent), transparent 97%) 0%,
     transparent 70%
   );
 }
@@ -708,7 +716,7 @@
 /* ── Custom Select (macOS Polished) ─────────────────── */
 select {
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%2388a088' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23909090' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.75rem center;
   background-size: 1rem;
@@ -723,7 +731,7 @@ select {
 
 select:focus {
   border-color: var(--color-wardian-accent) !important;
-  box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.15);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-wardian-accent), transparent 85%);
 }
 
 select optgroup {
