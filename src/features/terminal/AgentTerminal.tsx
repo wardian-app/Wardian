@@ -636,6 +636,10 @@ function providerUsesViewportRedraws(provider: string | undefined) {
   return provider === "codex" || provider === "claude" || provider === "gemini";
 }
 
+function providerViewportRedrawPreservesViewport(provider: string | undefined) {
+  return provider !== "codex";
+}
+
 const TOP_LEFT_CURSOR_REPOSITION = /\u001b\[(?:|1|;|1;|;1|1;1)[Hf]/;
 
 function isProviderViewportRedraw(provider: string | undefined, data: string) {
@@ -780,9 +784,30 @@ function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
   clearRendererTimers(renderer);
   webglPool.delete(sessionId);
   renderer.serializeAddon.dispose();
-  renderer.webglAddon?.dispose();
-  renderer.webglAddon = null;
+  disposeWebglAddonAndReleaseContext(renderer);
   renderer.term.dispose();
+}
+
+// @xterm/addon-webgl removes its canvas on dispose but never calls
+// WEBGL_lose_context, so Chromium keeps counting the context as live until the
+// detached canvas is garbage-collected. Under pool churn (LRU eviction, grace
+// disposal, re-promotion) those zombie contexts stack on top of the live pool
+// and trip the browser's ~16-context cap, which force-loses a context that may
+// belong to a terminal the user is looking at. Lose the context explicitly so
+// disposal frees the slot immediately instead of at GC time.
+function disposeWebglAddonAndReleaseContext(renderer: TerminalRendererEntry) {
+  const addon = renderer.webglAddon;
+  if (!addon) {
+    return;
+  }
+  const canvas = renderer.term.element?.querySelector("canvas");
+  renderer.webglAddon = null;
+  addon.dispose();
+  try {
+    canvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    // Best effort; GC remains the fallback.
+  }
 }
 
 // Chrome caps active WebGL contexts (~16); exceeding it force-evicts the oldest
@@ -802,8 +827,7 @@ function demoteSessionToDom(sessionId: string) {
   webglPool.delete(sessionId);
   const renderer = terminalSessionMap.get(sessionId)?.renderer;
   if (renderer?.webglAddon) {
-    renderer.webglAddon.dispose();
-    renderer.webglAddon = null;
+    disposeWebglAddonAndReleaseContext(renderer);
     renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   }
 }
@@ -1130,12 +1154,21 @@ async function writeTerminalOutputBatch(
       }
     }
 
+    // Codex repaints the full screen on every redraw, so rendering the frame
+    // into a blank scratch screen is safe and drops stale rows. Claude and
+    // Gemini emit home-anchored frames that may repaint only part of the
+    // screen — and a frame can split across PTY reads — so a blank scratch
+    // wipes every row the frame didn't touch, leaving a mostly blank terminal
+    // with just the status line. Apply those frames on top of the existing
+    // viewport, as a real terminal would; the frame's own erase sequences
+    // (ESC[K / ESC[J) still clear stale cells.
+    const preserveExistingViewport = providerViewportRedrawPreservesViewport(entry.provider);
     await applyViewportRedrawInPlace(entry.parser, viewportData, {
-      preserveExistingViewport: false,
+      preserveExistingViewport,
     });
     if (renderer) {
       await applyViewportRedrawInPlace(renderer.term, viewportData, {
-        preserveExistingViewport: false,
+        preserveExistingViewport,
       });
       renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
       if (!entry.disposed && rendererWasAtBottom) {
@@ -1932,6 +1965,7 @@ export const __terminalTesting = {
   applyViewportRedrawInPlace,
   appendSyntheticScrollbackRows,
   isProviderViewportRedraw,
+  providerViewportRedrawPreservesViewport,
   splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,

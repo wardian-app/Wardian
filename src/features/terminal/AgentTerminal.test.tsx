@@ -319,6 +319,43 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("force-loses the WebGL context when a renderer is disposed", async () => {
+    // @xterm/addon-webgl never calls WEBGL_lose_context on dispose, so Chromium
+    // keeps counting evicted contexts as active until GC. Disposal must lose the
+    // context explicitly or churn still trips the browser's context cap.
+    const firstRender = render(
+      <AgentTerminal sessionId="webgl-lose" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("webgl-lose")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const loseContext = vi.fn();
+    const canvas = document.createElement("canvas");
+    canvas.getContext = vi.fn(
+      () => ({
+        getExtension: vi.fn((name: string) =>
+          name === "WEBGL_lose_context" ? { loseContext } : null,
+        ),
+      }),
+    ) as never;
+    (instance.element as HTMLElement).appendChild(canvas);
+
+    vi.useFakeTimers();
+    try {
+      firstRender.unmount();
+      vi.advanceTimersByTime(30_000);
+
+      expect(instance.dispose).toHaveBeenCalled();
+      expect(loseContext).toHaveBeenCalledTimes(1);
+      expect(canvas.getContext).toHaveBeenCalledWith("webgl2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("caps live WebGL renderers without promoting a focused terminal onto the GPU", async () => {
     // Render more terminals than the WebGL pool cap (12). The pool must stay at
     // 12 live contexts; the rest fall back to the DOM renderer. Newly mounted
@@ -438,6 +475,93 @@ describe("AgentTerminal scrollback", () => {
     expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(true);
     expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[12;1Hstatus")).toBe(false);
     expect(__terminalTesting.isProviderViewportRedraw("opencode", "\u001b[1;1H1\r\n2")).toBe(false);
+  });
+
+  it("preserves the existing viewport for Claude/Gemini redraws but not Codex", () => {
+    expect(__terminalTesting.providerViewportRedrawPreservesViewport("claude")).toBe(true);
+    expect(__terminalTesting.providerViewportRedrawPreservesViewport("gemini")).toBe(true);
+    expect(__terminalTesting.providerViewportRedrawPreservesViewport("codex")).toBe(false);
+  });
+
+  it("keeps rows a partial home-anchored redraw did not repaint when preserving the viewport", async () => {
+    // Claude blank-screen regression: a home-anchored frame that only repaints
+    // the header/status rows (or a frame split across PTY reads) must not wipe
+    // the rest of the viewport.
+    const createLine = (text: string) => ({
+      clone: () => createLine(text),
+      translateToString: () => text,
+    });
+    function createHeadlessTerm(
+      ybase: number,
+      options?: ConstructorParameters<typeof HeadlessTerminal>[0],
+    ) {
+      const lines: ReturnType<typeof createLine>[] = [];
+      const internalBuffer = {
+        x: 0,
+        y: 0,
+        ybase,
+        ydisp: ybase,
+        lines: {
+          get: (index: number) => lines[index],
+          set: (index: number, value: ReturnType<typeof createLine>) => {
+            lines[index] = value;
+            terminal.buffer.active.length = Math.max(terminal.buffer.active.length, index + 1);
+          },
+        },
+      };
+      const terminal = {
+        cols: options?.cols ?? 80,
+        rows: options?.rows ?? 24,
+        options: { ...(options ?? {}) },
+        buffer: {
+          active: {
+            baseY: internalBuffer.ybase,
+            viewportY: internalBuffer.ydisp,
+            length: 0,
+            getLine: (index: number) => lines[index],
+          },
+        },
+        _core: { _bufferService: { buffer: internalBuffer } },
+        write: vi.fn((data: string, callback?: () => void) => {
+          const rendered = data
+            .replace(new RegExp("\\u001b\\[[0-?]*[ -/]*[@-~]", "g"), "")
+            .split(new RegExp("\\r?\\n"))
+            .map((line) => line.trimEnd());
+          rendered.forEach((line, row) => {
+            if (line.length > 0) {
+              internalBuffer.lines.set(internalBuffer.ybase + row, createLine(line));
+            }
+          });
+          callback?.();
+        }),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      } as any;
+      return terminal;
+    }
+    // Scratch terminals are created with scrollback 0, so their base stays 0.
+    mockHeadlessTerminal.mockImplementation(function MockScratchTerm(
+      options?: ConstructorParameters<typeof HeadlessTerminal>[0],
+    ) {
+      return createHeadlessTerm(0, options);
+    });
+    const term = createHeadlessTerm(10, { cols: 80, rows: 24 });
+    for (let index = 0; index < 24; index += 1) {
+      term._core._bufferService.buffer.lines.set(10 + index, createLine(` stale ${index + 1}`));
+    }
+
+    const esc = String.fromCharCode(27);
+    const applied = await __terminalTesting.applyViewportRedrawInPlace(
+      term,
+      `${esc}[H header${esc}[K\r\n 130989 tokens${esc}[K`,
+      { preserveExistingViewport: true },
+    );
+
+    expect(applied).toBe(true);
+    expect(term.buffer.active.getLine(10)?.translateToString()).toBe(" header");
+    expect(term.buffer.active.getLine(11)?.translateToString()).toBe(" 130989 tokens");
+    expect(term.buffer.active.getLine(12)?.translateToString()).toBe(" stale 3");
+    expect(term.buffer.active.getLine(33)?.translateToString()).toBe(" stale 24");
   });
 
   it("journals new substantive rows from provider redraw frames before applying them in place", () => {
