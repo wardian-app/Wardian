@@ -1341,6 +1341,21 @@ async function dispatchTerminalWheel(driver, sessionId, deltaY) {
     }
     return {
       target_count: targets.length,
+      has_card: Boolean(card),
+      has_host: Boolean(host),
+      has_xterm: Boolean(host?.querySelector(".xterm")),
+      has_screen: Boolean(host?.querySelector(".xterm-screen")),
+      host_rect: host ? (() => { const r = host.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })() : null,
+      host_count: document.querySelectorAll('[data-testid="agent-terminal-host"]').length,
+      card_buttons: card
+        ? Array.from(card.querySelectorAll("button"))
+            .map((button) => button.textContent?.replace(/\s+/g, " ").trim() || button.getAttribute("aria-label") || "")
+            .filter(Boolean)
+            .slice(0, 10)
+        : null,
+      card_container_html: card
+        ? (card.querySelector(".terminal-container")?.innerHTML ?? "").slice(0, 500)
+        : null,
       snapshot: window.__wardianTerminalDebug?.snapshot?.(sid) ?? null,
     };
   }, sessionId, deltaY);
@@ -1352,8 +1367,9 @@ async function scrollTerminalUserWheelUp(driver, sessionId) {
   const baseY = before?.renderer?.baseY ?? before?.baseY ?? 0;
   assert.ok(baseY > 0, `Expected scrollback before user wheel scroll for ${sessionId}: ${JSON.stringify(before)}`);
 
+  let lastDispatch = null;
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    await dispatchTerminalWheel(driver, sessionId, -1200);
+    lastDispatch = await dispatchTerminalWheel(driver, sessionId, -1200);
     await new Promise((resolve) => setTimeout(resolve, 100));
     const current = await readTerminalDebugSnapshot(driver, sessionId);
     const currentViewportY = current?.renderer?.viewportY ?? current?.viewportY ?? 0;
@@ -1363,8 +1379,21 @@ async function scrollTerminalUserWheelUp(driver, sessionId) {
   }
 
   const after = await readTerminalDebugSnapshot(driver, sessionId);
+  const dispatchDiagnostics = lastDispatch
+    ? {
+        target_count: lastDispatch.target_count,
+        has_card: lastDispatch.has_card,
+        has_host: lastDispatch.has_host,
+        has_xterm: lastDispatch.has_xterm,
+        has_screen: lastDispatch.has_screen,
+        host_rect: lastDispatch.host_rect,
+        host_count: lastDispatch.host_count,
+        card_buttons: lastDispatch.card_buttons,
+        card_container_html: lastDispatch.card_container_html,
+      }
+    : null;
   throw new Error(
-    `Expected user wheel scroll to move renderer viewport for ${sessionId}: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+    `Expected user wheel scroll to move renderer viewport for ${sessionId}: dispatch=${JSON.stringify(dispatchDiagnostics)} before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
   );
 }
 
@@ -1427,9 +1456,15 @@ async function setCardMaximized(driver, sessionId, maximize) {
       return false;
     }
     const buttons = Array.from(card.querySelectorAll("button"));
-    const restoreButton = buttons.find((button) => button.textContent?.includes("Minimize"));
+    const byAriaPrefix = (prefix) =>
+      buttons.find((button) => (button.getAttribute("aria-label") || "").startsWith(prefix));
+    const restoreButton = byAriaPrefix("Minimize") ??
+      buttons.find((button) => button.textContent?.includes("Minimize"));
     if (shouldMaximize) {
-      const target = restoreButton ?? buttons[0];
+      // The card header gained a Chat/Terminal mode toggle as its first
+      // button; target the maximize control by aria-label instead of
+      // position so we don't flip the card into chat mode.
+      const target = restoreButton ?? byAriaPrefix("Maximize");
       target?.click();
       return Boolean(target);
     }

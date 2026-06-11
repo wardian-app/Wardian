@@ -1321,6 +1321,13 @@ async function writeTerminalOutputBatch(
       scrollRendererToBottomAfterWrite(entry.renderer, rendererBottomBeforeWrite);
     }
   }
+  // NOTE: Claude/Gemini resize repaints scroll part of the pre-repaint
+  // viewport into scrollback, leaving duplicate rows there — the same
+  // artifact a standalone terminal shows for those TUIs. Scrollback
+  // dedup heuristics were tried here (trimOverlappingScrollbackBeforeViewport
+  // after repaint batches) and rejected: after a column reflow the exact-match
+  // path cannot fire, and the fuzzy fallback deletes legitimate history.
+  // Cosmetic duplicates are preferred over data loss.
 }
 
 function scrollRendererToBottomAfterWrite(

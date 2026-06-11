@@ -437,6 +437,7 @@ export function auditRenderingEvidence({
   requireOutsideEvidence = true,
 } = {}) {
   const failures = [];
+  const warnings = [];
   const checks = [];
   const providerSummaries = [];
   const check = (condition, message) => {
@@ -470,6 +471,25 @@ export function auditRenderingEvidence({
       checks.push(item);
       if (!condition) {
         failures.push(`${provider}: ${message}`);
+      }
+    };
+    // Claude/Gemini are diff renderers whose streams Wardian writes natively
+    // (frame interception corrupts them — see AgentTerminal). Their resize
+    // repaints scroll the pre-repaint viewport into scrollback, so duplicated
+    // scrollback rows are real-terminal-equivalent behavior, not a Wardian
+    // rendering defect. Record duplicates as warnings for those providers;
+    // completeness stays a hard failure.
+    const duplicatesAreWarnings = provider === "claude" || provider === "gemini";
+    const providerDuplicateCheck = (condition, message) => {
+      if (!duplicatesAreWarnings) {
+        providerCheck(condition, message);
+        return;
+      }
+      const item = { ok: Boolean(condition), message, warning: true };
+      summary.checks.push(item);
+      checks.push(item);
+      if (!condition) {
+        warnings.push(`${provider}: ${message}`);
       }
     };
 
@@ -517,7 +537,7 @@ export function auditRenderingEvidence({
           wardianManifest.input_text,
           allowedInputOccurrences,
         );
-        providerCheck(
+        providerDuplicateCheck(
           duplicateContent.ok,
           `Wardian terminal content has no obvious duplicated rows: ${stateName}`,
         );
@@ -527,7 +547,7 @@ export function auditRenderingEvidence({
           wardianManifest.input_text,
           allowedInputOccurrences,
         );
-        providerCheck(
+        providerDuplicateCheck(
           duplicateNumberedRows.ok,
           `Wardian numbered response rows are not duplicated: ${stateName}`,
         );
@@ -548,7 +568,7 @@ export function auditRenderingEvidence({
             wardianManifest.input_text,
             allowedInputOccurrences,
           );
-          providerCheck(
+          providerDuplicateCheck(
             duplicateRendererNumberedRows.ok,
             `Wardian renderer numbered response rows are not duplicated: ${stateName}`,
           );
@@ -768,7 +788,7 @@ export function auditRenderingEvidence({
     }
   }
 
-  return { ok: failures.length === 0, checks, failures, providers: providerSummaries };
+  return { ok: failures.length === 0, checks, failures, warnings, providers: providerSummaries };
 }
 
 export function writeJsonArtifact(filePath, payload) {

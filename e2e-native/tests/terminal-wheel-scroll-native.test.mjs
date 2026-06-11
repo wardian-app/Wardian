@@ -93,8 +93,59 @@ async function dispatchTerminalWheel(driver, sessionId, deltaY) {
         }),
       );
     }
-    return targets.length;
+    return {
+      targetCount: targets.length,
+      hasCard: Boolean(card),
+      hasHost: Boolean(host),
+      hasXterm: Boolean(host?.querySelector(".xterm")),
+    };
   }, sessionId, deltaY);
+}
+
+async function assertWheelScrolls(driver, sessionId, label) {
+  const before = rendererViewport(await readTerminalDebug(driver, sessionId));
+  assert.ok(before.baseY > 0, `[${label}] Expected renderer scrollback, got ${JSON.stringify(before)}`);
+  assert.equal(
+    before.viewportY,
+    before.baseY,
+    `[${label}] Expected renderer viewport at bottom before wheel, got ${JSON.stringify(before)}`,
+  );
+
+  let after = before;
+  let lastDispatch = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    lastDispatch = await dispatchTerminalWheel(driver, sessionId, -480);
+    assert.ok(lastDispatch.targetCount > 0, `[${label}] Expected wheel dispatch targets: ${JSON.stringify(lastDispatch)}`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    after = rendererViewport(await readTerminalDebug(driver, sessionId));
+    if (after.viewportY < before.viewportY) {
+      break;
+    }
+  }
+  assert.ok(
+    after.viewportY < before.viewportY,
+    `[${label}] Expected wheel-up to scroll the renderer viewport: before=${JSON.stringify(before)} after=${JSON.stringify(after)} dispatch=${JSON.stringify(lastDispatch)}`,
+  );
+  assert.ok(
+    after.parserViewportY < before.parserViewportY,
+    `[${label}] Expected parser viewport to follow the renderer: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+  );
+
+  // Wheel back down must return to the bottom so live output resumes following.
+  let settled = after;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await dispatchTerminalWheel(driver, sessionId, 480);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    settled = rendererViewport(await readTerminalDebug(driver, sessionId));
+    if (settled.viewportY >= settled.baseY) {
+      break;
+    }
+  }
+  assert.equal(
+    settled.viewportY,
+    settled.baseY,
+    `[${label}] Expected wheel-down to return the viewport to the bottom, got ${JSON.stringify(settled)}`,
+  );
 }
 
 function createScrollbackMockScript() {
@@ -275,46 +326,24 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     scrollableElement: beforeSnapshot?.renderer?.scrollableElement,
     webglActive: beforeSnapshot?.renderer?.webglActive,
   }));
-  const before = rendererViewport(beforeSnapshot);
-  assert.ok(before.baseY > 0, `Expected renderer scrollback, got ${JSON.stringify(before)}`);
-  assert.equal(
-    before.viewportY,
-    before.baseY,
-    `Expected renderer viewport at bottom before wheel, got ${JSON.stringify(before)}`,
-  );
+  await assertWheelScrolls(driver, SESSION_ID, "initial");
 
-  let after = before;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const targetCount = await dispatchTerminalWheel(driver, SESSION_ID, -480);
-    assert.ok(targetCount > 0, "Expected wheel dispatch targets");
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    after = rendererViewport(await readTerminalDebug(driver, SESSION_ID));
-    if (after.viewportY < before.viewportY) {
-      break;
-    }
-  }
-  assert.ok(
-    after.viewportY < before.viewportY,
-    `Expected wheel-up to scroll the renderer viewport: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
-  );
-  assert.ok(
-    after.parserViewportY < before.parserViewportY,
-    `Expected parser viewport to follow the renderer: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
-  );
+  // The live-Claude audit failed its wheel checks after shrinking the window
+  // (content reflow + terminal refit); guard that transition too.
+  await driver.manage().window().setRect({ width: 980, height: 980 });
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  const narrowSnapshot = await readTerminalDebug(driver, SESSION_ID);
+  console.log("narrow diagnostics:", JSON.stringify({
+    cols: narrowSnapshot?.cols,
+    rows: narrowSnapshot?.rows,
+    rendererBaseY: narrowSnapshot?.renderer?.baseY,
+    rendererViewportY: narrowSnapshot?.renderer?.viewportY,
+    wheelStats: narrowSnapshot?.wheelStats,
+    viewportScrollState: narrowSnapshot?.renderer?.viewportScrollState,
+  }));
+  await assertWheelScrolls(driver, SESSION_ID, "narrow");
 
-  // Wheel back down must return to the bottom so live output resumes following.
-  let settled = after;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    await dispatchTerminalWheel(driver, SESSION_ID, 480);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    settled = rendererViewport(await readTerminalDebug(driver, SESSION_ID));
-    if (settled.viewportY >= settled.baseY) {
-      break;
-    }
-  }
-  assert.equal(
-    settled.viewportY,
-    settled.baseY,
-    `Expected wheel-down to return the viewport to the bottom, got ${JSON.stringify(settled)}`,
-  );
+  await driver.manage().window().setRect({ width: 1920, height: 1080 });
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  await assertWheelScrolls(driver, SESSION_ID, "restored");
 });
