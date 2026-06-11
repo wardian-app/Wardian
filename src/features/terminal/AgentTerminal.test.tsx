@@ -469,24 +469,30 @@ describe("AgentTerminal scrollback", () => {
     expect(term.buffer.active.getLine(9)).toBeUndefined();
   });
 
-  it("treats only top-left cursor addresses as provider viewport redraws", () => {
-    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[1;1H1\r\n2")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[H1\r\n2")).toBe(true);
+  it("treats only top-left Codex cursor addresses as provider viewport redraws", () => {
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[1;1H1\r\n2")).toBe(true);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[H1\r\n2")).toBe(true);
     expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[12;1Hstatus")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[12;1Hstatus")).toBe(false);
     expect(__terminalTesting.isProviderViewportRedraw("opencode", "\u001b[1;1H1\r\n2")).toBe(false);
   });
 
-  it("preserves the existing viewport for Claude/Gemini redraws but not Codex", () => {
-    expect(__terminalTesting.providerViewportRedrawPreservesViewport("claude")).toBe(true);
-    expect(__terminalTesting.providerViewportRedrawPreservesViewport("gemini")).toBe(true);
-    expect(__terminalTesting.providerViewportRedrawPreservesViewport("codex")).toBe(false);
+  it("never routes Claude or Gemini frames through viewport redraws", () => {
+    // Claude/Gemini are diff renderers that assume the terminal retained their
+    // previous frame; replacing their viewport via a scratch screen corrupts
+    // cells (blank rows with a fresh scratch, merged rows with a preserved
+    // one — observed live against Claude Code 2.1.173). Their streams are
+    // written natively.
+    const esc = String.fromCharCode(27);
+    expect(__terminalTesting.isProviderViewportRedraw("claude", `${esc}[H1` + "\r\n2")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("claude", `${esc}[2J${esc}[H`)).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("gemini", `${esc}[H1` + "\r\n2")).toBe(false);
   });
 
   it("keeps rows a partial home-anchored redraw did not repaint when preserving the viewport", async () => {
-    // Claude blank-screen regression: a home-anchored frame that only repaints
-    // the header/status rows (or a frame split across PTY reads) must not wipe
-    // the rest of the viewport.
+    // Unit coverage for applyViewportRedrawInPlace's preserveExistingViewport
+    // option: with it enabled, rows the frame does not write must keep their
+    // prior content instead of going blank.
     const createLine = (text: string) => ({
       clone: () => createLine(text),
       translateToString: () => text,

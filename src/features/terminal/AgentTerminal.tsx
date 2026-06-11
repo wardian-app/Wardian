@@ -632,12 +632,18 @@ function appendSyntheticScrollbackRows(scrollbackData: string, rows: string[] | 
     : `${SYNTHETIC_SCROLLBACK_PREFIX}${renderedRows}`;
 }
 
+// Codex only. Claude and Gemini are diff renderers: they cursor-address just
+// the changed cells of a row and assume the terminal retained their previous
+// frame. Routing them through the scratch-screen replacement corrupts cells
+// both ways — a blank scratch wipes every cell the frame didn't write (users
+// saw mostly black terminals with only the status row), and a preserved
+// scratch merges the frame with rows Claude believes it already replaced
+// (verified live against Claude Code 2.1.173: numbered output interleaved
+// with stale banner cells). xterm itself honors the retained-frame contract,
+// so their streams must be written natively. Codex repaints full frames and
+// still needs this path to keep its redraws out of scrollback.
 function providerUsesViewportRedraws(provider: string | undefined) {
-  return provider === "codex" || provider === "claude" || provider === "gemini";
-}
-
-function providerViewportRedrawPreservesViewport(provider: string | undefined) {
-  return provider !== "codex";
+  return provider === "codex";
 }
 
 const TOP_LEFT_CURSOR_REPOSITION = /\u001b\[(?:|1|;|1;|;1|1;1)[Hf]/;
@@ -1154,21 +1160,12 @@ async function writeTerminalOutputBatch(
       }
     }
 
-    // Codex repaints the full screen on every redraw, so rendering the frame
-    // into a blank scratch screen is safe and drops stale rows. Claude and
-    // Gemini emit home-anchored frames that may repaint only part of the
-    // screen — and a frame can split across PTY reads — so a blank scratch
-    // wipes every row the frame didn't touch, leaving a mostly blank terminal
-    // with just the status line. Apply those frames on top of the existing
-    // viewport, as a real terminal would; the frame's own erase sequences
-    // (ESC[K / ESC[J) still clear stale cells.
-    const preserveExistingViewport = providerViewportRedrawPreservesViewport(entry.provider);
     await applyViewportRedrawInPlace(entry.parser, viewportData, {
-      preserveExistingViewport,
+      preserveExistingViewport: false,
     });
     if (renderer) {
       await applyViewportRedrawInPlace(renderer.term, viewportData, {
-        preserveExistingViewport,
+        preserveExistingViewport: false,
       });
       renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
       if (!entry.disposed && rendererWasAtBottom) {
@@ -1965,7 +1962,6 @@ export const __terminalTesting = {
   applyViewportRedrawInPlace,
   appendSyntheticScrollbackRows,
   isProviderViewportRedraw,
-  providerViewportRedrawPreservesViewport,
   splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,

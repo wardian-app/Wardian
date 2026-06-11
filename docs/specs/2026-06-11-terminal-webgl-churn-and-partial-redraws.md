@@ -53,24 +53,32 @@ Findings:
    `canvas.getContext("webgl2").getExtension("WEBGL_lose_context").loseContext()`
    (best-effort, GC remains the fallback). Used by both renderer disposal and LRU
    demotion paths.
-2. **Apply Claude/Gemini viewport redraws on top of the existing screen.**
-   `providerViewportRedrawPreservesViewport(provider)` returns `false` only for codex.
-   For claude/gemini, `applyViewportRedrawInPlace` now seeds the scratch screen with the
-   current viewport — exactly what a real terminal does when it receives a frame — so a
-   partial or split frame can no longer blank untouched rows. The frame's own erase
-   sequences (`ESC[K`/`ESC[J`) still clear stale cells. Codex keeps the blank-scratch
-   behavior because its full-frame repaints rely on it to drop stale rows.
+2. **Restrict the viewport-redraw machinery to Codex; write Claude/Gemini streams
+   natively.** An intermediate fix (seeding the scratch screen with the existing
+   viewport for claude/gemini) was tried first and disproved by a live native-E2E run
+   against Claude Code 2.1.173 (Haiku): the journaled scrollback contained rows like
+   `▐▛14█▜▌   Claude Code v2.1.173` — numbered output cell-merged with stale banner
+   content. The live capture shows modern Claude Code is a *diff renderer*: it
+   cursor-addresses only the changed cells of a row and assumes the terminal retained
+   its previous frame. Scratch-screen replacement breaks that contract both ways — a
+   blank scratch wipes unwritten cells (the reported blank screens), a preserved
+   scratch merges the frame with rows Claude believes it already replaced. xterm itself
+   honors the retained-frame contract, so `providerUsesViewportRedraws` now returns
+   true only for codex (full-frame repainter), and claude/gemini output is written to
+   xterm natively.
 
 ## Consequences
 
 - **Positive**: Pool evictions and renderer disposals free their context slot
   immediately; the live count stays at ≤12 with no zombie overhang, eliminating the
   forced loss of visible terminals' contexts.
-- **Positive**: Claude/Gemini partial home-anchored frames (status-only repaints,
-  frames split mid-redraw across PTY reads) no longer blank the viewport.
-- **Negative**: If a Claude/Gemini frame intentionally relies on an implicit cleared
-  screen without emitting erase sequences, stale cells could linger until the next
-  repaint — the same behavior a real terminal would show for such a frame.
+- **Positive**: Claude/Gemini diff-rendered frames (partial repaints, frames split
+  mid-redraw across PTY reads) can no longer blank or merge viewport rows; xterm
+  applies them exactly as a standalone terminal would.
+- **Negative**: Claude/Gemini lose the synthetic scrollback journal that the redraw
+  path provided. If a current Claude/Gemini build still discards completed rows
+  without scrolling them out, that history is not reconstructed. Live-provider audit
+  evidence is the gate for re-adding any such heuristic.
 - **Negative**: The broader quirk-fix layer is still heuristic; provider renderer
   upgrades can invalidate it silently. Re-validation against live providers (native
   E2E + real-provider harness) is the standing mitigation.
