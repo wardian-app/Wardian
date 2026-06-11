@@ -172,6 +172,20 @@ declare global {
         renderer: {
           cols: number;
           rows: number;
+          baseY: number;
+          viewportY: number;
+          bufferType: string;
+          mouseTrackingMode: string | null;
+          scrollableElement: {
+            scrollTop: number;
+            scrollHeight: number;
+            clientHeight: number;
+          } | null;
+          viewportScrollState: {
+            scrollTop: number | null;
+            dimensions: { height: number; scrollHeight: number } | null;
+            latestYDisp: number | null;
+          } | null;
           fontFamily: string;
           fontSize: number | null;
           webglActive: boolean;
@@ -185,6 +199,15 @@ declare global {
           allLines: string[];
         } | null;
         provider: string | null;
+        wheelStats: {
+          events: number;
+          handled: number;
+          opencode_owned: number;
+          no_scrollback: number;
+          zero_rows: number;
+          viewport_unchanged: number;
+        } | null;
+        scrollTraces: { position: number; at: number; stack: string }[] | null;
         usesViewportRedraws: boolean;
         supportsViewportRedrawInPlace: boolean;
         lines: string[];
@@ -298,6 +321,51 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
             ? {
                 cols: rendererTerm.cols,
                 rows: rendererTerm.rows,
+                baseY: rendererBuffer?.baseY ?? 0,
+                viewportY: rendererBuffer?.viewportY ?? 0,
+                bufferType: String(rendererBuffer?.type ?? ""),
+                mouseTrackingMode: (() => {
+                  try {
+                    return String(rendererTerm.modes?.mouseTrackingMode ?? "");
+                  } catch {
+                    return null;
+                  }
+                })(),
+                scrollableElement: (() => {
+                  const node = rendererTerm.element?.querySelector(".xterm-scrollable-element");
+                  return node
+                    ? {
+                        scrollTop: node.scrollTop,
+                        scrollHeight: node.scrollHeight,
+                        clientHeight: node.clientHeight,
+                      }
+                    : null;
+                })(),
+                viewportScrollState: (() => {
+                  try {
+                    const viewport = (rendererTerm as unknown as {
+                      _core?: {
+                        _viewport?: {
+                          _scrollableElement?: {
+                            getScrollPosition?: () => { scrollTop: number };
+                            getScrollDimensions?: () => { height: number; scrollHeight: number };
+                          };
+                          _latestYDisp?: number;
+                        };
+                      };
+                    })._core?._viewport;
+                    if (!viewport?._scrollableElement) {
+                      return null;
+                    }
+                    return {
+                      scrollTop: viewport._scrollableElement.getScrollPosition?.()?.scrollTop ?? null,
+                      dimensions: viewport._scrollableElement.getScrollDimensions?.() ?? null,
+                      latestYDisp: viewport._latestYDisp ?? null,
+                    };
+                  } catch {
+                    return null;
+                  }
+                })(),
                 fontFamily: String(rendererTerm.options.fontFamily ?? ""),
                 fontSize: nullableNumber(rendererTerm.options.fontSize),
                 webglActive: renderer.webglAddon !== null,
@@ -312,6 +380,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
               }
             : null,
           provider: entry.provider ?? null,
+          wheelStats: wheelDebugStats.get(sessionId) ?? null,
+          scrollTraces: scrollTraces.get(sessionId) ?? null,
           usesViewportRedraws: providerUsesViewportRedraws(entry.provider),
           supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(term),
           lines,
@@ -673,6 +743,56 @@ function wheelEventRows(
   return event.deltaY / Math.max(lineHeight, 1);
 }
 
+// Diagnostic counters for user wheel handling, surfaced through the debug
+// snapshot so native E2E failures can tell which branch swallowed the event.
+type WheelDebugStats = {
+  events: number;
+  handled: number;
+  opencode_owned: number;
+  no_scrollback: number;
+  zero_rows: number;
+  viewport_unchanged: number;
+};
+const wheelDebugStats = new Map<string, WheelDebugStats>();
+
+// Ring buffer of renderer viewport scroll events with call stacks (debug
+// builds only) so native E2E can identify what moved the viewport.
+type ScrollTraceEntry = { position: number; at: number; stack: string };
+const scrollTraces = new Map<string, ScrollTraceEntry[]>();
+
+function recordScrollTrace(sessionId: string, position: number) {
+  const trace = scrollTraces.get(sessionId) ?? [];
+  trace.push({
+    position,
+    at: Date.now(),
+    stack: String(new Error().stack ?? "")
+      .split("\n")
+      .slice(2, 10)
+      .map((line) => line.trim())
+      .join(" | "),
+  });
+  if (trace.length > 8) {
+    trace.splice(0, trace.length - 8);
+  }
+  scrollTraces.set(sessionId, trace);
+}
+
+function recordWheel(sessionId: string | undefined, key: keyof WheelDebugStats) {
+  if (!sessionId) {
+    return;
+  }
+  const stats = wheelDebugStats.get(sessionId) ?? {
+    events: 0,
+    handled: 0,
+    opencode_owned: 0,
+    no_scrollback: 0,
+    zero_rows: 0,
+    viewport_unchanged: 0,
+  };
+  stats[key] += 1;
+  wheelDebugStats.set(sessionId, stats);
+}
+
 function scrollTerminalFromWheel(
   term: Terminal,
   provider: string | undefined,
@@ -683,13 +803,17 @@ function scrollTerminalFromWheel(
     stopPropagation: () => void;
   },
   rowRemainder: { current: number },
+  sessionId?: string,
 ) {
+  recordWheel(sessionId, "events");
   if (provider === "opencode") {
+    recordWheel(sessionId, "opencode_owned");
     return false;
   }
 
   const buffer = term.buffer.active;
   if ((buffer.baseY ?? 0) <= 0) {
+    recordWheel(sessionId, "no_scrollback");
     return false;
   }
 
@@ -697,6 +821,7 @@ function scrollTerminalFromWheel(
   const scrollRows = rowDelta > 0 ? Math.floor(rowDelta) : Math.ceil(rowDelta);
   if (scrollRows === 0) {
     rowRemainder.current = rowDelta;
+    recordWheel(sessionId, "zero_rows");
     return false;
   }
 
@@ -705,9 +830,11 @@ function scrollTerminalFromWheel(
   term.scrollLines(scrollRows);
   const afterViewportY = term.buffer.active.viewportY ?? 0;
   if (afterViewportY === beforeViewportY) {
+    recordWheel(sessionId, "viewport_unchanged");
     return false;
   }
 
+  recordWheel(sessionId, "handled");
   event.preventDefault();
   event.stopPropagation();
   term.refresh(0, Math.max(term.rows - 1, 0));
@@ -1125,9 +1252,20 @@ async function writeTerminalOutputBatch(
 
   entry.existingKnownLines = readParserKnownLineSet(entry);
   const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
-  const rendererWasAtBottom = entry.renderer
-    ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
-    : false;
+  // Sampled before the awaited writes below. While a provider streams, drain
+  // batches run nearly back-to-back, so a user wheel-scroll usually lands in
+  // the middle of one — if we only consulted this stale sample afterwards we
+  // would snap the viewport straight back to the bottom and the terminal
+  // would feel unscrollable until the provider went quiet (observed live with
+  // Claude). scrollRendererToBottomAfterWrite re-checks against this baseline
+  // and skips the snap when the user scrolled away mid-batch.
+  const rendererBottomBeforeWrite = entry.renderer
+    ? {
+        atBottom:
+          entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY,
+        baseY: entry.renderer.term.buffer.active.baseY,
+      }
+    : null;
   entry.recentNormalizedWritePreviews.push(
     batchedWrite
       .replace(/\u001b/g, "\\x1b")
@@ -1168,8 +1306,8 @@ async function writeTerminalOutputBatch(
         preserveExistingViewport: false,
       });
       renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-      if (!entry.disposed && rendererWasAtBottom) {
-        renderer.term.scrollToBottom();
+      if (!entry.disposed) {
+        scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
       }
     }
     entry.existingKnownLines = undefined;
@@ -1179,9 +1317,25 @@ async function writeTerminalOutputBatch(
   await writeTerminalControl(entry.parser, batchedWrite);
   if (entry.renderer) {
     await writeTerminalControl(entry.renderer.term, batchedWrite);
-    if (!entry.disposed && rendererWasAtBottom) {
-      entry.renderer?.term.scrollToBottom();
+    if (!entry.disposed) {
+      scrollRendererToBottomAfterWrite(entry.renderer, rendererBottomBeforeWrite);
     }
+  }
+}
+
+function scrollRendererToBottomAfterWrite(
+  renderer: TerminalRendererEntry,
+  bottomBeforeWrite: { atBottom: boolean; baseY: number } | null,
+) {
+  if (!bottomBeforeWrite?.atBottom) {
+    return;
+  }
+  // The viewport followed the output (or the write didn't scroll) — keep it
+  // pinned to the bottom. If it now sits above the pre-write base, the user
+  // scrolled up while this batch was being written; respect that.
+  const buffer = renderer.term.buffer.active;
+  if ((buffer.viewportY ?? 0) >= bottomBeforeWrite.baseY) {
+    renderer.term.scrollToBottom();
   }
 }
 
@@ -1567,7 +1721,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   host.addEventListener(
     "wheel",
     (event) => {
-      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder)) {
+      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder, sessionId)) {
         syncParserViewportToRenderer(entry);
       }
     },
@@ -1607,6 +1761,12 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     entry.latestTitle = title;
     entry.titleHandlerRef.current?.(title);
   });
+
+  if (shouldExposeTerminalDebug()) {
+    term.onScroll((position) => {
+      recordScrollTrace(sessionId, position);
+    });
+  }
 
   term.onResize((size) => {
     entry.resizeCount += 1;
@@ -1766,7 +1926,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry || !term) {
       return;
     }
-    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef)) {
+    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef, sessionId)) {
       syncParserViewportToRenderer(entry);
     }
   }, [sessionId]);
