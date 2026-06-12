@@ -82,9 +82,11 @@ Submit through the normal `microsoft/winget-pkgs` PR flow or with
 The `wardian-app/homebrew-tap` repository owns the published Homebrew Cask.
 After a stable release, its **Update Wardian Cask** workflow can be run with a
 release tag such as `v0.3.6`. The main Wardian release workflow also dispatches
-that tap workflow after stable publication when the Wardian repository has a
-`HOMEBREW_TAP_DISPATCH_TOKEN` secret with access to create dispatch events in
-the tap repository.
+that tap workflow after stable publication when the Wardian repository has the
+Wardian release dispatch GitHub App configured. Set
+`WARDIAN_RELEASE_DISPATCH_APP_ID` as a repository variable and
+`WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY` as a repository secret. The app must be
+installed on `wardian-app/homebrew-tap` with Actions write permission.
 
 The tap workflow reads the published Wardian release assets, rewrites
 `Casks/wardian.rb`, runs Homebrew audit, and opens a pull request in the tap.
@@ -125,11 +127,9 @@ object storage behind the same domain. Do not publish user-facing APT install
 instructions until the public URL, archive signing key, key fingerprint, and
 first validated repository tree are live.
 
-Do not add upload automation until the APT hosting target, public install URL,
-archive signing key custody model, key-rotation procedure, and dry-run output
-directory are provisioned. Local dry runs from Windows should use WSL Ubuntu or
-another Linux environment for Debian tooling. Published automation should run on
-a Linux CI runner after stable release publication and:
+Local dry runs from Windows should use WSL Ubuntu or another Linux environment
+for Debian tooling. Published automation runs in the separate
+`wardian-app/packages` repository after stable release publication and:
 
 1. read `gh release view vX.Y.Z --json tagName,assets`;
 2. verify the `Wardian_X.Y.Z_amd64.deb` asset name, tag URL, and SHA-256 digest;
@@ -139,30 +139,28 @@ a Linux CI runner after stable release publication and:
 6. sign `Release` as both `InRelease` and `Release.gpg`;
 7. validate the repository before upload.
 
-The repository includes an **APT Repository** GitHub Actions workflow for this
-path. It can be run manually, and the stable release workflow also calls it
-after the release is published. The release caller requests `publish=true`; if
-the real static host or archive signing configuration is absent, the workflow
-logs a notice, generates a signed dry-run repository with a temporary key,
-validates it with local `file://` APT sources, and uploads the repository tree as
-a workflow artifact instead of failing the release.
+This repository includes an **APT Repository** GitHub Actions workflow for
+manual validation. It generates a signed dry-run repository with a temporary
+key, validates it with local `file://` APT sources, and uploads the repository
+tree as a workflow artifact. It does not publish to the public package host.
 
-Run the workflow manually with `publish=false` before enabling the production
-host. After the host repository and real signing key are configured, manual
-`publish=true` runs and post-release calls publish to the external static host.
+Publishing is owned by `wardian-app/packages`. That repository's
+`publish-apt.yml` workflow consumes the published Wardian release assets, signs
+the repository with the real archive signing key, writes `CNAME`, commits the
+`apt/` tree, and publishes `https://packages.wardian.org/apt` through GitHub
+Pages. Configure these in `wardian-app/packages`:
 
-Publishing requires these repository variables and secrets:
-
-- `APT_REPOSITORY_REPOSITORY`: external static-host repository to push, for
-  example `wardian-app/packages`.
-- `APT_REPOSITORY_BRANCH`: branch to push, defaulting to `main` when omitted.
-- `APT_REPOSITORY_CNAME`: optional custom domain file content, expected to be
-  `packages.wardian.org` when using GitHub Pages for the package host.
-- `APT_REPOSITORY_DEPLOY_TOKEN`: token with push access to the external
-  static-host repository.
 - `WARDIAN_APT_SIGNING_PRIVATE_KEY`: armored private archive signing key.
 - `WARDIAN_APT_SIGNING_KEY_PASSPHRASE`: optional passphrase for the archive
   signing key.
+
+Configure these in `wardian-app/Wardian` so stable releases can dispatch the
+package repository workflow:
+
+- `WARDIAN_RELEASE_DISPATCH_APP_ID`: release dispatch GitHub App ID.
+- `WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY`: release dispatch GitHub App private
+  key. The app must be installed on `wardian-app/packages` with Actions write
+  permission.
 
 Do not use this repository's GitHub Pages deployment for the package repository;
 the Wardian docs site already owns that deployment. Use a separate static host
@@ -209,21 +207,20 @@ npm run release:apt-repo -- \
   --signing-key "$WARDIAN_APT_SIGNING_KEY"
 ```
 
-Manual GitHub Actions dry run:
+Manual Wardian repository validation:
 
 ```bash
 gh workflow run apt-repository.yml \
-  -f release_tag=vX.Y.Z \
-  -f publish=false
+  -f release_tag=vX.Y.Z
 ```
 
-Manual GitHub Actions publish run, after the host repository and signing key
+Manual package repository publish run, after the package workflow and signing
 secrets are configured:
 
 ```bash
-gh workflow run apt-repository.yml \
-  -f release_tag=vX.Y.Z \
-  -f publish=true
+gh workflow run publish-apt.yml \
+  --repo wardian-app/packages \
+  -f release_tag=vX.Y.Z
 ```
 
 The underlying metadata generation commands are:

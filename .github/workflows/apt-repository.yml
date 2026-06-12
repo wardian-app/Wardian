@@ -6,22 +6,6 @@ on:
       release_tag:
         description: "Stable release tag to publish, for example v0.4.0"
         required: true
-      publish:
-        description: "Push the generated repository to the configured static host repository"
-        required: true
-        type: boolean
-        default: false
-  workflow_call:
-    inputs:
-      release_tag:
-        description: "Stable release tag to publish, for example v0.4.0"
-        required: true
-        type: string
-      publish:
-        description: "Push the generated repository to the configured static host repository"
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -32,13 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
-      PUBLISH: ${{ inputs.publish }}
-      APT_REPOSITORY_REPOSITORY: ${{ vars.APT_REPOSITORY_REPOSITORY }}
-      APT_REPOSITORY_BRANCH: ${{ vars.APT_REPOSITORY_BRANCH }}
-      APT_REPOSITORY_CNAME: ${{ vars.APT_REPOSITORY_CNAME }}
-      APT_REPOSITORY_DEPLOY_TOKEN: ${{ secrets.APT_REPOSITORY_DEPLOY_TOKEN }}
-      WARDIAN_APT_SIGNING_PRIVATE_KEY: ${{ secrets.WARDIAN_APT_SIGNING_PRIVATE_KEY }}
-      WARDIAN_APT_SIGNING_KEY_PASSPHRASE: ${{ secrets.WARDIAN_APT_SIGNING_KEY_PASSPHRASE }}
     steps:
       - uses: actions/checkout@v6
 
@@ -58,30 +35,6 @@ jobs:
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "release_tag must be a stable semver tag like v0.4.0" >&2
             exit 1
-          fi
-
-      - name: Resolve publish mode
-        id: publish_mode
-        run: |
-          set -euo pipefail
-          if [[ "$PUBLISH" != "true" ]]; then
-            echo "effective_publish=false" >> "$GITHUB_OUTPUT"
-            echo "APT_EFFECTIVE_PUBLISH=false" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          missing=()
-          [[ -n "$APT_REPOSITORY_REPOSITORY" ]] || missing+=("APT_REPOSITORY_REPOSITORY")
-          [[ -n "$APT_REPOSITORY_DEPLOY_TOKEN" ]] || missing+=("APT_REPOSITORY_DEPLOY_TOKEN")
-          [[ -n "$WARDIAN_APT_SIGNING_PRIVATE_KEY" ]] || missing+=("WARDIAN_APT_SIGNING_PRIVATE_KEY")
-
-          if (( ${#missing[@]} > 0 )); then
-            echo "::notice::APT publishing requested, but missing ${missing[*]}; generating a signed dry-run artifact instead."
-            echo "effective_publish=false" >> "$GITHUB_OUTPUT"
-            echo "APT_EFFECTIVE_PUBLISH=false" >> "$GITHUB_ENV"
-          else
-            echo "effective_publish=true" >> "$GITHUB_OUTPUT"
-            echo "APT_EFFECTIVE_PUBLISH=true" >> "$GITHUB_ENV"
           fi
 
       - name: Fetch release asset metadata
@@ -122,12 +75,7 @@ jobs:
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
-          if [[ -n "$WARDIAN_APT_SIGNING_PRIVATE_KEY" ]]; then
-            printf '%s' "$WARDIAN_APT_SIGNING_PRIVATE_KEY" | gpg --batch --import
-          else
-            echo "::notice::WARDIAN_APT_SIGNING_PRIVATE_KEY is not configured; using a temporary dry-run signing key."
-            gpg --batch --passphrase '' --quick-gen-key "Wardian APT Dry Run <apt-dry-run@wardian.local>" ed25519 sign 1d
-          fi
+          gpg --batch --passphrase '' --quick-gen-key "Wardian APT Dry Run <apt-dry-run@wardian.local>" ed25519 sign 1d
           signing_key="$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')"
           if [[ -z "$signing_key" ]]; then
             echo "No secret signing key is available" >&2
@@ -142,20 +90,9 @@ jobs:
         id: prepare_repository
         run: |
           set -euo pipefail
-          if [[ "$APT_EFFECTIVE_PUBLISH" == "true" ]]; then
-            branch="${APT_REPOSITORY_BRANCH:-main}"
-            git clone --branch "$branch" "https://x-access-token:${APT_REPOSITORY_DEPLOY_TOKEN}@github.com/${APT_REPOSITORY_REPOSITORY}.git" "$RUNNER_TEMP/package-repository"
-            mkdir -p "$RUNNER_TEMP/package-repository/apt"
-            echo "APT_REPOSITORY_BRANCH=$branch" >> "$GITHUB_ENV"
-            echo "PACKAGE_REPO_ROOT=$RUNNER_TEMP/package-repository" >> "$GITHUB_ENV"
-            echo "APT_REPO_OUT=$RUNNER_TEMP/package-repository/apt" >> "$GITHUB_ENV"
-            echo "repo_out=$RUNNER_TEMP/package-repository" >> "$GITHUB_OUTPUT"
-          else
-            mkdir -p "$GITHUB_WORKSPACE/dist/packages/apt"
-            echo "PACKAGE_REPO_ROOT=$GITHUB_WORKSPACE/dist/packages" >> "$GITHUB_ENV"
-            echo "APT_REPO_OUT=$GITHUB_WORKSPACE/dist/packages/apt" >> "$GITHUB_ENV"
-            echo "repo_out=$GITHUB_WORKSPACE/dist/packages" >> "$GITHUB_OUTPUT"
-          fi
+          mkdir -p "$GITHUB_WORKSPACE/dist/packages/apt"
+          echo "APT_REPO_OUT=$GITHUB_WORKSPACE/dist/packages/apt" >> "$GITHUB_ENV"
+          echo "repo_out=$GITHUB_WORKSPACE/dist/packages" >> "$GITHUB_OUTPUT"
 
       - name: Generate APT repository
         run: |
@@ -165,9 +102,6 @@ jobs:
             --deb "$RUNNER_TEMP/apt-release/$WARDIAN_DEB_NAME" \
             --out "$APT_REPO_OUT" \
             --signing-key "$WARDIAN_APT_SIGNING_KEY"
-          if [[ -n "${APT_REPOSITORY_CNAME:-}" ]]; then
-            printf '%s\n' "$APT_REPOSITORY_CNAME" > "$PACKAGE_REPO_ROOT/CNAME"
-          fi
 
       - name: Verify repository signatures
         run: |
@@ -204,19 +138,3 @@ jobs:
           name: wardian-apt-repository-${{ inputs.release_tag }}
           path: |
             ${{ steps.prepare_repository.outputs.repo_out }}
-            !${{ steps.prepare_repository.outputs.repo_out }}/.git/**
-
-      - name: Publish APT repository
-        if: steps.publish_mode.outputs.effective_publish == 'true'
-        run: |
-          set -euo pipefail
-          cd "$PACKAGE_REPO_ROOT"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .
-          if git diff --cached --quiet; then
-            echo "APT repository is already up to date."
-          else
-            git commit -m "chore(apt): publish ${RELEASE_TAG}"
-            git push origin "HEAD:${APT_REPOSITORY_BRANCH}"
-          fi

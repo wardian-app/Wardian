@@ -28,7 +28,8 @@ Configure GitHub Actions secrets:
 
 - `TAURI_SIGNING_PRIVATE_KEY`: the private key content, or use `TAURI_SIGNING_PRIVATE_KEY_PATH` in a controlled runner environment.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional, only when the private key was generated with a password.
-- `HOMEBREW_TAP_DISPATCH_TOKEN`: optional fine-grained GitHub token or GitHub App token that can create `repository_dispatch` events in `wardian-app/homebrew-tap`. When present, stable releases trigger the tap cask update workflow after publication. When absent, the release workflow logs a notice and leaves the tap update as a manual post-release step.
+- `WARDIAN_RELEASE_DISPATCH_APP_ID`: optional GitHub App ID for dispatching package repository workflows after stable release publication.
+- `WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY`: optional GitHub App private key for the release dispatch app. The app must be installed on `wardian-app/homebrew-tap` and `wardian-app/packages` with Actions write permission.
 
 For this repository's GitHub Actions workflow, store the private key file content in `TAURI_SIGNING_PRIVATE_KEY`. Do not store the public `.pub` file, the committed `plugins.updater.pubkey`, or a local filesystem path. The generated private key file is base64 text; when decoded it starts with `untrusted comment:` and contains `secret key`.
 
@@ -62,21 +63,19 @@ Stable tag-push and stable manual backfill builds set `WARDIAN_UPDATE_CHANNEL=st
 
 After a stable release is published, generate winget and Linux direct-install
 metadata from the published release assets. Stable releases also dispatch the
-`wardian-app/homebrew-tap` cask update workflow when
-`HOMEBREW_TAP_DISPATCH_TOKEN` is configured. See
+`wardian-app/homebrew-tap` cask update workflow and the `wardian-app/packages`
+APT publish workflow when the Wardian release dispatch GitHub App is configured.
+See
 [Package Manager Distribution](./package-manager-distribution.md) for the
 post-release package-manager workflow. Package-manager metadata must consume the
 published release asset URLs and SHA-256 digests; it must not depend on release
 titles.
 
-The Linux APT repository is handled by the separate **APT Repository** workflow.
-Stable releases call it after publication with `publish=true`. Until
-`https://packages.wardian.org/apt`, archive signing key custody, and the
-external static host are provisioned, that called workflow logs a notice,
-performs a signed dry-run with a temporary key, and uploads the generated
-repository as an artifact instead of failing the release. Run the same workflow
-manually with `publish=false` to validate changes, then with `publish=true`
-after the package host repository and signing secrets are configured.
+The Wardian repository's **APT Repository** workflow is validation-only. It
+builds a signed dry-run repository with a temporary key and uploads the generated
+repository as an artifact. Published APT repository updates are owned by the
+separate `wardian-app/packages` workflow, which stores the real archive signing
+key, writes `CNAME`, commits the `apt/` tree, and publishes through GitHub Pages.
 
 `latest.json` must contain all stable platform keys:
 
