@@ -10,6 +10,7 @@ Windows is the primary development and testing platform for Wardian.
 
 - **Implementation**: Wardian uses `portable-pty` with native **ConPTY** support. This ensures a true, high-fidelity Windows terminal experience (supporting PowerShell 7, Git Bash, and CMD).
 - **Nuance**: On Windows, Wardian handles UNC path resolution for Gemini logs and session state navigation, preventing common "path not found" errors when working across drive letters.
+- **Install**: Use `winget install WardianApp.Wardian`, or download `Wardian_X.Y.Z_x64-setup.exe` from the Releases page.
 - **Recommended Tools**: We recommend using the latest PowerShell 7 for agent operations.
 
 ---
@@ -20,6 +21,7 @@ Wardian is fully supported on macOS, with a focus on Apple Silicon (M-series) pe
 
 - **Implementation**: Standard Unix PTY via `portable-pty`.
 - **Status**: Stable. All core features (Library management, Workflows, Telemetry) are verified on macOS.
+- **Install**: Use `brew install --cask wardian-app/tap/wardian`, or download the Apple Silicon or Intel `.dmg` from the Releases page.
 - **Visuals**: The UI includes macOS-specific titlebar and sidebar width optimizations for a more native look and feel.
 
 ---
@@ -30,7 +32,7 @@ Wardian is fully supported on Linux.
 
 - **Implementation**: Standard Unix PTY via `portable-pty`.
 - **Status**: Stable. Core features verified on Linux. Distribution-specific shell environments are handled via the runtime shell selection feature.
-- **Packages**: `.AppImage` (portable, `chmod +x` and run) and `.deb` (install via `sudo apt install ./Wardian_*.deb`) are available from the Releases page. A Linux package-manager channel is tracked separately in [#324](https://github.com/wardian-app/Wardian/issues/324).
+- **Packages**: `.AppImage` (portable, `chmod +x` and run) and `.deb` (install via `sudo apt install ./Wardian_*.deb`) are available from the Releases page.
 
 ---
 

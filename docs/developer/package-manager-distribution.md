@@ -12,9 +12,14 @@ Phase 1 covers:
 - Homebrew Cask for macOS, using the Apple Silicon and Intel `.dmg` files.
 - Linux direct-install docs for `.deb` and AppImage artifacts.
 
-npm bootstrap, standalone CLI-only distribution, signed APT repositories,
-Flathub, and Snap are out of scope for Phase 1. Linux package-manager publishing
-is tracked in [#324](https://github.com/wardian-app/Wardian/issues/324).
+npm bootstrap and standalone CLI-only distribution are out of scope for Phase 1.
+Linux package-manager publishing is tracked in
+[#324](https://github.com/wardian-app/Wardian/issues/324). The Phase 2 decision
+is documented in
+[Linux Package Manager Distribution](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-06-11-linux-package-manager-distribution.md):
+use a signed APT repository as the first Linux package-manager channel, defer
+Flathub and Snap until Wardian has a deliberate sandbox/permission design, and
+keep AppImage as a direct-download artifact.
 The Phase 1 implementation is tracked in
 [#325](https://github.com/wardian-app/Wardian/issues/325).
 
@@ -101,9 +106,178 @@ they must never point at prerelease or draft artifacts.
 ## Linux Direct Install
 
 Use `dist/package-managers/v0.3.6/linux/install.md` as the hash-verified Linux
-install snippet for release notes and documentation. Do not present it as an
-APT, Flatpak, Snap, or AppImageUpdate channel. Those choices belong to the
-Phase 2 Linux package-manager work.
+install snippet for release notes and documentation until the APT repository is
+published. Do not present it as Flatpak, Snap, or AppImageUpdate.
+
+## Linux APT Repository
+
+The selected Linux package-manager channel is a signed APT repository that
+mirrors stable `.deb` assets from GitHub Releases. GitHub Releases remain the
+canonical artifact source; APT metadata is the Linux package-manager integrity
+surface and must be generated only after the stable release assets and updater
+metadata have been published and validated.
+
+The intended public repository contract is `https://apt.wardian.org`. The first
+backend may be any static host that preserves that URL contract, such as GitHub
+Pages behind the custom domain or object storage behind the same domain. Do not
+publish user-facing APT install instructions until the public URL, archive
+signing key, key fingerprint, and first validated repository tree are live.
+
+Do not add upload automation until the APT hosting target, public install URL,
+archive signing key custody model, key-rotation procedure, and dry-run output
+directory are provisioned. Local dry runs from Windows should use WSL Ubuntu or
+another Linux environment for Debian tooling. Published automation should run on
+a Linux CI runner after stable release publication and:
+
+1. read `gh release view vX.Y.Z --json tagName,assets`;
+2. verify the `Wardian_X.Y.Z_amd64.deb` asset name, tag URL, and SHA-256 digest;
+3. verify package identity with `dpkg-deb -f`;
+4. stage the `.deb` under `pool/main/w/wardian/`;
+5. generate `Packages`, `Packages.gz`, and `Release`;
+6. sign `Release` as both `InRelease` and `Release.gpg`;
+7. validate the repository before upload.
+
+The repository includes an **APT Repository** GitHub Actions workflow for this
+path. It can be run manually, and the stable release workflow also calls it
+after the release is published. The release caller requests `publish=true`; if
+the real static host or archive signing configuration is absent, the workflow
+logs a notice, generates a signed dry-run repository with a temporary key,
+validates it with local `file://` APT sources, and uploads the repository tree as
+a workflow artifact instead of failing the release.
+
+Run the workflow manually with `publish=false` before enabling the production
+host. After the host repository and real signing key are configured, manual
+`publish=true` runs and post-release calls publish to the external static host.
+
+Publishing requires these repository variables and secrets:
+
+- `APT_REPOSITORY_REPOSITORY`: external static-host repository to push, for
+  example `wardian-app/apt-repository`.
+- `APT_REPOSITORY_BRANCH`: branch to push, defaulting to `main` when omitted.
+- `APT_REPOSITORY_CNAME`: optional custom domain file content, expected to be
+  `apt.wardian.org` when using GitHub Pages for the APT host.
+- `APT_REPOSITORY_DEPLOY_TOKEN`: token with push access to the external
+  static-host repository.
+- `WARDIAN_APT_SIGNING_PRIVATE_KEY`: armored private archive signing key.
+- `WARDIAN_APT_SIGNING_KEY_PASSPHRASE`: optional passphrase for the archive
+  signing key.
+
+Do not use this repository's GitHub Pages deployment for the APT repository; the
+Wardian docs site already owns that deployment. Use a separate static host or a
+separate repository with Pages enabled behind `https://apt.wardian.org`.
+
+Expected repository shape:
+
+```text
+apt/
+  pool/main/w/wardian/Wardian_X.Y.Z_amd64.deb
+  dists/stable/main/binary-amd64/Packages
+  dists/stable/main/binary-amd64/Packages.gz
+  dists/stable/Release
+  dists/stable/InRelease
+  dists/stable/Release.gpg
+  wardian-archive-keyring.gpg
+```
+
+Package identity validation:
+
+```bash
+dpkg-deb -f Wardian_X.Y.Z_amd64.deb Package Version Architecture
+```
+
+Expected values:
+
+- `Package`: `wardian`
+- `Version`: `X.Y.Z`
+- `Architecture`: `amd64`
+
+Keep previously published `.deb` files in `pool/`; do not overwrite an already
+published package version with different contents. If a package must be
+republished for packaging-only reasons, publish a new Debian package version
+instead of reusing the same version string.
+
+Dry-run repository generation:
+
+```bash
+npm run release:apt-repo -- \
+  --release-assets dist/package-managers/vX.Y.Z/assets.json \
+  --deb Wardian_X.Y.Z_amd64.deb \
+  --out dist/apt \
+  --signing-key "$WARDIAN_APT_SIGNING_KEY"
+```
+
+Manual GitHub Actions dry run:
+
+```bash
+gh workflow run apt-repository.yml \
+  -f release_tag=vX.Y.Z \
+  -f publish=false
+```
+
+Manual GitHub Actions publish run, after the host repository and signing key
+secrets are configured:
+
+```bash
+gh workflow run apt-repository.yml \
+  -f release_tag=vX.Y.Z \
+  -f publish=true
+```
+
+The underlying metadata generation commands are:
+
+```bash
+apt-ftparchive packages pool/main > dists/stable/main/binary-amd64/Packages
+gzip -k -f dists/stable/main/binary-amd64/Packages
+apt-ftparchive release dists/stable > dists/stable/Release
+gpg --batch --yes --local-user "$WARDIAN_APT_SIGNING_KEY" --clearsign \
+  -o dists/stable/InRelease dists/stable/Release
+gpg --batch --yes --local-user "$WARDIAN_APT_SIGNING_KEY" -abs \
+  -o dists/stable/Release.gpg dists/stable/Release
+```
+
+PowerShell should not be the primary form for repository generation because APT
+metadata generation and validation depend on Debian/Ubuntu tooling.
+
+Validation before upload:
+
+```bash
+test -s dists/stable/main/binary-amd64/Packages
+test -s dists/stable/main/binary-amd64/Packages.gz
+gpg --verify dists/stable/Release.gpg dists/stable/Release
+gpg --verify dists/stable/InRelease
+```
+
+End-to-end install validation in a disposable Debian or Ubuntu container or VM:
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://apt.wardian.org/wardian-archive-keyring.gpg \
+  | sudo tee /etc/apt/keyrings/wardian.gpg >/dev/null
+sudo tee /etc/apt/sources.list.d/wardian.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://apt.wardian.org
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/wardian.gpg
+EOF
+sudo apt update
+apt-cache policy wardian
+sudo apt install wardian
+```
+
+When Wardian is installed through APT, APT owns desktop app updates. Any future
+Linux in-app installer behavior must detect package-manager installs before
+replacing files outside the package database.
+
+## Deferred Linux Channels
+
+Flathub is deferred until Wardian has a small, intentional Flatpak permission
+surface for PTYs, provider CLIs, workspace files, WebKit, and external editors.
+Snap is deferred until Wardian can prove strict confinement is practical or
+maintainers decide that classic confinement review is worth the support burden.
+AppImage remains a direct-download artifact unless Wardian later adopts a real
+AppImage update mechanism.
 
 ## Verification
 
