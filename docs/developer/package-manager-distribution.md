@@ -10,7 +10,8 @@ Phase 1 covers:
 
 - winget for Windows, using the NSIS `.exe`.
 - Homebrew Cask for macOS, using the Apple Silicon and Intel `.dmg` files.
-- Linux direct-install docs for `.deb` and AppImage artifacts.
+- A signed APT repository for Debian/Ubuntu x64, using the stable `.deb`.
+- Linux direct-install fallback docs for `.deb` and AppImage artifacts.
 
 npm bootstrap and standalone CLI-only distribution are out of scope for Phase 1.
 Linux package-manager publishing is tracked in
@@ -108,8 +109,9 @@ they must never point at prerelease or draft artifacts.
 ## Linux Direct Install
 
 Use `dist/package-managers/v0.3.6/linux/install.md` as the hash-verified Linux
-install snippet for release notes and documentation until the APT repository is
-published. Do not present it as Flatpak, Snap, or AppImageUpdate.
+install fallback for release notes and documentation. Debian/Ubuntu users should
+prefer the signed APT repository. Do not present direct `.deb` downloads as
+Flatpak, Snap, or AppImageUpdate.
 
 ## Linux APT Repository
 
@@ -119,13 +121,26 @@ canonical artifact source; APT metadata is the Linux package-manager integrity
 surface and must be generated only after the stable release assets and updater
 metadata have been published and validated.
 
-The intended public repository contract is `https://packages.wardian.org/apt`.
-The package host can later add sibling package-manager paths such as `/rpm`
-without changing the APT URL. The first backend may be any static host that
-preserves that URL contract, such as GitHub Pages behind the custom domain or
-object storage behind the same domain. Do not publish user-facing APT install
-instructions until the public URL, archive signing key, key fingerprint, and
-first validated repository tree are live.
+The public repository is `https://packages.wardian.org/apt`. The package host
+can later add sibling package-manager paths such as `/rpm` without changing the
+APT URL. The first backend is GitHub Pages behind `packages.wardian.org`.
+
+Public Debian/Ubuntu install instructions:
+
+```bash
+curl -fsSL https://packages.wardian.org/apt/wardian-archive-keyring.gpg \
+  | sudo install -D -m 0644 /dev/stdin /etc/apt/keyrings/wardian.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/wardian.gpg] https://packages.wardian.org/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/wardian.list >/dev/null
+sudo apt update
+sudo apt install wardian
+```
+
+Archive key fingerprint:
+
+```text
+C956 3C05 D88D B483 748A 5F8B 66E5 FF51 0BCE 9193
+```
 
 Local dry runs from Windows should use WSL Ubuntu or another Linux environment
 for Debian tooling. Published automation runs in the separate

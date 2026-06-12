@@ -30,11 +30,14 @@ Choose the asset for your operating system and CPU:
 
 `x64` and `amd64` both mean 64-bit Intel/AMD CPUs. On macOS, Apple Silicon uses `aarch64`, not `x64`. Ignore updater-only assets such as `latest.json`, `.app.tar.gz`, or `.sig` files when installing manually.
 
+Debian/Ubuntu users who want package-manager updates can use the optional
+[Wardian APT repository](../developer/package-manager-distribution.md#linux-apt-repository).
+
 Wardian binaries are currently unsigned:
 
 - **Windows:** SmartScreen can show a warning. Choose **More info**, then **Run anyway**.
 - **macOS:** Gatekeeper can block the first launch. Right-click Wardian and choose **Open**.
-- **Linux:** Make the AppImage executable before running it.
+- **Linux:** APT installs update through the system package manager. Make the AppImage executable before running it.
 
 ```bash
 chmod +x Wardian*.AppImage
