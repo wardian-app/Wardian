@@ -13,6 +13,7 @@ import { remoteClient } from "./remoteClient";
 import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
+  type TerminalCapabilityContext,
   type TerminalOutputState,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
@@ -60,6 +61,65 @@ function remoteTerminalTheme() {
     foreground: wardianColorToken("--color-wardian-text", "#111827"),
     cursor: wardianColorToken("--color-wardian-accent", "#926a09"),
     selectionBackground: wardianColorToken("--color-wardian-border", "#e5e7eb"),
+  };
+}
+
+function cssColorToRgbParts(value: string, fallback: [number, number, number]) {
+  const trimmed = value.trim();
+  const hex = trimmed.match(/^#?([0-9a-f]{6})$/i);
+  if (hex) {
+    const color = hex[1];
+    return [color.slice(0, 2), color.slice(2, 4), color.slice(4, 6)].map((component) =>
+      Number.parseInt(component, 16),
+    ) as [number, number, number];
+  }
+
+  const rgb = trimmed.match(/^rgba?\((\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i);
+  if (rgb) {
+    return [Number.parseInt(rgb[1], 10), Number.parseInt(rgb[2], 10), Number.parseInt(rgb[3], 10)] as [
+      number,
+      number,
+      number,
+    ];
+  }
+
+  return fallback;
+}
+
+function rgbPartsToSlashTriplet(parts: [number, number, number]) {
+  return parts
+    .map((component) => Math.max(0, Math.min(255, component)).toString(16).padStart(2, "0"))
+    .join("/");
+}
+
+function rgbLuminance(parts: [number, number, number]) {
+  const [red, green, blue] = parts.map((component) => {
+    const normalized = component / 255;
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function remoteTerminalCapabilityContext(terminal: Terminal, host: HTMLDivElement): TerminalCapabilityContext {
+  const theme = remoteTerminalTheme();
+  const backgroundParts = cssColorToRgbParts(theme.background, [243, 244, 246]);
+  const foregroundParts = cssColorToRgbParts(theme.foreground, [17, 24, 39]);
+  const rect = host.getBoundingClientRect();
+  const buffer = (terminal as Terminal & {
+    buffer?: { active?: { cursorY?: number; cursorX?: number } };
+  }).buffer?.active;
+
+  return {
+    cursorRow: Math.max(1, (buffer?.cursorY ?? 0) + 1),
+    cursorCol: Math.max(1, (buffer?.cursorX ?? 0) + 1),
+    pixelWidth: Math.max(1, Math.round(rect.width || host.clientWidth || 0)),
+    pixelHeight: Math.max(1, Math.round(rect.height || host.clientHeight || 0)),
+    backgroundRgb: rgbPartsToSlashTriplet(backgroundParts),
+    foregroundRgb: rgbPartsToSlashTriplet(foregroundParts),
+    prefersLight: rgbLuminance(backgroundParts) >= 0.5,
+    focusReported: false,
   };
 }
 
@@ -404,13 +464,20 @@ function TerminalPane({
           base64ToTerminalString(stateBase64),
           agent.provider ?? undefined,
           outputStateRef.current,
+          remoteTerminalCapabilityContext(terminal, host),
         ),
       );
     };
     const writeTerminalUpdate = (stateBase64: string) => {
       const output = liveDecoder.decode(base64ToTerminalBytes(stateBase64), { stream: true });
       if (output) {
-        terminal.write?.(normalizeRemoteTerminalLiveOutput(output));
+        terminal.write?.(
+          normalizeRemoteTerminalLiveOutput(
+            output,
+            agent.provider ?? undefined,
+            remoteTerminalCapabilityContext(terminal, host),
+          ),
+        );
       }
     };
     void remoteClient

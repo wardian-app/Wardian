@@ -1463,6 +1463,97 @@ describe("RemoteMobileApp", () => {
     expect(terminalInstance.write.mock.calls[0]?.[0]).toContain("\u001b[999;1H  60\r\n");
   });
 
+  it("renders Codex's dark composer background as a light fill in the remote mobile terminal", async () => {
+    document.documentElement.style.setProperty("--color-wardian-card", "#fcfaf5");
+
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.write?.mock) as {
+      write: ReturnType<typeof vi.fn>;
+    };
+    const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa(codexComposerFrame),
+        }),
+      });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "update",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          state_base64: btoa(codexComposerFrame),
+        }),
+      });
+    });
+
+    const writes = terminalInstance.write.mock.calls.map(([data]) => String(data));
+    expect(writes).toEqual([
+      "\u001b[48;2;242;240;235m\n\u001b[K",
+      "\u001b[48;2;242;240;235m\n\u001b[K",
+    ]);
+    expect(writes.join("")).not.toContain("\u001b[48;2;41;41;41m");
+  });
+
   it("does not reconstruct scrollback from live terminal update frames", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
