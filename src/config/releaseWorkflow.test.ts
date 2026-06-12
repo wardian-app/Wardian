@@ -27,7 +27,7 @@ describe("release workflow contract", () => {
     });
     expect(releasePleaseWorkflow).toContain("Sync release PR Cargo lockfile");
     expect(releasePleaseWorkflow).toContain("steps.release.outputs.prs_created == 'true'");
-    expect(releasePleaseWorkflow).toContain("actions/checkout@v4");
+    expect(releasePleaseWorkflow).toContain("actions/checkout@v6");
     expect(releasePleaseWorkflow).toContain("fetch-depth: 0");
     expect(releasePleaseWorkflow).toContain("RELEASE_PLEASE_PRS: ${{ steps.release.outputs.prs }}");
     expect(releasePleaseWorkflow).toContain("headBranchName");

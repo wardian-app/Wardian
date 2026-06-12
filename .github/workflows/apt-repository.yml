@@ -40,10 +40,10 @@ jobs:
       WARDIAN_APT_SIGNING_PRIVATE_KEY: ${{ secrets.WARDIAN_APT_SIGNING_PRIVATE_KEY }}
       WARDIAN_APT_SIGNING_KEY_PASSPHRASE: ${{ secrets.WARDIAN_APT_SIGNING_KEY_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
 
@@ -196,7 +196,7 @@ jobs:
           apt-get download wardian
 
       - name: Upload APT repository artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wardian-apt-repository-${{ inputs.release_tag }}
           path: |
