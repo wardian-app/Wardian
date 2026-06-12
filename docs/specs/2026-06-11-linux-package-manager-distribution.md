@@ -27,11 +27,13 @@ GitHub Releases remain the canonical release artifact source. The APT repository
 is a package-manager mirror of the published stable `.deb`, not an independent
 build system and not a replacement for the Tauri updater artifacts.
 
-The intended public repository contract is `https://apt.wardian.org`. The
-initial backend can be any static host that preserves that URL contract, such as
-GitHub Pages behind the custom domain or object storage behind the same domain.
-Do not publish user-facing APT install instructions until the domain, signing
-key, fingerprint, and first validated repository tree are live.
+The intended public repository contract is `https://packages.wardian.org/apt`.
+The package host can later add sibling package-manager paths such as `/rpm`
+without changing the APT URL. The initial backend can be any static host that
+preserves that URL contract, such as GitHub Pages behind the custom domain or
+object storage behind the same domain. Do not publish user-facing APT install
+instructions until the domain, signing key, fingerprint, and first validated
+repository tree are live.
 
 The first public APT repository should publish:
 
@@ -98,9 +100,11 @@ outside the package database.
 
 ## Repository Shape
 
-The generated repository should use a conventional minimal layout:
+The package host should keep APT metadata under `/apt` so sibling package
+manager paths can be added later without changing the APT URL:
 
 ```text
+CNAME
 apt/
   pool/main/w/wardian/Wardian_X.Y.Z_amd64.deb
   dists/stable/main/binary-amd64/Packages
@@ -122,29 +126,30 @@ instead of reusing the same version string.
 
 ## Release Automation Gate
 
-Do not add upload/publish automation until the maintainers have provisioned:
+APT publication requires:
 
-- the APT repository hosting location;
-- the public install URL, expected to be `https://apt.wardian.org`;
+- a separate package host repository, currently `wardian-app/packages`;
+- the public install URL, expected to be `https://packages.wardian.org/apt`;
 - the private archive signing key custody model;
 - a rotation and recovery procedure for the archive signing key;
-- a dry-run repository output directory that can be validated without publishing.
+- a dry-run repository output directory that can be validated without publishing;
+- a release dispatch GitHub App installed on the package repository with Actions
+  write permission.
 
 Local dry runs from Windows should use WSL Ubuntu or another Linux environment
-for Debian tooling. The long-term publishing job should run on a Linux CI runner
-so repository generation is reproducible and does not depend on a maintainer's
-workstation.
+for Debian tooling. Production publishing should run on a Linux CI runner in the
+package host repository so repository generation is reproducible and does not
+depend on a maintainer's workstation.
 
-The first automation step is a reusable GitHub Actions workflow that builds and
-validates the APT repository from a published stable release. Manual runs should
-default to `publish=false`. Stable release runs can call the workflow after
-release publication with `publish=true`, but the workflow must skip effective
-publication and upload a signed dry-run artifact when the real archive signing
-key or host repository credentials are absent. The existing Wardian docs Pages
-deployment must remain separate; if GitHub Pages hosts APT, use a separate
-repository behind `https://apt.wardian.org`.
+The Wardian repository keeps a manual **APT Repository** validation workflow
+that builds and validates a signed dry-run repository from a published stable
+release. It uses a temporary signing key and uploads the repository tree as an
+artifact. Public publishing is owned by the package host repository workflow,
+which holds the real archive signing key, commits the `apt/` tree, and publishes
+through the package host. The existing Wardian docs Pages deployment must remain
+separate.
 
-Once those exist, the release job can add a Linux-only post-publish step that:
+The package host publish workflow:
 
 1. reads `gh release view vX.Y.Z --json tagName,assets`;
 2. verifies the `.deb` asset name, tag URL, and SHA-256 digest;
@@ -195,11 +200,11 @@ container or VM. Once the public repository is live, use deb822 source syntax:
 
 ```bash
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://apt.wardian.org/wardian-archive-keyring.gpg \
+curl -fsSL https://packages.wardian.org/apt/wardian-archive-keyring.gpg \
   | sudo tee /etc/apt/keyrings/wardian.gpg >/dev/null
 sudo tee /etc/apt/sources.list.d/wardian.sources >/dev/null <<'EOF'
 Types: deb
-URIs: https://apt.wardian.org
+URIs: https://packages.wardian.org/apt
 Suites: stable
 Components: main
 Architectures: amd64
