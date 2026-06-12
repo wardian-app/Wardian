@@ -62,6 +62,18 @@ Findings:
    `canvas.getContext("webgl2").getExtension("WEBGL_lose_context").loseContext()`
    (best-effort, GC remains the fallback). Used by both renderer disposal and LRU
    demotion paths.
+
+   **Follow-up (2026-06-12): the Graph view leaked contexts the same way.** Live
+   use still tripped the cap after the terminal fix. Sigma v3 creates *three*
+   WebGL contexts per instance (`edges`, `nodes`, `hoverNodes`) and its `kill()`
+   only detaches the canvases — `WEBGL_lose_context` appears nowhere in the
+   package. Every Graph view visit therefore parked three zombie contexts until
+   GC; stacked on the 12-context terminal pool this exceeded Chromium's cap, and
+   the forced loss landed on *visible* terminals, dropping them to the DOM
+   renderer (where Claude's half-block logo glyphs garble — `customGlyphs` is a
+   canvas/WebGL feature). `GraphCanvas` now captures `renderer.getCanvases()`
+   before `kill()` and explicitly loses each WebGL context. Context budget:
+   12 (terminal pool) + 3 (Graph view while mounted) = 15 of ~16.
 2. **Restrict the viewport-redraw machinery to Codex; write Claude/Gemini streams
    natively.** An intermediate fix (seeding the scratch screen with the existing
    viewport for claude/gemini) was tried first and disproved by a live native-E2E run

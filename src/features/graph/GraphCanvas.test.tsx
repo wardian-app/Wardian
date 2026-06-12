@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   animatedReset: vi.fn(),
   kill: vi.fn(),
   refresh: vi.fn(),
+  loseContext: vi.fn(),
+  webglCanvasCount: 3,
   graphology: {
     clear: vi.fn(),
     addNode: vi.fn(),
@@ -18,9 +20,23 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("sigma", () => ({
   default: vi.fn().mockImplementation(function MockSigma() {
+    const makeCanvas = (hasWebgl: boolean) =>
+      ({
+        getContext: (type: string) =>
+          hasWebgl && type === "webgl2"
+            ? { getExtension: (name: string) => (name === "WEBGL_lose_context" ? { loseContext: mocks.loseContext } : null) }
+            : null,
+      }) as unknown as HTMLCanvasElement;
     return {
       on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
       getCamera: () => ({ animatedReset: mocks.animatedReset }),
+      getCanvases: () => ({
+        edges: makeCanvas(true),
+        nodes: makeCanvas(true),
+        hoverNodes: makeCanvas(true),
+        labels: makeCanvas(false),
+        mouse: makeCanvas(false),
+      }),
       kill: mocks.kill,
       refresh: mocks.refresh,
     };
@@ -80,6 +96,7 @@ describe("GraphCanvas", () => {
     mocks.animatedReset.mockClear();
     mocks.kill.mockClear();
     mocks.refresh.mockClear();
+    mocks.loseContext.mockClear();
     mocks.graphology.clear.mockClear();
     mocks.graphology.addNode.mockClear();
     mocks.graphology.addEdgeWithKey.mockClear();
@@ -405,5 +422,21 @@ describe("GraphCanvas", () => {
     unmount();
 
     expect(mocks.kill).toHaveBeenCalled();
+  });
+
+  it("loses sigma's WebGL contexts on unmount so they stop counting against the browser cap", () => {
+    const { unmount } = render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    unmount();
+
+    // Three WebGL layers (edges, nodes, hoverNodes); 2d layers are skipped.
+    expect(mocks.loseContext).toHaveBeenCalledTimes(3);
   });
 });
