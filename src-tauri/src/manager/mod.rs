@@ -573,6 +573,23 @@ pub(crate) fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<Strin
     stripped
 }
 
+pub(crate) fn strip_flag_value_pairs_and_equals(args: Vec<String>, flag: &str) -> Vec<String> {
+    let equals_prefix = format!("{flag}=");
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with(&equals_prefix) {
+            continue;
+        }
+        stripped.push(arg);
+    }
+    stripped
+}
+
 pub(crate) fn strip_standalone_flag(args: Vec<String>, flag: &str) -> Vec<String> {
     args.into_iter().filter(|arg| arg != flag).collect()
 }
@@ -673,14 +690,17 @@ pub(crate) fn interactive_provider_args(
 }
 
 pub(crate) fn finalize_interactive_spawn_args(
-    _provider_name: &str,
+    provider_name: &str,
     _is_restored: bool,
     _resume_session: &Option<String>,
     provider_args: Vec<String>,
 ) -> Vec<String> {
-    // Phase 3 Fix: Do NOT strip --input-format/--output-format from Claude.
-    // We need stream-json events to capture session IDs and status changes
-    // even during interactive launches.
+    if provider_name == "claude" {
+        let provider_args = strip_standalone_flag(provider_args, "--verbose");
+        let provider_args = strip_flag_value_pairs_and_equals(provider_args, "--input-format");
+        return strip_flag_value_pairs_and_equals(provider_args, "--output-format");
+    }
+
     provider_args
 }
 
@@ -1090,6 +1110,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_interactive_spawn_strips_equals_form_print_only_stream_flags() {
+        let args = finalize_interactive_spawn_args(
+            "claude",
+            false,
+            &None,
+            vec![
+                "--input-format=stream-json".to_string(),
+                "--output-format=stream-json".to_string(),
+                "--model".to_string(),
+                "claude-test".to_string(),
+                "--mcp-config=server.json".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--model".to_string(),
+                "claude-test".to_string(),
+                "--mcp-config=server.json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn strip_standalone_flag_removes_only_the_matching_flag() {
         let args = vec![
             "resume".to_string(),
@@ -1194,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_interactive_spawn_preserves_stream_json_flags() {
+    fn claude_interactive_spawn_strips_print_only_stream_json_flags() {
         let args = finalize_interactive_spawn_args(
             "claude",
             true,
@@ -1205,22 +1250,24 @@ mod tests {
                 "stream-json".to_string(),
                 "--output-format".to_string(),
                 "stream-json".to_string(),
+                "--model".to_string(),
+                "claude-test".to_string(),
                 "--resume".to_string(),
                 "claude-session".to_string(),
+                "--add-dir".to_string(),
+                "C:/Users/test/.wardian/classes/Coder".to_string(),
             ],
         );
 
-        // Phase 3: We now preserve these flags so PTY output can be parsed for status
         assert_eq!(
             args,
             vec![
-                "--verbose".to_string(),
-                "--input-format".to_string(),
-                "stream-json".to_string(),
-                "--output-format".to_string(),
-                "stream-json".to_string(),
+                "--model".to_string(),
+                "claude-test".to_string(),
                 "--resume".to_string(),
                 "claude-session".to_string(),
+                "--add-dir".to_string(),
+                "C:/Users/test/.wardian/classes/Coder".to_string(),
             ]
         );
     }
