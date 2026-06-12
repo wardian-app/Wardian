@@ -388,17 +388,28 @@ export function normalizeRemoteTerminalOutput(
   data: string,
   provider?: string,
   state?: TerminalOutputState,
+  context?: TerminalCapabilityContext,
 ) {
   if (!data) {
     return data;
   }
-  return stripCursorStyleControls(
+  const normalized = stripCursorStyleControls(
     normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state),
   );
+  return provider === "codex" && context
+    ? normalizeCodexComposerBackgroundForTheme(normalized, context)
+    : normalized;
 }
 
-export function normalizeRemoteTerminalLiveOutput(data: string) {
-  return stripCursorStyleControls(data);
+export function normalizeRemoteTerminalLiveOutput(
+  data: string,
+  provider?: string,
+  context?: TerminalCapabilityContext,
+) {
+  const normalized = stripCursorStyleControls(data);
+  return provider === "codex" && context
+    ? normalizeCodexComposerBackgroundForTheme(normalized, context)
+    : normalized;
 }
 
 export function planTerminalCapabilityResponses(
