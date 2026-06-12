@@ -65,6 +65,11 @@ type TerminalSessionEntry = {
   lastMeasuredHostSize: { width: number; height: number } | null;
   recentWritePreviews: string[];
   recentNormalizedWritePreviews: string[];
+  // Debug-only (shouldExposeTerminalDebug): full raw PTY chunks in arrival
+  // order so a live rendering failure can be replayed offline with the exact
+  // chunk boundaries. Capped at RAW_OUTPUT_LOG_MAX_CHARS.
+  rawOutputLog: string[];
+  rawOutputLogChars: number;
   opencodeFocusReported: boolean;
   outputReadyUnlisten: (() => void) | null;
   terminalClearedUnlisten: (() => void) | null;
@@ -151,6 +156,8 @@ export function shouldExposeTerminalDebug(env: TerminalDebugEnv = import.meta.en
   return env.DEV === true || env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
 }
 
+const RAW_OUTPUT_LOG_MAX_CHARS = 4_000_000;
+
 declare global {
   interface Window {
     __wardianTerminalDebug?: {
@@ -215,6 +222,7 @@ declare global {
         recentWritePreviews: string[];
         recentNormalizedWritePreviews: string[];
       } | null;
+      rawOutputLog: (sessionId: string) => string[] | null;
     };
   }
 }
@@ -390,6 +398,10 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         recentNormalizedWritePreviews: [...entry.recentNormalizedWritePreviews],
       };
       },
+      rawOutputLog: (sessionId: string) => {
+        const entry = terminalSessionMap.get(sessionId);
+        return entry ? [...entry.rawOutputLog] : null;
+      },
     }),
   });
 }
@@ -416,13 +428,16 @@ function terminalCursorPositionReply(entry: TerminalSessionEntry) {
 }
 
 function readParserKnownLineSet(entry: TerminalSessionEntry) {
-  // Include both scrollback (0..baseY-1) and the viewport (baseY..length-1).
-  // Codex home-redraw reconstruction uses this set to decide whether a "dropped"
-  // line is already represented somewhere in the parser buffer. Without viewport
-  // coverage, a content shuffle that the drop heuristic misidentifies can push a
-  // still-visible line into scrollback, duplicating it.
+  // Scrollback only (0..baseY-1) — deliberately NOT the viewport. A Codex
+  // sliding-window drop is still visible in the viewport when its drop frame
+  // arrives (the repaint that removes it is in this very batch), so including
+  // viewport rows suppresses genuine drops and loses output whenever a window
+  // row was already painted by an earlier batch (observed live with Codex
+  // 0.139.0: rows vanished or survived depending on PTY chunk boundaries).
+  // Shuffle protection (line moved but still visible after the repaint) is
+  // handled in reconstructHomeRedrawScrollback against the new frame's lines.
   const buffer = entry.parser.buffer.active;
-  const lineCount = Math.max(0, buffer.length ?? 0);
+  const lineCount = Math.max(0, buffer.baseY ?? 0);
   return new Set(
     Array.from({ length: lineCount }, (_, index) =>
       buffer.getLine(index)?.translateToString(true).replace(/\s+/g, " ").trim() || "",
@@ -613,6 +628,91 @@ async function applyViewportRedrawInPlace(
 
 const SYNTHETIC_SCROLLBACK_PREFIX = "\u001b[999;1H";
 
+// Journal segments are `SYNTHETIC_SCROLLBACK_PREFIX` followed by plain
+// CRLF-terminated rows (no escapes). A drain batch joins multiple normalized
+// chunks, so segments can sit mid-stream, not just at the front.
+const SYNTHETIC_SCROLLBACK_SEGMENT = new RegExp(
+  `${SYNTHETIC_SCROLLBACK_PREFIX.replace(/[[\\^$.|?*+()]/g, "\\$&")}(?:[^\\u001b\\r\\n]*\\r\\n)+`,
+  "g",
+);
+
+function extractSyntheticScrollbackRows(data: string) {
+  const rows: string[] = [];
+  const cleaned = data.replace(SYNTHETIC_SCROLLBACK_SEGMENT, (segment) => {
+    for (const row of segment.slice(SYNTHETIC_SCROLLBACK_PREFIX.length).split("\r\n")) {
+      if (row.length > 0) {
+        rows.push(row);
+      }
+    }
+    return "";
+  });
+  return { rows, cleaned };
+}
+
+// The home-redraw journal recovers rows that a provider's sliding-window
+// repaint simply stops painting (verified live against Codex 0.139.0: each
+// frame re-homes and paints rows N..N+k, never scrolling the dropped top row
+// out). There is no VT sequence that inserts a line into scrollback above an
+// untouched viewport — the legacy delivery (cursor to row 999 + newline)
+// overwrote the status row and pushed whatever happened to be at the top of
+// the screen instead of the journaled row. Insert directly into xterm's
+// buffer between the scrollback tail and the viewport.
+async function insertSyntheticScrollbackRows(
+  term: Terminal | HeadlessTerminal,
+  rows: string[],
+) {
+  const buffer = getInternalActiveBuffer(term);
+  if (!buffer?.lines.splice || rows.length === 0) {
+    return false;
+  }
+
+  // A row longer than the terminal width wraps into several buffer lines in
+  // the scratch terminal, so size the scrollback for the worst case and clone
+  // the RENDERED line count, not rows.length — cloning rows.length lines
+  // silently truncated the batch tail whenever an earlier row wrapped
+  // (observed live with Codex 0.139.0: one journaled response row vanished
+  // whenever the same drain batch also journaled a long wrapped splash line).
+  const wrappedLineEstimate = rows.reduce(
+    (total, row) => total + Math.max(1, Math.ceil(row.length / Math.max(1, term.cols))),
+    0,
+  );
+  const scratch = new HeadlessTerminal({
+    cols: term.cols,
+    rows: Math.max(2, Math.min(rows.length, term.rows)),
+    scrollback: wrappedLineEstimate + term.rows,
+    allowProposedApi: true,
+  });
+  try {
+    await writeTerminalControl(scratch, rows.join("\r\n"));
+    const scratchBuffer = getInternalActiveBuffer(scratch);
+    if (!scratchBuffer?.lines.get) {
+      return false;
+    }
+    const scratchActive = scratch.buffer.active;
+    const renderedLineCount = (scratchActive.baseY ?? 0) + (scratchActive.cursorY ?? 0) + 1;
+    const cloned: unknown[] = [];
+    for (let index = 0; index < renderedLineCount; index += 1) {
+      const line = scratchBuffer.lines.get(index)?.clone?.();
+      if (line) {
+        cloned.push(line);
+      }
+    }
+    if (cloned.length === 0) {
+      return false;
+    }
+    const wasAtBottom = buffer.ydisp === buffer.ybase;
+    buffer.lines.splice(buffer.ybase, 0, ...cloned);
+    buffer.ybase += cloned.length;
+    if (wasAtBottom) {
+      buffer.ydisp = buffer.ybase;
+    }
+    syncBrowserTerminalScrollState(term);
+    return true;
+  } finally {
+    scratch.dispose();
+  }
+}
+
 function splitSyntheticScrollbackPrefix(data: string) {
   if (!data.startsWith(SYNTHETIC_SCROLLBACK_PREFIX)) {
     return { scrollbackData: "", viewportData: data };
@@ -702,18 +802,21 @@ function appendSyntheticScrollbackRows(scrollbackData: string, rows: string[] | 
     : `${SYNTHETIC_SCROLLBACK_PREFIX}${renderedRows}`;
 }
 
-// Codex only. Claude and Gemini are diff renderers: they cursor-address just
-// the changed cells of a row and assume the terminal retained their previous
-// frame. Routing them through the scratch-screen replacement corrupts cells
-// both ways — a blank scratch wipes every cell the frame didn't write (users
-// saw mostly black terminals with only the status row), and a preserved
-// scratch merges the frame with rows Claude believes it already replaced
-// (verified live against Claude Code 2.1.173: numbered output interleaved
-// with stale banner cells). xterm itself honors the retained-frame contract,
-// so their streams must be written natively. Codex repaints full frames and
-// still needs this path to keep its redraws out of scrollback.
-function providerUsesViewportRedraws(provider: string | undefined) {
-  return provider === "codex";
+// Disabled for every provider. Modern provider TUIs (verified live against
+// Claude Code 2.1.173 and Codex 0.139.0) are diff renderers: they
+// cursor-address just the changed cells of a row and assume the terminal
+// retained their previous frame. Routing such frames through the
+// scratch-screen replacement corrupts cells both ways — a blank scratch wipes
+// every cell the frame didn't write (mostly black terminals with only the
+// status row), and a preserved scratch merges the frame with rows the TUI
+// believes it already replaced (numbered output interleaved with stale
+// banner/status cells, dropped and duplicated rows). xterm itself honors the
+// retained-frame contract, so provider streams are written natively. The
+// machinery is kept behind this switch for one release in case a provider
+// ships a true full-frame repainter again; the live rendering audit is the
+// gate for re-enabling it.
+function providerUsesViewportRedraws(_provider: string | undefined) {
+  return false;
 }
 
 const TOP_LEFT_CURSOR_REPOSITION = /\u001b\[(?:|1|;|1;|;1|1;1)[Hf]/;
@@ -1060,6 +1163,8 @@ function clearTerminalSession(sessionId: string) {
 
   entry.recentWritePreviews = [];
   entry.recentNormalizedWritePreviews = [];
+  entry.rawOutputLog = [];
+  entry.rawOutputLogChars = 0;
   entry.drainQueued = false;
   entry.initialPtyBackfillComplete = false;
   entry.initialPtyBackfillInFlight = false;
@@ -1237,6 +1342,15 @@ async function writeTerminalOutputBatch(
     }),
   );
 
+  if (shouldExposeTerminalDebug()) {
+    for (const data of rawChunks) {
+      if (entry.rawOutputLogChars >= RAW_OUTPUT_LOG_MAX_CHARS) {
+        break;
+      }
+      entry.rawOutputLog.push(data);
+      entry.rawOutputLogChars += data.length;
+    }
+  }
   rawChunks.forEach((data) => {
     entry.recentWritePreviews.push(
       data
@@ -1280,8 +1394,18 @@ async function writeTerminalOutputBatch(
     useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
   }
   const knownLines = entry.existingKnownLines;
-  let { scrollbackData, viewportData } = splitSyntheticScrollbackPrefix(batchedWrite);
+  const { rows: journalRows, cleaned } = extractSyntheticScrollbackRows(batchedWrite);
+  let scrollbackData = "";
+  let viewportData = cleaned;
   const renderer = entry.renderer;
+  if (journalRows.length > 0) {
+    await insertSyntheticScrollbackRows(entry.parser, journalRows);
+    if (renderer && !entry.disposed) {
+      if (await insertSyntheticScrollbackRows(renderer.term, journalRows)) {
+        renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+      }
+    }
+  }
   if (
     isProviderViewportRedraw(entry.provider, viewportData) &&
     supportsViewportRedrawInPlace(entry.parser) &&
@@ -1314,9 +1438,9 @@ async function writeTerminalOutputBatch(
     return;
   }
   entry.existingKnownLines = undefined;
-  await writeTerminalControl(entry.parser, batchedWrite);
+  await writeTerminalControl(entry.parser, viewportData);
   if (entry.renderer) {
-    await writeTerminalControl(entry.renderer.term, batchedWrite);
+    await writeTerminalControl(entry.renderer.term, viewportData);
     if (!entry.disposed) {
       scrollRendererToBottomAfterWrite(entry.renderer, rendererBottomBeforeWrite);
     }
@@ -1580,6 +1704,8 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     lastMeasuredHostSize: null,
     recentWritePreviews: [],
     recentNormalizedWritePreviews: [],
+    rawOutputLog: [],
+    rawOutputLogChars: 0,
     opencodeFocusReported: false,
     outputReadyUnlisten: null,
     terminalClearedUnlisten: null,
@@ -2128,6 +2254,8 @@ export const AgentTerminal = memo(function AgentTerminal({
 export const __terminalTesting = {
   applyViewportRedrawInPlace,
   appendSyntheticScrollbackRows,
+  extractSyntheticScrollbackRows,
+  insertSyntheticScrollbackRows,
   isProviderViewportRedraw,
   splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,

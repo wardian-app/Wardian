@@ -170,8 +170,10 @@ describe("terminal capability broker", () => {
     const responseRedraw =
       "\u001b[?25l\u001b[H  ROW_049\u001b[K\r\n  ROW_050\u001b[K";
 
+    // Per-frame journaling: the response redraw that follows repaints
+    // ROW_049/ROW_050, so nothing is journaled and nothing is lost.
     expect(normalizeTerminalOutputBatch([splashReset, responseRedraw], "codex", state)).toBe(
-      `\u001b[999;1H  ROW_049\r\n  ROW_050\r\n${splashReset.replace("\u001b[3J", "")}${responseRedraw}`,
+      `${splashReset.replace("\u001b[3J", "")}${responseRedraw}`,
     );
   });
 
@@ -301,7 +303,7 @@ describe("terminal capability broker", () => {
       firstFrame,
     );
     expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(
-      `\u001b[999;1H  60\r\n${secondFrame}`,
+      `\u001b[?2026h\u001b[?2026l\u001b[999;1H  60\r\n\u001b[?25l\u001b[H  61\u001b[K\r\n  62\u001b[K\r\n  63\u001b[K`,
     );
   });
 
@@ -520,6 +522,21 @@ describe("terminal capability broker", () => {
     );
     expect(normalizeOpenCodeOutput(thirdFrame, "codex", state)).toBe(
       `\u001b[999;1Hgamma\r\ndelta\r\n${thirdFrame}`,
+    );
+  });
+
+  it("journals Codex drops when the chunk opens with a cursor-addressed diff frame", () => {
+    // Live failure shape (Codex 0.139.0, post-clear at 124x28): the PTY chunk
+    // begins with a spinner diff frame, so the first ESC[H sits deeper in the
+    // chunk than the whole-chunk extraction probe looks. The repaint frames
+    // inside the chunk must still journal their dropped rows.
+    const state: TerminalOutputState = { lastHomeRedrawLines: ["  1", "  2", "  3"] };
+    const ESC = String.fromCharCode(27);
+    const diffFrame = `${ESC}[?2026h${ESC}[0 q${ESC}[?2026l${ESC}[?2026h${ESC}[?25l${ESC}[14;2H${"x".repeat(70)}${ESC}[K`;
+    const repaintFrame = `${ESC}[?25l${ESC}[H  2${ESC}[K\r\n  3${ESC}[K\r\n  4${ESC}[K`;
+
+    expect(normalizeOpenCodeOutput(`${diffFrame}${repaintFrame}`, "codex", state)).toBe(
+      `${diffFrame}${ESC}[999;1H  1\r\n${repaintFrame}`,
     );
   });
 

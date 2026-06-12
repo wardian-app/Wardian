@@ -40,11 +40,20 @@ Findings:
   across PTY reads, since drain batching is not frame-aligned. Rendering such a partial
   frame into a blank scratch wipes every row the frame didn't touch, leaving exactly the
   reported symptom: a blank screen with only the status/token row.
-- **Cause 2 remains open.** The remaining normalization layers (home-redraw scrollback
-  reconstruction, fullscreen-clear-by-newlines rewriting, synthetic scrollback journal)
-  are heuristic and version-sensitive. They have test coverage against captured frames
-  from Claude Code v2.1.x and current Codex, but should be re-validated against live
-  providers via the native E2E harness whenever a provider ships a renderer change.
+- **Cause 2: one concrete defect found and fixed via live-provider debugging.** The
+  live Claude audit exposed that user wheel-scrolls were applied and then immediately
+  reverted while the provider streamed: drain batches run nearly back-to-back during
+  streaming, and `writeTerminalOutputBatch` consulted an at-bottom flag sampled *before*
+  its awaited writes, so the post-write `scrollToBottom()` snapped the viewport back —
+  the terminal felt unscrollable until the provider went quiet. Diagnosed with
+  debug-build wheel branch counters and `onScroll` stack traces surfaced through the
+  terminal debug snapshot; fixed by re-checking the live viewport against the pre-write
+  base before snapping.
+- **The remaining normalization layers** (home-redraw scrollback reconstruction,
+  fullscreen-clear-by-newlines rewriting, synthetic scrollback journal — now codex-only)
+  are heuristic and version-sensitive. They have test coverage against captured frames,
+  and the live rendering audit is the re-validation gate whenever a provider ships a
+  renderer change.
 
 ## Proposed Decision
 
@@ -64,8 +73,70 @@ Findings:
    blank scratch wipes unwritten cells (the reported blank screens), a preserved
    scratch merges the frame with rows Claude believes it already replaced. xterm itself
    honors the retained-frame contract, so `providerUsesViewportRedraws` now returns
-   true only for codex (full-frame repainter), and claude/gemini output is written to
-   xterm natively.
+   false for every provider (the machinery stays behind the switch for one release;
+   a live audit pass is the gate for re-enabling it), and all provider output is
+   written to xterm natively.
+
+3. **Journal Codex sliding-window drops via direct scrollback insertion.** Live
+   capture of Codex 0.139.0 (gpt-5.3-codex-spark) shows it repaints a home-anchored
+   window every tick and simply stops painting the top row as content grows — the
+   dropped row never scrolls out, so written natively it would vanish. The codex
+   normalization journals each repaint frame's dropped rows
+   (`reconstructHomeRedrawScrollback`, per frame — extracting across frame boundaries
+   glues the status row onto content). `writeTerminalOutputBatch` extracts every
+   journal segment mid-stream and inserts the rows directly into xterm's buffer above
+   the viewport (`insertSyntheticScrollbackRows`); the legacy `ESC[999;1H` raw
+   delivery clamps to the bottom row and corrupts the frame. Three live-disproven
+   pitfalls are encoded as regression tests:
+   - the journal dedup must consult only scrollback, never the viewport — a genuine
+     drop is still visible pre-repaint, and viewport dedup made row survival depend
+     on PTY chunk boundaries;
+   - the scratch-terminal clone must copy the *rendered* line count — a journal row
+     longer than the terminal width wraps, and cloning `rows.length` lines truncated
+     the batch tail (one response row vanished whenever a drain batch also journaled
+     the long wrapped splash line);
+   - per-frame journaling must not be gated on a whole-chunk `extractHomeRedrawLines`
+     probe — a chunk opening with a spinner diff frame fails the probe and silently
+     skipped every drop the chunk's repaint frames carried.
+   Offline replay of captured raw PTY logs (`target/raw-pty-logs`, written by the
+   audit harness on failure) reproduced each of these deterministically.
+
+4. **Respect user scroll position during streaming writes.**
+   `scrollRendererToBottomAfterWrite` only re-pins the viewport to the bottom when it
+   still sits at or past the pre-write base; a wheel scroll landing mid-batch wins.
+5. **Accept resize-repaint scrollback duplicates for natively-written providers.**
+   Claude/Gemini resize repaints scroll part of the pre-repaint viewport into
+   scrollback — the same artifact a standalone terminal shows. A post-write dedup
+   (`trimOverlappingScrollbackBeforeViewport` on repaint batches) was tried and
+   rejected: after a column reflow the exact-match path cannot fire and the fuzzy
+   fallback deletes legitimate history (the audit's completeness gate caught it).
+   The rendering audit records such duplicates as warnings for claude/gemini/codex
+   (codex resize repaints can re-show journaled rows); completeness of content
+   remains a hard failure.
+
+## Verification
+
+Live native-E2E rendering audit (`WARDIAN_E2E_REAL_RENDERING=1`, real provider CLIs):
+
+- **claude** — Claude Code 2.1.173, model `haiku`: all 14 audit states pass
+  (initial, settled, narrow, resized, wide, card-maximized/restored,
+  minimized/restored, maximized/restored, rapid-resize, scrolled-top,
+  cleared-immediate, paused, resumed) including user wheel-scroll and scrollback
+  evidence per state. Evidence: `e2e/screenshots/real-provider-rendering/`.
+- **codex** — Codex 0.139.0, model `gpt-5.3-codex-spark`: all 14 audit states pass,
+  including the 50-row completeness gate on both the initial turn (88×20) and the
+  post-clear turn (124×28) — the two geometries where sliding-window drops were
+  lost before the journaling fixes in decision 5. Evidence:
+  `e2e/screenshots/real-provider-rendering/2026-06-12T00-17-18-037Z`.
+- Synthetic scrollback insertion is covered by real-buffer unit tests
+  (`syntheticScrollback.test.ts`, bypassing the global headless-xterm mock) and the
+  diff-frame-gated journaling by `terminalCapabilities.test.ts`.
+- A mock-provider wheel-scroll regression test
+  (`e2e-native/tests/terminal-wheel-scroll-native.test.mjs`) reproduces the
+  audit layout with back-to-back streaming and narrow/restore window phases.
+- The audit harness's maximize helper was fixed to target card controls by
+  aria-label; the card header gained a Chat/Terminal toggle as its first button,
+  and positional clicking flipped cards into chat mode mid-audit.
 
 ## Consequences
 

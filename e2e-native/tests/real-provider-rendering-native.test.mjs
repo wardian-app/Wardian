@@ -899,6 +899,28 @@ function hasXtermScrollback(capture) {
   return (renderer?.baseY ?? 0) > 0 || (capture?.debug?.baseY ?? 0) > 0;
 }
 
+async function dumpRawOutputLog(driver, sessionId, label) {
+  try {
+    const chunks = await driver.executeScript(
+      (sid) => window.__wardianTerminalDebug?.rawOutputLog?.(sid) ?? null,
+      sessionId,
+    );
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      return null;
+    }
+    const dir = path.join(process.cwd(), "target", "raw-pty-logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(
+      dir,
+      `${sessionId}-${label}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+    );
+    fs.writeFileSync(filePath, JSON.stringify(chunks, null, 1), "utf8");
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
 async function waitForScrollableNumberedResponse(driver, sessionId, max, timeoutMs, minOccurrences = 1) {
   let last = null;
   let lastWheelError = null;
@@ -917,8 +939,9 @@ async function waitForScrollableNumberedResponse(driver, sessionId, max, timeout
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+  const rawLogPath = await dumpRawOutputLog(driver, sessionId, "numbered-response-timeout");
   throw new Error(
-    `Timed out waiting for complete scrollable numbered response 1..${max} for ${sessionId}: ${JSON.stringify({
+    `Timed out waiting for complete scrollable numbered response 1..${max} for ${sessionId} (raw PTY log: ${rawLogPath ?? "unavailable"}): ${JSON.stringify({
       title: last?.title ?? "",
       cardText: last?.cardText ?? "",
       debug: compactDebug(last?.debug),
@@ -981,6 +1004,7 @@ function compactDebug(debug) {
     usesViewportRedraws: debug.usesViewportRedraws ?? null,
     lastHomeRedrawLines: debug.lastHomeRedrawLines ?? null,
     renderer: debug.renderer ?? null,
+    recentWritePreviews: debug.recentWritePreviews ?? null,
     ...debugCounts(debug),
   };
 }
@@ -1789,6 +1813,8 @@ test("real provider terminal rendering audit captures user-visible Wardian state
       resize: resumeResize,
       expectAuditText: auditSubmitInput && auditInputText.trim().length > 0,
     });
+
+    record.raw_output_log = await dumpRawOutputLog(driver, sessionId, `${provider}-final`);
 
     const config = await readAgentConfig(driver, sessionId);
     if (provider === "opencode") {

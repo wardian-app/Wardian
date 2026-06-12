@@ -473,13 +473,14 @@ export function auditRenderingEvidence({
         failures.push(`${provider}: ${message}`);
       }
     };
-    // Claude/Gemini are diff renderers whose streams Wardian writes natively
-    // (frame interception corrupts them — see AgentTerminal). Their resize
-    // repaints scroll the pre-repaint viewport into scrollback, so duplicated
-    // scrollback rows are real-terminal-equivalent behavior, not a Wardian
-    // rendering defect. Record duplicates as warnings for those providers;
-    // completeness stays a hard failure.
-    const duplicatesAreWarnings = provider === "claude" || provider === "gemini";
+    // Claude/Gemini/Codex are diff renderers whose streams Wardian writes
+    // natively (frame interception corrupts them — see AgentTerminal). Their
+    // resize repaints scroll the pre-repaint viewport into scrollback, so
+    // duplicated scrollback rows are real-terminal-equivalent behavior, not a
+    // Wardian rendering defect. Record duplicates as warnings for those
+    // providers; completeness stays a hard failure.
+    const duplicatesAreWarnings =
+      provider === "claude" || provider === "gemini" || provider === "codex";
     const providerDuplicateCheck = (condition, message) => {
       if (!duplicatesAreWarnings) {
         providerCheck(condition, message);

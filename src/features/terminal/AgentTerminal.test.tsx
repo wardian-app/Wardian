@@ -469,10 +469,10 @@ describe("AgentTerminal scrollback", () => {
     expect(term.buffer.active.getLine(9)).toBeUndefined();
   });
 
-  it("treats only top-left Codex cursor addresses as provider viewport redraws", () => {
-    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[1;1H1\r\n2")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[H1\r\n2")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(true);
+  it("never treats provider frames as viewport redraws", () => {
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[1;1H1\r\n2")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[H1\r\n2")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(false);
     expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[12;1Hstatus")).toBe(false);
     expect(__terminalTesting.isProviderViewportRedraw("opencode", "\u001b[1;1H1\r\n2")).toBe(false);
   });
