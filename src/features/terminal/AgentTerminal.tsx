@@ -56,6 +56,10 @@ type TerminalRendererEntry = {
   webglAddon: WebglAddon | null;
   webglAttempted: boolean;
   host: HTMLDivElement;
+  // Pixel-perfect still of the last WebGL frame, overlaid while the terminal
+  // is demoted to the DOM renderer. Strictly cosmetic (pointer-events: none);
+  // removed on promotion or when fresh output arrives.
+  snapshotOverlay: HTMLCanvasElement | null;
 };
 
 type TerminalSessionEntry = {
@@ -1019,6 +1023,7 @@ function disposeTerminalSession(sessionId: string) {
 function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
   clearRendererTimers(renderer);
   webglPool.delete(sessionId);
+  removeSnapshotOverlay(renderer);
   renderer.serializeAddon.dispose();
   disposeWebglAddonAndReleaseContext(renderer);
   renderer.term.dispose();
@@ -1053,9 +1058,59 @@ function disposeWebglAddonAndReleaseContext(renderer: TerminalRendererEntry) {
 const MAX_WEBGL_CONTEXTS = 12;
 const webglPool = new Set<string>();
 
+// Grace before an off-screen terminal releases its WebGL context: long enough
+// to survive drag/maximize/view-switch layout churn, short enough to free the
+// slot promptly while the user scrolls a large grid.
+const VISIBILITY_DEMOTE_GRACE_MS = 1000;
+
 function touchWebglPool(sessionId: string) {
   if (webglPool.delete(sessionId)) {
     webglPool.add(sessionId);
+  }
+}
+
+// Freeze the demoted terminal's last WebGL frame into a 2D canvas overlay so
+// the card keeps showing pixel-perfect content instead of the DOM renderer's
+// font-fallback rendering (custom glyphs — Claude's half-block logo and TUI
+// borders — are canvas/WebGL-only and garble in the DOM renderer). 2D canvases
+// do not count against Chromium's ~16 WebGL context cap. The overlay is
+// cosmetic: it never intercepts input, and it is removed the moment the
+// terminal re-promotes or new output arrives (live DOM rendering then shows
+// through, trading glyph fidelity for liveness).
+function captureSnapshotOverlay(renderer: TerminalRendererEntry) {
+  removeSnapshotOverlay(renderer);
+  const source = renderer.term.element?.querySelector("canvas");
+  if (!(source instanceof HTMLCanvasElement) || source.width === 0 || source.height === 0) {
+    return;
+  }
+  try {
+    const overlay = document.createElement("canvas");
+    overlay.width = source.width;
+    overlay.height = source.height;
+    overlay.dataset.testid = "terminal-snapshot-overlay";
+    overlay.style.position = "absolute";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = source.style.width || "100%";
+    overlay.style.height = source.style.height || "100%";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "5";
+    const context = overlay.getContext("2d");
+    if (!context) {
+      return;
+    }
+    context.drawImage(source, 0, 0);
+    renderer.host.appendChild(overlay);
+    renderer.snapshotOverlay = overlay;
+  } catch {
+    // Snapshot is best-effort; the DOM renderer underneath stays functional.
+  }
+}
+
+function removeSnapshotOverlay(renderer: TerminalRendererEntry) {
+  if (renderer.snapshotOverlay) {
+    renderer.snapshotOverlay.remove();
+    renderer.snapshotOverlay = null;
   }
 }
 
@@ -1063,6 +1118,7 @@ function demoteSessionToDom(sessionId: string) {
   webglPool.delete(sessionId);
   const renderer = terminalSessionMap.get(sessionId)?.renderer;
   if (renderer?.webglAddon) {
+    captureSnapshotOverlay(renderer);
     disposeWebglAddonAndReleaseContext(renderer);
     renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   }
@@ -1090,7 +1146,10 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
   }
   evictLruWebglIfNeeded(sessionId);
   try {
-    const webglAddon = new WebglAddon();
+    // preserveDrawingBuffer keeps the last composited frame readable so
+    // demotion can snapshot it (drawImage on a non-preserved WebGL canvas
+    // outside the frame callback reads back cleared pixels).
+    const webglAddon = new WebglAddon(true);
     webglAddon.onContextLoss(() => {
       webglAddon.dispose();
       webglPool.delete(sessionId);
@@ -1102,6 +1161,7 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
     renderer.term.loadAddon(webglAddon);
     renderer.webglAddon = webglAddon;
     webglPool.add(sessionId);
+    removeSnapshotOverlay(renderer);
     renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   } catch (error) {
     renderer.webglAddon = null;
@@ -1270,6 +1330,7 @@ function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
   (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
 
   if (entry.renderer) {
+    removeSnapshotOverlay(entry.renderer);
     entry.renderer.term.reset();
     entry.renderer.term.scrollToBottom();
     entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
@@ -1440,6 +1501,9 @@ async function writeTerminalOutputBatch(
   entry.existingKnownLines = undefined;
   await writeTerminalControl(entry.parser, viewportData);
   if (entry.renderer) {
+    // A frozen snapshot must never mask live output: drop it and let the DOM
+    // renderer underneath show the stream until the terminal re-promotes.
+    removeSnapshotOverlay(entry.renderer);
     await writeTerminalControl(entry.renderer.term, viewportData);
     if (!entry.disposed) {
       scrollRendererToBottomAfterWrite(entry.renderer, rendererBottomBeforeWrite);
@@ -1850,6 +1914,8 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   host.className = "w-full h-full";
   host.style.width = "100%";
   host.style.height = "100%";
+  // Anchor for the absolute-positioned snapshot overlay.
+  host.style.position = "relative";
   const wheelRowRemainder = { current: 0 };
   host.addEventListener(
     "wheel",
@@ -1870,6 +1936,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     webglAddon: null,
     webglAttempted: false,
     host,
+    snapshotOverlay: null,
   };
 
   term.onData((data) => {
@@ -2071,6 +2138,8 @@ export const AgentTerminal = memo(function AgentTerminal({
 
     let isMounted = true;
     let resizeObserver: ResizeObserver | null = null;
+    let visibilityObserver: IntersectionObserver | null = null;
+    let visibilityDemoteTimer: ReturnType<typeof setTimeout> | null = null;
     let entry: TerminalSessionEntry | null = null;
 
     const attach = async () => {
@@ -2116,7 +2185,43 @@ export const AgentTerminal = memo(function AgentTerminal({
 
         void drainPty(sessionId);
         checkSizing({ force: true, reportUnchanged: false });
-        activateWebglRenderer(renderer, sessionId);
+        if (typeof IntersectionObserver === "undefined") {
+          activateWebglRenderer(renderer, sessionId);
+        } else {
+          // Scope WebGL contexts to terminals actually on screen: a card
+          // scrolled out of view (or in a hidden view) releases its context
+          // after a grace period and freezes its last frame as a snapshot, so
+          // the browser's ~16-context cap binds on simultaneously visible
+          // terminals instead of total agent count. Promotion on re-entry,
+          // focus, and maximize wins the LRU slot back.
+          visibilityObserver = new IntersectionObserver(
+            (entries) => {
+              const lastObservation = entries[entries.length - 1];
+              if (!isMounted || !lastObservation) {
+                return;
+              }
+              if (lastObservation.isIntersecting) {
+                if (visibilityDemoteTimer) {
+                  clearTimeout(visibilityDemoteTimer);
+                  visibilityDemoteTimer = null;
+                }
+                renderer.webglAttempted = true;
+                promoteSessionToWebgl(sessionId);
+              } else if (!visibilityDemoteTimer) {
+                // Debounced: drag, maximize, and view-switch churn briefly
+                // report zero intersection before the layout settles.
+                visibilityDemoteTimer = setTimeout(() => {
+                  visibilityDemoteTimer = null;
+                  if (isMounted) {
+                    demoteSessionToDom(sessionId);
+                  }
+                }, VISIBILITY_DEMOTE_GRACE_MS);
+              }
+            },
+            { rootMargin: "64px" },
+          );
+          visibilityObserver.observe(terminalRef.current);
+        }
         requestAnimationFrame(() => checkSizing({ force: true, reportUnchanged: false }));
         setTimeout(() => checkSizing({ force: true, reportUnchanged: false }), 50);
 
@@ -2146,6 +2251,11 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => {
       isMounted = false;
       resizeObserver?.disconnect();
+      visibilityObserver?.disconnect();
+      if (visibilityDemoteTimer) {
+        clearTimeout(visibilityDemoteTimer);
+        visibilityDemoteTimer = null;
+      }
       if (entry && !entry.disposed && entry.renderer) {
         scheduleRendererDisposal(sessionId);
       }
@@ -2254,8 +2364,12 @@ export const AgentTerminal = memo(function AgentTerminal({
 export const __terminalTesting = {
   applyViewportRedrawInPlace,
   appendSyntheticScrollbackRows,
+  captureSnapshotOverlay,
+  demoteSessionToDom,
   extractSyntheticScrollbackRows,
   insertSyntheticScrollbackRows,
+  promoteSessionToWebgl,
+  removeSnapshotOverlay,
   isProviderViewportRedraw,
   splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,

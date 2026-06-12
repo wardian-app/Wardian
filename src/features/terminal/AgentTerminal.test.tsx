@@ -2374,4 +2374,190 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  // jsdom canvases have no real rendering contexts; stub both the 2D context
+  // the snapshot overlay draws into and the WebGL context the release path
+  // loses.
+  function stubCanvasContexts() {
+    const drawImage = vi.fn();
+    const loseContext = vi.fn();
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(((type: string) =>
+        type === "2d"
+          ? ({ drawImage } as unknown as CanvasRenderingContext2D)
+          : ({
+              getExtension: (name: string) =>
+                name === "WEBGL_lose_context" ? { loseContext } : null,
+            } as unknown as RenderingContext)) as never);
+    return { spy, drawImage, loseContext };
+  }
+
+  function querySnapshotOverlay() {
+    return document.querySelector('[data-testid="terminal-snapshot-overlay"]') as HTMLCanvasElement | null;
+  }
+
+  it("freezes the last WebGL frame as a cosmetic overlay on demotion and removes it on promotion", async () => {
+    render(<AgentTerminal sessionId="snap-overlay" theme="dark" />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = 320;
+    sourceCanvas.height = 200;
+    (instance.element as HTMLElement).appendChild(sourceCanvas);
+    const { spy, drawImage } = stubCanvasContexts();
+
+    try {
+      act(() => {
+        __terminalTesting.demoteSessionToDom("snap-overlay");
+      });
+
+      const overlay = querySnapshotOverlay();
+      expect(overlay).toBeTruthy();
+      // Strictly cosmetic: clicks, wheel, and selection must reach the live
+      // terminal underneath.
+      expect(overlay?.style.pointerEvents).toBe("none");
+      expect(drawImage).toHaveBeenCalledWith(sourceCanvas, 0, 0);
+      expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(false);
+
+      act(() => {
+        __terminalTesting.promoteSessionToWebgl("snap-overlay");
+      });
+
+      expect(querySnapshotOverlay()).toBeNull();
+      expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("drops a stale snapshot overlay when fresh output arrives for the demoted terminal", async () => {
+    const listeners = new Map<string, (event: { payload?: { session_id?: string } }) => void>();
+    mockListen.mockImplementation((async (event: string, handler: never) => {
+      listeners.set(event, handler);
+      return () => {};
+    }) as never);
+    const pendingReads: string[] = ["hello from codex\n"];
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return pendingReads.shift() ?? null;
+        case "terminal_link_target_exists":
+          return true;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="snap-stale" theme="dark" />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("snap-stale")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = 320;
+    sourceCanvas.height = 200;
+    (instance.element as HTMLElement).appendChild(sourceCanvas);
+    const { spy } = stubCanvasContexts();
+
+    try {
+      act(() => {
+        __terminalTesting.demoteSessionToDom("snap-stale");
+      });
+      expect(querySnapshotOverlay()).toBeTruthy();
+
+      // Output for the demoted terminal must lift the frozen still so the
+      // live DOM rendering shows the stream.
+      pendingReads.push("late output while demoted\n");
+      await act(async () => {
+        listeners.get("agent-pty-output-ready")?.({ payload: { session_id: "snap-stale" } });
+      });
+
+      await waitFor(() => {
+        expect(querySnapshotOverlay()).toBeNull();
+      });
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("late output while demoted"),
+        expect.any(Function),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("releases the WebGL context after a terminal leaves the viewport and re-promotes on re-entry", async () => {
+    type ObservationCallback = (
+      entries: Array<{ isIntersecting: boolean; target?: Element }>,
+      observer: unknown,
+    ) => void;
+    const ioCallbacks: ObservationCallback[] = [];
+    const OriginalIntersectionObserver = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class {
+      root = null;
+      rootMargin = "";
+      thresholds = [];
+      private callback: ObservationCallback;
+      constructor(callback: ObservationCallback) {
+        this.callback = callback;
+        ioCallbacks.push(callback);
+      }
+      observe(target: Element) {
+        this.callback([{ isIntersecting: true, target }], this);
+      }
+      unobserve() {}
+      disconnect() {}
+      takeRecords() {
+        return [];
+      }
+    } as unknown as typeof IntersectionObserver;
+    const { spy, loseContext } = stubCanvasContexts();
+
+    try {
+      render(<AgentTerminal sessionId="vis-scope" theme="dark" />);
+
+      await waitFor(() => {
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(true);
+      });
+
+      const instance = getLatestTerminalInstance();
+      const sourceCanvas = document.createElement("canvas");
+      sourceCanvas.width = 320;
+      sourceCanvas.height = 200;
+      (instance.element as HTMLElement).appendChild(sourceCanvas);
+      const leaveAndReenter = ioCallbacks[ioCallbacks.length - 1];
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          leaveAndReenter([{ isIntersecting: false }], null);
+        });
+        // Still within the grace window: layout churn must not thrash contexts.
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(true);
+
+        act(() => {
+          vi.advanceTimersByTime(1_000);
+        });
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(false);
+        expect(loseContext).toHaveBeenCalled();
+        expect(querySnapshotOverlay()).toBeTruthy();
+
+        act(() => {
+          leaveAndReenter([{ isIntersecting: true }], null);
+        });
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(true);
+        expect(querySnapshotOverlay()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    } finally {
+      globalThis.IntersectionObserver = OriginalIntersectionObserver;
+      spy.mockRestore();
+    }
+  });
+
 });

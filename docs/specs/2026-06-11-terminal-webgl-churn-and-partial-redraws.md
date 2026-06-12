@@ -113,6 +113,39 @@ Findings:
    Offline replay of captured raw PTY logs (`target/raw-pty-logs`, written by the
    audit harness on failure) reproduced each of these deterministically.
 
+3b. **Scope WebGL contexts to visible terminals; freeze a snapshot on
+   demotion (2026-06-12).** Even with deterministic context release, the
+   12-context pool bound *total* agent count to the browser cap. Each
+   `AgentTerminal` now drives promotion/demotion from an IntersectionObserver:
+   a card scrolled out of view (or in a hidden view) releases its context
+   after a 1s grace window, and a card entering the viewport promotes
+   (focus and maximize promotion unchanged). Before a demoted terminal's
+   context is released, its last WebGL frame is copied into a 2D-canvas
+   overlay (`preserveDrawingBuffer` is enabled on the addon to make the frame
+   readable; 2D canvases do not count against the WebGL cap). The overlay is
+   strictly cosmetic — `pointer-events: none`, removed on promotion and the
+   moment fresh output arrives — so demoted-but-streaming terminals show live
+   DOM rendering rather than a stale still. Result: agent count is unbounded;
+   the cap binds only on simultaneously visible terminals, and the DOM
+   renderer's font-fallback rendering of custom glyphs (the garbled Claude
+   logo) is only ever visible for terminals that are actively streaming while
+   demoted. The demotion/promotion lifecycle is provably non-functional-state:
+   PTY, parser buffer, input, and the remote gateway never touch the renderer
+   (`terminal-visibility-snapshot-native.test.mjs` exercises offscreen
+   output/input, re-entry completeness, overlay pointer-transparency, and
+   stale-snapshot lift).
+
+3c. **Record PTY size reports that arrive before the PTY exists
+   (2026-06-12).** Startup restore publishes "Restoring" placeholders before
+   providers spawn (bounded-concurrency restore widened this window). A
+   terminal size report for a placeholder used to be dropped — `resize_pty`
+   only recorded `pty_sizes` after a successful master resize — so the later
+   spawn opened the PTY at the 80×24 default and nothing re-reported, leaving
+   full-screen TUIs (OpenCode, Gemini) laid out for 80×24 inside a larger
+   grid. `resize_pty` now records the requested size for agents without a
+   live PTY and returns Ok; `spawn_agent` already seeds new PTYs from
+   `pty_sizes`.
+
 4. **Respect user scroll position during streaming writes.**
    `scrollRendererToBottomAfterWrite` only re-pins the viewport to the bottom when it
    still sits at or past the pre-write base; a wheel scroll landing mid-batch wins.
