@@ -27,7 +27,7 @@ describe("release workflow contract", () => {
     });
     expect(releasePleaseWorkflow).toContain("Sync release PR Cargo lockfile");
     expect(releasePleaseWorkflow).toContain("steps.release.outputs.prs_created == 'true'");
-    expect(releasePleaseWorkflow).toContain("actions/checkout@v4");
+    expect(releasePleaseWorkflow).toContain("actions/checkout@v6");
     expect(releasePleaseWorkflow).toContain("fetch-depth: 0");
     expect(releasePleaseWorkflow).toContain("RELEASE_PLEASE_PRS: ${{ steps.release.outputs.prs }}");
     expect(releasePleaseWorkflow).toContain("headBranchName");
@@ -130,18 +130,28 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, cleanup-updater-signatures, validate-updater-metadata]");
   });
 
-  it("dispatches Homebrew tap updates after stable releases publish", () => {
-    expect(releaseWorkflow).toContain("update-homebrew-cask:");
-    expect(releaseWorkflow).toContain("Update Homebrew cask");
+  it("dispatches package repository workflows after stable releases publish", () => {
+    expect(releaseWorkflow).toContain("dispatch-package-workflows:");
+    expect(releaseWorkflow).toContain("Dispatch package workflows");
     expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, publish]");
     expect(releaseWorkflow).toContain("needs.publish.result == 'success'");
     expect(releaseWorkflow).toContain("needs.create-release.outputs.is_prerelease == 'false'");
     expect(releaseWorkflow).toContain("needs.resolve-release.outputs.is_prerelease == 'false'");
-    expect(releaseWorkflow).toContain("HOMEBREW_TAP_DISPATCH_TOKEN");
-    expect(releaseWorkflow).toContain("wardian-release-published");
+    expect(releaseWorkflow).toContain("actions/create-github-app-token@v3.2.0");
+    expect(releaseWorkflow).toContain("WARDIAN_RELEASE_DISPATCH_APP_ID");
+    expect(releaseWorkflow).toContain("WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY");
+    expect(releaseWorkflow).toContain("actions.createWorkflowDispatch");
     expect(releaseWorkflow).toContain("owner: 'wardian-app'");
     expect(releaseWorkflow).toContain("repo: 'homebrew-tap'");
+    expect(releaseWorkflow).toContain("workflow_id: 'update-cask.yml'");
     expect(releaseWorkflow).toContain("tag: process.env.RELEASE_TAG");
+    expect(releaseWorkflow).toContain("repo: 'packages'");
+    expect(releaseWorkflow).toContain("workflow_id: 'publish-apt.yml'");
+    expect(releaseWorkflow).toContain("release_tag: process.env.RELEASE_TAG");
+    expect(releaseWorkflow).not.toContain("HOMEBREW_TAP_DISPATCH_TOKEN");
+    expect(releaseWorkflow).not.toContain("wardian-release-published");
+    expect(releaseWorkflow).not.toContain("update-apt-repository:");
+    expect(releaseWorkflow).not.toContain("uses: ./.github/workflows/apt-repository.yml");
   });
 
   it("publishes unified installers that carry the staged CLI", () => {

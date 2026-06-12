@@ -607,7 +607,7 @@ pub async fn obtain_session_id(
         provider_args.push("--print".to_string());
         provider_args.push(session_bootstrap_prompt().to_string());
     } else if provider_name == "claude" {
-        // --print mode does not accept --input-format stream-json; strip it.
+        // This bootstrap print call supplies a prompt argument, not stream-json stdin.
         if let Some(config) = config {
             let spawn_args =
                 strip_flag_value_pairs(provider.get_spawn_args(config, false), "--input-format");

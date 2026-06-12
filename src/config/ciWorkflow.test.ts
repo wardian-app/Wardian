@@ -18,7 +18,7 @@ describe("CI workflow contract", () => {
   it("uploads frontend coverage on main branch pushes for Codecov branch badges", () => {
     expect(ciWorkflow).toMatch(/- name: Coverage Report\s+run: npm run test:coverage/);
     expect(ciWorkflow).toMatch(
-      /- name: Upload Frontend Coverage\s+uses: codecov\/codecov-action@v4\s+with:\s+files: \.\/coverage\/lcov\.info\s+flags: frontend/,
+      /- name: Upload Frontend Coverage\s+uses: codecov\/codecov-action@v7\s+with:\s+files: \.\/coverage\/lcov\.info\s+flags: frontend/,
     );
   });
 
