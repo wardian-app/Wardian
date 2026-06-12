@@ -71,12 +71,12 @@ titles.
 
 The Linux APT repository is handled by the separate **APT Repository** workflow.
 Stable releases call it after publication with `publish=true`. Until
-`https://apt.wardian.org`, archive signing key custody, and the external static
-host are provisioned, that called workflow logs a notice, performs a signed
-dry-run with a temporary key, and uploads the generated repository as an
-artifact instead of failing the release. Run the same workflow manually with
-`publish=false` to validate changes, then with `publish=true` after the APT host
-repository and signing secrets are configured.
+`https://packages.wardian.org/apt`, archive signing key custody, and the
+external static host are provisioned, that called workflow logs a notice,
+performs a signed dry-run with a temporary key, and uploads the generated
+repository as an artifact instead of failing the release. Run the same workflow
+manually with `publish=false` to validate changes, then with `publish=true`
+after the package host repository and signing secrets are configured.
 
 `latest.json` must contain all stable platform keys:
 
