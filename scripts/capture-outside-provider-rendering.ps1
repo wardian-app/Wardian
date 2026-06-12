@@ -366,11 +366,11 @@ $providerInvocation = if ($Provider -eq "codex") {
     $claudeAddDirInvocationArg += " --add-dir '$escapedClaudeAgentDir'"
   }
   if ($escapedSessionId.Trim().Length -gt 0 -and $escapedSessionName.Trim().Length -gt 0) {
-    "& '$escapedClaudeExecutable'$claudeSettingsInvocationArg --verbose --input-format stream-json --output-format stream-json --session-id '$escapedSessionId' --name '$escapedSessionName'$claudeAddDirInvocationArg"
+    "& '$escapedClaudeExecutable'$claudeSettingsInvocationArg --session-id '$escapedSessionId' --name '$escapedSessionName'$claudeAddDirInvocationArg"
   } elseif ($escapedSessionId.Trim().Length -gt 0) {
-    "& '$escapedClaudeExecutable'$claudeSettingsInvocationArg --verbose --input-format stream-json --output-format stream-json --session-id '$escapedSessionId'$claudeAddDirInvocationArg"
+    "& '$escapedClaudeExecutable'$claudeSettingsInvocationArg --session-id '$escapedSessionId'$claudeAddDirInvocationArg"
   } else {
-    "& '$escapedClaudeExecutable'$claudeSettingsInvocationArg --verbose --input-format stream-json --output-format stream-json$claudeAddDirInvocationArg"
+    "& '$escapedClaudeExecutable'$claudeSettingsInvocationArg$claudeAddDirInvocationArg"
   }
 } elseif ($Provider -eq "gemini") {
   "& '$escapedGeminiExecutable'"

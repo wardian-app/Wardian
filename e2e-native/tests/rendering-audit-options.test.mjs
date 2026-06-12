@@ -1220,14 +1220,15 @@ test("outside Codex capture disables provider-owned rotating startup tips", () =
   assert.match(script, /-c tui\.show_tooltips=false/);
 });
 
-test("outside Claude capture mirrors Wardian named stream-json launch", () => {
+test("outside Claude capture mirrors Wardian named interactive launch", () => {
   const script = fs.readFileSync(
     path.join(process.cwd(), "scripts", "capture-outside-provider-rendering.ps1"),
     "utf8",
   );
 
   assert.match(script, /Get-Command "claude\.exe"/);
-  assert.match(script, /--verbose --input-format stream-json --output-format stream-json/);
+  assert.doesNotMatch(script, /--input-format stream-json/);
+  assert.doesNotMatch(script, /--output-format stream-json/);
   assert.match(script, /--session-id '\$escapedSessionId' --name '\$escapedSessionName'/);
 });
 
