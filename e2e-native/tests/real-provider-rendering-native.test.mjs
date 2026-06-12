@@ -23,7 +23,8 @@ const runRealRendering = process.env.WARDIAN_E2E_REAL_RENDERING === "1";
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const DEFAULT_SCROLLBACK_PROMPT =
-  "Print exactly 50 lines of numbers, one per line, from 1 through 50. Output no other text.";
+  "Print exactly 50 lines of numbers, one per line, from 1 through 50. Output no other text. " +
+  "Do not run any shell commands or use any tools; write the numbers directly in your reply.";
 const DEFAULT_SCROLLBACK_RESPONSE_MARKER = "50";
 const auditInputText = process.env.WARDIAN_E2E_RENDERING_INPUT_TEXT ?? DEFAULT_SCROLLBACK_PROMPT;
 const parsedTerminalFontSize = Number.parseFloat(process.env.WARDIAN_E2E_TERMINAL_FONT_SIZE ?? "10");
@@ -489,6 +490,7 @@ function responseLinesFromCapture(capture) {
     const promptLike =
       startsPrompt ||
       normalized.includes("Print exactly 50 lines") ||
+      normalized.includes("write the numbers directly") ||
       normalized.includes("WARDIAN_SCROLL_NNN") ||
       /\b(?:WA)?RDIAN_SCROLL_\d{3}\s+(?:through|to)\s+WARDIAN_SCROLL_\d{3}\b/.test(normalized) ||
       /\bprefix\s+WARDIAN_SCROLL_/i.test(normalized);
@@ -561,6 +563,23 @@ async function waitForAnyTerminalText(driver, sessionId, expectedTexts, timeoutM
   );
 }
 
+/**
+ * TUI input boxes wrap long single-line prompts at the box width (opencode
+ * inserts non-whitespace border glyphs between wrapped segments), and very
+ * narrow cards make some TUIs truncate the tail with an ellipsis (gemini), so
+ * the exact contiguous prompt string never appears in the terminal. Probe for
+ * a short word-boundary prefix that survives both wrapping and truncation.
+ */
+function echoProbeText(text) {
+  const trimmed = String(text ?? "").trim();
+  if (trimmed.length <= 20) {
+    return trimmed;
+  }
+  const cut = trimmed.slice(0, 20);
+  const lastSpace = cut.lastIndexOf(" ");
+  return lastSpace > 8 ? cut.slice(0, lastSpace) : cut;
+}
+
 function longInputEchoFallbackTexts(text) {
   const meaningfulLines = String(text ?? "")
     .split(/\r?\n/)
@@ -574,24 +593,35 @@ function longInputEchoFallbackTexts(text) {
   ];
 }
 
+function providerReadyFallbackTexts(provider) {
+  // Alternate idle markers that survive very narrow cards, where the primary
+  // marker can be split across interleaved layout columns (e.g. opencode's
+  // footer at ~21 cols separates "ctrl+p" and "commands" with other text).
+  if (provider === "opencode") {
+    return ["Ask anything"];
+  }
+  return [];
+}
+
 async function waitForProviderInputReady(driver, sessionId, provider) {
   const readyText = providerReadyText(provider);
   if (!readyText) {
     return await waitForReadableTerminal(driver, sessionId);
   }
+  const readyTexts = [readyText, ...providerReadyFallbackTexts(provider)];
   let last = null;
   const startedAt = Date.now();
   while (Date.now() - startedAt < 120000) {
     last = await readTerminalCapture(driver, sessionId);
     const terminalText = terminalTextFromCapture(last);
-    if (terminalTextIncludes(terminalText, readyText)) {
+    if (readyTexts.some((text) => terminalTextIncludes(terminalText, text))) {
       return last;
     }
     await dismissProviderStartupModal(driver, sessionId, provider);
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error(
-    `Timed out waiting for terminal text ${JSON.stringify(readyText)} for ${sessionId}: ${JSON.stringify(last)}`,
+    `Timed out waiting for terminal text ${JSON.stringify(readyTexts)} for ${sessionId}: ${JSON.stringify(last)}`,
   );
 }
 
@@ -715,13 +745,23 @@ async function submitAuditInput(driver, sessionId, provider, text) {
   const startupModal = await dismissProviderStartupModal(driver, sessionId, provider);
   const typedAt = nowIso();
   await invokeTauri(driver, "send_input_to_agent", { sessionId, input: text });
+  // Best-effort echo sync: narrow TUI input boxes wrap typed text around
+  // border glyphs (opencode) or truncate it with ellipses (gemini), so even a
+  // short probe can fail to match at extreme widths. The provider-turn wait
+  // after submission is the authoritative check that the input arrived.
+  let echoConfirmed = true;
   try {
     await waitForTerminalText(driver, sessionId, text, 10000);
-  } catch (error) {
-    if (String(text).length < 500) {
-      throw error;
+  } catch {
+    try {
+      if (String(text).length >= 500) {
+        await waitForAnyTerminalText(driver, sessionId, longInputEchoFallbackTexts(text), 30000);
+      } else {
+        await waitForTerminalText(driver, sessionId, echoProbeText(text), 10000);
+      }
+    } catch {
+      echoConfirmed = false;
     }
-    await waitForAnyTerminalText(driver, sessionId, longInputEchoFallbackTexts(text), 30000);
   }
 
   if (!auditSubmitInput || auditInputSubmitSequence.length === 0) {
@@ -732,6 +772,7 @@ async function submitAuditInput(driver, sessionId, provider, text) {
       typed_at: typedAt,
       submitted_at: null,
       startup_modal: startupModal,
+      echo_confirmed: echoConfirmed,
       reason: "submission disabled",
     };
   }
@@ -745,6 +786,7 @@ async function submitAuditInput(driver, sessionId, provider, text) {
     typed_at: typedAt,
     submitted_at: submittedAt,
     startup_modal: startupModal,
+    echo_confirmed: echoConfirmed,
   };
 }
 
@@ -770,6 +812,7 @@ async function waitForSubmittedProviderTurn(driver, sessionId, options = {}) {
       numberedResponseMax,
       auditProviderTurnTimeoutMs,
       minNumberedResponseOccurrences,
+      options.provider ?? null,
     );
     return {
       waited_for_turn: true,
@@ -839,7 +882,7 @@ function numberedResponseValues(capture, max) {
   const seen = new Set();
   for (const line of lines) {
     const normalized = String(line ?? "").replace(/\s+/g, " ").trim();
-    const match = normalized.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+    const match = normalized.match(/^(?:[●•*✦>]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
     if (!match) {
       continue;
     }
@@ -853,7 +896,7 @@ function numberedResponseValues(capture, max) {
 
 function numberedResponseLineValue(line, max) {
   const normalized = String(line ?? "").replace(/\s+/g, " ").trim();
-  const match = normalized.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+  const match = normalized.match(/^(?:[●•*✦>]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
   if (!match) {
     return null;
   }
@@ -894,6 +937,45 @@ function hasCompleteNumberedResponse(capture, max, minOccurrences = 1) {
   return true;
 }
 
+// Providers that repaint a full-screen TUI in place and never push response
+// lines into xterm scrollback, so a "complete scrollable 1..N" check can never
+// pass for them. For these we assert a contiguous visible numbered tail instead.
+const NO_SCROLLBACK_PROVIDERS = new Set(["opencode"]);
+
+/**
+ * For in-place TUIs the viewport can only show the tail of the numbered
+ * response. Require the visible numbered run to be strictly contiguous and end
+ * at `max` — a dropped or garbled rendered line would break the run. At very
+ * narrow card sizes the TUI may show only the final line, so a single visible
+ * value (`max` itself) is accepted.
+ */
+function hasContiguousVisibleNumberedTail(capture, max, minRun = 1) {
+  const lines = capture?.debug?.renderer?.lines ?? capture?.debug?.lines ?? [];
+  const values = [];
+  for (const line of lines) {
+    const normalized = String(line ?? "").replace(/\s+/g, " ").trim();
+    // Whitespace/EOL must follow the number so unit-suffixed values on status
+    // lines ("3.0s", "12,070 tokens", "6% used") don't pollute the run.
+    const match = normalized.match(/^(?:[●•*✦>]\s*)?(\d{1,4})(?:\s|$)/);
+    if (!match) {
+      continue;
+    }
+    const value = Number.parseInt(match[1], 10);
+    if (value >= 1 && value <= max) {
+      values.push(value);
+    }
+  }
+  if (values.length < minRun || values[values.length - 1] !== max) {
+    return false;
+  }
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index] !== values[index - 1] + 1) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function hasXtermScrollback(capture) {
   const renderer = capture?.debug?.renderer;
   return (renderer?.baseY ?? 0) > 0 || (capture?.debug?.baseY ?? 0) > 0;
@@ -921,13 +1003,93 @@ async function dumpRawOutputLog(driver, sessionId, label) {
   }
 }
 
-async function waitForScrollableNumberedResponse(driver, sessionId, max, timeoutMs, minOccurrences = 1) {
+const APPROVAL_PROMPT_PATTERN =
+  /Allow execution of|Allow once|Allow for this session|Do you want to (?:run|allow|proceed)|Yes, (?:allow|proceed|run)/i;
+
+/**
+ * Providers occasionally answer the audit prompt by invoking a shell/tool call,
+ * which raises an in-TUI approval dialog and stalls the turn. When the visible
+ * viewport shows such a dialog, pick the first ("allow once") option so the
+ * rendering audit can keep measuring what it is actually here to measure.
+ */
+async function maybeAnswerApprovalPrompt(driver, sessionId, capture, state) {
+  const viewportLines = capture?.debug?.renderer?.lines ?? capture?.debug?.lines ?? [];
+  if (!APPROVAL_PROMPT_PATTERN.test(viewportLines.join("\n"))) {
+    return false;
+  }
+  const now = Date.now();
+  if (state.answers >= 5 || now - state.lastAnswerAt < 5000) {
+    return false;
+  }
+  state.answers += 1;
+  state.lastAnswerAt = now;
+  await invokeTauri(driver, "send_input_to_agent", { sessionId, input: "1" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await invokeTauri(driver, "send_input_to_agent", { sessionId, input: "\r" });
+  return true;
+}
+
+const PROVIDER_BUSY_PATTERN = /esc to cancel|esc to interrupt|Thinking|Generating|Working/i;
+const MAX_NUMBERED_RESPONSE_RESUBMITS = 2;
+const NUMBERED_RESPONSE_STALL_MS = 15000;
+
+/**
+ * Providers occasionally end their turn with an incomplete numbered response
+ * (model noncompliance, e.g. stopping at 46/50). When the response has stalled,
+ * the provider is idle at its ready prompt, and the response is still incomplete,
+ * resubmit the audit prompt so the run measures rendering rather than one model
+ * sample's arithmetic discipline.
+ */
+async function maybeResubmitNumberedPrompt(driver, sessionId, capture, max, minOccurrences, state) {
+  if (!state.readyText || state.resubmits >= MAX_NUMBERED_RESPONSE_RESUBMITS) {
+    return false;
+  }
+  const seenCount = numberedResponseValues(capture, max).size;
+  const now = Date.now();
+  if (seenCount > state.lastSeenCount) {
+    state.lastSeenCount = seenCount;
+    state.lastProgressAt = now;
+    return false;
+  }
+  if (now - state.lastProgressAt < NUMBERED_RESPONSE_STALL_MS) {
+    return false;
+  }
+  const viewportText = (capture?.debug?.renderer?.lines ?? capture?.debug?.lines ?? []).join("\n");
+  if (!viewportText.includes(state.readyText) || PROVIDER_BUSY_PATTERN.test(viewportText)) {
+    return false;
+  }
+  if (hasCompleteNumberedResponse(capture, max, minOccurrences)) {
+    return false;
+  }
+  state.resubmits += 1;
+  state.lastProgressAt = now;
+  await invokeTauri(driver, "send_input_to_agent", { sessionId, input: auditInputText });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  await invokeTauri(driver, "send_input_to_agent", { sessionId, input: auditInputSubmitSequence });
+  return true;
+}
+
+async function waitForScrollableNumberedResponse(driver, sessionId, max, timeoutMs, minOccurrences = 1, provider = null) {
   let last = null;
   let lastWheelError = null;
+  const approvalState = { answers: 0, lastAnswerAt: 0 };
+  const resubmitState = {
+    readyText: provider ? providerReadyText(provider) : null,
+    resubmits: 0,
+    lastSeenCount: 0,
+    lastProgressAt: Date.now(),
+  };
+  const requireScrollback = !NO_SCROLLBACK_PROVIDERS.has(provider ?? "");
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     last = await readTerminalCapture(driver, sessionId);
-    if (hasCompleteNumberedResponse(last, max, minOccurrences) && hasXtermScrollback(last)) {
+    await maybeAnswerApprovalPrompt(driver, sessionId, last, approvalState);
+    await maybeResubmitNumberedPrompt(driver, sessionId, last, max, minOccurrences, resubmitState);
+    if (!requireScrollback) {
+      if (hasContiguousVisibleNumberedTail(last, max)) {
+        return last;
+      }
+    } else if (hasCompleteNumberedResponse(last, max, minOccurrences) && hasXtermScrollback(last)) {
       try {
         await scrollTerminalUserWheelUp(driver, sessionId);
         await scrollTerminalDebug(driver, sessionId, "bottom");
@@ -1403,6 +1565,13 @@ async function scrollTerminalUserWheelUp(driver, sessionId) {
   }
 
   const after = await readTerminalDebugSnapshot(driver, sessionId);
+  // TUI-owned-scroll terminals (e.g. opencode) intentionally forward wheel
+  // events to the provider instead of scrolling the xterm viewport, so an
+  // unmoved viewport is the correct behavior there, not a failure.
+  const wheelStats = after?.wheelStats ?? null;
+  if (wheelStats && (wheelStats.opencode_owned ?? 0) > 0 && (wheelStats.handled ?? 0) === 0) {
+    return { before, after, tui_owned: true };
+  }
   const dispatchDiagnostics = lastDispatch
     ? {
         target_count: lastDispatch.target_count,
@@ -1649,6 +1818,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
       inputEvent.phase = inputIndex === 0 ? "initial" : `initial-repeat-${inputIndex + 1}`;
       inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, {
         minNumberedResponseOccurrences: inputIndex + 1,
+        provider,
       });
       record.input_events.push(inputEvent);
     }
@@ -1788,7 +1958,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     if (auditInputText.trim().length > 0) {
       const inputEvent = await submitAuditInput(driver, sessionId, provider, auditInputText);
       inputEvent.phase = "after-clear";
-      inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId);
+      inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, { provider });
       record.input_events.push(inputEvent);
     }
     await addCapturedStateWithScrollback(record, driver, providerDir, sessionId, "cleared-immediate", {
@@ -1816,8 +1986,15 @@ test("real provider terminal rendering audit captures user-visible Wardian state
 
     record.raw_output_log = await dumpRawOutputLog(driver, sessionId, `${provider}-final`);
 
-    const config = await readAgentConfig(driver, sessionId);
+    let config = await readAgentConfig(driver, sessionId);
     if (provider === "opencode") {
+      // The backend records the OpenCode session id asynchronously after the
+      // provider (re)spawns, so a single read right after resume can race it.
+      const sessionIdDeadline = Date.now() + 30000;
+      while (!isOpenCodeProviderSessionId(config?.resume_session ?? "") && Date.now() < sessionIdDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        config = await readAgentConfig(driver, sessionId);
+      }
       const providerSessionId = config?.resume_session ?? "";
       assert.ok(
         isOpenCodeProviderSessionId(providerSessionId),

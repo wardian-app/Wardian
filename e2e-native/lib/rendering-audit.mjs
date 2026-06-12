@@ -40,7 +40,10 @@ export function createRenderingEvidenceDir(repoRoot, runId) {
 
 export function terminalTextIncludes(text, expectedText) {
   const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const compact = (value) => normalize(value).replace(/\s+/g, "");
+  // Compact matching also drops box-drawing and block glyphs (U+2500-U+259F):
+  // narrow TUI layouts wrap text around border characters (e.g. opencode's
+  // "┃" input-box edge), which would otherwise break substring matching.
+  const compact = (value) => normalize(value).replace(/[\s─-▟]+/g, "");
   return normalize(text).includes(normalize(expectedText)) ||
     compact(text).includes(compact(expectedText));
 }
@@ -255,7 +258,7 @@ function repeatedNumberedResponseRows(state, auditText, inputText = "", allowedO
     const counts = new Map();
     for (const line of sourceLines) {
       const normalizedLine = normalizedContentLine(line);
-      const match = normalizedLine.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+      const match = normalizedLine.match(/^(?:[●•*✦>]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
       if (!match) {
         continue;
       }
@@ -350,7 +353,7 @@ function completeNumberedResponseRows(state, auditText, inputText = "") {
   for (const line of sourceLines) {
     const normalizedLine = normalizedContentLine(line);
     if (expected.type === "plain") {
-      const match = normalizedLine.match(/^(?:[●•*]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
+      const match = normalizedLine.match(/^(?:[●•*✦>]\s*)?(?:line\s+)?(\d{1,4})(?:\s*:\s*\d{1,4})?\.?$/i);
       if (match) {
         seen.add(String(Number.parseInt(match[1], 10)));
       }
@@ -481,6 +484,14 @@ export function auditRenderingEvidence({
     // providers; completeness stays a hard failure.
     const duplicatesAreWarnings =
       provider === "claude" || provider === "gemini" || provider === "codex";
+    // opencode is a full-screen in-place TUI: it repaints its own message view
+    // rather than appending to the terminal stream, so xterm scrollback holds
+    // arbitrary repaint overflow (expected duplicates), never the complete
+    // response, and post-resize repaints may show any portion of the
+    // conversation. The stream-content lab checks below are not meaningful for
+    // it; the native test asserts live turn completion via the visible
+    // numbered tail instead.
+    const inPlaceTui = provider === "opencode";
     const providerDuplicateCheck = (condition, message) => {
       if (!duplicatesAreWarnings) {
         providerCheck(condition, message);
@@ -532,56 +543,58 @@ export function auditRenderingEvidence({
           hasTimestamp(state.metrics?.timestamps?.artifact_written_at),
           `Wardian artifact timestamp recorded: ${stateName}`,
         );
-        const allowedInputOccurrences = expectedInputRepeatCount(wardianManifest);
-        const duplicateContent = duplicatedTerminalContent(
-          state,
-          wardianManifest.input_text,
-          allowedInputOccurrences,
-        );
-        providerDuplicateCheck(
-          duplicateContent.ok,
-          `Wardian terminal content has no obvious duplicated rows: ${stateName}`,
-        );
-        const duplicateNumberedRows = repeatedNumberedResponseRows(
-          state,
-          auditText,
-          wardianManifest.input_text,
-          allowedInputOccurrences,
-        );
-        providerDuplicateCheck(
-          duplicateNumberedRows.ok,
-          `Wardian numbered response rows are not duplicated: ${stateName}`,
-        );
-        const completeNumberedRows = completeNumberedResponseRows(
-          state,
-          auditText,
-          wardianManifest.input_text,
-        );
-        providerCheck(
-          completeNumberedRows.ok,
-          `Wardian numbered response rows are complete: ${stateName}`,
-        );
-        const rendererState = rendererBackedState(state);
-        if (rendererState) {
-          const duplicateRendererNumberedRows = repeatedNumberedResponseRows(
-            rendererState,
+        if (!inPlaceTui) {
+          const allowedInputOccurrences = expectedInputRepeatCount(wardianManifest);
+          const duplicateContent = duplicatedTerminalContent(
+            state,
+            wardianManifest.input_text,
+            allowedInputOccurrences,
+          );
+          providerDuplicateCheck(
+            duplicateContent.ok,
+            `Wardian terminal content has no obvious duplicated rows: ${stateName}`,
+          );
+          const duplicateNumberedRows = repeatedNumberedResponseRows(
+            state,
             auditText,
             wardianManifest.input_text,
             allowedInputOccurrences,
           );
           providerDuplicateCheck(
-            duplicateRendererNumberedRows.ok,
-            `Wardian renderer numbered response rows are not duplicated: ${stateName}`,
+            duplicateNumberedRows.ok,
+            `Wardian numbered response rows are not duplicated: ${stateName}`,
           );
-          const completeRendererNumberedRows = completeNumberedResponseRows(
-            rendererState,
+          const completeNumberedRows = completeNumberedResponseRows(
+            state,
             auditText,
             wardianManifest.input_text,
           );
           providerCheck(
-            completeRendererNumberedRows.ok,
-            `Wardian renderer numbered response rows are complete: ${stateName}`,
+            completeNumberedRows.ok,
+            `Wardian numbered response rows are complete: ${stateName}`,
           );
+          const rendererState = rendererBackedState(state);
+          if (rendererState) {
+            const duplicateRendererNumberedRows = repeatedNumberedResponseRows(
+              rendererState,
+              auditText,
+              wardianManifest.input_text,
+              allowedInputOccurrences,
+            );
+            providerDuplicateCheck(
+              duplicateRendererNumberedRows.ok,
+              `Wardian renderer numbered response rows are not duplicated: ${stateName}`,
+            );
+            const completeRendererNumberedRows = completeNumberedResponseRows(
+              rendererState,
+              auditText,
+              wardianManifest.input_text,
+            );
+            providerCheck(
+              completeRendererNumberedRows.ok,
+              `Wardian renderer numbered response rows are complete: ${stateName}`,
+            );
+          }
         }
         if (requiresVisibleTerminalDom(stateName)) {
           providerCheck(
@@ -590,26 +603,36 @@ export function auditRenderingEvidence({
           );
         }
         if (stateNeedsResizeAudit(stateName)) {
-          const auditTextPresent = terminalTextIncludes(stateText(state), auditText);
-          providerCheck(
-            auditTextPresent,
-            wardianManifest.input_submitted === true
-              ? `Wardian resized state includes visible audit marker: ${stateName}`
-              : `Wardian resized state includes visible audit input: ${stateName}`,
-          );
-          const historyText = parserHistoryText(state);
-          if (historyText.trim().length > 0) {
+          if (!inPlaceTui) {
+            // gemini's bottom-anchored TUI may repaint only its input chrome
+            // after a resize, leaving the response marker in xterm scrollback
+            // rather than the visible viewport — accept either there. Diff
+            // renderers (codex/claude) keep content in place, so the marker
+            // must stay visible for them.
+            const markerHaystack = provider === "gemini"
+              ? `${stateText(state)}\n${parserHistoryText(state)}\n${rendererHistoryText(state)}`
+              : stateText(state);
+            const auditTextPresent = terminalTextIncludes(markerHaystack, auditText);
             providerCheck(
-              terminalTextIncludes(`${stateText(state)}\n${historyText}`, auditText),
-              `Wardian resized state parser history includes audit marker: ${stateName}`,
+              auditTextPresent,
+              wardianManifest.input_submitted === true
+                ? `Wardian resized state includes visible audit marker: ${stateName}`
+                : `Wardian resized state includes visible audit input: ${stateName}`,
             );
-          }
-          const rendererHistory = rendererHistoryText(state);
-          if (rendererHistory.trim().length > 0) {
-            providerCheck(
-              terminalTextIncludes(`${stateText(state)}\n${rendererHistory}`, auditText),
-              `Wardian resized state renderer history includes audit marker: ${stateName}`,
-            );
+            const historyText = parserHistoryText(state);
+            if (historyText.trim().length > 0) {
+              providerCheck(
+                terminalTextIncludes(`${stateText(state)}\n${historyText}`, auditText),
+                `Wardian resized state parser history includes audit marker: ${stateName}`,
+              );
+            }
+            const rendererHistory = rendererHistoryText(state);
+            if (rendererHistory.trim().length > 0) {
+              providerCheck(
+                terminalTextIncludes(`${stateText(state)}\n${rendererHistory}`, auditText),
+                `Wardian resized state renderer history includes audit marker: ${stateName}`,
+              );
+            }
           }
           if (state.metrics?.resize?.expect_cols_change === true) {
             const beforeCols = state.metrics.resize.before_debug?.cols;
@@ -633,9 +656,15 @@ export function auditRenderingEvidence({
         : "Wardian resized terminal text includes audit input",
     );
     const latestPrePauseState = wardianStates.get("cleared-immediate") ?? wardianStates.get("scrolled-top");
+    // In-place TUIs repaint idle chrome (elapsed-time/token footers) between
+    // captures, so exact row equality is wrong for them; assert pause did not
+    // blank the terminal instead.
+    const pausedLines = wardianStates.get("paused")?.capture?.debug?.lines ?? [];
     providerCheck(
-      JSON.stringify(latestPrePauseState?.capture?.debug?.lines ?? []) ===
-        JSON.stringify(wardianStates.get("paused")?.capture?.debug?.lines ?? []),
+      inPlaceTui
+        ? pausedLines.some((line) => String(line ?? "").trim().length > 0)
+        : JSON.stringify(latestPrePauseState?.capture?.debug?.lines ?? []) ===
+            JSON.stringify(pausedLines),
       "Wardian paused parser rows preserve latest pre-pause buffer",
     );
     if (wardianManifest.input_submitted === true) {
