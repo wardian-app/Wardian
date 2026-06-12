@@ -415,3 +415,13 @@ jobs:
                 source_run_id: String(context.runId),
               },
             });
+
+  update-apt-repository:
+    name: Update APT repository
+    needs: [create-release, resolve-release, publish]
+    if: always() && needs.publish.result == 'success' && ((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && needs.resolve-release.outputs.is_prerelease == 'false'))
+    uses: ./.github/workflows/apt-repository.yml
+    with:
+      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      publish: true
+    secrets: inherit

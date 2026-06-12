@@ -28,10 +28,18 @@ Wardian is built for malleable agent work. Prompts, classes, skills, workflows, 
 
 ---
 
-## Download
+## Install
 
-Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are available from the [Releases page](https://github.com/wardian-app/Wardian/releases).
+Use the supported install path for your platform:
 
+| System | Install |
+| :--- | :--- |
+| Windows x64 | `winget install WardianApp.Wardian` |
+| macOS Apple Silicon or Intel | `brew install --cask wardian-app/tap/wardian` |
+| Linux Debian/Ubuntu x64 | Download `Wardian_X.Y.Z_amd64.deb` from [Releases](https://github.com/wardian-app/Wardian/releases/latest), then run `sudo apt install ./Wardian_X.Y.Z_amd64.deb`. |
+| Linux other x64 | Download `Wardian_X.Y.Z_amd64.AppImage` from [Releases](https://github.com/wardian-app/Wardian/releases/latest), then run `chmod +x Wardian_X.Y.Z_amd64.AppImage && ./Wardian_X.Y.Z_amd64.AppImage`. |
+
+Manual downloads are also available from the [Releases page](https://github.com/wardian-app/Wardian/releases).
 Choose the asset for your operating system and CPU:
 
 | System | Download asset | Notes |

@@ -4,9 +4,19 @@ Use this guide to get from a fresh Wardian install to a completed first agent ta
 
 If any first-run step fails, use [First-Run Troubleshooting](./first-run-troubleshooting.md) to recover without switching to developer-only diagnostics.
 
-## 1. Download and Launch Wardian
+## 1. Install and Launch Wardian
 
-Download the latest installer or app bundle from the [Wardian releases page](https://github.com/wardian-app/Wardian/releases/latest), then launch Wardian from your operating system. GitHub Releases are the canonical install source; package-manager listings may lag behind the newest stable release.
+Use the supported install path for your platform, then launch Wardian from your
+operating system.
+
+| System | Install |
+| :--- | :--- |
+| Windows x64 | `winget install WardianApp.Wardian` |
+| macOS Apple Silicon or Intel | `brew install --cask wardian-app/tap/wardian` |
+| Linux Debian/Ubuntu x64 | Download `Wardian_X.Y.Z_amd64.deb` from [Releases](https://github.com/wardian-app/Wardian/releases/latest), then run `sudo apt install ./Wardian_X.Y.Z_amd64.deb`. |
+| Linux other x64 | Download `Wardian_X.Y.Z_amd64.AppImage` from [Releases](https://github.com/wardian-app/Wardian/releases/latest), then run `chmod +x Wardian_X.Y.Z_amd64.AppImage && ./Wardian_X.Y.Z_amd64.AppImage`. |
+
+Manual downloads are also available from the [Wardian releases page](https://github.com/wardian-app/Wardian/releases/latest).
 
 Choose the asset for your operating system and CPU:
 
