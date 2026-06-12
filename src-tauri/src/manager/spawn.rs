@@ -1602,10 +1602,22 @@ pub async fn resize_pty(
                     &format!("resize cols={} rows={}", cols, rows),
                 );
             }
-            agent
-                .pty_master
-                .clone()
-                .ok_or_else(|| format!("Agent {} is off", session_id))?
+            match agent.pty_master.clone() {
+                Some(master) => master,
+                None => {
+                    drop(agents);
+                    // No live PTY yet: the agent is a startup "Restoring"
+                    // placeholder or is off. Record the requested size so
+                    // spawn_agent opens the PTY at it; dropping the report here
+                    // left restored TUIs laid out for the 80x24 default inside
+                    // a larger terminal grid, because nothing re-reports after
+                    // the placeholder is replaced.
+                    if let Ok(mut sizes) = state.pty_sizes.write() {
+                        sizes.insert(session_id, (cols, rows));
+                    }
+                    return Ok(());
+                }
+            }
         } else {
             return Err(format!("Agent {} not found", session_id));
         }
@@ -1664,6 +1676,61 @@ mod tests {
     fn restored_spawns_skip_stale_process_scan() {
         assert!(!should_cleanup_stale_session_processes_before_spawn(true));
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
+    }
+
+    fn agent_without_pty() -> crate::state::ActiveAgent {
+        crate::state::ActiveAgent {
+            config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            process_id: None,
+            query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_status: std::sync::Arc::new(std::sync::Mutex::new("Restoring".to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::state::AgentWatchState::new("restoring-agent".to_string(), 4096, 262_144),
+            )),
+            terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+
+    // A resize that arrives while the agent is still a "Restoring" placeholder
+    // (or off) has no PTY to apply to, but spawn_agent seeds new PTYs from
+    // pty_sizes. Dropping the report left restored TUIs laid out for the 80x24
+    // default inside a larger terminal grid.
+    #[tokio::test]
+    async fn resize_without_pty_records_size_for_spawn() {
+        let state = AppState::new();
+        state
+            .agents
+            .lock()
+            .await
+            .insert("restoring-agent".to_string(), agent_without_pty());
+
+        let result = resize_pty("restoring-agent".to_string(), 124, 30, &state).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            state.pty_sizes.read().unwrap().get("restoring-agent"),
+            Some(&(124, 30))
+        );
+    }
+
+    #[tokio::test]
+    async fn resize_unknown_agent_still_errors() {
+        let state = AppState::new();
+        let result = resize_pty("missing".to_string(), 124, 30, &state).await;
+        assert!(result.is_err());
+        assert!(state.pty_sizes.read().unwrap().is_empty());
     }
 
     #[test]
