@@ -31,7 +31,7 @@ jobs:
       release_id: ${{ steps.create.outputs.result }}
       is_prerelease: ${{ steps.detect.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Detect prerelease
         id: detect
         run: |
@@ -150,12 +150,12 @@ jobs:
             name: linux
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && inputs.release_tag || github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: "npm"
@@ -228,7 +228,7 @@ jobs:
 
       - name: Upload dry-run artifacts
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wardian-${{ matrix.platform.name }}
           path: |
