@@ -235,3 +235,22 @@ reflow failure drops that parser's off-screen scrollback, which live output
 re-seeds — strictly better than a dead, console-flooding terminal.
 Regression-tested by forcing `parser.resize` to throw and asserting reset +
 retry with no propagated error.
+
+## Follow-up: reclaim the FitAddon overview-ruler gutter (2026-06-13)
+
+TUIs rendered a few columns short of the card's right edge. `@xterm/addon-fit`'s
+`proposeDimensions` reserves `this._terminal.options.overviewRuler?.width || 14`
+off the available width whenever `scrollback !== 0` — a flat **14px** gutter for
+an overview ruler we never render. Because `0` is falsy, the reservation can't
+be disabled through options (`{ width: 0 }` still yields 14), and at a ~7–8px
+cell that gutter costs roughly two columns on every terminal, which the TUI then
+faithfully fills short.
+
+`proposeTerminalDimensions` now computes `floor(host.clientWidth / cellWidth)`
+and `floor(host.clientHeight / cellHeight)` directly from
+`term._core._renderService.dimensions.css.cell` (the same measured cell size the
+addon reads), against the renderer host's padding-free content box, and falls
+back to `fitAddon.proposeDimensions()` if those internals are ever absent or the
+cell size is still zero (pre-open). `fitTerminalToContainer` calls it instead of
+the addon. Regression-tested for both the internal-path full-width result and
+the addon fallback.

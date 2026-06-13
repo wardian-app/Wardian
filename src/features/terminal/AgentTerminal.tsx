@@ -1287,6 +1287,42 @@ async function reportTerminalSize(
   }
 }
 
+// xterm's FitAddon reserves a flat 14px gutter for an overview ruler whenever
+// scrollback is enabled (`overviewRuler?.width || 14`) — and `0` is falsy, so
+// the reservation can't be disabled via options. We never render an overview
+// ruler, so that gutter just costs ~2 columns on every terminal, leaving TUIs
+// rendering short of the card's right edge. Compute dimensions directly from
+// the measured CSS cell size (the same field FitAddon reads) against the host's
+// full content box, with FitAddon as the fallback if the internals move.
+function proposeTerminalDimensions(
+  renderer: TerminalRendererEntry,
+): { cols: number; rows: number } | null {
+  try {
+    const cell = (
+      renderer.term as unknown as {
+        _core?: {
+          _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } };
+        };
+      }
+    )._core?._renderService?.dimensions?.css?.cell;
+    const cellWidth = cell?.width ?? 0;
+    const cellHeight = cell?.height ?? 0;
+    const hostWidth = renderer.host.clientWidth;
+    const hostHeight = renderer.host.clientHeight;
+    if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
+      const cols = Math.floor(hostWidth / cellWidth);
+      const rows = Math.floor(hostHeight / cellHeight);
+      if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
+        return { cols, rows };
+      }
+    }
+  } catch {
+    // Fall through to the addon below.
+  }
+  const proposed = renderer.fitAddon.proposeDimensions();
+  return proposed ? { cols: proposed.cols, rows: proposed.rows } : null;
+}
+
 async function fitTerminalToContainer(
   sessionId: string,
   entry: TerminalSessionEntry,
@@ -1315,7 +1351,7 @@ async function fitTerminalToContainer(
   entry.lastMeasuredHostSize = { width, height };
 
   try {
-    const proposedDimensions = renderer.fitAddon.proposeDimensions();
+    const proposedDimensions = proposeTerminalDimensions(renderer);
     entry.fitCount += 1;
     if (!proposedDimensions) {
       return;
@@ -2433,6 +2469,7 @@ export const __terminalTesting = {
   extractSyntheticScrollbackRows,
   insertSyntheticScrollbackRows,
   promoteSessionToWebgl,
+  proposeTerminalDimensions,
   removeSnapshotOverlay,
   resizeParser,
   isProviderViewportRedraw,

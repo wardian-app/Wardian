@@ -356,6 +356,38 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("computes columns from the cell size without the FitAddon overview-ruler gutter", () => {
+    // FitAddon reserves a flat 14px gutter when scrollback is enabled, costing
+    // ~2 columns even though we never render an overview ruler. Our computation
+    // must use the full host width / cell width instead.
+    const fallback = vi.fn(() => ({ cols: 1, rows: 1 }));
+    const renderer = {
+      term: {
+        _core: { _renderService: { dimensions: { css: { cell: { width: 8, height: 16 } } } } },
+      },
+      host: { clientWidth: 800, clientHeight: 320 },
+      fitAddon: { proposeDimensions: fallback },
+    } as never;
+
+    const dims = __terminalTesting.proposeTerminalDimensions(renderer);
+
+    // 800 / 8 = 100 cols (FitAddon would give floor((800-14)/8) = 98), 320/16 = 20.
+    expect(dims).toEqual({ cols: 100, rows: 20 });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("falls back to FitAddon when xterm cell internals are unavailable", () => {
+    const fallback = vi.fn(() => ({ cols: 77, rows: 19 }));
+    const renderer = {
+      term: {},
+      host: { clientWidth: 800, clientHeight: 320 },
+      fitAddon: { proposeDimensions: fallback },
+    } as never;
+
+    expect(__terminalTesting.proposeTerminalDimensions(renderer)).toEqual({ cols: 77, rows: 19 });
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
   it("releases WebGL1 fallback contexts (not just webgl2) on disposal", async () => {
     // @xterm/addon-webgl silently falls back to a WebGL1 context when webgl2 is
     // unavailable (common once the browser nears its context cap). Probing only
