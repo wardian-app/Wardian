@@ -1041,11 +1041,29 @@ function disposeWebglAddonAndReleaseContext(renderer: TerminalRendererEntry) {
   if (!addon) {
     return;
   }
-  const canvas = renderer.term.element?.querySelector("canvas");
+  // Snapshot every canvas under the terminal element before dispose detaches
+  // them. @xterm/addon-webgl creates a WebGL2 context when available and
+  // silently falls back to WebGL1 otherwise (common once the browser is near
+  // its context cap), so we must probe BOTH context types — querying only
+  // "webgl2" misses every fallback context, leaving zombies that re-trip the
+  // "too many active WebGL contexts" cap. Re-`getContext` with the type that
+  // created the context returns that same context; the other type returns null.
+  const canvases = renderer.term.element
+    ? Array.from(renderer.term.element.querySelectorAll("canvas"))
+    : [];
   renderer.webglAddon = null;
   addon.dispose();
+  for (const canvas of canvases) {
+    releaseCanvasWebglContext(canvas);
+  }
+}
+
+function releaseCanvasWebglContext(canvas: HTMLCanvasElement) {
   try {
-    canvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+    const gl =
+      (canvas.getContext("webgl2") as WebGL2RenderingContext | null) ??
+      (canvas.getContext("webgl") as WebGLRenderingContext | null);
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
   } catch {
     // Best effort; GC remains the fallback.
   }
@@ -1841,9 +1859,45 @@ function clearRendererTimers(renderer: TerminalRendererEntry) {
 }
 
 function resizeParser(entry: TerminalSessionEntry, cols: number, rows: number) {
-  if (entry.parser.cols !== cols || entry.parser.rows !== rows) {
-    entry.parser.resize(cols, rows);
+  if (entry.parser.cols === cols && entry.parser.rows === rows) {
+    return;
   }
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
+    return;
+  }
+  try {
+    entry.parser.resize(cols, rows);
+  } catch (error) {
+    // xterm 6.0.0's reflow can throw mid-resize on large headless buffers,
+    // leaving the buffer half-resized — every later write (setCellFromCodepoint)
+    // and serialize (isWrapped) then throws on the undefined trailing lines,
+    // turning one bad reflow into a permanently dead terminal that floods the
+    // console. Reset the parser to a consistent buffer and re-apply the size so
+    // the session keeps working; the cost is lost off-screen scrollback, which
+    // the renderer re-seeds from live output. See [[wardian-telemetry-perf]].
+    console.warn("Parser resize failed; resetting parser buffer to recover.", error);
+    recoverCorruptedParser(entry, cols, rows);
+  }
+}
+
+function recoverCorruptedParser(entry: TerminalSessionEntry, cols: number, rows: number) {
+  try {
+    const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
+    if (typeof parserWithReset.reset === "function") {
+      parserWithReset.reset();
+    } else {
+      entry.parser.write("c");
+    }
+    if (entry.parser.cols !== cols || entry.parser.rows !== rows) {
+      entry.parser.resize(cols, rows);
+    }
+  } catch (error) {
+    console.warn("Parser recovery resize failed; leaving parser at prior size.", error);
+  }
+  entry.lastHomeRedrawLines = null;
+  entry.homeRedrawScrollbackSeen?.clear();
+  entry.transientHomeRedrawActive = false;
+  entry.existingKnownLines = undefined;
 }
 
 function applyTerminalAppearance(
@@ -2031,9 +2085,19 @@ function mountRenderer(
 
     renderer.term.open(renderer.host);
 
-    const seedState = session.parserSerializeAddon.serialize({
-      scrollback: TERMINAL_SCROLLBACK_LINES,
-    });
+    // Seeding the fresh renderer from the parser's scrollback is best-effort:
+    // if the parser buffer is transiently inconsistent (xterm reflow edge
+    // cases), serialize() can throw — that must not abort the whole renderer
+    // mount and leave the card in an error state. Skip the seed and let live
+    // output repaint instead.
+    let seedState = "";
+    try {
+      seedState = session.parserSerializeAddon.serialize({
+        scrollback: TERMINAL_SCROLLBACK_LINES,
+      });
+    } catch (error) {
+      console.warn("Parser serialize failed during renderer seed; skipping seed.", error);
+    }
     if (seedState) {
       renderer.term.write(seedState);
     }
@@ -2370,6 +2434,7 @@ export const __terminalTesting = {
   insertSyntheticScrollbackRows,
   promoteSessionToWebgl,
   removeSnapshotOverlay,
+  resizeParser,
   isProviderViewportRedraw,
   splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,

@@ -74,6 +74,19 @@ Findings:
    canvas/WebGL feature). `GraphCanvas` now captures `renderer.getCanvases()`
    before `kill()` and explicitly loses each WebGL context. Context budget:
    12 (terminal pool) + 3 (Graph view while mounted) = 15 of ~16.
+
+   **Follow-up (2026-06-13): the terminal release path missed WebGL1
+   fallbacks.** A live session still flooded "Too many active WebGL contexts"
+   after both fixes above. `@xterm/addon-webgl` requests a WebGL2 context when
+   available and silently falls back to WebGL1 otherwise (which happens
+   precisely as the browser nears its context cap), but
+   `disposeWebglAddonAndReleaseContext` probed only `getContext("webgl2")` —
+   which returns `null` for a canvas whose live context is WebGL1, so those
+   contexts were never lost and accumulated as zombies that re-tripped the cap.
+   The release path now probes **both** types
+   (`getContext("webgl2") ?? getContext("webgl")`) across every canvas under
+   the terminal element, matching the GraphCanvas fix. Regression-tested with a
+   WebGL1-only stub canvas.
 2. **Restrict the viewport-redraw machinery to Codex; write Claude/Gemini streams
    natively.** An intermediate fix (seeding the scratch screen with the existing
    viewport for claude/gemini) was tried first and disproved by a live native-E2E run
@@ -198,3 +211,27 @@ Live native-E2E rendering audit (`WARDIAN_E2E_REAL_RENDERING=1`, real provider C
 - **Negative**: The broader quirk-fix layer is still heuristic; provider renderer
   upgrades can invalidate it silently. Re-validation against live providers (native
   E2E + real-provider harness) is the standing mitigation.
+
+## Follow-up: headless-parser reflow crash recovery (2026-06-13)
+
+The same live session that surfaced the WebGL1 leak also threw a cascade of
+uncaught xterm errors — `Buffer.resize` reading `'resize'` of undefined, then
+`setCellFromCodepoint` of undefined on every subsequent write, then `isWrapped`
+of undefined when the renderer re-seeded via `SerializeAddon`. Root cause:
+xterm 6.0.0's reflow can throw partway through `resize()` on large headless
+**parser** buffers (the persistent, off-screen backfill buffer carries far more
+scrollback than the renderer), leaving the buffer half-resized. Because the
+parser is long-lived, that one corrupt resize poisoned every later write and
+serialize, turning a transient reflow bug into a permanently dead terminal that
+floods the console.
+
+`resizeParser` now (a) skips non-integer/sub-1 dimensions, (b) wraps
+`parser.resize` in try/catch, and (c) on failure calls `recoverCorruptedParser`,
+which `reset()`s the parser to a consistent buffer and re-applies the size. The
+renderer-seed `serialize()` in `mountRenderer` is likewise guarded so a
+transient parser inconsistency skips the seed instead of aborting the whole
+renderer mount (the `AgentTerminal Init Error` the user saw). Cost: a rare
+reflow failure drops that parser's off-screen scrollback, which live output
+re-seeds — strictly better than a dead, console-flooding terminal.
+Regression-tested by forcing `parser.resize` to throw and asserting reset +
+retry with no propagated error.

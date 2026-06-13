@@ -356,6 +356,78 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("releases WebGL1 fallback contexts (not just webgl2) on disposal", async () => {
+    // @xterm/addon-webgl silently falls back to a WebGL1 context when webgl2 is
+    // unavailable (common once the browser nears its context cap). Probing only
+    // "webgl2" returns null for those canvases, so their context never gets
+    // WEBGL_lose_context — they accumulate as zombies and re-trip the cap. The
+    // release path must try "webgl" too.
+    const firstRender = render(
+      <AgentTerminal sessionId="webgl1-lose" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("webgl1-lose")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const loseContext = vi.fn();
+    const canvas = document.createElement("canvas");
+    // Emulate a WebGL1-only canvas: getContext("webgl2") → null, "webgl" → ctx.
+    canvas.getContext = vi.fn((type: string) =>
+      type === "webgl"
+        ? {
+            getExtension: (name: string) =>
+              name === "WEBGL_lose_context" ? { loseContext } : null,
+          }
+        : null,
+    ) as never;
+    (instance.element as HTMLElement).appendChild(canvas);
+
+    vi.useFakeTimers();
+    try {
+      firstRender.unmount();
+      vi.advanceTimersByTime(30_000);
+
+      expect(instance.dispose).toHaveBeenCalled();
+      expect(canvas.getContext).toHaveBeenCalledWith("webgl2");
+      expect(canvas.getContext).toHaveBeenCalledWith("webgl");
+      expect(loseContext).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a headless parser when an xterm reflow resize throws", async () => {
+    // xterm 6.0.0 reflow can throw mid-resize on large headless buffers,
+    // leaving the buffer half-resized so every later write/serialize throws.
+    // resizeParser must catch the throw, reset the parser, and re-apply the
+    // size instead of letting the uncaught error cascade.
+    render(<AgentTerminal sessionId="parser-recover" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("parser-recover")?.renderer).toBeTruthy();
+    });
+
+    const parser = getLatestHeadlessTerminalInstance();
+    parser.resize = vi.fn(() => {
+      throw new TypeError("Cannot read properties of undefined (reading 'resize')");
+    });
+    parser.reset = vi.fn();
+
+    expect(() =>
+      __terminalTesting.resizeParser(
+        { parser, lastReportedSize: null } as never,
+        120,
+        40,
+      ),
+    ).not.toThrow();
+
+    // After the failed reflow it reset the parser and retried the resize.
+    expect(parser.reset).toHaveBeenCalledTimes(1);
+    expect(parser.resize).toHaveBeenCalledTimes(2);
+  });
+
   it("caps live WebGL renderers without promoting a focused terminal onto the GPU", async () => {
     // Render more terminals than the WebGL pool cap (12). The pool must stay at
     // 12 live contexts; the rest fall back to the DOM renderer. Newly mounted
