@@ -1193,7 +1193,6 @@ function inputDisabledReason(status: string | null, isSubmitting: boolean): stri
   if (normalized.includes("headless")) return "Agent is headless";
   if (normalized.includes("paused")) return "Agent is paused";
   if (normalized.includes("error")) return "Agent is in an error state";
-  if (normalized.includes("processing") || normalized.includes("running")) return "Agent is processing";
   return null;
 }
 

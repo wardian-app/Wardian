@@ -1302,25 +1302,34 @@ describe("AgentChatView", () => {
     expect(screen.getByText("Working...")).toBeInTheDocument();
   });
 
-  it("disables chat input while the agent is busy but allows action required responses", async () => {
-    invokeMock.mockResolvedValue([
-      event({
-        id: "approval-required",
-        kind: "approval",
-        role: null,
-        title: "Approval required",
-        text: "Do you want to proceed?",
-        status: "action_required",
-        sequence: 1,
-      }),
-    ]);
+  it("keeps chat input editable while the agent is processing and still allows action required responses", async () => {
+    invokeMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        event({
+          id: "approval-required",
+          session_id: "agent-2",
+          kind: "approval",
+          role: null,
+          title: "Approval required",
+          text: "Do you want to proceed?",
+          status: "action_required",
+          sequence: 1,
+        }),
+      ]);
 
     const { rerender } = render(<AgentChatView sessionId="agent-1" status="Processing" />);
 
-    expect(await screen.findByLabelText("Message agent")).toBeDisabled();
-    expect(screen.getByPlaceholderText("Agent is processing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
+    expect(screen.getByPlaceholderText("Message agent...")).toBeInTheDocument();
 
-    rerender(<AgentChatView sessionId="agent-1" status="Action Required" />);
+    rerender(<AgentChatView sessionId="agent-running" status="Running" />);
+
+    expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
+    expect(screen.getByPlaceholderText("Message agent...")).toBeInTheDocument();
+
+    rerender(<AgentChatView sessionId="agent-2" status="Action Required" />);
 
     expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
     expect(screen.getByPlaceholderText("Respond to action needed...")).toBeInTheDocument();
