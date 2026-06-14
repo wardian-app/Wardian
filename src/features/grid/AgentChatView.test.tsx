@@ -127,6 +127,42 @@ describe("AgentChatView", () => {
     expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
   });
 
+  it("does not restore stale transcript rows when a pre-clear load resolves after clear", async () => {
+    let clearHandler: ((event: { payload?: { session_id?: string } }) => void) | null = null;
+    const load = deferred<AgentChatEvent[]>();
+    listenMock.mockImplementation(async (eventName, handler) => {
+      if (eventName === "agent-terminal-cleared") {
+        clearHandler = handler as typeof clearHandler;
+      }
+      return () => {};
+    });
+    invokeMock.mockReturnValue(load.promise);
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+    expect(clearHandler).toBeTruthy();
+    act(() => {
+      clearHandler?.({ payload: { session_id: "agent-1" } });
+    });
+
+    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
+
+    await act(async () => {
+      load.resolve([
+        event({
+          id: "message-before-clear",
+          kind: "message",
+          role: "assistant",
+          text: "This stale answer should stay hidden",
+          sequence: 1,
+        }),
+      ]);
+    });
+
+    expect(screen.queryByText("This stale answer should stay hidden")).not.toBeInTheDocument();
+    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
+  });
+
   it("hides routine status lifecycle rows covered by the card header", async () => {
     invokeMock.mockResolvedValue([
       event({
