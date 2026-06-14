@@ -1100,6 +1100,10 @@ async function writeTerminalOutputBatch(
   }
 
   entry.existingKnownLines = readParserKnownLineSet(entry);
+  entry.antigravityForegroundRgb =
+    entry.provider === "antigravity"
+      ? rgbTripletFromHex(entry.currentTheme.foreground, "255;255;255")
+      : undefined;
   const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
   const rendererWasAtBottom = entry.renderer
     ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY

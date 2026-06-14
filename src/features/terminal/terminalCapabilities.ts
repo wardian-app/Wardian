@@ -47,6 +47,7 @@ export type TerminalOutputState = {
   // drop heuristic misfires on content shuffles.
   existingKnownLines?: Set<string>;
   transientHomeRedrawActive?: boolean;
+  antigravityForegroundRgb?: string;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -163,6 +164,14 @@ function codexLightUserMessageBackground(backgroundRgb: string) {
   return [r, g, b].map((component) => Math.round(component * 0.96)).join(";");
 }
 
+function foregroundRgbForSgr(foregroundRgb: string) {
+  const isHexTriplet = foregroundRgb.includes("/");
+  const values = foregroundRgb
+    .split(isHexTriplet ? "/" : ";")
+    .map((component) => Number.parseInt(component, isHexTriplet ? 16 : 10));
+  return values.length === 3 && values.every(Number.isFinite) ? values.join(";") : "255;255;255";
+}
+
 export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
   if (context.prefersLight) {
     return data.replace(
@@ -172,6 +181,114 @@ export function normalizeCodexComposerBackgroundForTheme(data: string, context: 
   }
 
   return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, "\u001b[48;2;41;41;41m");
+}
+
+function isGrayRgb(r: number, g: number, b: number) {
+  return Math.max(r, g, b) - Math.min(r, g, b) <= 8;
+}
+
+function normalizeAntigravitySgrParams(
+  params: string,
+  foregroundRgb: string,
+  brightenGrayForeground: boolean,
+) {
+  const raw = params.length > 0 ? params.split(";") : ["0"];
+  const normalized: string[] = [];
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const param = raw[index] === "" ? "0" : raw[index];
+    if (param === "38" && raw[index + 1] === "2") {
+      const rgb = raw.slice(index + 2, index + 5).map((component) => Number.parseInt(component, 10));
+      if (
+        brightenGrayForeground &&
+        rgb.length === 3 &&
+        rgb.every(Number.isFinite) &&
+        isGrayRgb(rgb[0], rgb[1], rgb[2])
+      ) {
+        normalized.push("38", "2", ...foregroundRgb.split(";"));
+        index += 4;
+        continue;
+      }
+      normalized.push(param, "2", ...raw.slice(index + 2, index + 5));
+      index += 4;
+      continue;
+    }
+
+    if (param === "48" && raw[index + 1] === "2") {
+      normalized.push(param, "2", ...raw.slice(index + 2, index + 5));
+      index += 4;
+      continue;
+    }
+
+    if (param === "38" && raw[index + 1] === "5") {
+      const colorIndex = Number.parseInt(raw[index + 2] ?? "", 10);
+      if (brightenGrayForeground && Number.isFinite(colorIndex) && colorIndex >= 232 && colorIndex <= 255) {
+        normalized.push("38", "2", ...foregroundRgb.split(";"));
+        index += 2;
+        continue;
+      }
+      normalized.push(param, "5", raw[index + 2] ?? "0");
+      index += 2;
+      continue;
+    }
+
+    if (param === "48" && raw[index + 1] === "5") {
+      normalized.push(param, "5", raw[index + 2] ?? "0");
+      index += 2;
+      continue;
+    }
+
+    if (param === "2") {
+      continue;
+    }
+
+    normalized.push(param);
+  }
+
+  return normalized.length > 0 ? `\u001b[${normalized.join(";")}m` : "";
+}
+
+function antigravityPlainLine(line: string) {
+  return line.replace(ANSI_SEQUENCE, "").replace(/\s+/g, " ").trim();
+}
+
+function isAntigravityPrimaryResponseLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  if (!plain) {
+    return false;
+  }
+
+  if (/^[›>]/.test(plain) || /^[●•▸]/.test(plain)) {
+    return false;
+  }
+
+  if (/^(?:Read|Search|Bash|ListDir|Write|Edit|Glob|Grep|Run|Loading)\b/i.test(plain)) {
+    return false;
+  }
+
+  if (/\b(?:ctrl\+o to expand|Thought for|tokens?|esc to cancel|for shortcuts)\b/i.test(plain)) {
+    return false;
+  }
+
+  return true;
+}
+
+function normalizeAntigravityLine(line: string, foregroundRgb: string) {
+  const brightenGrayForeground = isAntigravityPrimaryResponseLine(line);
+  return line.replace(/\u001b\[([0-9;]*)m/g, (_match, params: string) =>
+    normalizeAntigravitySgrParams(params, foregroundRgb, brightenGrayForeground),
+  );
+}
+
+function normalizeAntigravityPrimaryText(data: string, foregroundRgb = "255;255;255") {
+  return data
+    .split(/(\r\n|\n|\r)/)
+    .map((part) =>
+      part === "\r\n" || part === "\n" || part === "\r"
+        ? part
+        : normalizeAntigravityLine(part, foregroundRgb),
+    )
+    .join("");
 }
 
 function stripCursorStyleControls(data: string) {
@@ -363,9 +480,12 @@ export function normalizeTerminalOutputBatch(
     .map((data) => normalizeOpenCodeOutput(data, provider, state))
     .join("");
   const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
+  const themedOutput = provider === "antigravity"
+    ? normalizeAntigravityPrimaryText(normalizedOutput, state?.antigravityForegroundRgb)
+    : normalizedOutput;
   return provider === "opencode"
-    ? normalizedOutput
-    : normalizeFullscreenClearByNewlines(normalizedOutput);
+    ? themedOutput
+    : normalizeFullscreenClearByNewlines(themedOutput);
 }
 
 function splitRemoteTerminalHistoryFrames(data: string) {
@@ -398,6 +518,8 @@ export function normalizeRemoteTerminalOutput(
   );
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
+    : provider === "antigravity" && context
+      ? normalizeAntigravityPrimaryText(normalized, foregroundRgbForSgr(context.foregroundRgb))
     : normalized;
 }
 
@@ -409,6 +531,8 @@ export function normalizeRemoteTerminalLiveOutput(
   const normalized = stripCursorStyleControls(data);
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
+    : provider === "antigravity" && context
+      ? normalizeAntigravityPrimaryText(normalized, foregroundRgbForSgr(context.foregroundRgb))
     : normalized;
 }
 
@@ -494,6 +618,8 @@ export function planTerminalCapabilityResponses(
         ? normalizeOpenCodeOutput(data, "opencode")
         : provider === "codex"
           ? normalizeCodexComposerBackgroundForTheme(data, context)
+          : provider === "antigravity"
+            ? normalizeAntigravityPrimaryText(data, foregroundRgbForSgr(context.foregroundRgb))
           : data,
     focusReported,
   };
