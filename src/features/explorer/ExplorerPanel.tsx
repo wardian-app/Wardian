@@ -7,6 +7,7 @@ import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { AgentConfig, GitStatusResult } from '../../types';
 import { useSettingsStore } from '../../store/useSettingsStore';
+import { normalizeExplorerPathForCompare } from './pathUtils';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
@@ -17,11 +18,6 @@ interface ExplorerChangedEvent {
   root_path: string;
   changed_paths: string[];
 }
-
-const normalizeComparablePath = (path: string): string => {
-  const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
-  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
-};
 
 const externalEditorLabel = (editor: string) => {
   switch (editor) {
@@ -117,7 +113,10 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     let disposed = false;
     let watchActive = false;
     const unlistenPromise = listen<ExplorerChangedEvent>('explorer-changed', (event) => {
-      if (normalizeComparablePath(event.payload.root_path) !== normalizeComparablePath(rootPath)) {
+      if (
+        normalizeExplorerPathForCompare(event.payload.root_path) !==
+        normalizeExplorerPathForCompare(rootPath)
+      ) {
         return;
       }
       setChangedPaths(event.payload.changed_paths);

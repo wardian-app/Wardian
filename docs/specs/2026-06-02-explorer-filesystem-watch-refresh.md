@@ -27,6 +27,12 @@ The watcher excludes high-churn implementation folders such as `.git`,
 `node_modules`, `target`, `.venv`, `dist`, `build`, `.next`, `.turbo`,
 `.cache`, and `.wardian/tmp`.
 
+The frontend normalizes watcher paths before comparing them with rendered tree
+paths. This includes stripping Windows verbatim prefixes such as
+`\\?\<absolute-windows-path>` and `\\?\UNC\<server>\<share>\...`, because
+platform watcher backends can report canonical paths while `get_directory_tree`
+returns display paths.
+
 ## Consequences
 
 * Visible explorer directories update without manual tab switching or polling.
