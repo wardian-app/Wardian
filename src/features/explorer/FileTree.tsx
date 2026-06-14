@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronRight, ChevronDown, File, FileText, Image, Code } from 'lucide-react';
+import { normalizeExplorerPathForCompare } from './pathUtils';
 
 export interface FileNode {
   name: string;
@@ -36,14 +37,9 @@ function toRelativePath(nodePath: string, root: string): string {
   return n.startsWith(r) ? n.slice(r.length).replace(/^\//, '') : n;
 }
 
-function normalizePathForCompare(path: string): string {
-  const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '');
-  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
-}
-
 function pathAffectsDirectory(changedPath: string, directoryPath: string): boolean {
-  const changed = normalizePathForCompare(changedPath);
-  const directory = normalizePathForCompare(directoryPath);
+  const changed = normalizeExplorerPathForCompare(changedPath);
+  const directory = normalizeExplorerPathForCompare(directoryPath);
   const changedParent = changed.includes('/') ? changed.slice(0, changed.lastIndexOf('/')) : '';
   return changed === directory || changedParent === directory;
 }
