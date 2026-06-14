@@ -49,6 +49,7 @@ export type TerminalOutputState = {
   transientHomeRedrawActive?: boolean;
   antigravityForegroundRgb?: string;
   antigravityPendingToolMarkerText?: string;
+  antigravitySuppressIndentedToolDetail?: boolean;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -387,11 +388,14 @@ function normalizeAntigravityPrimaryText(
   foregroundRgb = "255;255;255",
   state?: TerminalOutputState,
 ) {
-  let suppressIndentedToolDetail = false;
-  return data
-    .split(/(\r\n|\n|\r)/)
-    .map((part) => {
+  let suppressIndentedToolDetail = state?.antigravitySuppressIndentedToolDetail ?? false;
+  const parts = data.split(/(\r\n|\n|\r)/);
+  return parts
+    .map((part, index) => {
       if (part === "\r\n" || part === "\n" || part === "\r") {
+        return part;
+      }
+      if (part === "" && index === parts.length - 1) {
         return part;
       }
 
@@ -423,6 +427,9 @@ function normalizeAntigravityPrimaryText(
         suppressIndentedToolDetail = true;
       } else if (!isIndentedDetail) {
         suppressIndentedToolDetail = false;
+      }
+      if (state) {
+        state.antigravitySuppressIndentedToolDetail = suppressIndentedToolDetail;
       }
 
       return normalized;

@@ -142,6 +142,27 @@ describe("terminal capability broker", () => {
     );
   });
 
+  it("carries Antigravity tool-detail suppression across remote live output updates", () => {
+    const state: TerminalOutputState = { lastHomeRedrawLines: null };
+
+    expect(
+      normalizeRemoteTerminalLiveOutput(
+        "Bash(npm run lint) (ctrl+o to expand)\r\n",
+        "antigravity",
+        baseContext,
+        state,
+      ),
+    ).toBe("Bash(npm run lint) (ctrl+o to expand)\r\n");
+    expect(
+      normalizeRemoteTerminalLiveOutput(
+        "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n",
+        "antigravity",
+        baseContext,
+        state,
+      ),
+    ).toBe("\u001b[2m  Tool call detail stays muted\u001b[22m\r\n");
+  });
+
   it("answers Codex terminal color probes from the Wardian theme", () => {
     const data = "\u001b[?996n\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
     const plan = planTerminalCapabilityResponses("codex", data, {
