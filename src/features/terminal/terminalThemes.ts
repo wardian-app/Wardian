@@ -57,9 +57,26 @@ export const DARK_TERM_THEME: WardianTerminalTheme = {
   brightWhite: "#ffffff",
 };
 
+export const ANTIGRAVITY_DARK_TERM_THEME: WardianTerminalTheme = {
+  ...DARK_TERM_THEME,
+  foreground: "#ffffff",
+  white: "#ffffff",
+  brightWhite: "#ffffff",
+};
+
 export const LIGHT_TERM_THEME: WardianTerminalTheme = {
   background: "#fcfaf5",
   foreground: "#111827",
   cursor: "#b8860b",
   selectionBackground: "#e5e7eb",
 };
+
+export function terminalThemeForProvider(
+  theme: "dark" | "light",
+  provider?: string,
+): WardianTerminalTheme {
+  if (theme === "light") {
+    return LIGHT_TERM_THEME;
+  }
+  return provider === "antigravity" ? ANTIGRAVITY_DARK_TERM_THEME : DARK_TERM_THEME;
+}
