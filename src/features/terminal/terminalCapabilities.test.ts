@@ -1,6 +1,7 @@
 import {
   normalizeTerminalOutputBatch,
   normalizeOpenCodeOutput,
+  normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
   type TerminalCapabilityContext,
@@ -127,6 +128,16 @@ describe("terminal capability broker", () => {
     expect(normalizeTerminalOutputBatch(["● "], "antigravity", state)).toBe("● ");
     expect(normalizeTerminalOutputBatch(["Ba"], "antigravity", state)).toBe("Ba");
     expect(normalizeTerminalOutputBatch(["sh(pwd) (ctrl+o to expand)\r\n"], "antigravity", state)).toBe(
+      "sh(pwd) (ctrl+o to expand)\r\n",
+    );
+  });
+
+  it("carries partial Antigravity tool markers across remote live output updates", () => {
+    const state: TerminalOutputState = { lastHomeRedrawLines: null };
+
+    expect(normalizeRemoteTerminalLiveOutput("● ", "antigravity", baseContext, state)).toBe("● ");
+    expect(normalizeRemoteTerminalLiveOutput("Ba", "antigravity", baseContext, state)).toBe("Ba");
+    expect(normalizeRemoteTerminalLiveOutput("sh(pwd) (ctrl+o to expand)\r\n", "antigravity", baseContext, state)).toBe(
       "sh(pwd) (ctrl+o to expand)\r\n",
     );
   });

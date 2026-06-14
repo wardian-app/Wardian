@@ -675,12 +675,13 @@ export function normalizeRemoteTerminalLiveOutput(
   data: string,
   provider?: string,
   context?: TerminalCapabilityContext,
+  state?: TerminalOutputState,
 ) {
   const normalized = stripCursorStyleControls(data);
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
     : provider === "antigravity" && context
-      ? normalizeAntigravityPrimaryText(normalized, foregroundRgbForSgr(context.foregroundRgb))
+      ? normalizeAntigravityPrimaryText(normalized, foregroundRgbForSgr(context.foregroundRgb), state)
     : normalized;
 }
 
