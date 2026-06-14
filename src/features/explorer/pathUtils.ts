@@ -7,7 +7,7 @@ const isWindowsExplorerHost = (): boolean => {
 };
 
 const stripTrailingSeparators = (path: string): string => {
-  if (path === '/' || /^[a-z]:\/$/i.test(path)) {
+  if (path === '/' || path === '//' || /^[a-z]:\/$/i.test(path)) {
     return path;
   }
 

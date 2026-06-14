@@ -16,6 +16,7 @@ describe('normalizeExplorerPathForCompare', () => {
 
   it('preserves POSIX root and significant trailing spaces', () => {
     expect(normalizeExplorerPathForCompare('/', false)).toBe('/');
+    expect(normalizeExplorerPathForCompare('//', false)).toBe('//');
     expect(normalizeExplorerPathForCompare('/tmp/name ', false)).toBe('/tmp/name ');
   });
 
