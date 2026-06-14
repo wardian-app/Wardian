@@ -940,7 +940,10 @@ function hasCompleteNumberedResponse(capture, max, minOccurrences = 1) {
 // Providers that repaint a full-screen TUI in place and never push response
 // lines into xterm scrollback, so a "complete scrollable 1..N" check can never
 // pass for them. For these we assert a contiguous visible numbered tail instead.
-const NO_SCROLLBACK_PROVIDERS = new Set(["opencode"]);
+// Codex is here too: it home-anchors every repaint (ESC[H + overwrite) and
+// never scrolls content out, so once the synthetic-scrollback journal was
+// removed it behaves exactly like opencode.
+const NO_SCROLLBACK_PROVIDERS = new Set(["opencode", "codex"]);
 
 /**
  * For in-place TUIs the viewport can only show the tail of the numbered

@@ -484,14 +484,16 @@ export function auditRenderingEvidence({
     // providers; completeness stays a hard failure.
     const duplicatesAreWarnings =
       provider === "claude" || provider === "gemini" || provider === "codex";
-    // opencode is a full-screen in-place TUI: it repaints its own message view
-    // rather than appending to the terminal stream, so xterm scrollback holds
-    // arbitrary repaint overflow (expected duplicates), never the complete
-    // response, and post-resize repaints may show any portion of the
-    // conversation. The stream-content lab checks below are not meaningful for
-    // it; the native test asserts live turn completion via the visible
-    // numbered tail instead.
-    const inPlaceTui = provider === "opencode";
+    // opencode and codex are full-screen in-place TUIs: they repaint their own
+    // message view rather than appending to the terminal stream, so xterm
+    // scrollback holds arbitrary repaint overflow (expected duplicates), never
+    // the complete response, and post-resize repaints may show any portion of
+    // the conversation. (Codex home-anchors every repaint and never scrolls
+    // content out; its synthetic-scrollback journal was removed because it
+    // fabricated history codex never committed.) The stream-content lab checks
+    // below are not meaningful for them; the native test asserts live turn
+    // completion via the visible numbered tail instead.
+    const inPlaceTui = provider === "opencode" || provider === "codex";
     const providerDuplicateCheck = (condition, message) => {
       if (!duplicatesAreWarnings) {
         providerCheck(condition, message);

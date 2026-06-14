@@ -177,7 +177,7 @@ describe("terminal capability broker", () => {
     );
   });
 
-  it("journals displaced Codex resize redraw rows into scrollback", () => {
+  it("does not journal displaced Codex resize redraw rows into scrollback (renders natively)", () => {
     const state: TerminalOutputState = {
       lastHomeRedrawLines: Array.from({ length: 14 }, (_, index) =>
         `  ROW_${String(index + 37).padStart(3, "0")}`,
@@ -189,15 +189,11 @@ describe("terminal capability broker", () => {
         `  ROW_${String(index + 24).padStart(3, "0")}\u001b[K`,
       ).join("\r\n");
 
-    expect(normalizeTerminalOutputBatch([staleResizeRedraw], "codex", state)).toBe(
-      `\u001b[999;1H${Array.from({ length: 12 }, (_, index) =>
-        `  ROW_${String(index + 39).padStart(3, "0")}`,
-      ).join("\r\n")}\r\n${staleResizeRedraw}`,
-    );
+    expect(normalizeTerminalOutputBatch([staleResizeRedraw], "codex", state)).toBe(staleResizeRedraw);
     expect(state.lastHomeRedrawLines?.[state.lastHomeRedrawLines.length - 1]).toBe("  ROW_038");
   });
 
-  it("journals displaced Codex response rows when a lower-numbered repaint arrives", () => {
+  it("does not journal displaced Codex response rows when a lower-numbered repaint arrives (renders natively)", () => {
     const state: TerminalOutputState = {
       lastHomeRedrawLines: Array.from({ length: 14 }, (_, index) =>
         `  ROW_${String(index + 37).padStart(3, "0")}`,
@@ -209,11 +205,7 @@ describe("terminal capability broker", () => {
         `  ROW_${String(index + 18).padStart(3, "0")}\u001b[K`,
       ).join("\r\n");
 
-    expect(normalizeTerminalOutputBatch([staleResizeRedraw], "codex", state)).toBe(
-      `\u001b[999;1H${Array.from({ length: 14 }, (_, index) =>
-        `  ROW_${String(index + 37).padStart(3, "0")}`,
-      ).join("\r\n")}\r\n${staleResizeRedraw}`,
-    );
+    expect(normalizeTerminalOutputBatch([staleResizeRedraw], "codex", state)).toBe(staleResizeRedraw);
     expect(state.lastHomeRedrawLines?.[state.lastHomeRedrawLines.length - 1]).toBe("  ROW_031");
   });
 
@@ -292,7 +284,7 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput(promptRedraw, "codex", state)).toBe(promptRedraw);
   });
 
-  it("journals overlapping Codex home-redraw frames that advance forward", () => {
+  it("does not journal overlapping Codex home-redraw frames that advance forward (renders natively)", () => {
     const state: TerminalOutputState = { lastHomeRedrawLines: null };
     const firstFrame =
       "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[H  60\u001b[K\r\n  61\u001b[K\r\n  62\u001b[K";
@@ -302,9 +294,7 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput(firstFrame, "codex", state)).toBe(
       firstFrame,
     );
-    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(
-      `\u001b[?2026h\u001b[?2026l\u001b[999;1H  60\r\n\u001b[?25l\u001b[H  61\u001b[K\r\n  62\u001b[K\r\n  63\u001b[K`,
-    );
+    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(secondFrame);
   });
 
   it("preserves Claude home redraw frames without injecting synthetic clears", () => {
@@ -379,7 +369,7 @@ describe("terminal capability broker", () => {
     );
   });
 
-  it("journals Codex home redraw rows that scroll out of the visible frame", () => {
+  it("does not journal Codex home redraw rows that scroll out of the visible frame (renders natively)", () => {
     const state: TerminalOutputState = { lastHomeRedrawLines: null };
     const firstFrame =
       "\u001b[?25l\u001b[H  ROW_001\u001b[K\r\n  ROW_002\u001b[K\r\n  ROW_003\u001b[K";
@@ -391,15 +381,11 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput(firstFrame, "codex", state)).toBe(
       firstFrame,
     );
-    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(
-      `\u001b[999;1H  ROW_001\r\n${secondFrame}`,
-    );
-    expect(normalizeOpenCodeOutput(thirdFrame, "codex", state)).toBe(
-      `\u001b[999;1H  ROW_002\r\n${thirdFrame}`,
-    );
+    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(secondFrame);
+    expect(normalizeOpenCodeOutput(thirdFrame, "codex", state)).toBe(thirdFrame);
   });
 
-  it("journals non-numbered Codex conversation rows that scroll out of the visible frame", () => {
+  it("does not journal non-numbered Codex conversation rows that scroll out of the visible frame (renders natively)", () => {
     const state: TerminalOutputState = { lastHomeRedrawLines: null };
     const firstFrame =
       "\u001b[?25l\u001b[H  Here is the first answer line.\u001b[K\r\n" +
@@ -409,9 +395,7 @@ describe("terminal capability broker", () => {
       "  Here is the third answer line.\u001b[K";
 
     expect(normalizeOpenCodeOutput(firstFrame, "codex", state)).toBe(firstFrame);
-    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(
-      `\u001b[999;1H  Here is the first answer line.\r\n${secondFrame}`,
-    );
+    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(secondFrame);
   });
 
   it("does not reconstruct Codex prompt rows into scrollback", () => {
@@ -510,22 +494,18 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput(shuffleFrame, "codex", shuffleState)).toBe(shuffleFrame);
   });
 
-  it("journals non-overlapping Codex home-redraw frames without repeating seen lines", () => {
+  it("does not journal non-overlapping Codex home-redraw frames without repeating seen lines (renders natively)", () => {
     const state: TerminalOutputState = { lastHomeRedrawLines: null };
     const firstFrame = "\u001b[?25l\u001b[Halpha\u001b[K\r\nbeta\u001b[K";
     const secondFrame = "\u001b[?25l\u001b[Hgamma\u001b[K\r\ndelta\u001b[K";
     const thirdFrame = "\u001b[?25l\u001b[Halpha\u001b[K\r\nepsilon\u001b[K";
 
     expect(normalizeOpenCodeOutput(firstFrame, "codex", state)).toBe(firstFrame);
-    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(
-      `\u001b[999;1Halpha\r\nbeta\r\n${secondFrame}`,
-    );
-    expect(normalizeOpenCodeOutput(thirdFrame, "codex", state)).toBe(
-      `\u001b[999;1Hgamma\r\ndelta\r\n${thirdFrame}`,
-    );
+    expect(normalizeOpenCodeOutput(secondFrame, "codex", state)).toBe(secondFrame);
+    expect(normalizeOpenCodeOutput(thirdFrame, "codex", state)).toBe(thirdFrame);
   });
 
-  it("journals Codex drops when the chunk opens with a cursor-addressed diff frame", () => {
+  it("does not journal Codex drops when the chunk opens with a cursor-addressed diff frame (renders natively)", () => {
     // Live failure shape (Codex 0.139.0, post-clear at 124x28): the PTY chunk
     // begins with a spinner diff frame, so the first ESC[H sits deeper in the
     // chunk than the whole-chunk extraction probe looks. The repaint frames
@@ -536,7 +516,7 @@ describe("terminal capability broker", () => {
     const repaintFrame = `${ESC}[?25l${ESC}[H  2${ESC}[K\r\n  3${ESC}[K\r\n  4${ESC}[K`;
 
     expect(normalizeOpenCodeOutput(`${diffFrame}${repaintFrame}`, "codex", state)).toBe(
-      `${diffFrame}${ESC}[999;1H  1\r\n${repaintFrame}`,
+      `${diffFrame}${repaintFrame}`,
     );
   });
 

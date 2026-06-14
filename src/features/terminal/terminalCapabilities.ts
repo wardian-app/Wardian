@@ -216,10 +216,14 @@ function shouldReconstructProviderLine(provider: string | undefined) {
     return true;
   }
 
-  if (provider === "codex") {
-    return true;
-  }
-
+  // Codex is a home-anchored repainter: every frame re-homes (ESC[H) and
+  // overwrites the visible window in place; it never scrolls content into the
+  // terminal's scrollback (confirmed from raw PTY captures). A real terminal
+  // running codex therefore has no recoverable history above the window — the
+  // synthetic-scrollback journal was fabricating rows codex never committed,
+  // which rendered without their original colors and surfaced as artifacts when
+  // the user scrolled. Render codex natively instead, exactly like a standalone
+  // terminal: no journaling, no fabricated scrollback.
   return false;
 }
 

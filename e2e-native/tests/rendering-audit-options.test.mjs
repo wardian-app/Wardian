@@ -329,7 +329,7 @@ test("auditRenderingEvidence does not require column changes when the terminal s
 });
 
 test("auditRenderingEvidence rejects Wardian resized states that lose the fixed audit text", () => {
-  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -412,7 +412,7 @@ test("auditRenderingEvidence can use an expected response marker for submitted p
 });
 
 test("auditRenderingEvidence rejects submitted response markers that survive only in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -455,7 +455,7 @@ test("auditRenderingEvidence rejects submitted response markers that survive onl
 });
 
 test("auditRenderingEvidence rejects repeated numbered response rows in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -504,7 +504,7 @@ test("auditRenderingEvidence rejects repeated numbered response rows in parser h
 });
 
 test("auditRenderingEvidence rejects repeated plain numeric response rows in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -548,7 +548,7 @@ test("auditRenderingEvidence rejects repeated plain numeric response rows in par
 });
 
 test("auditRenderingEvidence rejects missing plain numeric response rows in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -634,7 +634,7 @@ test("auditRenderingEvidence does not count the submitted prompt as a duplicated
 });
 
 test("auditRenderingEvidence rejects duplicated numbered rows immediately after a submitted prompt", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -723,7 +723,7 @@ test("auditRenderingEvidence credits literal submitted prompt markers once befor
 });
 
 test("auditRenderingEvidence rejects resized audit text that is only preserved in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -788,7 +788,12 @@ test("auditRenderingEvidence rejects Wardian states with unstable rendered rows"
 });
 
 test("auditRenderingEvidence rejects obvious duplicated terminal content rows", () => {
-  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  // Codex is now an in-place TUI (its scrollback-content checks are skipped),
+  // so the duplicate-as-warning policy is exercised against Claude, a
+  // natively-written diff renderer that still gets the check.
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({
+    provider: "claude",
+  });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -834,7 +839,10 @@ test("auditRenderingEvidence rejects obvious duplicated terminal content rows", 
 });
 
 test("auditRenderingEvidence rejects duplicated submitted prompt anchors in parser history", () => {
-  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  // Codex is in-place now; exercise the duplicate-warning policy against Claude.
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({
+    provider: "claude",
+  });
   const manifestPath = path.join(
     root,
     "e2e",
