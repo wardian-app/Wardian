@@ -1997,7 +1997,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("uses white dark-mode foreground for Antigravity terminal text and color probes", async () => {
+  it("keeps Antigravity dark-mode terminal default muted while primary text is normalized separately", async () => {
     const probe = "\u001b]10;?\u001b\\";
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {
@@ -2019,10 +2019,10 @@ describe("AgentTerminal scrollback", () => {
         string,
         unknown
       >;
-      expect(terminalOptions.theme).toMatchObject({ foreground: "#ffffff" });
+      expect(terminalOptions.theme).toMatchObject({ foreground: "#c9d1d9" });
       expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
         sessionId: "antigravity-terminal-colors",
-        input: "\u001b]10;rgb:ff/ff/ff\u001b\\",
+        input: "\u001b]10;rgb:c9/d1/d9\u001b\\",
       });
     });
   });

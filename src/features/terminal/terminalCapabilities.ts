@@ -196,9 +196,25 @@ function normalizeAntigravitySgrParams(
 ) {
   const raw = params.length > 0 ? params.split(";") : ["0"];
   const normalized: string[] = [];
+  const hasForegroundAfter = (start: number) => {
+    for (let cursor = start; cursor < raw.length; cursor += 1) {
+      if (raw[cursor] === "38" && (raw[cursor + 1] === "2" || raw[cursor + 1] === "5")) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   for (let index = 0; index < raw.length; index += 1) {
     const param = raw[index] === "" ? "0" : raw[index];
+    if (brightenGrayForeground && param === "0") {
+      normalized.push(param);
+      if (!hasForegroundAfter(index + 1)) {
+        normalized.push("38", "2", ...foregroundRgb.split(";"));
+      }
+      continue;
+    }
+
     if (param === "38" && raw[index + 1] === "2") {
       const rgb = raw.slice(index + 2, index + 5).map((component) => Number.parseInt(component, 10));
       if (
@@ -254,17 +270,37 @@ function antigravityPlainLine(line: string) {
   return line.replace(ANSI_SEQUENCE, "").replace(/\s+/g, " ").trim();
 }
 
+function isAntigravitySeparatorLine(line: string) {
+  return /^[─━—-]{4,}$/.test(antigravityPlainLine(line).replace(/\s/g, ""));
+}
+
+const ANTIGRAVITY_TOOL_LINE_PATTERN =
+  /^(?:Read|Search|Bash|ListDir|Write|Edit|Glob|Grep|Run|Loading|Create|Delete|MultiEdit|Patch|TodoWrite|WebFetch|WebSearch|LS)\b/i;
+
+function antigravityLineAfterMarker(line: string) {
+  return antigravityPlainLine(line).replace(/^[●•]\s*/, "");
+}
+
+function isAntigravityToolMarkerLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  return /^[●•]/.test(plain) && ANTIGRAVITY_TOOL_LINE_PATTERN.test(antigravityLineAfterMarker(line));
+}
+
 function isAntigravityPrimaryResponseLine(line: string) {
   const plain = antigravityPlainLine(line);
   if (!plain) {
     return false;
   }
 
-  if (/^[›>]/.test(plain) || /^[●•▸]/.test(plain)) {
+  if (isAntigravitySeparatorLine(line)) {
     return false;
   }
 
-  if (/^(?:Read|Search|Bash|ListDir|Write|Edit|Glob|Grep|Run|Loading)\b/i.test(plain)) {
+  if (/^[›>▸]/.test(plain) || isAntigravityToolMarkerLine(line)) {
+    return false;
+  }
+
+  if (ANTIGRAVITY_TOOL_LINE_PATTERN.test(plain)) {
     return false;
   }
 
@@ -278,17 +314,26 @@ function isAntigravityPrimaryResponseLine(line: string) {
 function isAntigravityToolOrStatusLine(line: string) {
   const plain = antigravityPlainLine(line);
   return (
-    /^[●•▸]/.test(plain) ||
-    /^(?:Read|Search|Bash|ListDir|Write|Edit|Glob|Grep|Run|Loading)\b/i.test(plain) ||
+    isAntigravitySeparatorLine(line) ||
+    /^▸/.test(plain) ||
+    isAntigravityToolMarkerLine(line) ||
+    ANTIGRAVITY_TOOL_LINE_PATTERN.test(plain) ||
     /\b(?:ctrl\+o to expand|Thought for|tokens?|esc to cancel|for shortcuts)\b/i.test(plain)
   );
 }
 
 function normalizeAntigravityLine(line: string, foregroundRgb: string, suppressPrimaryBrightening = false) {
   const brightenGrayForeground = !suppressPrimaryBrightening && isAntigravityPrimaryResponseLine(line);
-  return line.replace(/\u001b\[([0-9;]*)m/g, (_match, params: string) =>
+  const normalized = line.replace(/\u001b\[([0-9;]*)m/g, (_match, params: string) =>
     normalizeAntigravitySgrParams(params, foregroundRgb, brightenGrayForeground),
   );
+  if (!brightenGrayForeground) {
+    return normalized;
+  }
+
+  const foreground = `\u001b[38;2;${foregroundRgb}m`;
+  const withForeground = normalized.startsWith(foreground) ? normalized : `${foreground}${normalized}`;
+  return withForeground.endsWith("\u001b[39m") ? withForeground : `${withForeground}\u001b[39m`;
 }
 
 function normalizeAntigravityPrimaryText(data: string, foregroundRgb = "255;255;255") {

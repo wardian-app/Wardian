@@ -59,9 +59,7 @@ export const DARK_TERM_THEME: WardianTerminalTheme = {
 
 export const ANTIGRAVITY_DARK_TERM_THEME: WardianTerminalTheme = {
   ...DARK_TERM_THEME,
-  foreground: "#ffffff",
-  white: "#ffffff",
-  brightWhite: "#ffffff",
+  foreground: "#c9d1d9",
 };
 
 export const LIGHT_TERM_THEME: WardianTerminalTheme = {

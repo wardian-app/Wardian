@@ -65,6 +65,10 @@ describe("terminal capability broker", () => {
       "\u001b[38;2;184;184;184mBash(npm run lint) (ctrl+o to expand)\u001b[39m\r\n" +
       "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n" +
       "\u001b[2mI have started npm run lint.\u001b[22m\r\n" +
+      "\u001b[38;2;184;184;184m• wardian-antigravity-visual-b5pC8w\u001b[39m\r\n" +
+      "This unstyled primary response should be white.\r\n" +
+      "● Create(C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
+      "● Bash(python C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
       "\u001b[38;2;156;171;190mWARDIAN_WHITE_TEXT_PROOF_123\u001b[39m\r\n" +
       "\u001b[38;2;184;184;184mI will notify you when it completes.\u001b[39m";
 
@@ -72,9 +76,34 @@ describe("terminal capability broker", () => {
       "\u001b[38;2;184;184;184m▸ Thought for 2s, 1.1k tokens\u001b[39m\r\n" +
         "\u001b[38;2;184;184;184mBash(npm run lint) (ctrl+o to expand)\u001b[39m\r\n" +
         "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n" +
-        "I have started npm run lint.\u001b[22m\r\n" +
+        "\u001b[38;2;255;255;255mI have started npm run lint.\u001b[22m\u001b[39m\r\n" +
+        "\u001b[38;2;255;255;255m• wardian-antigravity-visual-b5pC8w\u001b[39m\r\n" +
+        "\u001b[38;2;255;255;255mThis unstyled primary response should be white.\u001b[39m\r\n" +
+        "● Create(C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
+        "● Bash(python C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
         "\u001b[38;2;255;255;255mWARDIAN_WHITE_TEXT_PROOF_123\u001b[39m\r\n" +
         "\u001b[38;2;255;255;255mI will notify you when it completes.\u001b[39m",
+    );
+  });
+
+  it("preserves Antigravity prompt and separator coloring in repaint frames", () => {
+    const output =
+      "\u001b[38;2;218;220;224m────────────────────────────\u001b[K\u001b[38;2;25;103;210m\u001b[1m\r\n" +
+      "> What dir are you in\u001b[0m\u001b[K\r\n" +
+      "\u001b[38;2;24;128;56m\r\n" +
+      "● \u001b[38;2;227;116;0m\u001b[1mBash\u001b[38;2;60;64;67m\u001b[22m(pwd) (ctrl+o to expand)\u001b[K\u001b[0m";
+
+    expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(output);
+  });
+
+  it("reapplies white after resets inside Antigravity primary response lines", () => {
+    const output =
+      "\u001b[38;2;184;184;184mI am currently operating in the following workspace directory:\u001b[0m\r\n" +
+      "\u001b[38;2;184;184;184mI also have access to the \u001b[1mfollowing workspace directories\u001b[22m:\u001b[0m";
+
+    expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(
+      "\u001b[38;2;255;255;255mI am currently operating in the following workspace directory:\u001b[0;38;2;255;255;255m\u001b[39m\r\n" +
+        "\u001b[38;2;255;255;255mI also have access to the \u001b[1mfollowing workspace directories\u001b[22m:\u001b[0;38;2;255;255;255m\u001b[39m",
     );
   });
 
