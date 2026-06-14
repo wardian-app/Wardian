@@ -238,7 +238,7 @@ function normalizeAntigravitySgrParams(
       continue;
     }
 
-    if (param === "2") {
+    if (param === "2" && brightenGrayForeground) {
       continue;
     }
 
@@ -273,21 +273,46 @@ function isAntigravityPrimaryResponseLine(line: string) {
   return true;
 }
 
-function normalizeAntigravityLine(line: string, foregroundRgb: string) {
-  const brightenGrayForeground = isAntigravityPrimaryResponseLine(line);
+function isAntigravityToolOrStatusLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  return (
+    /^[●•▸]/.test(plain) ||
+    /^(?:Read|Search|Bash|ListDir|Write|Edit|Glob|Grep|Run|Loading)\b/i.test(plain) ||
+    /\b(?:ctrl\+o to expand|Thought for|tokens?|esc to cancel|for shortcuts)\b/i.test(plain)
+  );
+}
+
+function normalizeAntigravityLine(line: string, foregroundRgb: string, suppressPrimaryBrightening = false) {
+  const brightenGrayForeground = !suppressPrimaryBrightening && isAntigravityPrimaryResponseLine(line);
   return line.replace(/\u001b\[([0-9;]*)m/g, (_match, params: string) =>
     normalizeAntigravitySgrParams(params, foregroundRgb, brightenGrayForeground),
   );
 }
 
 function normalizeAntigravityPrimaryText(data: string, foregroundRgb = "255;255;255") {
+  let suppressIndentedToolDetail = false;
   return data
     .split(/(\r\n|\n|\r)/)
-    .map((part) =>
-      part === "\r\n" || part === "\n" || part === "\r"
-        ? part
-        : normalizeAntigravityLine(part, foregroundRgb),
-    )
+    .map((part) => {
+      if (part === "\r\n" || part === "\n" || part === "\r") {
+        return part;
+      }
+
+      const plain = antigravityPlainLine(part);
+      const isIndentedDetail = /^\s+/.test(part.replace(ANSI_SEQUENCE, ""));
+      const suppressPrimaryBrightening = suppressIndentedToolDetail && isIndentedDetail;
+      const normalized = normalizeAntigravityLine(part, foregroundRgb, suppressPrimaryBrightening);
+
+      if (!plain) {
+        suppressIndentedToolDetail = false;
+      } else if (isAntigravityToolOrStatusLine(part)) {
+        suppressIndentedToolDetail = true;
+      } else if (!isIndentedDetail) {
+        suppressIndentedToolDetail = false;
+      }
+
+      return normalized;
+    })
     .join("");
 }
 
