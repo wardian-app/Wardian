@@ -4,7 +4,6 @@
   --color-wardian-bg: #fcfaf5;
   --color-wardian-card: #f3f4f6;
   --color-wardian-text: #111827;
-  --color-wardian-response-text: #111827;
   --color-wardian-text-muted: #445d44;
   --color-wardian-text-muted-neutral: #4b5563;
   --color-wardian-text-bright: #374151;
@@ -278,7 +277,6 @@
   --color-wardian-bg: #191919;
   --color-wardian-card: #212121;
   --color-wardian-text: #ececec;
-  --color-wardian-response-text: #ffffff;
   --color-wardian-text-muted: #b4b4b4;
   --color-wardian-text-muted-neutral: #a9a9a9;
   --color-wardian-text-bright: #d6d6d6;
@@ -316,11 +314,6 @@
 
 .text-primary {
   color: var(--color-wardian-text);
-}
-
-.agent-chat-primary-response,
-.agent-chat-primary-response .text-primary {
-  color: var(--color-wardian-response-text);
 }
 
 .text-muted {

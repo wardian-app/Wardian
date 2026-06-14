@@ -298,42 +298,6 @@ describe("AgentChatView", () => {
     expect(screen.queryByText("running")).not.toBeInTheDocument();
   });
 
-  it("uses high-contrast primary styling for Antigravity assistant responses", async () => {
-    invokeMock.mockResolvedValue([
-      event({
-        id: "antigravity-response",
-        provider: "antigravity",
-        kind: "message",
-        role: "assistant",
-        text: "Antigravity answer should stay bright in dark mode.",
-        source: "transcript",
-        sequence: 1,
-      }),
-      event({
-        id: "antigravity-tool",
-        provider: "antigravity",
-        kind: "tool_result",
-        role: null,
-        title: "Run command",
-        text: "npm run test completed",
-        sequence: 2,
-      }),
-    ]);
-
-    render(
-      <AgentChatView
-        sessionId="agent-1"
-        agent={{ session_name: "Antigravity", agent_class: "Coder", provider: "antigravity" }}
-        theme="dark"
-      />,
-    );
-
-    const responseText = await screen.findByText("Antigravity answer should stay bright in dark mode.");
-    expect(responseText.closest(".agent-chat-primary-response")).toBeTruthy();
-    expect(responseText.closest(".text-muted-neutral")).toBeNull();
-    expect(screen.getByText("Run command").closest(".agent-chat-primary-response")).toBeNull();
-  });
-
   it("shows running function calls when a tool name is available", async () => {
     invokeMock.mockResolvedValue([
       event({

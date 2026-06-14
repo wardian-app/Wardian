@@ -389,9 +389,7 @@ function MessageEvent({ event }: { event: AgentChatEvent }) {
           </div>
         ) : null}
         {text ? (
-          <div className={role === "assistant" ? "agent-chat-primary-response" : undefined}>
-            <ChatMarkdown source={text} />
-          </div>
+          <ChatMarkdown source={text} />
         ) : (
           <div className="text-[13px] leading-5 text-muted-neutral">No message content</div>
         )}
