@@ -113,6 +113,7 @@ export function AgentChatView({
 
     listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
       if (event.payload?.session_id !== sessionId) return;
+      transcriptRequestRef.current += 1;
       stickToLatestRef.current = true;
       prependScrollSnapshotRef.current = null;
       setEvents([]);
