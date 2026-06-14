@@ -2306,7 +2306,16 @@ export const AgentTerminal = memo(function AgentTerminal({
                   visibilityDemoteTimer = null;
                 }
                 renderer.webglAttempted = true;
+                const hadWebgl = Boolean(renderer.webglAddon);
                 promoteSessionToWebgl(sessionId);
+                // Loading the WebGL addon rebuilds xterm's render layers and
+                // re-measures the cell grid. The mount fits above can run before
+                // that (against pre-WebGL metrics), so re-fit once the GPU
+                // renderer is live — otherwise the terminal keeps stale columns
+                // and renders narrow until the user manually resizes the window.
+                if (!hadWebgl && renderer.webglAddon) {
+                  requestAnimationFrame(() => checkSizing({ force: true }));
+                }
               } else if (!visibilityDemoteTimer) {
                 // Debounced: drag, maximize, and view-switch churn briefly
                 // report zero intersection before the layout settles.
@@ -2323,7 +2332,17 @@ export const AgentTerminal = memo(function AgentTerminal({
           visibilityObserver.observe(terminalRef.current);
         }
         requestAnimationFrame(() => checkSizing({ force: true, reportUnchanged: false }));
-        setTimeout(() => checkSizing({ force: true, reportUnchanged: false }), 50);
+        // Later fits report the size unconditionally so the backend PTY is
+        // synced to the settled measurement even when the renderer already
+        // matches it (e.g. restored agents whose PTY opened at a stale size) —
+        // otherwise the terminal only converges on the first manual resize.
+        setTimeout(() => checkSizing({ force: true }), 50);
+        setTimeout(() => checkSizing({ force: true }), 300);
+        // Web/custom terminal fonts can finish loading after mount, changing the
+        // cell metrics; re-fit once they're ready so columns don't stay stale.
+        if (typeof document !== "undefined" && document.fonts?.ready) {
+          void document.fonts.ready.then(() => checkSizing({ force: true }));
+        }
 
         resizeObserver = new ResizeObserver(() => {
           if (!isMounted) {
