@@ -10,6 +10,13 @@ import {
   terminalTextIncludes,
 } from "../lib/rendering-audit.mjs";
 
+const fixtureRoots = [];
+test.after(() => {
+  for (const root of fixtureRoots) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function writeJson(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
@@ -76,6 +83,7 @@ function createRenderingEvidenceFixture({
   providerSessionId = null,
 } = {}) {
   const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp-rendering-audit-"));
+  fixtureRoots.push(root);
   const wardianRunId = "wardian-run";
   const outsideRunId = "outside-run";
   const wardianHome = path.join(root, "target", "wardian-home");
@@ -490,8 +498,9 @@ test("auditRenderingEvidence rejects repeated numbered response rows in parser h
     requireOutsideEvidence: false,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  // Codex output is written natively; duplicated rows are warnings, not failures.
+  assert.match(audit.warnings.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /numbered response rows are not duplicated/);
 });
 
 test("auditRenderingEvidence rejects repeated plain numeric response rows in parser history", () => {
@@ -533,8 +542,9 @@ test("auditRenderingEvidence rejects repeated plain numeric response rows in par
     requireOutsideEvidence: false,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  // Codex output is written natively; duplicated rows are warnings, not failures.
+  assert.match(audit.warnings.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /numbered response rows are not duplicated/);
 });
 
 test("auditRenderingEvidence rejects missing plain numeric response rows in parser history", () => {
@@ -664,8 +674,9 @@ test("auditRenderingEvidence rejects duplicated numbered rows immediately after 
     requireOutsideEvidence: false,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  // Codex output is written natively; duplicated rows are warnings, not failures.
+  assert.match(audit.warnings.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /numbered response rows are not duplicated/);
 });
 
 test("auditRenderingEvidence credits literal submitted prompt markers once before duplicate checks", () => {
@@ -816,8 +827,10 @@ test("auditRenderingEvidence rejects obvious duplicated terminal content rows", 
     requireWardianLabMetrics: true,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+  // Codex streams are written natively, so resize-repaint duplicates are
+  // real-terminal-equivalent behavior: warning, not failure.
+  assert.equal(audit.ok, true);
+  assert.match(audit.warnings.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
 });
 
 test("auditRenderingEvidence rejects duplicated submitted prompt anchors in parser history", () => {
@@ -871,8 +884,10 @@ test("auditRenderingEvidence rejects duplicated submitted prompt anchors in pars
     requireWardianLabMetrics: true,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+  // Same policy as above: duplicated prompt anchors in a natively-written
+  // provider's history surface as warnings.
+  assert.match(audit.warnings.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /terminal content has no obvious duplicated rows/);
 });
 
 test("auditRenderingEvidence rejects Wardian screen rects that do not match xterm cells", () => {

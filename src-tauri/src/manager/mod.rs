@@ -21,7 +21,9 @@ pub use headless::{
     obtain_session_id, run_headless, run_headless_with_config, run_headless_with_options,
     HeadlessRunOptions,
 };
-pub use opencode::opencode_extract_created_session_id;
+pub use opencode::{
+    opencode_extract_created_session_id, opencode_extract_created_session_id_for_agent,
+};
 pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use opencode::{opencode_log_dirs, opencode_log_path_in};
 pub use spawn::{resize_pty, spawn_agent};

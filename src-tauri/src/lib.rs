@@ -346,52 +346,82 @@ pub fn run() {
                                 }
                             }
 
-                            // Pass 2: spawn PTY agents sequentially, replacing each
-                            // placeholder in place as its provider becomes ready.
+                            // Pass 2: spawn PTY agents with bounded concurrency,
+                            // replacing each placeholder in place as its provider
+                            // becomes ready. Each spawn costs seconds (stale-process
+                            // cleanup, PTY open, provider CLI boot), so a sequential
+                            // loop left the tail of a large roster stuck on its
+                            // "Restoring" placeholder for minutes; unbounded
+                            // parallelism would thundering-herd the provider CLIs.
+                            const RESTORE_SPAWN_CONCURRENCY: usize = 4;
+                            let restore_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(
+                                RESTORE_SPAWN_CONCURRENCY,
+                            ));
+                            let mut restore_tasks = tokio::task::JoinSet::new();
                             for (config, last_born) in pending_spawns {
-                                let spawn_result = manager::spawn_agent(
-                                    app_handle.clone(),
-                                    config.clone(),
-                                    true,
-                                    last_born.clone(),
-                                )
-                                .await;
-                                match spawn_result {
-                                    Ok(agent) => {
-                                        if let Some(ref tx) = agent.stdin_tx {
-                                            if let Ok(mut senders) = state.input_senders.write() {
-                                                senders
-                                                    .insert(config.session_id.clone(), tx.clone());
+                                let app_handle = app_handle.clone();
+                                let restore_slots = restore_slots.clone();
+                                restore_tasks.spawn(async move {
+                                    let Ok(_permit) = restore_slots.acquire_owned().await else {
+                                        return;
+                                    };
+                                    let spawn_result = manager::spawn_agent(
+                                        app_handle.clone(),
+                                        config.clone(),
+                                        true,
+                                        last_born.clone(),
+                                    )
+                                    .await;
+                                    let agent = match spawn_result {
+                                        Ok(agent) => {
+                                            if let Some(ref tx) = agent.stdin_tx {
+                                                let state = app_handle.state::<AppState>();
+                                                if let Ok(mut senders) =
+                                                    state.input_senders.write()
+                                                {
+                                                    senders.insert(
+                                                        config.session_id.clone(),
+                                                        tx.clone(),
+                                                    );
+                                                };
                                             }
+                                            agent
                                         }
-                                        insert_restored_agent(config.session_id.clone(), agent)
-                                            .await;
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Failed to restore agent {}: {}",
+                                                config.session_id, error
+                                            );
+                                            let _ = wardian_core::db::update_agent_status(
+                                                &config.session_id,
+                                                "Error",
+                                                None,
+                                            );
+                                            restored_agent_without_process(
+                                                config.clone(),
+                                                "Error",
+                                                format!(
+                                                    "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
+                                                    error
+                                                ),
+                                                None,
+                                                last_born,
+                                            )
+                                        }
+                                    };
+                                    let state = app_handle.state::<AppState>();
+                                    let mut agents_map = state.agents.lock().await;
+                                    let mut order_map = state.agent_order.lock().await;
+                                    if !order_map.contains(&config.session_id) {
+                                        order_map.push(config.session_id.clone());
                                     }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "Failed to restore agent {}: {}",
-                                            config.session_id, error
-                                        );
-                                        let _ = wardian_core::db::update_agent_status(
-                                            &config.session_id,
-                                            "Error",
-                                            None,
-                                        );
-                                        let agent = restored_agent_without_process(
-                                            config.clone(),
-                                            "Error",
-                                            format!(
-                                                "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
-                                                error
-                                            ),
-                                            None,
-                                            last_born,
-                                        );
-                                        insert_restored_agent(config.session_id.clone(), agent)
-                                            .await;
-                                    }
-                                }
+                                    agents_map.insert(config.session_id.clone(), agent);
+                                    drop(agents_map);
+                                    drop(order_map);
+                                    let _ = app_handle.emit("agents-updated", ());
+                                });
                             }
+                            while restore_tasks.join_next().await.is_some() {}
                             let agents_map = state.agents.lock().await;
                             let order_map = state.agent_order.lock().await;
                             manager::save_state(&app_handle, &agents_map, &order_map);

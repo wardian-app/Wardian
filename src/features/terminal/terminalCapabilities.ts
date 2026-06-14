@@ -42,11 +42,15 @@ export type TerminalCapabilityPlan = {
 export type TerminalOutputState = {
   lastHomeRedrawLines: string[] | null;
   homeRedrawScrollbackSeen?: Set<string>;
-  // Lines already represented in the parser buffer (scrollback + viewport).
-  // Used by home-redraw reconstruction to avoid pushing duplicates when the
-  // drop heuristic misfires on content shuffles.
+  // Lines already represented in the parser's scrollback (above the viewport).
+  // Used by home-redraw reconstruction to avoid journaling a line twice. Must
+  // NOT include viewport rows: a genuine sliding-window drop is still visible
+  // there when its drop frame arrives.
   existingKnownLines?: Set<string>;
   transientHomeRedrawActive?: boolean;
+  // Diagnostic sink: when present, home-redraw reconstruction appends one
+  // entry per frame describing the drop decision. Used by replay harnesses.
+  journalTrace?: string[];
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -280,10 +284,16 @@ function reconstructHomeRedrawScrollback(
   }
 
   const droppedLines = findDroppedHomeRedrawLines(state.lastHomeRedrawLines, nextLines);
+  state.journalTrace?.push(
+    `prev=${JSON.stringify(state.lastHomeRedrawLines?.slice(0, 2) ?? null)}(${state.lastHomeRedrawLines?.length ?? 0}) next=${JSON.stringify(nextLines.slice(0, 2))}(${nextLines.length}) dropped=${JSON.stringify(droppedLines)}`,
+  );
   state.lastHomeRedrawLines = nextLines;
 
   const seen = state.homeRedrawScrollbackSeen ?? new Set<string>();
   state.homeRedrawScrollbackSeen = seen;
+  // Lines still present in the incoming frame survive the repaint — a
+  // "dropped" hit on one of these is a shuffle false positive, not a scroll.
+  const nextLineSet = new Set(nextLines.map(normalizePlainLine));
   const newDroppedLines = droppedLines.filter((line) => {
     if (!shouldReconstructProviderLine(provider)) {
       return false;
@@ -293,6 +303,7 @@ function reconstructHomeRedrawScrollback(
     }
     const normalizedLine = normalizePlainLine(line);
     if (
+      nextLineSet.has(normalizedLine) ||
       seen.has(normalizedLine) ||
       state.existingKnownLines?.has(normalizedLine) ||
       state.existingKnownLines?.has(line)
@@ -326,8 +337,27 @@ export function normalizeOpenCodeOutput(
     if (state && isSynchronizedHomeRedraw(data)) {
       state.transientHomeRedrawActive = true;
     }
-    if (provider === "codex" && state && homeRedrawLines) {
-      data = reconstructHomeRedrawScrollback(data, state, homeRedrawLines, provider);
+    if (provider === "codex" && state) {
+      // A PTY chunk can carry several home-anchored repaint frames (verified
+      // live against Codex 0.139.0, which repaints a sliding window every
+      // tick). Journal each frame separately: extracting lines across frame
+      // boundaries glues the previous frame's status row onto the next
+      // frame's first content row. Deliberately NOT gated on a whole-chunk
+      // extractHomeRedrawLines probe — that probe returns null when the chunk
+      // opens with a cursor-addressed diff frame and the first ESC[H sits
+      // deeper in the chunk, which silently skipped every drop the chunk's
+      // repaint frames carried (observed live at 124x28 post-clear).
+      data = splitRemoteTerminalHistoryFrames(data)
+        .map((frame) => {
+          const frameLines = extractHomeRedrawLines(frame);
+          state.journalTrace?.push(
+            `frame lines=${frameLines ? frameLines.length : "null"} head=${JSON.stringify(frame.slice(0, 30))}`,
+          );
+          return frameLines
+            ? reconstructHomeRedrawScrollback(frame, state, frameLines, provider)
+            : frame;
+        })
+        .join("");
     }
     return stripProviderScrollbackErase(normalizeFullscreenClearByNewlines(data), provider);
   }
