@@ -122,6 +122,7 @@ describe("terminal capability broker", () => {
   });
 
   it("does not whiten partial Antigravity tool marker chunks before the tool name is complete", () => {
+    expect(normalizeTerminalOutputBatch(["● "], "antigravity")).toBe("● ");
     expect(normalizeTerminalOutputBatch(["● Ba"], "antigravity")).toBe("● Ba");
     expect(normalizeTerminalOutputBatch(["sh(pwd) (ctrl+o to expand)\r\n"], "antigravity")).toBe(
       "sh(pwd) (ctrl+o to expand)\r\n",

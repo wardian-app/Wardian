@@ -312,9 +312,12 @@ function isAntigravityPartialToolMarkerLine(line: string) {
     return false;
   }
   const afterMarker = antigravityLineAfterMarker(line).trim().toLowerCase();
+  if (!afterMarker) {
+    return true;
+  }
   return /^[a-z]*$/i.test(afterMarker) && ANTIGRAVITY_TOOL_NAMES.some((name) => {
     const lowerName = name.toLowerCase();
-    return afterMarker.length > 0 && afterMarker.length < lowerName.length && lowerName.startsWith(afterMarker);
+    return afterMarker.length < lowerName.length && lowerName.startsWith(afterMarker);
   });
 }
 
