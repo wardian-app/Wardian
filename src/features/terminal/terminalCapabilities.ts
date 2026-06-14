@@ -48,6 +48,7 @@ export type TerminalOutputState = {
   existingKnownLines?: Set<string>;
   transientHomeRedrawActive?: boolean;
   antigravityForegroundRgb?: string;
+  antigravityPendingToolMarkerText?: string;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -301,6 +302,21 @@ function antigravityLineAfterMarker(line: string) {
   return antigravityPlainLine(line).replace(/^[●•]\s*/, "");
 }
 
+function isAntigravityToolPrefix(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return /^[a-z]*$/i.test(normalized) && ANTIGRAVITY_TOOL_NAMES.some((name) => {
+    const lowerName = name.toLowerCase();
+    return normalized.length < lowerName.length && lowerName.startsWith(normalized);
+  });
+}
+
+function isAntigravityToolOrPrefix(value: string) {
+  return ANTIGRAVITY_TOOL_LINE_PATTERN.test(value.trim()) || isAntigravityToolPrefix(value);
+}
+
 function isAntigravityToolMarkerLine(line: string) {
   const plain = antigravityPlainLine(line);
   return /^[●•]/.test(plain) && ANTIGRAVITY_TOOL_LINE_PATTERN.test(antigravityLineAfterMarker(line));
@@ -312,13 +328,7 @@ function isAntigravityPartialToolMarkerLine(line: string) {
     return false;
   }
   const afterMarker = antigravityLineAfterMarker(line).trim().toLowerCase();
-  if (!afterMarker) {
-    return true;
-  }
-  return /^[a-z]*$/i.test(afterMarker) && ANTIGRAVITY_TOOL_NAMES.some((name) => {
-    const lowerName = name.toLowerCase();
-    return afterMarker.length < lowerName.length && lowerName.startsWith(afterMarker);
-  });
+  return isAntigravityToolPrefix(afterMarker);
 }
 
 function isAntigravityPrimaryResponseLine(line: string) {
@@ -372,7 +382,11 @@ function normalizeAntigravityLine(line: string, foregroundRgb: string, suppressP
   return withForeground.endsWith("\u001b[39m") ? withForeground : `${withForeground}\u001b[39m`;
 }
 
-function normalizeAntigravityPrimaryText(data: string, foregroundRgb = "255;255;255") {
+function normalizeAntigravityPrimaryText(
+  data: string,
+  foregroundRgb = "255;255;255",
+  state?: TerminalOutputState,
+) {
   let suppressIndentedToolDetail = false;
   return data
     .split(/(\r\n|\n|\r)/)
@@ -383,8 +397,25 @@ function normalizeAntigravityPrimaryText(data: string, foregroundRgb = "255;255;
 
       const plain = antigravityPlainLine(part);
       const isIndentedDetail = /^\s+/.test(part.replace(ANSI_SEQUENCE, ""));
-      const suppressPrimaryBrightening = suppressIndentedToolDetail && isIndentedDetail;
+      const pendingToolCandidate =
+        state?.antigravityPendingToolMarkerText !== undefined
+          ? `${state.antigravityPendingToolMarkerText}${plain}`
+          : null;
+      const suppressPendingTool = pendingToolCandidate !== null && isAntigravityToolOrPrefix(pendingToolCandidate);
+      const suppressPrimaryBrightening = (suppressIndentedToolDetail && isIndentedDetail) || suppressPendingTool;
       const normalized = normalizeAntigravityLine(part, foregroundRgb, suppressPrimaryBrightening);
+
+      if (state) {
+        if (pendingToolCandidate !== null) {
+          state.antigravityPendingToolMarkerText = isAntigravityToolPrefix(pendingToolCandidate)
+            ? pendingToolCandidate.trim()
+            : undefined;
+        } else if (isAntigravityPartialToolMarkerLine(part)) {
+          state.antigravityPendingToolMarkerText = antigravityLineAfterMarker(part).trim();
+        } else if (plain && !isIndentedDetail) {
+          state.antigravityPendingToolMarkerText = undefined;
+        }
+      }
 
       if (!plain) {
         suppressIndentedToolDetail = false;
@@ -589,7 +620,7 @@ export function normalizeTerminalOutputBatch(
     .join("");
   const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
   const themedOutput = provider === "antigravity"
-    ? normalizeAntigravityPrimaryText(normalizedOutput, state?.antigravityForegroundRgb)
+    ? normalizeAntigravityPrimaryText(normalizedOutput, state?.antigravityForegroundRgb, state)
     : normalizedOutput;
   return provider === "opencode"
     ? themedOutput
