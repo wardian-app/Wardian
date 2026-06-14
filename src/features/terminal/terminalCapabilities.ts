@@ -274,8 +274,28 @@ function isAntigravitySeparatorLine(line: string) {
   return /^[─━—-]{4,}$/.test(antigravityPlainLine(line).replace(/\s/g, ""));
 }
 
-const ANTIGRAVITY_TOOL_LINE_PATTERN =
-  /^(?:Read|Search|Bash|ListDir|Write|Edit|Glob|Grep|Run|Loading|Create|Delete|MultiEdit|Patch|TodoWrite|WebFetch|WebSearch|LS)\b/i;
+const ANTIGRAVITY_TOOL_NAMES = [
+  "Read",
+  "Search",
+  "Bash",
+  "ListDir",
+  "Write",
+  "Edit",
+  "Glob",
+  "Grep",
+  "Run",
+  "Loading",
+  "Create",
+  "Delete",
+  "MultiEdit",
+  "Patch",
+  "TodoWrite",
+  "WebFetch",
+  "WebSearch",
+  "LS",
+] as const;
+
+const ANTIGRAVITY_TOOL_LINE_PATTERN = new RegExp(`^(?:${ANTIGRAVITY_TOOL_NAMES.join("|")})\\b`, "i");
 
 function antigravityLineAfterMarker(line: string) {
   return antigravityPlainLine(line).replace(/^[●•]\s*/, "");
@@ -284,6 +304,18 @@ function antigravityLineAfterMarker(line: string) {
 function isAntigravityToolMarkerLine(line: string) {
   const plain = antigravityPlainLine(line);
   return /^[●•]/.test(plain) && ANTIGRAVITY_TOOL_LINE_PATTERN.test(antigravityLineAfterMarker(line));
+}
+
+function isAntigravityPartialToolMarkerLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  if (!/^[●•]/.test(plain)) {
+    return false;
+  }
+  const afterMarker = antigravityLineAfterMarker(line).trim().toLowerCase();
+  return /^[a-z]*$/i.test(afterMarker) && ANTIGRAVITY_TOOL_NAMES.some((name) => {
+    const lowerName = name.toLowerCase();
+    return afterMarker.length > 0 && afterMarker.length < lowerName.length && lowerName.startsWith(afterMarker);
+  });
 }
 
 function isAntigravityPrimaryResponseLine(line: string) {
@@ -296,7 +328,7 @@ function isAntigravityPrimaryResponseLine(line: string) {
     return false;
   }
 
-  if (/^[›>▸]/.test(plain) || isAntigravityToolMarkerLine(line)) {
+  if (/^[›>▸]/.test(plain) || isAntigravityToolMarkerLine(line) || isAntigravityPartialToolMarkerLine(line)) {
     return false;
   }
 
@@ -317,6 +349,7 @@ function isAntigravityToolOrStatusLine(line: string) {
     isAntigravitySeparatorLine(line) ||
     /^▸/.test(plain) ||
     isAntigravityToolMarkerLine(line) ||
+    isAntigravityPartialToolMarkerLine(line) ||
     ANTIGRAVITY_TOOL_LINE_PATTERN.test(plain) ||
     /\b(?:ctrl\+o to expand|Thought for|tokens?|esc to cancel|for shortcuts)\b/i.test(plain)
   );
@@ -585,13 +618,22 @@ export function normalizeRemoteTerminalOutput(
   if (!data) {
     return data;
   }
+  const contextForeground = provider === "antigravity" && context
+    ? foregroundRgbForSgr(context.foregroundRgb)
+    : undefined;
+  const outputState = state ?? (contextForeground ? { lastHomeRedrawLines: null } : undefined);
+  const previousAntigravityForeground = outputState?.antigravityForegroundRgb;
+  if (outputState && contextForeground) {
+    outputState.antigravityForegroundRgb = contextForeground;
+  }
   const normalized = stripCursorStyleControls(
-    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state),
+    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, outputState),
   );
+  if (outputState && contextForeground) {
+    outputState.antigravityForegroundRgb = previousAntigravityForeground;
+  }
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
-    : provider === "antigravity" && context
-      ? normalizeAntigravityPrimaryText(normalized, foregroundRgbForSgr(context.foregroundRgb))
     : normalized;
 }
 

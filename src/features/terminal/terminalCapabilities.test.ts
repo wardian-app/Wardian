@@ -1,6 +1,7 @@
 import {
   normalizeTerminalOutputBatch,
   normalizeOpenCodeOutput,
+  normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
   type TerminalCapabilityContext,
   type TerminalOutputState,
@@ -104,6 +105,26 @@ describe("terminal capability broker", () => {
     expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(
       "\u001b[38;2;255;255;255mI am currently operating in the following workspace directory:\u001b[0;38;2;255;255;255m\u001b[39m\r\n" +
         "\u001b[38;2;255;255;255mI also have access to the \u001b[1mfollowing workspace directories\u001b[22m:\u001b[0;38;2;255;255;255m\u001b[39m",
+    );
+  });
+
+  it("uses the remote terminal context foreground for Antigravity snapshots in light mode", () => {
+    const output = "\u001b[38;2;184;184;184mRemote primary response\u001b[39m";
+
+    expect(
+      normalizeRemoteTerminalOutput(output, "antigravity", undefined, {
+        ...baseContext,
+        prefersLight: true,
+        backgroundRgb: "fc/fa/f5",
+        foregroundRgb: "11/18/27",
+      }),
+    ).toBe("\u001b[38;2;17;24;39mRemote primary response\u001b[39m");
+  });
+
+  it("does not whiten partial Antigravity tool marker chunks before the tool name is complete", () => {
+    expect(normalizeTerminalOutputBatch(["● Ba"], "antigravity")).toBe("● Ba");
+    expect(normalizeTerminalOutputBatch(["sh(pwd) (ctrl+o to expand)\r\n"], "antigravity")).toBe(
+      "sh(pwd) (ctrl+o to expand)\r\n",
     );
   });
 
