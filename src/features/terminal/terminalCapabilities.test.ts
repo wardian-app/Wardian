@@ -65,6 +65,7 @@ describe("terminal capability broker", () => {
       "\u001b[38;2;184;184;184mBash(npm run lint) (ctrl+o to expand)\u001b[39m\r\n" +
       "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n" +
       "\u001b[2mI have started npm run lint.\u001b[22m\r\n" +
+      "\u001b[38;2;156;171;190mWARDIAN_WHITE_TEXT_PROOF_123\u001b[39m\r\n" +
       "\u001b[38;2;184;184;184mI will notify you when it completes.\u001b[39m";
 
     expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(
@@ -72,6 +73,7 @@ describe("terminal capability broker", () => {
         "\u001b[38;2;184;184;184mBash(npm run lint) (ctrl+o to expand)\u001b[39m\r\n" +
         "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n" +
         "I have started npm run lint.\u001b[22m\r\n" +
+        "\u001b[38;2;255;255;255mWARDIAN_WHITE_TEXT_PROOF_123\u001b[39m\r\n" +
         "\u001b[38;2;255;255;255mI will notify you when it completes.\u001b[39m",
     );
   });

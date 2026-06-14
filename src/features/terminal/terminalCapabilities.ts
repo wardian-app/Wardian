@@ -183,8 +183,10 @@ export function normalizeCodexComposerBackgroundForTheme(data: string, context: 
   return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, "\u001b[48;2;41;41;41m");
 }
 
-function isGrayRgb(r: number, g: number, b: number) {
-  return Math.max(r, g, b) - Math.min(r, g, b) <= 8;
+function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max - min <= 40 && max <= 220;
 }
 
 function normalizeAntigravitySgrParams(
@@ -203,7 +205,7 @@ function normalizeAntigravitySgrParams(
         brightenGrayForeground &&
         rgb.length === 3 &&
         rgb.every(Number.isFinite) &&
-        isGrayRgb(rgb[0], rgb[1], rgb[2])
+        isMutedPrimaryForegroundRgb(rgb[0], rgb[1], rgb[2])
       ) {
         normalized.push("38", "2", ...foregroundRgb.split(";"));
         index += 4;
