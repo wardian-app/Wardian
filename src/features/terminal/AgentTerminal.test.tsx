@@ -1997,6 +1997,36 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("keeps Antigravity dark-mode terminal default muted while primary text is normalized separately", async () => {
+    const probe = "\u001b]10;?\u001b\\";
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          return readCount === 1 ? probe : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="antigravity-terminal-colors" provider="antigravity" theme="dark" />);
+
+    await waitFor(() => {
+      const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+        string,
+        unknown
+      >;
+      expect(terminalOptions.theme).toMatchObject({ foreground: "#c9d1d9" });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "antigravity-terminal-colors",
+        input: "\u001b]10;rgb:c9/d1/d9\u001b\\",
+      });
+    });
+  });
+
   it("answers OpenCode light-dark probes from the Wardian terminal theme", async () => {
     const matchMedia = vi.fn().mockReturnValue({
       matches: false,

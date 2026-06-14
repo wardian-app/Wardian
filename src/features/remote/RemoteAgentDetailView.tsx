@@ -476,6 +476,7 @@ function TerminalPane({
             output,
             agent.provider ?? undefined,
             remoteTerminalCapabilityContext(terminal, host),
+            outputStateRef.current,
           ),
         );
       }

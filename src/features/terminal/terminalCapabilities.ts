@@ -47,6 +47,9 @@ export type TerminalOutputState = {
   // drop heuristic misfires on content shuffles.
   existingKnownLines?: Set<string>;
   transientHomeRedrawActive?: boolean;
+  antigravityForegroundRgb?: string;
+  antigravityPendingToolMarkerText?: string;
+  antigravitySuppressIndentedToolDetail?: boolean;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -163,6 +166,14 @@ function codexLightUserMessageBackground(backgroundRgb: string) {
   return [r, g, b].map((component) => Math.round(component * 0.96)).join(";");
 }
 
+function foregroundRgbForSgr(foregroundRgb: string) {
+  const isHexTriplet = foregroundRgb.includes("/");
+  const values = foregroundRgb
+    .split(isHexTriplet ? "/" : ";")
+    .map((component) => Number.parseInt(component, isHexTriplet ? 16 : 10));
+  return values.length === 3 && values.every(Number.isFinite) ? values.join(";") : "255;255;255";
+}
+
 export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
   if (context.prefersLight) {
     return data.replace(
@@ -172,6 +183,258 @@ export function normalizeCodexComposerBackgroundForTheme(data: string, context: 
   }
 
   return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, "\u001b[48;2;41;41;41m");
+}
+
+function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max - min <= 40 && max <= 220;
+}
+
+function normalizeAntigravitySgrParams(
+  params: string,
+  foregroundRgb: string,
+  brightenGrayForeground: boolean,
+) {
+  const raw = params.length > 0 ? params.split(";") : ["0"];
+  const normalized: string[] = [];
+  const hasForegroundAfter = (start: number) => {
+    for (let cursor = start; cursor < raw.length; cursor += 1) {
+      if (raw[cursor] === "38" && (raw[cursor + 1] === "2" || raw[cursor + 1] === "5")) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const param = raw[index] === "" ? "0" : raw[index];
+    if (brightenGrayForeground && param === "0") {
+      normalized.push(param);
+      if (!hasForegroundAfter(index + 1)) {
+        normalized.push("38", "2", ...foregroundRgb.split(";"));
+      }
+      continue;
+    }
+
+    if (param === "38" && raw[index + 1] === "2") {
+      const rgb = raw.slice(index + 2, index + 5).map((component) => Number.parseInt(component, 10));
+      if (
+        brightenGrayForeground &&
+        rgb.length === 3 &&
+        rgb.every(Number.isFinite) &&
+        isMutedPrimaryForegroundRgb(rgb[0], rgb[1], rgb[2])
+      ) {
+        normalized.push("38", "2", ...foregroundRgb.split(";"));
+        index += 4;
+        continue;
+      }
+      normalized.push(param, "2", ...raw.slice(index + 2, index + 5));
+      index += 4;
+      continue;
+    }
+
+    if (param === "48" && raw[index + 1] === "2") {
+      normalized.push(param, "2", ...raw.slice(index + 2, index + 5));
+      index += 4;
+      continue;
+    }
+
+    if (param === "38" && raw[index + 1] === "5") {
+      const colorIndex = Number.parseInt(raw[index + 2] ?? "", 10);
+      if (brightenGrayForeground && Number.isFinite(colorIndex) && colorIndex >= 232 && colorIndex <= 255) {
+        normalized.push("38", "2", ...foregroundRgb.split(";"));
+        index += 2;
+        continue;
+      }
+      normalized.push(param, "5", raw[index + 2] ?? "0");
+      index += 2;
+      continue;
+    }
+
+    if (param === "48" && raw[index + 1] === "5") {
+      normalized.push(param, "5", raw[index + 2] ?? "0");
+      index += 2;
+      continue;
+    }
+
+    if (param === "2" && brightenGrayForeground) {
+      continue;
+    }
+
+    normalized.push(param);
+  }
+
+  return normalized.length > 0 ? `\u001b[${normalized.join(";")}m` : "";
+}
+
+function antigravityPlainLine(line: string) {
+  return line.replace(ANSI_SEQUENCE, "").replace(/\s+/g, " ").trim();
+}
+
+function isAntigravitySeparatorLine(line: string) {
+  return /^[─━—-]{4,}$/.test(antigravityPlainLine(line).replace(/\s/g, ""));
+}
+
+const ANTIGRAVITY_TOOL_NAMES = [
+  "Read",
+  "Search",
+  "Bash",
+  "ListDir",
+  "Write",
+  "Edit",
+  "Glob",
+  "Grep",
+  "Run",
+  "Loading",
+  "Create",
+  "Delete",
+  "MultiEdit",
+  "Patch",
+  "TodoWrite",
+  "WebFetch",
+  "WebSearch",
+  "LS",
+] as const;
+
+const ANTIGRAVITY_TOOL_LINE_PATTERN = new RegExp(`^(?:${ANTIGRAVITY_TOOL_NAMES.join("|")})\\b`, "i");
+
+function antigravityLineAfterMarker(line: string) {
+  return antigravityPlainLine(line).replace(/^[●•]\s*/, "");
+}
+
+function isAntigravityToolPrefix(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return /^[a-z]*$/i.test(normalized) && ANTIGRAVITY_TOOL_NAMES.some((name) => {
+    const lowerName = name.toLowerCase();
+    return normalized.length < lowerName.length && lowerName.startsWith(normalized);
+  });
+}
+
+function isAntigravityToolOrPrefix(value: string) {
+  return ANTIGRAVITY_TOOL_LINE_PATTERN.test(value.trim()) || isAntigravityToolPrefix(value);
+}
+
+function isAntigravityToolMarkerLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  return /^[●•]/.test(plain) && ANTIGRAVITY_TOOL_LINE_PATTERN.test(antigravityLineAfterMarker(line));
+}
+
+function isAntigravityPartialToolMarkerLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  if (!/^[●•]/.test(plain)) {
+    return false;
+  }
+  const afterMarker = antigravityLineAfterMarker(line).trim().toLowerCase();
+  return isAntigravityToolPrefix(afterMarker);
+}
+
+function isAntigravityPrimaryResponseLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  if (!plain) {
+    return false;
+  }
+
+  if (isAntigravitySeparatorLine(line)) {
+    return false;
+  }
+
+  if (/^[›>▸]/.test(plain) || isAntigravityToolMarkerLine(line) || isAntigravityPartialToolMarkerLine(line)) {
+    return false;
+  }
+
+  if (ANTIGRAVITY_TOOL_LINE_PATTERN.test(plain)) {
+    return false;
+  }
+
+  if (/\b(?:ctrl\+o to expand|Thought for|tokens?|esc to cancel|for shortcuts)\b/i.test(plain)) {
+    return false;
+  }
+
+  return true;
+}
+
+function isAntigravityToolOrStatusLine(line: string) {
+  const plain = antigravityPlainLine(line);
+  return (
+    isAntigravitySeparatorLine(line) ||
+    /^▸/.test(plain) ||
+    isAntigravityToolMarkerLine(line) ||
+    isAntigravityPartialToolMarkerLine(line) ||
+    ANTIGRAVITY_TOOL_LINE_PATTERN.test(plain) ||
+    /\b(?:ctrl\+o to expand|Thought for|tokens?|esc to cancel|for shortcuts)\b/i.test(plain)
+  );
+}
+
+function normalizeAntigravityLine(line: string, foregroundRgb: string, suppressPrimaryBrightening = false) {
+  const brightenGrayForeground = !suppressPrimaryBrightening && isAntigravityPrimaryResponseLine(line);
+  const normalized = line.replace(/\u001b\[([0-9;]*)m/g, (_match, params: string) =>
+    normalizeAntigravitySgrParams(params, foregroundRgb, brightenGrayForeground),
+  );
+  if (!brightenGrayForeground) {
+    return normalized;
+  }
+
+  const foreground = `\u001b[38;2;${foregroundRgb}m`;
+  const withForeground = normalized.startsWith(foreground) ? normalized : `${foreground}${normalized}`;
+  return withForeground.endsWith("\u001b[39m") ? withForeground : `${withForeground}\u001b[39m`;
+}
+
+function normalizeAntigravityPrimaryText(
+  data: string,
+  foregroundRgb = "255;255;255",
+  state?: TerminalOutputState,
+) {
+  let suppressIndentedToolDetail = state?.antigravitySuppressIndentedToolDetail ?? false;
+  const parts = data.split(/(\r\n|\n|\r)/);
+  return parts
+    .map((part, index) => {
+      if (part === "\r\n" || part === "\n" || part === "\r") {
+        return part;
+      }
+      if (part === "" && index === parts.length - 1) {
+        return part;
+      }
+
+      const plain = antigravityPlainLine(part);
+      const isIndentedDetail = /^\s+/.test(part.replace(ANSI_SEQUENCE, ""));
+      const pendingToolCandidate =
+        state?.antigravityPendingToolMarkerText !== undefined
+          ? `${state.antigravityPendingToolMarkerText}${plain}`
+          : null;
+      const suppressPendingTool = pendingToolCandidate !== null && isAntigravityToolOrPrefix(pendingToolCandidate);
+      const suppressPrimaryBrightening = (suppressIndentedToolDetail && isIndentedDetail) || suppressPendingTool;
+      const normalized = normalizeAntigravityLine(part, foregroundRgb, suppressPrimaryBrightening);
+
+      if (state) {
+        if (pendingToolCandidate !== null) {
+          state.antigravityPendingToolMarkerText = isAntigravityToolPrefix(pendingToolCandidate)
+            ? pendingToolCandidate.trim()
+            : undefined;
+        } else if (isAntigravityPartialToolMarkerLine(part)) {
+          state.antigravityPendingToolMarkerText = antigravityLineAfterMarker(part).trim();
+        } else if (plain && !isIndentedDetail) {
+          state.antigravityPendingToolMarkerText = undefined;
+        }
+      }
+
+      if (!plain) {
+        suppressIndentedToolDetail = false;
+      } else if (isAntigravityToolOrStatusLine(part)) {
+        suppressIndentedToolDetail = true;
+      } else if (!isIndentedDetail) {
+        suppressIndentedToolDetail = false;
+      }
+      if (state) {
+        state.antigravitySuppressIndentedToolDetail = suppressIndentedToolDetail;
+      }
+
+      return normalized;
+    })
+    .join("");
 }
 
 function stripCursorStyleControls(data: string) {
@@ -363,9 +626,12 @@ export function normalizeTerminalOutputBatch(
     .map((data) => normalizeOpenCodeOutput(data, provider, state))
     .join("");
   const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
+  const themedOutput = provider === "antigravity"
+    ? normalizeAntigravityPrimaryText(normalizedOutput, state?.antigravityForegroundRgb, state)
+    : normalizedOutput;
   return provider === "opencode"
-    ? normalizedOutput
-    : normalizeFullscreenClearByNewlines(normalizedOutput);
+    ? themedOutput
+    : normalizeFullscreenClearByNewlines(themedOutput);
 }
 
 function splitRemoteTerminalHistoryFrames(data: string) {
@@ -393,9 +659,20 @@ export function normalizeRemoteTerminalOutput(
   if (!data) {
     return data;
   }
+  const contextForeground = provider === "antigravity" && context
+    ? foregroundRgbForSgr(context.foregroundRgb)
+    : undefined;
+  const outputState = state ?? (contextForeground ? { lastHomeRedrawLines: null } : undefined);
+  const previousAntigravityForeground = outputState?.antigravityForegroundRgb;
+  if (outputState && contextForeground) {
+    outputState.antigravityForegroundRgb = contextForeground;
+  }
   const normalized = stripCursorStyleControls(
-    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state),
+    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, outputState),
   );
+  if (outputState && contextForeground) {
+    outputState.antigravityForegroundRgb = previousAntigravityForeground;
+  }
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
     : normalized;
@@ -405,10 +682,13 @@ export function normalizeRemoteTerminalLiveOutput(
   data: string,
   provider?: string,
   context?: TerminalCapabilityContext,
+  state?: TerminalOutputState,
 ) {
   const normalized = stripCursorStyleControls(data);
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
+    : provider === "antigravity" && context
+      ? normalizeAntigravityPrimaryText(normalized, foregroundRgbForSgr(context.foregroundRgb), state)
     : normalized;
 }
 
@@ -494,6 +774,8 @@ export function planTerminalCapabilityResponses(
         ? normalizeOpenCodeOutput(data, "opencode")
         : provider === "codex"
           ? normalizeCodexComposerBackgroundForTheme(data, context)
+          : provider === "antigravity"
+            ? normalizeAntigravityPrimaryText(data, foregroundRgbForSgr(context.foregroundRgb))
           : data,
     focusReported,
   };

@@ -20,7 +20,13 @@ import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
-import { DARK_TERM_THEME, LIGHT_TERM_THEME, terminalMinimumContrastRatio } from "./terminalThemes";
+import {
+  DARK_TERM_THEME,
+  LIGHT_TERM_THEME,
+  terminalMinimumContrastRatio,
+  terminalThemeForProvider,
+  type WardianTerminalTheme,
+} from "./terminalThemes";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -69,7 +75,7 @@ type TerminalSessionEntry = {
   outputReadyUnlisten: (() => void) | null;
   terminalClearedUnlisten: (() => void) | null;
   provider?: string;
-  currentTheme: typeof DARK_TERM_THEME;
+  currentTheme: WardianTerminalTheme;
   renderer: TerminalRendererEntry | null;
   rendererDisposeTimer: ReturnType<typeof setTimeout> | null;
   parser: HeadlessTerminal;
@@ -1094,6 +1100,12 @@ async function writeTerminalOutputBatch(
   }
 
   entry.existingKnownLines = readParserKnownLineSet(entry);
+  const antigravityPrimaryForeground =
+    entry.currentTheme === LIGHT_TERM_THEME ? entry.currentTheme.foreground : "#ffffff";
+  entry.antigravityForegroundRgb =
+    entry.provider === "antigravity"
+      ? rgbTripletFromHex(antigravityPrimaryForeground, "255;255;255")
+      : undefined;
   const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
   const rendererWasAtBottom = entry.renderer
     ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
@@ -1674,7 +1686,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
-  const lastThemeSignalRef = useRef<typeof DARK_TERM_THEME | null>(null);
+  const lastThemeSignalRef = useRef<WardianTerminalTheme | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
@@ -1699,7 +1711,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => mediaQuery.removeEventListener("change", handler);
   }, [theme]);
 
-  const termTheme = effectiveTheme === "light" ? LIGHT_TERM_THEME : DARK_TERM_THEME;
+  const termTheme = terminalThemeForProvider(effectiveTheme, provider);
 
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
@@ -1764,15 +1776,16 @@ export const AgentTerminal = memo(function AgentTerminal({
           basePath: workspacePath,
           onOpenError: setLinkOpenError,
         };
-        session.currentTheme = termTheme;
-        lastThemeSignalRef.current = termTheme;
+        const sessionTermTheme = terminalThemeForProvider(effectiveTheme, session.provider ?? provider);
+        session.currentTheme = sessionTermTheme;
+        lastThemeSignalRef.current = sessionTermTheme;
 
         const renderer = mountRenderer(sessionId, session, terminalRef.current);
         if (!renderer) {
           return;
         }
 
-        renderer.term.options.theme = termTheme;
+        renderer.term.options.theme = sessionTermTheme;
         attachRendererHost(session, terminalRef.current);
 
         xtermRef.current = renderer.term;
@@ -1838,39 +1851,40 @@ export const AgentTerminal = memo(function AgentTerminal({
   }, [performFit, provider, sessionId, workspacePath]);
 
   useEffect(() => {
+    const entry = terminalSessionMap.get(sessionId);
+    const activeTermTheme = terminalThemeForProvider(effectiveTheme, entry?.provider ?? provider);
     const term = xtermRef.current;
     if (term) {
-      term.options.theme = termTheme;
+      term.options.theme = activeTermTheme;
       term.refresh(0, Math.max(term.rows - 1, 0));
     }
-    const entry = terminalSessionMap.get(sessionId);
     if (!entry) {
       return;
     }
     const previousSignaledTheme = lastThemeSignalRef.current;
-    lastThemeSignalRef.current = termTheme;
-    entry.currentTheme = termTheme;
-    if (entry.provider === "opencode" || entry.provider === "codex") {
+    lastThemeSignalRef.current = activeTermTheme;
+    entry.currentTheme = activeTermTheme;
+    if (entry.provider === "opencode" || entry.provider === "codex" || entry.provider === "antigravity") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
           ? `${cleaned.slice(0, 2)}/${cleaned.slice(2, 4)}/${cleaned.slice(4, 6)}`
           : fallback;
       };
-      const background = toRgbTriplet(termTheme.background, "1a/1a/1a");
-      const foreground = toRgbTriplet(termTheme.foreground, "eb/eb/eb");
-      const prefersLight = termTheme === LIGHT_TERM_THEME;
+      const background = toRgbTriplet(activeTermTheme.background, "1a/1a/1a");
+      const foreground = toRgbTriplet(activeTermTheme.foreground, "eb/eb/eb");
+      const prefersLight = activeTermTheme === LIGHT_TERM_THEME;
       // TUIs that probe terminal colors infer their visible mode from ?997 and
       // subsequent OSC color replies, so send mode first and colors second.
       queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
-      if (entry.provider === "codex" && previousSignaledTheme !== null && previousSignaledTheme !== termTheme) {
+      if (entry.provider === "codex" && previousSignaledTheme !== null && previousSignaledTheme !== activeTermTheme) {
         void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
       }
     }
-  }, [sessionId, termTheme]);
+  }, [effectiveTheme, provider, sessionId, termTheme]);
 
   useEffect(() => {
     let isMounted = true;
