@@ -563,7 +563,11 @@ function TerminalPane({
         data-testid="remote-terminal-scroll-surface"
         className="mt-2 min-h-0 flex-1 overflow-hidden rounded-md border border-wardian-border bg-wardian-card"
       >
-        <div ref={terminalHostRef} data-testid="remote-terminal-attach" className="h-full w-full bg-wardian-card" />
+        <div
+          ref={terminalHostRef}
+          data-testid="remote-terminal-attach"
+          className="remote-terminal-hide-composition h-full w-full bg-wardian-card"
+        />
       </div>
       <div ref={endRef} aria-hidden="true" />
     </section>
