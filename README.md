@@ -52,10 +52,13 @@ Choose the asset for your operating system and CPU:
 
 `x64` and `amd64` both mean 64-bit Intel/AMD CPUs. On macOS, Apple Silicon uses `aarch64`, not `x64`. Ignore updater-only assets such as `latest.json`, `.app.tar.gz`, or `.sig` files when installing manually.
 
+Debian/Ubuntu users who want package-manager updates can use the optional
+[Wardian APT repository](docs/developer/package-manager-distribution.md#linux-apt-repository).
+
 > **Note:** Wardian binaries are currently unsigned. On first launch:
 > - **Windows:** SmartScreen will show a warning. Click "More info" → "Run anyway."
 > - **macOS:** Gatekeeper will refuse to open the app. Right-click the app and choose "Open," or run `xattr -cr /Applications/Wardian.app` from Terminal.
-> - **Linux:** `.AppImage` is portable (`chmod +x` and run); `.deb` installs via `sudo apt install ./Wardian_*.deb`.
+> - **Linux:** APT installs update through the system package manager. `.AppImage` is portable (`chmod +x` and run); direct `.deb` downloads install via `sudo apt install ./Wardian_*.deb`.
 
 ---
 

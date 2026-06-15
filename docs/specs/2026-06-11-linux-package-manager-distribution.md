@@ -1,7 +1,8 @@
 # Linux Package Manager Distribution
 
-- **Status:** Proposed
+- **Status:** Accepted and implemented
 - **Date:** 2026-06-11
+- **Implemented:** 2026-06-12
 - **Issue:** [#324](https://github.com/wardian-app/Wardian/issues/324)
 - **Decision owner:** Maintainers
 
@@ -27,13 +28,12 @@ GitHub Releases remain the canonical release artifact source. The APT repository
 is a package-manager mirror of the published stable `.deb`, not an independent
 build system and not a replacement for the Tauri updater artifacts.
 
-The intended public repository contract is `https://packages.wardian.org/apt`.
-The package host can later add sibling package-manager paths such as `/rpm`
-without changing the APT URL. The initial backend can be any static host that
-preserves that URL contract, such as GitHub Pages behind the custom domain or
-object storage behind the same domain. Do not publish user-facing APT install
-instructions until the domain, signing key, fingerprint, and first validated
-repository tree are live.
+The public repository contract is `https://packages.wardian.org/apt`. The
+package host can later add sibling package-manager paths such as `/rpm` without
+changing the APT URL. The initial backend is GitHub Pages behind
+`packages.wardian.org`. User-facing APT install instructions may be published
+only after the domain, signing key, fingerprint, and first validated repository
+tree are live; that gate was satisfied on 2026-06-12.
 
 The first public APT repository should publish:
 

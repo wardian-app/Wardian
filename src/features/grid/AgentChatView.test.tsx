@@ -127,6 +127,42 @@ describe("AgentChatView", () => {
     expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
   });
 
+  it("does not restore stale transcript rows when a pre-clear load resolves after clear", async () => {
+    let clearHandler: ((event: { payload?: { session_id?: string } }) => void) | null = null;
+    const load = deferred<AgentChatEvent[]>();
+    listenMock.mockImplementation(async (eventName, handler) => {
+      if (eventName === "agent-terminal-cleared") {
+        clearHandler = handler as typeof clearHandler;
+      }
+      return () => {};
+    });
+    invokeMock.mockReturnValue(load.promise);
+
+    render(<AgentChatView sessionId="agent-1" status="Idle" />);
+
+    expect(clearHandler).toBeTruthy();
+    act(() => {
+      clearHandler?.({ payload: { session_id: "agent-1" } });
+    });
+
+    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
+
+    await act(async () => {
+      load.resolve([
+        event({
+          id: "message-before-clear",
+          kind: "message",
+          role: "assistant",
+          text: "This stale answer should stay hidden",
+          sequence: 1,
+        }),
+      ]);
+    });
+
+    expect(screen.queryByText("This stale answer should stay hidden")).not.toBeInTheDocument();
+    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
+  });
+
   it("hides routine status lifecycle rows covered by the card header", async () => {
     invokeMock.mockResolvedValue([
       event({
@@ -1266,25 +1302,34 @@ describe("AgentChatView", () => {
     expect(screen.getByText("Working...")).toBeInTheDocument();
   });
 
-  it("disables chat input while the agent is busy but allows action required responses", async () => {
-    invokeMock.mockResolvedValue([
-      event({
-        id: "approval-required",
-        kind: "approval",
-        role: null,
-        title: "Approval required",
-        text: "Do you want to proceed?",
-        status: "action_required",
-        sequence: 1,
-      }),
-    ]);
+  it("keeps chat input editable while the agent is processing and still allows action required responses", async () => {
+    invokeMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        event({
+          id: "approval-required",
+          session_id: "agent-2",
+          kind: "approval",
+          role: null,
+          title: "Approval required",
+          text: "Do you want to proceed?",
+          status: "action_required",
+          sequence: 1,
+        }),
+      ]);
 
     const { rerender } = render(<AgentChatView sessionId="agent-1" status="Processing" />);
 
-    expect(await screen.findByLabelText("Message agent")).toBeDisabled();
-    expect(screen.getByPlaceholderText("Agent is processing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
+    expect(screen.getByPlaceholderText("Message agent...")).toBeInTheDocument();
 
-    rerender(<AgentChatView sessionId="agent-1" status="Action Required" />);
+    rerender(<AgentChatView sessionId="agent-running" status="Running" />);
+
+    expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
+    expect(screen.getByPlaceholderText("Message agent...")).toBeInTheDocument();
+
+    rerender(<AgentChatView sessionId="agent-2" status="Action Required" />);
 
     expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
     expect(screen.getByPlaceholderText("Respond to action needed...")).toBeInTheDocument();

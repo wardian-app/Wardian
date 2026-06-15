@@ -2171,6 +2171,36 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("keeps Antigravity dark-mode terminal default muted while primary text is normalized separately", async () => {
+    const probe = "\u001b]10;?\u001b\\";
+    let readCount = 0;
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          readCount += 1;
+          return readCount === 1 ? probe : null;
+        case "resize_agent_terminal":
+          return null;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="antigravity-terminal-colors" provider="antigravity" theme="dark" />);
+
+    await waitFor(() => {
+      const terminalOptions = mockTerminal.mock.calls[mockTerminal.mock.calls.length - 1]?.[0] as Record<
+        string,
+        unknown
+      >;
+      expect(terminalOptions.theme).toMatchObject({ foreground: "#c9d1d9" });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "antigravity-terminal-colors",
+        input: "\u001b]10;rgb:c9/d1/d9\u001b\\",
+      });
+    });
+  });
+
   it("answers OpenCode light-dark probes from the Wardian terminal theme", async () => {
     const matchMedia = vi.fn().mockReturnValue({
       matches: false,
@@ -2209,7 +2239,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("replies to Codex OSC 10/11 probes during the initial preview window", async () => {
+  it("does not reply to Codex OSC 10/11 probes (the modern ConPTY answers them)", async () => {
     const probe = "\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {
@@ -2236,14 +2266,17 @@ describe("AgentTerminal scrollback", () => {
     render(<AgentTerminal sessionId="codex-theme-probe" provider="codex" theme="light" />);
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-theme-probe",
-        input: "\u001b]10;rgb:11/18/27\u001b\\",
-      });
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-theme-probe",
-        input: "\u001b]11;rgb:fc/fa/f5\u001b\\",
-      });
+      expect(mockInvoke).toHaveBeenCalledWith("read_agent_pty", expect.anything());
+    });
+    // Codex's OSC 10/11 color probes are answered by the bundled modern ConPTY
+    // (OpenConsole); a second Wardian reply would leak into codex's composer.
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-theme-probe",
+      input: "\u001b]10;rgb:11/18/27\u001b\\",
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-theme-probe",
+      input: "\u001b]11;rgb:fc/fa/f5\u001b\\",
     });
   });
 

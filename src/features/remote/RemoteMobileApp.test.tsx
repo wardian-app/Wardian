@@ -768,6 +768,80 @@ describe("RemoteMobileApp", () => {
     });
   });
 
+  it("keeps the mobile chat composer editable while the selected agent is processing", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Processing...",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/agents/agent-1/chat") {
+        return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/agents/action" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const input = await screen.findByLabelText("Prompt Coder");
+    expect(input).not.toBeDisabled();
+
+    await userEvent.type(input, "continue while running");
+    await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/remote/api/agents/action",
+        expect.objectContaining({
+          credentials: "same-origin",
+          method: "POST",
+        }),
+      );
+    });
+    const actionCall = fetchMock.mock.calls.find(([url]) => url === "/remote/api/agents/action");
+    expect(JSON.parse(actionCall?.[1]?.body as string)).toEqual({
+      action: "send_prompt",
+      target: "agent-1",
+      prompt: "continue while running",
+    });
+  });
+
   it("renders remote chat work logs with concrete tool call details", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {

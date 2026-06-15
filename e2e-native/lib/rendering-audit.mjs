@@ -651,8 +651,15 @@ export function auditRenderingEvidence({
     }
 
     const resizedState = wardianStates.get("resized");
+    // gemini's bottom-anchored TUI repaints only its input chrome on resize,
+    // leaving the response marker in real terminal scrollback (native rendering)
+    // rather than the visible viewport — accept either, like the per-state check.
+    const resizedMarkerHaystack =
+      provider === "gemini"
+        ? `${stateText(resizedState)}\n${parserHistoryText(resizedState)}\n${rendererHistoryText(resizedState)}`
+        : stateText(resizedState);
     providerCheck(
-      terminalTextIncludes(stateText(resizedState), auditText),
+      terminalTextIncludes(resizedMarkerHaystack, auditText),
       wardianManifest.input_submitted === true
         ? "Wardian resized terminal text includes visible audit marker"
         : "Wardian resized terminal text includes audit input",

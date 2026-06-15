@@ -13,6 +13,7 @@ import { remoteClient } from "./remoteClient";
 import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
+  type AntigravityRenderState,
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
@@ -378,6 +379,8 @@ function TerminalPane({
   const terminalScrollSurfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  // Cross-chunk render state for antigravity tool-marker/foreground tracking.
+  const outputStateRef = useRef<AntigravityRenderState>({});
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
 
@@ -460,6 +463,7 @@ function TerminalPane({
         normalizeRemoteTerminalOutput(
           base64ToTerminalString(stateBase64),
           agent.provider ?? undefined,
+          outputStateRef.current,
           remoteTerminalCapabilityContext(terminal, host),
         ),
       );
@@ -472,6 +476,7 @@ function TerminalPane({
             output,
             agent.provider ?? undefined,
             remoteTerminalCapabilityContext(terminal, host),
+            outputStateRef.current,
           ),
         );
       }

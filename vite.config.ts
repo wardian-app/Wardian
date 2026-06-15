@@ -28,6 +28,9 @@ export default defineConfig(async () => ({
   // or anything that hits the parser after). Terser handles the shadowing
   // correctly.
   build: {
+    // esbuild 0.28 no longer lowers destructuring for Vite's legacy default
+    // target; Wardian's Tauri webviews are modern enough for ES2022 output.
+    target: "es2022",
     minify: "terser",
     rollupOptions: {
       output: {

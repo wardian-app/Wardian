@@ -4,6 +4,38 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.4.1](https://github.com/wardian-app/Wardian/compare/v0.4.0...v0.4.1) (2026-06-12)
+
+
+### Features
+
+* **chat:** improve markdown rendering and activity feedback ([#527](https://github.com/wardian-app/Wardian/issues/527)) ([a8df8d9](https://github.com/wardian-app/Wardian/commit/a8df8d9c32de62c1671cf31409866b06f688cf64))
+* **packaging:** add APT repository publishing workflow ([#536](https://github.com/wardian-app/Wardian/issues/536)) ([bb51737](https://github.com/wardian-app/Wardian/commit/bb517375786cab357ee357b5f5e04ea0f26265d5))
+* **remote:** reconstruct mobile watchlist ([#499](https://github.com/wardian-app/Wardian/issues/499)) ([6dac31c](https://github.com/wardian-app/Wardian/commit/6dac31ced4ab0411e3f25a27f0971dd58bcc63c9))
+* **theme:** rebuild dark mode as neutral high-contrast IDE palette ([#533](https://github.com/wardian-app/Wardian/issues/533)) ([6784342](https://github.com/wardian-app/Wardian/commit/678434281715d4fd07f172853ce5f1f6f9e5b648))
+
+
+### Bug Fixes
+
+* **cli:** honor watchlist spawn position setting ([#495](https://github.com/wardian-app/Wardian/issues/495)) ([1989450](https://github.com/wardian-app/Wardian/commit/1989450be35260192880bdceea39295a9fd94f91))
+* **explorer:** refresh file tree from filesystem changes ([#491](https://github.com/wardian-app/Wardian/issues/491)) ([1e5b30a](https://github.com/wardian-app/Wardian/commit/1e5b30afd730f21782005f657cbd87086aa3ed5c))
+* **remote:** remap mobile Codex composer fill ([#535](https://github.com/wardian-app/Wardian/issues/535)) ([66fe408](https://github.com/wardian-app/Wardian/commit/66fe40819872b4228a0015f670d8f137c91ecd0f))
+* **runtime:** remove Claude stream flags from interactive launch ([#538](https://github.com/wardian-app/Wardian/issues/538)) ([17f89b2](https://github.com/wardian-app/Wardian/commit/17f89b285c61c4212c3995b92e90229048302c5f))
+* **runtime:** silence Windows process wrappers ([#503](https://github.com/wardian-app/Wardian/issues/503)) ([3aa5145](https://github.com/wardian-app/Wardian/commit/3aa5145022622fcc796fb513cbb44499b2f6da96))
+* **telemetry:** eliminate idle disk/CPU thrash and unblock startup restore ([#532](https://github.com/wardian-app/Wardian/issues/532)) ([4f85da4](https://github.com/wardian-app/Wardian/commit/4f85da494af243303358960543ca05cdb4dbad55))
+* **terminal:** adapt Codex composer theme ([#530](https://github.com/wardian-app/Wardian/issues/530)) ([49f9156](https://github.com/wardian-app/Wardian/commit/49f91560ab8db72db8e09b48fb558c87496b5a34))
+* **workflows:** restore browser E2E smoke coverage ([#486](https://github.com/wardian-app/Wardian/issues/486)) ([6d1506b](https://github.com/wardian-app/Wardian/commit/6d1506bbd8ed01883a69633fe06b9949acebd91a))
+* **workflows:** route CLI exec through live control ([#506](https://github.com/wardian-app/Wardian/issues/506)) ([9df5ca2](https://github.com/wardian-app/Wardian/commit/9df5ca244d8dbf5b63b1571c3708ff383f237d98))
+
+
+### Documentation
+
+* align Wardian positioning and README demo ([#492](https://github.com/wardian-app/Wardian/issues/492)) ([e92034f](https://github.com/wardian-app/Wardian/commit/e92034f29f1f56b0a5319f51f7552952ae217311))
+* **packaging:** publish APT install instructions ([#545](https://github.com/wardian-app/Wardian/issues/545)) ([0795951](https://github.com/wardian-app/Wardian/commit/07959510908a19886313a05957224a426dbf14f2))
+* refine HabitatLayout navigation v2 spec ([#524](https://github.com/wardian-app/Wardian/issues/524)) ([184892b](https://github.com/wardian-app/Wardian/commit/184892b80a54e08dba860c5ab27196136d2fef3b))
+* **research:** add shared agent memory references ([#497](https://github.com/wardian-app/Wardian/issues/497)) ([a2b045a](https://github.com/wardian-app/Wardian/commit/a2b045abdff03c889e6e30c3d4ca45a56261f4de))
+* **specs:** normalize spec metadata ([#510](https://github.com/wardian-app/Wardian/issues/510)) ([cf1faa8](https://github.com/wardian-app/Wardian/commit/cf1faa80810c7f4893a383b864d3556c285d6582))
+
 ## [0.4.0](https://github.com/wardian-app/Wardian/compare/v0.3.8...v0.4.0) (2026-06-01)
 
 

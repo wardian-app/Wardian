@@ -136,6 +136,55 @@ describe('FileTree Component', () => {
     expect(screen.getByText('src')).toBeInTheDocument();
   });
 
+  it('refetches an expanded directory when a Windows watcher reports a verbatim changed path', async () => {
+    const rootPath = 'C:\\Users\\test\\repo';
+    const srcPath = 'C:\\Users\\test\\repo\\src';
+    const rootNodes = [
+      { name: 'src', path: srcPath, is_dir: true, extension: null },
+    ];
+    const initialSrcNodes = [
+      { name: 'before.ts', path: `${srcPath}\\before.ts`, is_dir: false, extension: 'ts' },
+    ];
+    const refreshedSrcNodes = [
+      { name: 'after.ts', path: `${srcPath}\\after.ts`, is_dir: false, extension: 'ts' },
+    ];
+    let srcReads = 0;
+
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const path = (args as { path: string }).path;
+      if (path === rootPath) return rootNodes;
+      if (path === srcPath) {
+        srcReads += 1;
+        return srcReads === 1 ? initialSrcNodes : refreshedSrcNodes;
+      }
+      return [];
+    });
+
+    const { rerender } = render(
+      <FileTree
+        path={rootPath}
+        explorerRoot={rootPath}
+        refreshToken={0}
+        changedPaths={[]}
+      />,
+    );
+
+    await userEvent.click(await screen.findByText('src'));
+    expect(await screen.findByText('before.ts')).toBeInTheDocument();
+
+    rerender(
+      <FileTree
+        path={rootPath}
+        explorerRoot={rootPath}
+        refreshToken={1}
+        changedPaths={['\\\\?\\C:\\Users\\test\\repo\\src\\after.ts']}
+      />,
+    );
+
+    expect(await screen.findByText('after.ts')).toBeInTheDocument();
+    expect(screen.queryByText('before.ts')).not.toBeInTheDocument();
+  });
+
   it('does not refetch an expanded directory when a refresh event is unrelated', async () => {
     const rootNodes = [
       { name: 'src', path: '/test/src', is_dir: true, extension: null },
