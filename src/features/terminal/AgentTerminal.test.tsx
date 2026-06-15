@@ -2313,7 +2313,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("re-renders Codex's composer on theme switch without pushing duplicate color replies (ConPTY answers natively)", async () => {
+  it("pushes updated Codex terminal colors on a real theme swap so the TUI repaints (and replays the composer)", async () => {
     const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
     let peekCount = 0;
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -2359,27 +2359,25 @@ describe("AgentTerminal scrollback", () => {
     mockInvoke.mockClear();
     view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
 
-    // Codex runs under the bundled modern ConPTY, which answers its color /
-    // light-dark probes natively. Wardian must NOT also push duplicate replies
-    // as input -- they get echoed back into codex's output as stray ]11;rgb /
-    // ?997;1n garbage, and this theme effect re-fires on every maximize/minimize
-    // re-render, bombarding every mounted codex terminal at once.
+    // A real light<->dark swap conveys the new scheme to codex (whose bundled
+    // ConPTY answers probes with its own colors, not Wardian's theme), so the TUI
+    // repaints. The echo this produces is scrubbed by the output-side strip; the
+    // push is gated to actual theme changes so maximize/minimize never fires it.
     const codexEsc = String.fromCharCode(27);
     const codexSt = codexEsc + String.fromCharCode(92);
     await waitFor(() => {
-      expect(instance.reset).toHaveBeenCalled();
-    });
-    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
-      sessionId: "codex-live-theme",
-      input: codexEsc + "[?997;1n",
-    });
-    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
-      sessionId: "codex-live-theme",
-      input: codexEsc + "]11;rgb:1a/1a/1a" + codexSt,
-    });
-    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
-      sessionId: "codex-live-theme",
-      input: codexEsc + "]10;rgb:eb/eb/eb" + codexSt,
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: codexEsc + "[?997;1n",
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: codexEsc + "]11;rgb:1a/1a/1a" + codexSt,
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
+        sessionId: "codex-live-theme",
+        input: codexEsc + "]10;rgb:eb/eb/eb" + codexSt,
+      });
     });
 
     await waitFor(() => {
