@@ -12,8 +12,6 @@ import {
   normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
-  shouldHomeCursorBeforeTransientResize,
-  type TerminalOutputState,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
@@ -93,7 +91,7 @@ type TerminalSessionEntry = {
   generation: number;
   disposed: boolean;
   pendingForceResize: boolean;
-} & TerminalOutputState;
+};
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
 
@@ -107,7 +105,17 @@ type TerminalOptionTarget = {
 };
 
 function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: string) {
-  term.options.scrollOnEraseInDisplay = provider === "codex";
+  // scrollOnEraseInDisplay must stay OFF for every provider, codex included.
+  // Codex (ratatui inline viewport) already scrolls its conversation history
+  // into scrollback the way a real terminal does: it sets a top-anchored scroll
+  // region (`ESC[1;<top>r`, so xterm's scrollTop === 0) and line-feeds history
+  // through it, which xterm commits to scrollback natively. The non-standard
+  // scrollOnEraseInDisplay additionally pushed the *entire visible screen* —
+  // the pinned composer/status viewport included — into scrollback on every
+  // `ESC[2J` full repaint, leaving frozen composer snapshots stranded in
+  // history (a standalone terminal never does this). Disabled so codex matches
+  // native rendering.
+  term.options.scrollOnEraseInDisplay = false;
   term.options.minimumContrastRatio = terminalMinimumContrastRatio(provider);
 }
 
@@ -631,107 +639,6 @@ async function applyViewportRedrawInPlace(
 }
 
 const SYNTHETIC_SCROLLBACK_PREFIX = "\u001b[999;1H";
-
-// Journal segments are `SYNTHETIC_SCROLLBACK_PREFIX` followed by plain
-// CRLF-terminated rows (no escapes). A drain batch joins multiple normalized
-// chunks, so segments can sit mid-stream, not just at the front.
-const SYNTHETIC_SCROLLBACK_SEGMENT = new RegExp(
-  `${SYNTHETIC_SCROLLBACK_PREFIX.replace(/[[\\^$.|?*+()]/g, "\\$&")}(?:[^\\u001b\\r\\n]*\\r\\n)+`,
-  "g",
-);
-
-function extractSyntheticScrollbackRows(data: string) {
-  const rows: string[] = [];
-  const cleaned = data.replace(SYNTHETIC_SCROLLBACK_SEGMENT, (segment) => {
-    for (const row of segment.slice(SYNTHETIC_SCROLLBACK_PREFIX.length).split("\r\n")) {
-      if (row.length > 0) {
-        rows.push(row);
-      }
-    }
-    return "";
-  });
-  return { rows, cleaned };
-}
-
-// The home-redraw journal recovers rows that a provider's sliding-window
-// repaint simply stops painting (verified live against Codex 0.139.0: each
-// frame re-homes and paints rows N..N+k, never scrolling the dropped top row
-// out). There is no VT sequence that inserts a line into scrollback above an
-// untouched viewport — the legacy delivery (cursor to row 999 + newline)
-// overwrote the status row and pushed whatever happened to be at the top of
-// the screen instead of the journaled row. Insert directly into xterm's
-// buffer between the scrollback tail and the viewport.
-async function insertSyntheticScrollbackRows(
-  term: Terminal | HeadlessTerminal,
-  rows: string[],
-) {
-  const buffer = getInternalActiveBuffer(term);
-  if (!buffer?.lines.splice || rows.length === 0) {
-    return false;
-  }
-
-  // A row longer than the terminal width wraps into several buffer lines in
-  // the scratch terminal, so size the scrollback for the worst case and clone
-  // the RENDERED line count, not rows.length — cloning rows.length lines
-  // silently truncated the batch tail whenever an earlier row wrapped
-  // (observed live with Codex 0.139.0: one journaled response row vanished
-  // whenever the same drain batch also journaled a long wrapped splash line).
-  const wrappedLineEstimate = rows.reduce(
-    (total, row) => total + Math.max(1, Math.ceil(row.length / Math.max(1, term.cols))),
-    0,
-  );
-  const scratch = new HeadlessTerminal({
-    cols: term.cols,
-    rows: Math.max(2, Math.min(rows.length, term.rows)),
-    scrollback: wrappedLineEstimate + term.rows,
-    allowProposedApi: true,
-  });
-  try {
-    await writeTerminalControl(scratch, rows.join("\r\n"));
-    const scratchBuffer = getInternalActiveBuffer(scratch);
-    if (!scratchBuffer?.lines.get) {
-      return false;
-    }
-    const scratchActive = scratch.buffer.active;
-    const renderedLineCount = (scratchActive.baseY ?? 0) + (scratchActive.cursorY ?? 0) + 1;
-    const cloned: unknown[] = [];
-    for (let index = 0; index < renderedLineCount; index += 1) {
-      const line = scratchBuffer.lines.get(index)?.clone?.();
-      if (line) {
-        cloned.push(line);
-      }
-    }
-    if (cloned.length === 0) {
-      return false;
-    }
-    const wasAtBottom = buffer.ydisp === buffer.ybase;
-    buffer.lines.splice(buffer.ybase, 0, ...cloned);
-    buffer.ybase += cloned.length;
-    if (wasAtBottom) {
-      buffer.ydisp = buffer.ybase;
-    }
-    syncBrowserTerminalScrollState(term);
-    return true;
-  } finally {
-    scratch.dispose();
-  }
-}
-
-function splitSyntheticScrollbackPrefix(data: string) {
-  if (!data.startsWith(SYNTHETIC_SCROLLBACK_PREFIX)) {
-    return { scrollbackData: "", viewportData: data };
-  }
-
-  const viewportStart = data.indexOf("\u001b", SYNTHETIC_SCROLLBACK_PREFIX.length);
-  if (viewportStart <= SYNTHETIC_SCROLLBACK_PREFIX.length) {
-    return { scrollbackData: "", viewportData: data };
-  }
-
-  return {
-    scrollbackData: data.slice(0, viewportStart),
-    viewportData: data.slice(viewportStart),
-  };
-}
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b[PX^_].*?(?:\u001b\\|\u0007)|\u001b[@-_]/g;
 
@@ -1358,12 +1265,6 @@ async function fitTerminalToContainer(
     }
     const nextCols = Math.max(MIN_TERMINAL_COLS, proposedDimensions.cols);
     const nextRows = Math.max(MIN_TERMINAL_ROWS, proposedDimensions.rows);
-    if (shouldHomeCursorBeforeTransientResize(entry, renderer.term.rows, nextRows)) {
-      await Promise.all([
-        new Promise<void>((resolve) => renderer.term.write("\u001b[H", () => resolve())),
-        new Promise<void>((resolve) => entry.parser.write("\u001b[H", () => resolve())),
-      ]);
-    }
     if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
       renderer.term.resize(nextCols, nextRows);
     } else if (options?.reportUnchanged !== false) {
@@ -1389,11 +1290,6 @@ function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
     entry.renderer.term.scrollToBottom();
     entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
   }
-
-  entry.lastHomeRedrawLines = null;
-  entry.homeRedrawScrollbackSeen?.clear();
-  entry.transientHomeRedrawActive = false;
-  entry.existingKnownLines = undefined;
 }
 
 function rgbTripletFromHex(hex: string, fallback: string) {
@@ -1479,8 +1375,7 @@ async function writeTerminalOutputBatch(
     entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
   }
 
-  entry.existingKnownLines = readParserKnownLineSet(entry);
-  const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
+  const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider);
   // Sampled before the awaited writes below. While a provider streams, drain
   // batches run nearly back-to-back, so a user wheel-scroll usually lands in
   // the middle of one — if we only consulted this stale sample afterwards we
@@ -1508,24 +1403,15 @@ async function writeTerminalOutputBatch(
   if (options?.recordOutput !== false) {
     useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
   }
-  const knownLines = entry.existingKnownLines;
-  const { rows: journalRows, cleaned } = extractSyntheticScrollbackRows(batchedWrite);
   let scrollbackData = "";
-  let viewportData = cleaned;
+  const viewportData = batchedWrite;
   const renderer = entry.renderer;
-  if (journalRows.length > 0) {
-    await insertSyntheticScrollbackRows(entry.parser, journalRows);
-    if (renderer && !entry.disposed) {
-      if (await insertSyntheticScrollbackRows(renderer.term, journalRows)) {
-        renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-      }
-    }
-  }
   if (
     isProviderViewportRedraw(entry.provider, viewportData) &&
     supportsViewportRedrawInPlace(entry.parser) &&
     (!renderer || supportsViewportRedrawInPlace(renderer.term))
   ) {
+    const knownLines = readParserKnownLineSet(entry);
     scrollbackData = appendSyntheticScrollbackRows(
       scrollbackData,
       syntheticScrollbackRowsForViewportRedraw(viewportData, knownLines),
@@ -1549,10 +1435,8 @@ async function writeTerminalOutputBatch(
         scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
       }
     }
-    entry.existingKnownLines = undefined;
     return;
   }
-  entry.existingKnownLines = undefined;
   await writeTerminalControl(entry.parser, viewportData);
   if (entry.renderer) {
     // A frozen snapshot must never mask live output: drop it and let the DOM
@@ -1809,7 +1693,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   const parser = new HeadlessTerminal({
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
-    scrollOnEraseInDisplay: resolvedProvider === "codex",
+    scrollOnEraseInDisplay: false,
   });
   applyProviderTerminalOptions(parser, resolvedProvider);
   const parserSerializeAddon = new SerializeAddon();
@@ -1843,9 +1727,6 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     generation: 0,
     disposed: false,
     pendingForceResize: false,
-    lastHomeRedrawLines: null,
-    homeRedrawScrollbackSeen: new Set(),
-    transientHomeRedrawActive: false,
   };
 
   terminalSessionMap.set(sessionId, entry);
@@ -1930,10 +1811,6 @@ function recoverCorruptedParser(entry: TerminalSessionEntry, cols: number, rows:
   } catch (error) {
     console.warn("Parser recovery resize failed; leaving parser at prior size.", error);
   }
-  entry.lastHomeRedrawLines = null;
-  entry.homeRedrawScrollbackSeen?.clear();
-  entry.transientHomeRedrawActive = false;
-  entry.existingKnownLines = undefined;
 }
 
 function applyTerminalAppearance(
@@ -1963,7 +1840,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     convertEol: false,
     disableStdin: false,
     reflowCursorLine: false,
-    scrollOnEraseInDisplay: entry.provider === "codex",
+    scrollOnEraseInDisplay: false,
     windowsPty: IS_WINDOWS ? { backend: "conpty", buildNumber: 22621 } : undefined,
     windowOptions: {
       getCellSizePixels: true,
@@ -2485,14 +2362,11 @@ export const __terminalTesting = {
   appendSyntheticScrollbackRows,
   captureSnapshotOverlay,
   demoteSessionToDom,
-  extractSyntheticScrollbackRows,
-  insertSyntheticScrollbackRows,
   promoteSessionToWebgl,
   proposeTerminalDimensions,
   removeSnapshotOverlay,
   resizeParser,
   isProviderViewportRedraw,
-  splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,
 };

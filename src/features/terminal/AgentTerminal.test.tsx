@@ -1005,7 +1005,11 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("preserves Codex primary-buffer clears into scrollback", async () => {
+  it("does not scroll Codex erase-in-display clears into scrollback (avoids composer snapshots)", async () => {
+    // Codex's conversation history reaches scrollback natively via its
+    // top-anchored DECSTBM scroll region; scrollOnEraseInDisplay would also push
+    // the pinned composer/status viewport into scrollback on every ESC[2J
+    // repaint, leaving frozen composer snapshots in history. It must stay off.
     render(<AgentTerminal sessionId="codex-3" provider="codex" theme="dark" />);
 
     await waitFor(() => {
@@ -1017,7 +1021,7 @@ describe("AgentTerminal scrollback", () => {
       unknown
     >;
     expect(terminalOptions.reflowCursorLine).toBe(false);
-    expect(terminalOptions.scrollOnEraseInDisplay).toBe(true);
+    expect(terminalOptions.scrollOnEraseInDisplay).toBe(false);
   });
 
   it("keeps non-Codex erase-in-display behavior at xterm defaults", async () => {
@@ -1770,73 +1774,6 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
-  it("homes transient TUI redraws before shrinking rows so complex glyph rows do not reflow", async () => {
-    let readCount = 0;
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      switch (cmd) {
-        case "read_agent_pty":
-          readCount += 1;
-          return readCount === 1
-            ? "\u001b[?2026h\u001b[38;2;215;119;87m\u001b[H ▐▛███▜▌   Claude Code v2.1.101\u001b[K\r\n▝▜█████▛▘  Sonnet 4.6 · Claude Pro\u001b[K\u001b[?2026l"
-            : null;
-        case "resize_agent_terminal":
-          return null;
-        default:
-          return null;
-      }
-    });
-
-    const { rerender } = render(
-      <AgentTerminal sessionId="claude-transient-shrink" provider="claude" isMaximized theme="dark" />,
-    );
-
-    await waitFor(() => {
-      const instance = getLatestTerminalInstance();
-      expect(instance.write).toHaveBeenCalledWith(expect.stringContaining("Claude Code"), expect.any(Function));
-    });
-
-    rectSpy.mockReturnValue({
-      width: 900,
-      height: 300,
-      top: 0,
-      left: 0,
-      right: 900,
-      bottom: 300,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    fitDimensions = { cols: 80, rows: 12 };
-
-    rerender(
-      <AgentTerminal
-        sessionId="claude-transient-shrink"
-        provider="claude"
-        isMaximized={false}
-        theme="dark"
-      />,
-    );
-
-    await waitFor(
-      () => {
-        const instance = getLatestTerminalInstance();
-        expect(instance.write).toHaveBeenCalledWith("\u001b[H", expect.any(Function));
-        expect(instance.resize).toHaveBeenCalledWith(80, 12);
-      },
-      { timeout: 400 },
-    );
-
-    const instance = getLatestTerminalInstance();
-    const homeWriteOrder = instance.write.mock.invocationCallOrder.find(
-      (_order: number, index: number) => instance.write.mock.calls[index]?.[0] === "\u001b[H",
-    );
-    const shrinkOrder = instance.resize.mock.invocationCallOrder.find(
-      (_order: number, index: number) =>
-        instance.resize.mock.calls[index]?.[0] === 80 && instance.resize.mock.calls[index]?.[1] === 12,
-    );
-    expect(homeWriteOrder).toBeLessThan(shrinkOrder);
-  });
-
   it("reports each distinct backend PTY row resize during bursty terminal resize events", async () => {
     render(<AgentTerminal sessionId="claude-resize" provider="claude" theme="dark" />);
 
@@ -1847,6 +1784,9 @@ describe("AgentTerminal scrollback", () => {
     const instance = getLatestTerminalInstance();
     const onResize = instance.onResize.mock.calls[0]?.[0] as ((size: { cols: number; rows: number }) => void);
 
+    // Drop any initial-mount fit report so the assertion isolates the three
+    // deliberate onResize events below (matches the sibling resize tests).
+    mockInvoke.mockClear();
     onResize({ cols: 120, rows: 40 });
     onResize({ cols: 121, rows: 41 });
     onResize({ cols: 122, rows: 42 });

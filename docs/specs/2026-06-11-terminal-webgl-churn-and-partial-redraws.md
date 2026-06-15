@@ -2,8 +2,56 @@
 
 Filename: `2026-06-11-terminal-webgl-churn-and-partial-redraws.md`
 
-- **Status:** Implemented
+- **Status:** Implemented (superseded in part — see Update below)
 - **Date:** 2026-06-11
+
+## Update (2026-06-14): synthetic-scrollback journaling removed
+
+Decision 3 below (journaling provider sliding-window drops into reconstructed
+scrollback) has been **fully removed**. Raw-PTY captures of both providers that
+ever used it proved they are home-anchored, synchronized (`ESC[?2026h…l`),
+in-place repainters that never scroll content into the terminal's scrollback:
+
+- **Codex** (codex-rs/ratatui) — confirmed earlier; opted out first.
+- **opencode** (OpenTUI alt-screen repainter, `targetFps: 60`) — confirmed via a
+  live capture: 254 balanced synchronized-update frames, 0 scroll-regions, 0
+  `ESC[2J` clears, ~30 newlines in 59 KB. Identical model to Codex.
+
+A standalone terminal running either provider therefore has no recoverable
+history above the visible window, so the journal was *fabricating* rows the
+provider never committed — which rendered without their original colors and
+surfaced as scroll artifacts. Both providers now render **natively**, exactly
+like a standalone terminal. The journaling machinery is deleted:
+`reconstructHomeRedrawScrollback`, `extractHomeRedrawLines`,
+`shouldReconstructProviderLine`, `findDroppedHomeRedrawLines`,
+`shouldHomeCursorBeforeTransientResize`, the `TerminalOutputState` journal state,
+the `ESC[999;1H` extract/insert path in `AgentTerminal.tsx`, and
+`syntheticScrollback.test.ts`. `normalizeOpenCodeOutput` now only strips
+capability-negotiation noise (sync/DECRQM/theme toggles, Codex's `ESC[3J`) and
+applies theme/cursor normalization. The disabled viewport-redraw switch
+(`providerUsesViewportRedraws` → `false`, decisions 2/4) is retained unchanged.
+
+### Codex composer snapshots in scrollback (same update)
+
+A related codex-only glitch was fixed at the same time: frozen snapshots of the
+pinned composer/status box accumulated in scrollback as the conversation grew
+(confirmed via the live rendering audit — the `Context N% left` status row
+appeared twice in the buffer, once live and once stranded in history).
+
+Root cause: the renderer/parser were constructed with xterm's non-standard
+`scrollOnEraseInDisplay = true` for codex, which scrolls the **entire visible
+screen** into scrollback on every `ESC[2J`. Codex emits `ESC[2J` on full
+repaints, so each repaint snapshotted the composer into history. This option was
+unnecessary: codex (ratatui inline viewport) already scrolls conversation
+history into scrollback the way a real terminal does — it sets a top-anchored
+scroll region (`ESC[1;<top>r`, so xterm's `scrollTop === 0`) and line-feeds
+history through it, which xterm's `BufferService.scroll` commits to scrollback
+natively. `scrollOnEraseInDisplay` is now `false` for every provider. Live audit
+before/after: status-row occurrences in the captured buffer dropped from 2 to 1,
+with `required_scrollback` still passing (history preserved).
+
+The sections below are preserved as the historical record of the journaling
+approach that this update reverses.
 
 ## Context and Problem Statement
 

@@ -18,8 +18,6 @@ const CODEX_LIGHT_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;242;240;235m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
-const HOME_CURSOR = "\u001b[H";
-const TOP_CURSOR_ADDRESS = /\u001b\[(\d+);1H/;
 const REMOTE_HISTORY_FRAME_START = /\u001b\[\?2026h|\u001b\[\?25l\u001b\[H|\u001b\[H/g;
 
 export type TerminalCapabilityContext = {
@@ -39,113 +37,6 @@ export type TerminalCapabilityPlan = {
   focusReported: boolean;
 };
 
-export type TerminalOutputState = {
-  lastHomeRedrawLines: string[] | null;
-  homeRedrawScrollbackSeen?: Set<string>;
-  // Lines already represented in the parser's scrollback (above the viewport).
-  // Used by home-redraw reconstruction to avoid journaling a line twice. Must
-  // NOT include viewport rows: a genuine sliding-window drop is still visible
-  // there when its drop frame arrives.
-  existingKnownLines?: Set<string>;
-  transientHomeRedrawActive?: boolean;
-  // Diagnostic sink: when present, home-redraw reconstruction appends one
-  // entry per frame describing the drop decision. Used by replay harnesses.
-  journalTrace?: string[];
-};
-
-const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
-const CSI_SEQUENCE = /^\u001b\[([0-?]*)([ -/]*)([@-~])$/;
-
-function extractHomeRedrawLines(data: string) {
-  const homeIndex = data.indexOf(HOME_CURSOR);
-  if (homeIndex < 0) {
-    const cursorAddress = TOP_CURSOR_ADDRESS.exec(data);
-    const row = Number.parseInt(cursorAddress?.[1] ?? "", 10);
-    if (cursorAddress?.index !== undefined && cursorAddress.index <= 80 && Number.isFinite(row) && row <= 200) {
-      const lines = extractCursorAddressedHomeRedrawLines(data.slice(cursorAddress.index));
-      if (row <= 10 || lines?.some((line) => parseNumberedTail(line))) {
-        return lines;
-      }
-    }
-    return null;
-  }
-
-  if (homeIndex > 80) {
-    return null;
-  }
-
-  const plain = data
-    .slice(homeIndex + HOME_CURSOR.length)
-    .replace(ANSI_SEQUENCE, "")
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0);
-
-  if (plain.length >= 2) {
-    return plain;
-  }
-
-  return extractCursorAddressedHomeRedrawLines(data.slice(homeIndex));
-}
-
-function extractCursorAddressedHomeRedrawLines(data: string) {
-  const rows = new Map<number, string>();
-  let currentRow = 1;
-  let cursor = 0;
-
-  const appendText = (text: string) => {
-    for (const char of text) {
-      if (char === "\r") {
-        continue;
-      }
-      if (char === "\n") {
-        currentRow += 1;
-        continue;
-      }
-      if (char < " ") {
-        continue;
-      }
-      rows.set(currentRow, `${rows.get(currentRow) ?? ""}${char}`);
-    }
-  };
-
-  for (const match of data.matchAll(ANSI_SEQUENCE)) {
-    appendText(data.slice(cursor, match.index));
-    const sequence = match[0];
-    const csi = sequence.match(CSI_SEQUENCE);
-    if (csi && (csi[3] === "H" || csi[3] === "f")) {
-      const rowParam = csi[1].split(";")[0];
-      const row = Number.parseInt(rowParam || "1", 10);
-      currentRow = Number.isFinite(row) && row > 0 ? row : 1;
-    }
-    cursor = match.index + sequence.length;
-  }
-  appendText(data.slice(cursor));
-
-  const lines = Array.from(rows.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([, line]) => line.trimEnd())
-    .filter((line) => line.trim().length > 0);
-
-  return lines.length >= 2 ? lines : null;
-}
-
-function isSynchronizedHomeRedraw(data: string) {
-  return data.includes("\u001b[?2026") && extractHomeRedrawLines(data) !== null;
-}
-
-function normalizePlainLine(line: string) {
-  return line.replace(/\s+/g, " ").trim();
-}
-
-export function shouldHomeCursorBeforeTransientResize(
-  state: TerminalOutputState,
-  currentRows: number,
-  nextRows: number,
-) {
-  return Boolean(state.transientHomeRedrawActive && nextRows < currentRows);
-}
-
 function normalizeFullscreenClearByNewlines(data: string) {
   return data.replace(
     FULLSCREEN_CLEAR_BY_NEWLINES,
@@ -156,6 +47,29 @@ function normalizeFullscreenClearByNewlines(data: string) {
 
 function stripProviderScrollbackErase(data: string, provider?: string) {
   return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
+}
+
+// Remove the terminal color / light-dark PROBES from a provider's output before
+// it reaches xterm.js. xterm.js auto-answers OSC 10/11/4 (and ESC[?996n) color
+// queries; under the bundled modern ConPTY codex now emits those probes, and its
+// reply (plus OpenConsole's) lands back in codex's composer as stray
+// `]10;rgb:...` / `]11;rgb:...` text. Stripping the probe so xterm never sees it
+// suppresses the auto-reply. These are non-visible control sequences, so the
+// rendered output is unchanged.
+function stripTerminalColorQueries(data: string) {
+  return data
+    .split(OSC_FOREGROUND_QUERY_BEL)
+    .join("")
+    .split(OSC_FOREGROUND_QUERY_ST)
+    .join("")
+    .split(OSC_BACKGROUND_QUERY_BEL)
+    .join("")
+    .split(OSC_BACKGROUND_QUERY_ST)
+    .join("")
+    .split(OSC_PALETTE_QUERY)
+    .join("")
+    .split(LIGHT_DARK_QUERY)
+    .join("");
 }
 
 function codexLightUserMessageBackground(backgroundRgb: string) {
@@ -182,219 +96,32 @@ function stripCursorStyleControls(data: string) {
   return data.replace(CURSOR_STYLE_SEQUENCE, "");
 }
 
-function parseNumberedTail(line: string) {
-  const match = normalizePlainLine(line).match(/^(.*?)(\d+)$/);
-  if (!match) {
-    return null;
-  }
-  const value = Number.parseInt(match[2], 10);
-  return Number.isFinite(value) ? { prefix: match[1], value } : null;
-}
-
-function findDroppedHomeRedrawLines(previous: string[] | null, next: string[]) {
-  if (!previous || previous.length < 2 || next.length < 2) {
-    return [];
-  }
-
-  const maxDrop = Math.min(previous.length - 1, next.length - 1);
-  for (let drop = 1; drop <= maxDrop; drop += 1) {
-    const remainingPrevious = previous.slice(drop);
-    const nextPrefix = next.slice(0, remainingPrevious.length);
-    if (
-      remainingPrevious.length > 0 &&
-      remainingPrevious.every((line, index) => line === nextPrefix[index])
-    ) {
-      return previous.slice(0, drop);
-    }
-  }
-
-  return previous.filter((line) => !next.includes(line));
-}
-
-function shouldReconstructProviderLine(provider: string | undefined) {
-  if (provider === "opencode") {
-    return true;
-  }
-
-  // Codex is a home-anchored repainter: every frame re-homes (ESC[H) and
-  // overwrites the visible window in place; it never scrolls content into the
-  // terminal's scrollback (confirmed from raw PTY captures). A real terminal
-  // running codex therefore has no recoverable history above the window — the
-  // synthetic-scrollback journal was fabricating rows codex never committed,
-  // which rendered without their original colors and surfaced as artifacts when
-  // the user scrolled. Render codex natively instead, exactly like a standalone
-  // terminal: no journaling, no fabricated scrollback.
-  return false;
-}
-
-function supportsTerminalCapabilityResponses(provider: string | undefined) {
-  return provider === "opencode" || provider === "antigravity";
-}
-
-function supportsTerminalThemeResponses(provider: string | undefined) {
-  return provider === "opencode" || provider === "antigravity" || provider === "codex";
-}
-
-function isCodexTransientUiLine(line: string) {
-  const normalizedLine = normalizePlainLine(line);
-  if (!normalizedLine) {
-    return true;
-  }
-
-  if (/^[›>]\s/.test(normalizedLine)) {
-    return true;
-  }
-
-  if (/^[╭╰│┌└┐┘─━┃]/.test(normalizedLine)) {
-    return true;
-  }
-
-  if (
-    /^[•●✦✻*]\s*(?:Working|Thinking|Running|Ran|Reading|Searching|Editing|Checking|Waiting|Bash|PowerShell)\b/i.test(
-      normalizedLine,
-    )
-  ) {
-    return true;
-  }
-
-  if (/\b(thinking|tokens?|esc to interrupt|ctrl\+c|press enter|approval)\b/i.test(normalizedLine)) {
-    return true;
-  }
-
-  return false;
-}
-
-function extractNumberedLinesFromData(data: string) {
-  const lines = data
-    .replace(ANSI_SEQUENCE, "")
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => parseNumberedTail(line));
-  return lines.length >= 2 ? lines : null;
-}
-
-function reconstructHomeRedrawScrollback(
-  data: string,
-  state?: TerminalOutputState,
-  nextLines: string[] | null = extractHomeRedrawLines(data),
-  provider?: string,
-) {
-  if (!state) {
-    return data;
-  }
-
-  if (!nextLines) {
-    return data;
-  }
-
-  const droppedLines = findDroppedHomeRedrawLines(state.lastHomeRedrawLines, nextLines);
-  state.journalTrace?.push(
-    `prev=${JSON.stringify(state.lastHomeRedrawLines?.slice(0, 2) ?? null)}(${state.lastHomeRedrawLines?.length ?? 0}) next=${JSON.stringify(nextLines.slice(0, 2))}(${nextLines.length}) dropped=${JSON.stringify(droppedLines)}`,
-  );
-  state.lastHomeRedrawLines = nextLines;
-
-  const seen = state.homeRedrawScrollbackSeen ?? new Set<string>();
-  state.homeRedrawScrollbackSeen = seen;
-  // Lines still present in the incoming frame survive the repaint — a
-  // "dropped" hit on one of these is a shuffle false positive, not a scroll.
-  const nextLineSet = new Set(nextLines.map(normalizePlainLine));
-  const newDroppedLines = droppedLines.filter((line) => {
-    if (!shouldReconstructProviderLine(provider)) {
-      return false;
-    }
-    if (provider === "codex" && isCodexTransientUiLine(line)) {
-      return false;
-    }
-    const normalizedLine = normalizePlainLine(line);
-    if (
-      nextLineSet.has(normalizedLine) ||
-      seen.has(normalizedLine) ||
-      state.existingKnownLines?.has(normalizedLine) ||
-      state.existingKnownLines?.has(line)
-    ) {
-      return false;
-    }
-    seen.add(normalizedLine);
-    return true;
-  });
-
-  if (newDroppedLines.length === 0) {
-    return data;
-  }
-
-  return `\u001b[999;1H${newDroppedLines.join("\r\n")}\r\n${data}`;
-}
-
-export function normalizeOpenCodeOutput(
-  data: string,
-  provider?: string,
-  state?: TerminalOutputState,
-) {
+// Provider TUIs (verified live against Codex 0.139.0 and opencode/OpenTUI) are
+// home-anchored in-place repainters: each frame re-homes (ESC[H) and overwrites
+// the visible window, never scrolling content into the terminal's scrollback. A
+// standalone terminal running them therefore has no recoverable history above
+// the window, so Wardian renders their streams natively too — no synthetic
+// scrollback is fabricated. The only output massaging that remains is stripping
+// the provider's terminal-capability negotiation noise (sync/DECRQM/theme
+// toggles, Codex's ESC[3J scrollback erase) and theme/cursor normalization.
+export function normalizeOpenCodeOutput(data: string, provider?: string) {
   if (!data) {
     return data;
   }
 
-  const homeRedrawLines = state ? extractHomeRedrawLines(data) : null;
-  const detectedRedrawLines = homeRedrawLines ?? (provider === "opencode" ? extractNumberedLinesFromData(data) : null);
-
   if (provider !== "opencode") {
-    if (state && isSynchronizedHomeRedraw(data)) {
-      state.transientHomeRedrawActive = true;
-    }
-    if (provider === "codex" && state) {
-      // A PTY chunk can carry several home-anchored repaint frames (verified
-      // live against Codex 0.139.0, which repaints a sliding window every
-      // tick). Journal each frame separately: extracting lines across frame
-      // boundaries glues the previous frame's status row onto the next
-      // frame's first content row. Deliberately NOT gated on a whole-chunk
-      // extractHomeRedrawLines probe — that probe returns null when the chunk
-      // opens with a cursor-addressed diff frame and the first ESC[H sits
-      // deeper in the chunk, which silently skipped every drop the chunk's
-      // repaint frames carried (observed live at 124x28 post-clear).
-      data = splitRemoteTerminalHistoryFrames(data)
-        .map((frame) => {
-          const frameLines = extractHomeRedrawLines(frame);
-          state.journalTrace?.push(
-            `frame lines=${frameLines ? frameLines.length : "null"} head=${JSON.stringify(frame.slice(0, 30))}`,
-          );
-          return frameLines
-            ? reconstructHomeRedrawScrollback(frame, state, frameLines, provider)
-            : frame;
-        })
-        .join("");
-    }
     return stripProviderScrollbackErase(normalizeFullscreenClearByNewlines(data), provider);
   }
 
-  if (state && isSynchronizedHomeRedraw(data)) {
-    state.transientHomeRedrawActive = true;
-  }
-
-  if (state && detectedRedrawLines) {
-    if (homeRedrawLines) {
-      data = reconstructHomeRedrawScrollback(data, state, detectedRedrawLines, provider);
-    }
-  }
-
-  data = stripProviderScrollbackErase(data, provider);
-
-  if (provider !== "opencode") {
-    return data;
-  }
-
-  return data
+  return stripProviderScrollbackErase(data, provider)
     .replace(DECRQM_QUERY, "")
     .replace(SYNC_OUTPUT_TOGGLE, "")
     .replace(THEME_MODE_NOTIFICATION_TOGGLE, "");
 }
 
-export function normalizeTerminalOutputBatch(
-  rawChunks: string[],
-  provider?: string,
-  state?: TerminalOutputState,
-) {
+export function normalizeTerminalOutputBatch(rawChunks: string[], provider?: string) {
   const normalizedChunks = rawChunks
-    .map((data) => normalizeOpenCodeOutput(data, provider, state))
+    .map((data) => normalizeOpenCodeOutput(data, provider))
     .join("");
   const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
   return provider === "opencode"
@@ -421,14 +148,13 @@ function splitRemoteTerminalHistoryFrames(data: string) {
 export function normalizeRemoteTerminalOutput(
   data: string,
   provider?: string,
-  state?: TerminalOutputState,
   context?: TerminalCapabilityContext,
 ) {
   if (!data) {
     return data;
   }
   const normalized = stripCursorStyleControls(
-    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state),
+    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider),
   );
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
@@ -444,6 +170,26 @@ export function normalizeRemoteTerminalLiveOutput(
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
     : normalized;
+}
+
+function supportsTerminalCapabilityResponses(provider: string | undefined) {
+  return provider === "opencode" || provider === "antigravity";
+}
+
+// Eligibility for theme-driven OUTPUT normalization (e.g. codex composer
+// background remap). Codex stays here so its rendered output is themed.
+function supportsTerminalThemeResponses(provider: string | undefined) {
+  return provider === "opencode" || provider === "antigravity" || provider === "codex";
+}
+
+// Whether Wardian should REPLY to the terminal's color/light-dark probes.
+// Codex is excluded: when Wardian runs under the bundled modern ConPTY,
+// OpenConsole answers codex's OSC 10/11 (and DSR) probes itself, so an
+// additional Wardian reply is a duplicate that leaks into codex's composer as
+// stray `]10;rgb:...` / `]11;rgb:...` text. Codex does not block on these
+// probes (unlike opencode/antigravity), so dropping the reply is safe.
+function respondsToThemeColorQueries(provider: string | undefined) {
+  return provider === "opencode" || provider === "antigravity";
 }
 
 export function planTerminalCapabilityResponses(
@@ -474,7 +220,7 @@ export function planTerminalCapabilityResponses(
     outgoingInputs.push("\u001b[?0u");
   }
 
-  if (supportsTerminalThemeResponses(provider) && data.includes(LIGHT_DARK_QUERY)) {
+  if (respondsToThemeColorQueries(provider) && data.includes(LIGHT_DARK_QUERY)) {
     outgoingInputs.push(`\u001b[?997;${context.prefersLight ? 2 : 1}n`);
   }
 
@@ -498,19 +244,19 @@ export function planTerminalCapabilityResponses(
     outgoingInputs.push(`\u001b[4;${context.pixelHeight};${context.pixelWidth}t`);
   }
 
-  if (supportsTerminalThemeResponses(provider) && data.includes(OSC_PALETTE_QUERY)) {
+  if (respondsToThemeColorQueries(provider) && data.includes(OSC_PALETTE_QUERY)) {
     outgoingInputs.push(`\u001b]4;0;rgb:${context.backgroundRgb}\u001b\\`);
   }
 
   if (
-    supportsTerminalThemeResponses(provider) &&
+    respondsToThemeColorQueries(provider) &&
     (data.includes(OSC_FOREGROUND_QUERY_BEL) || data.includes(OSC_FOREGROUND_QUERY_ST))
   ) {
     outgoingInputs.push(`\u001b]10;rgb:${context.foregroundRgb}\u001b\\`);
   }
 
   if (
-    supportsTerminalThemeResponses(provider) &&
+    respondsToThemeColorQueries(provider) &&
     (data.includes(OSC_BACKGROUND_QUERY_BEL) || data.includes(OSC_BACKGROUND_QUERY_ST))
   ) {
     outgoingInputs.push(`\u001b]11;rgb:${context.backgroundRgb}\u001b\\`);
@@ -527,8 +273,9 @@ export function planTerminalCapabilityResponses(
       provider === "opencode"
         ? normalizeOpenCodeOutput(data, "opencode")
         : provider === "codex"
-          ? normalizeCodexComposerBackgroundForTheme(data, context)
+          ? normalizeCodexComposerBackgroundForTheme(stripTerminalColorQueries(data), context)
           : data,
     focusReported,
   };
 }
+

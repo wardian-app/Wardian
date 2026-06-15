@@ -14,7 +14,6 @@ import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   type TerminalCapabilityContext,
-  type TerminalOutputState,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
 
@@ -378,7 +377,6 @@ function TerminalPane({
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalScrollSurfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const outputStateRef = useRef<TerminalOutputState>({ lastHomeRedrawLines: null });
   const socketRef = useRef<WebSocket | null>(null);
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
@@ -390,7 +388,6 @@ function TerminalPane({
     host.replaceChildren();
     setConnected(false);
     setStreamError("");
-    outputStateRef.current = { lastHomeRedrawLines: null };
 
     const terminal = new Terminal({
       allowProposedApi: false,
@@ -463,7 +460,6 @@ function TerminalPane({
         normalizeRemoteTerminalOutput(
           base64ToTerminalString(stateBase64),
           agent.provider ?? undefined,
-          outputStateRef.current,
           remoteTerminalCapabilityContext(terminal, host),
         ),
       );
