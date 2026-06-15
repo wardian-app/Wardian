@@ -4,6 +4,7 @@ import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
+  stripTerminalColorReportInputs,
   type AntigravityRenderState,
   type TerminalCapabilityContext,
 } from "./terminalCapabilities";
@@ -191,6 +192,26 @@ describe("terminal capability broker", () => {
     expect(plan.outgoingInputs).toEqual([]);
     expect(plan.normalizedOutput).toBe("");
     expect(plan.focusReported).toBe(false);
+  });
+
+  it("strips xterm's color/light-dark report replies from Codex input (ConPTY answers natively)", () => {
+    const ESC = String.fromCharCode(27);
+    const ST = ESC + String.fromCharCode(92); // ESC \  (string terminator)
+    // The exact reply burst xterm.js auto-emits on maximize/resize; forwarding it
+    // gets echoed back as visible ]11;rgb / ?997;1n garbage in codex's composer.
+    const replies =
+      ESC + "[?997;1n" +
+      ESC + "]11;rgb:1a/1a/1a" + ST +
+      ESC + "]10;rgb:eb/eb/eb" + ST +
+      ESC + "]4;0;rgb:1a/1a/1a" + ST;
+    expect(stripTerminalColorReportInputs(replies)).toBe("");
+  });
+
+  it("preserves real keystrokes around a stripped color reply", () => {
+    const ESC = String.fromCharCode(27);
+    const ST = ESC + String.fromCharCode(92);
+    const data = ESC + "]11;rgb:1a/1a/1a" + ST + "ls -la\r";
+    expect(stripTerminalColorReportInputs(data)).toBe("ls -la\r");
   });
 
   it("does not answer non-color Codex terminal probes from the frontend", () => {

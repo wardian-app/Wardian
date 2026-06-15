@@ -12,6 +12,7 @@ import {
   normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
+  stripTerminalColorReportInputs,
   type AntigravityRenderState,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
@@ -1923,12 +1924,20 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
+    // The modern ConPTY answers codex's color/light-dark probes natively, so
+    // xterm's duplicate auto-reply must not be forwarded -- ConPTY echoes it back
+    // into codex's output as visible ]11;rgb / ?997;1n garbage (worst on
+    // maximize/resize). Drop the reply; if nothing else remains, skip the send.
+    const input = entry.provider === "codex" ? stripTerminalColorReportInputs(data) : data;
+    if (input.length === 0) {
+      return;
+    }
     if (entry.provider !== "opencode" && term.buffer.active.viewportY < term.buffer.active.baseY) {
       term.scrollToBottom();
     }
     invoke("send_input_to_agent", {
       sessionId,
-      input: data,
+      input,
     }).catch(() => {});
   });
 

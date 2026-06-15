@@ -9,6 +9,16 @@ const OSC_FOREGROUND_QUERY_BEL = "\u001b]10;?\u0007";
 const OSC_BACKGROUND_QUERY_BEL = "\u001b]11;?\u0007";
 const OSC_FOREGROUND_QUERY_ST = "\u001b]10;?\u001b\\";
 const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
+// Terminal-status REPLIES that xterm.js auto-generates when it sees a color /
+// light-dark probe: the OSC 10/11/4 "rgb:..." reports and the CSI ?997;<n>n
+// light-dark report. Under the modern ConPTY, OpenConsole answers codex's probes
+// natively, so xterm's duplicate reply (forwarded as input) is echoed back into
+// codex's output as stray ]11;rgb / ?997;1n garbage -- worst on maximize/resize,
+// where the probe burst is fragmented across PTY chunks and slips past the
+// output-side probe strip. Dropping these replies on the INPUT side is immune to
+// chunk fragmentation: xterm emits each reply as one complete onData string.
+const TERMINAL_COLOR_REPORT_REPLY =
+  /\u001b\[\?997;\d+n|\u001b\]1[01];rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)|\u001b\]4;\d+;rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)/g;
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
@@ -77,6 +87,19 @@ function stripTerminalColorQueries(data: string) {
     .join("")
     .split(LIGHT_DARK_QUERY)
     .join("");
+}
+
+// Drop xterm.js's auto-generated terminal-status replies (OSC 10/11/4 rgb reports
+// and the CSI ?997 light-dark report) from a provider's INPUT before it is
+// forwarded to the PTY. Codex runs under the modern ConPTY, which answers codex's
+// probes itself; forwarding xterm's duplicate reply gets it echoed back into
+// codex's output as visible ]11;rgb / ?997;1n garbage (most visible on
+// maximize/resize, where the fragmented probe burst slips past the output-side
+// strip). xterm emits each reply as one complete onData string, so matching here
+// is immune to chunk fragmentation. Real keystrokes never contain these complete
+// report forms, so dropping them is safe.
+export function stripTerminalColorReportInputs(data: string) {
+  return data.replace(TERMINAL_COLOR_REPORT_REPLY, "");
 }
 
 function codexLightUserMessageBackground(backgroundRgb: string) {
