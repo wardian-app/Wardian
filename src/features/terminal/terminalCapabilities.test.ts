@@ -214,6 +214,33 @@ describe("terminal capability broker", () => {
     expect(stripTerminalColorReportInputs(data)).toBe("ls -la\r");
   });
 
+  it("strips ConPTY-echoed color/light-dark replies from Codex output even when fragmented across chunks", () => {
+    const ESC = String.fromCharCode(27);
+    const ST = ESC + String.fromCharCode(92); // ESC \  (string terminator)
+    // The echoed reply burst codex emits on maximize/resize, split mid-sequence
+    // across PTY chunks -- this is what defeats the per-chunk probe strip.
+    const chunks = [
+      "before" + ESC + "[?997;1n" + ESC + "]11;rgb:1a",
+      "/1a/1a" + ST + ESC + "]10;rgb:eb/eb/eb" + ST + ESC + "]4;0;rgb:1a/1a/1a" + ST + "after",
+    ];
+    expect(normalizeTerminalOutputBatch(chunks, "codex")).toBe("beforeafter");
+  });
+
+  it("strips fragmented Codex color/light-dark probes from output (suppresses xterm auto-reply)", () => {
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const ST = ESC + String.fromCharCode(92);
+    const chunks = [ESC + "[?996n" + ESC + "]10;", "?" + BEL + ESC + "]11;?" + ST + "ok"];
+    expect(normalizeTerminalOutputBatch(chunks, "codex")).toBe("ok");
+  });
+
+  it("leaves non-codex provider output color sequences untouched", () => {
+    const ESC = String.fromCharCode(27);
+    const ST = ESC + String.fromCharCode(92);
+    const data = ESC + "]11;rgb:1a/1a/1a" + ST + "text";
+    expect(normalizeTerminalOutputBatch([data], "antigravity")).toContain("]11;rgb:1a/1a/1a");
+  });
+
   it("does not answer non-color Codex terminal probes from the frontend", () => {
     const data = "\u001b[6n\u001b[14t\u001b[?1004h";
     const plan = planTerminalCapabilityResponses("codex", data, baseContext);
@@ -252,6 +279,89 @@ describe("terminal capability broker", () => {
     });
 
     expect(plan.normalizedOutput).toBe("\u001b[48;2;41;41;41m\n\u001b[K");
+  });
+
+  it("remaps Codex's chrome background combined with a foreground in one SGR (active composer) in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    // Codex emits the typing composer / xterm re-serializes scrollback as a compound
+    // SGR: foreground + background in one sequence. The standalone-only match missed
+    // these, leaving them black in light mode.
+    const plan = planTerminalCapabilityResponses(
+      "codex",
+      ESC + "[38;2;235;235;235;48;2;41;41;41m typing" + ESC + "[K",
+      { ...baseContext, prefersLight: true, backgroundRgb: "fc/fa/f5" },
+    );
+
+    expect(plan.normalizedOutput).toBe(ESC + "[38;2;235;235;235;48;2;242;240;235m typing" + ESC + "[K");
+  });
+
+  it("remaps a compound light Codex chrome SGR back to dark in dark mode", () => {
+    const ESC = String.fromCharCode(27);
+    const plan = planTerminalCapabilityResponses(
+      "codex",
+      ESC + "[1;38;2;20;20;20;48;2;242;240;235m x" + ESC + "[K",
+      { ...baseContext, prefersLight: false, backgroundRgb: "02/04/02" },
+    );
+
+    expect(plan.normalizedOutput).toBe(ESC + "[1;38;2;20;20;20;48;2;41;41;41m x" + ESC + "[K");
+  });
+
+  it("remaps non-canonical Codex chrome grays (e.g. the active composer) in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    const plan = planTerminalCapabilityResponses("codex", ESC + "[48;2;48;48;48m typing" + ESC + "[K", {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe(ESC + "[48;2;242;240;235m typing" + ESC + "[K");
+  });
+
+  it("leaves colored (non-gray) Codex backgrounds untouched in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    const data = ESC + "[48;2;0;120;200m link" + ESC + "[K";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe(data);
+  });
+
+  it("leaves light-gray Codex backgrounds untouched in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    const data = ESC + "[48;2;200;200;200m x" + ESC + "[K";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe(data);
+  });
+
+  it("remaps non-canonical light Codex chrome (e.g. opposite-theme composer) to dark in dark mode", () => {
+    const ESC = String.fromCharCode(27);
+    const plan = planTerminalCapabilityResponses("codex", ESC + "[48;2;245;245;245m typing" + ESC + "[K", {
+      ...baseContext,
+      prefersLight: false,
+      backgroundRgb: "02/04/02",
+    });
+
+    expect(plan.normalizedOutput).toBe(ESC + "[48;2;41;41;41m typing" + ESC + "[K");
+  });
+
+  it("leaves colored (non-gray) Codex backgrounds untouched in dark mode", () => {
+    const ESC = String.fromCharCode(27);
+    const data = ESC + "[48;2;0;120;200m link" + ESC + "[K";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: false,
+      backgroundRgb: "02/04/02",
+    });
+
+    expect(plan.normalizedOutput).toBe(data);
   });
 
   it("strips OpenTUI theme notification enablement from rendered output", () => {

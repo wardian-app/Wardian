@@ -2313,7 +2313,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("pushes updated Codex terminal colors when Wardian switches back to dark mode", async () => {
+  it("recolors Codex via composer replay on a real theme swap without typing color replies into its stdin", async () => {
     const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
     let peekCount = 0;
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -2359,19 +2359,25 @@ describe("AgentTerminal scrollback", () => {
     mockInvoke.mockClear();
     view.rerender(<AgentTerminal sessionId="codex-live-theme" provider="codex" theme="dark" />);
 
+    // Codex recolors via the Wardian-side composer replay, NOT by pushing color
+    // replies into its stdin: those are terminal->app responses, so codex's prompt
+    // line editor would just type them in as literal "[?997;1n]11;rgb:..." text.
+    const codexEsc = String.fromCharCode(27);
+    const codexSt = codexEsc + String.fromCharCode(92);
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-live-theme",
-        input: "\u001b[?997;1n",
-      });
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-live-theme",
-        input: "\u001b]11;rgb:1a/1a/1a\u001b\\",
-      });
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-live-theme",
-        input: "\u001b]10;rgb:eb/eb/eb\u001b\\",
-      });
+      expect(instance.reset).toHaveBeenCalled();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-live-theme",
+      input: codexEsc + "[?997;1n",
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-live-theme",
+      input: codexEsc + "]11;rgb:1a/1a/1a" + codexSt,
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-live-theme",
+      input: codexEsc + "]10;rgb:eb/eb/eb" + codexSt,
     });
 
     await waitFor(() => {

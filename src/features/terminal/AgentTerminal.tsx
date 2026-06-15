@@ -2303,7 +2303,23 @@ export const AgentTerminal = memo(function AgentTerminal({
     const previousSignaledTheme = lastThemeSignalRef.current;
     lastThemeSignalRef.current = activeTermTheme;
     entry.currentTheme = activeTermTheme;
-    if (entry.provider === "opencode" || entry.provider === "codex" || entry.provider === "antigravity") {
+    // A genuine light<->dark swap, as opposed to a maximize/minimize re-render
+    // (which re-runs this effect with the SAME theme). terminalThemeForProvider
+    // returns shared LIGHT/DARK constants, so reference inequality reliably means a
+    // real theme change rather than layout churn.
+    const isCodexThemeChange =
+      entry.provider === "codex" &&
+      previousSignaledTheme !== null &&
+      previousSignaledTheme !== activeTermTheme;
+    // Push ?997 + OSC color replies as input so the TUI repaints in the new scheme.
+    // ONLY opencode/antigravity: these are terminal->application REPLIES, valid only
+    // as answers to a probe the app made. Codex sits at an interactive prompt under
+    // the bundled modern ConPTY, so injecting them into its stdin just types them
+    // into the composer as literal "[?997;1n]11;rgb:..." text -- they are never
+    // interpreted as a theme signal. Codex has no "theme changed" input command, so
+    // its recoloring is done entirely Wardian-side via the preview replay below
+    // (plus normalizeCodexComposerBackgroundForTheme on streamed output).
+    if (entry.provider === "opencode" || entry.provider === "antigravity") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
@@ -2319,9 +2335,9 @@ export const AgentTerminal = memo(function AgentTerminal({
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
-      if (entry.provider === "codex" && previousSignaledTheme !== null && previousSignaledTheme !== activeTermTheme) {
-        void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
-      }
+    }
+    if (isCodexThemeChange) {
+      void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
     }
   }, [effectiveTheme, provider, sessionId, termTheme]);
 

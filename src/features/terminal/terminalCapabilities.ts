@@ -19,12 +19,26 @@ const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
 // chunk fragmentation: xterm emits each reply as one complete onData string.
 const TERMINAL_COLOR_REPORT_REPLY =
   /\u001b\[\?997;\d+n|\u001b\]1[01];rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)|\u001b\]4;\d+;rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)/g;
+// The full set of terminal color / light-dark STATUS sequences in codex's OUTPUT:
+// the OSC 10/11/4 + CSI ?996n probes codex emits, plus the OSC 10/11/4 "rgb:..."
+// reports and the CSI ?997;<n>n light-dark report that the modern ConPTY answers
+// them with. On maximize/resize codex emits a burst of probes; OpenConsole's
+// native answers get echoed back into codex's output, and because the burst is
+// fragmented across PTY chunks it slips past the per-chunk probe strip and renders
+// as stray ]11;rgb / ?997;1n garbage. Stripping on the JOINED output batch is
+// immune to that fragmentation. Codex never legitimately emits a light-dark report
+// or an OSC color "set", so dropping these from its display stream is safe.
+const CODEX_TERMINAL_STATUS_SEQUENCE =
+  /\u001b\[\?99[67](?:;\d+)?n|\u001b\]1[01];(?:\?|rgb:[0-9a-fA-F/]+)(?:\u0007|\u001b\\)|\u001b\]4;\d+;(?:\?|rgb:[0-9a-fA-F/]+)(?:\u0007|\u001b\\)/g;
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
-const CODEX_DARK_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;41;41;41m/g;
-const CODEX_LIGHT_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;242;240;235m/g;
+// Matches any SGR sequence so codex's chrome background can be remapped even when
+// it is COMBINED with a foreground/attributes in one SGR. Codex emits the active
+// (typing) composer that way, and xterm's serializer re-emits scrollback that way
+// on a theme swap; matching only the standalone form left those black/inverted.
+const CODEX_SGR_SEQUENCE = /\u001b\[([0-9;]*)m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
@@ -65,6 +79,15 @@ function normalizeFullscreenClearByNewlines(data: string) {
 
 function stripProviderScrollbackErase(data: string, provider?: string) {
   return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
+}
+
+// Strip codex's color / light-dark probes AND the ConPTY-answered reply echoes
+// from its rendered OUTPUT. Runs on the JOINED output batch (see
+// CODEX_TERMINAL_STATUS_SEQUENCE) so it heals the cross-chunk fragmentation that
+// lets a maximize/resize probe burst slip past the per-chunk probe strip and
+// surface as stray ]11;rgb / ?997;1n text in codex's composer.
+function stripCodexTerminalStatusEchoes(data: string) {
+  return data.replace(CODEX_TERMINAL_STATUS_SEQUENCE, "");
 }
 
 // Remove terminal color / light-dark PROBES from a provider's output before it
@@ -119,15 +142,67 @@ function foregroundRgbForSgr(foregroundRgb: string) {
   return values.length === 3 && values.every(Number.isFinite) ? values.join(";") : "255;255;255";
 }
 
+// Codex draws its composer / user-message chrome as a flat, near-uniform gray and
+// does not reliably track Wardian's runtime light<->dark swaps, so the gray it
+// emits can be the OPPOSITE of the active theme. Content (code, syntax) never uses
+// a flat near-black or near-white gray background, so re-theming these is safe:
+//   - light mode: no codex background should be near-black
+//   - dark mode:  no codex background should be near-white
+function isNearUniformGray(r: number, g: number, b: number) {
+  return (
+    Number.isFinite(r) &&
+    Number.isFinite(g) &&
+    Number.isFinite(b) &&
+    Math.max(r, g, b) - Math.min(r, g, b) <= 16
+  );
+}
+
+function isCodexChromeDarkGray(r: number, g: number, b: number) {
+  return isNearUniformGray(r, g, b) && Math.max(r, g, b) <= 96;
+}
+
+function isCodexChromeLightGray(r: number, g: number, b: number) {
+  return isNearUniformGray(r, g, b) && Math.min(r, g, b) >= 176;
+}
+
+// Remap a codex chrome background to `fill` wherever a 48;2;R;G;B run appears in an
+// SGR parameter list -- standalone OR combined with other attributes. Walking the
+// params (instead of a standalone-only regex) is what makes the active composer and
+// serialized scrollback re-theme on a swap rather than staying the opposite color.
+function remapCodexChromeBackground(
+  data: string,
+  isChrome: (r: number, g: number, b: number) => boolean,
+  fill: string,
+) {
+  const fillParts = fill.split(";");
+  return data.replace(CODEX_SGR_SEQUENCE, (whole: string, params: string) => {
+    const parts = params.split(";");
+    let changed = false;
+    for (let i = 0; i < parts.length; ) {
+      if (parts[i] === "48" && parts[i + 1] === "2" && i + 4 < parts.length) {
+        if (isChrome(Number(parts[i + 2]), Number(parts[i + 3]), Number(parts[i + 4]))) {
+          parts.splice(i, 5, "48", "2", fillParts[0], fillParts[1], fillParts[2]);
+          changed = true;
+        }
+        i += 5;
+      } else {
+        i += 1;
+      }
+    }
+    return changed ? `\u001b[${parts.join(";")}m` : whole;
+  });
+}
+
 export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
   if (context.prefersLight) {
-    return data.replace(
-      CODEX_DARK_USER_MESSAGE_BACKGROUND,
-      `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`,
+    return remapCodexChromeBackground(
+      data,
+      isCodexChromeDarkGray,
+      codexLightUserMessageBackground(context.backgroundRgb),
     );
   }
 
-  return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, "\u001b[48;2;41;41;41m");
+  return remapCodexChromeBackground(data, isCodexChromeLightGray, "41;41;41");
 }
 
 function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
@@ -462,7 +537,9 @@ export function normalizeTerminalOutputBatch(
   const normalizedChunks = rawChunks
     .map((data) => normalizeOpenCodeOutput(data, provider, state))
     .join("");
-  const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
+  const scrollbackStripped = stripProviderScrollbackErase(normalizedChunks, provider);
+  const normalizedOutput =
+    provider === "codex" ? stripCodexTerminalStatusEchoes(scrollbackStripped) : scrollbackStripped;
   const themedOutput = provider === "antigravity"
     ? normalizeAntigravityPrimaryText(normalizedOutput, state?.antigravityForegroundRgb, state)
     : normalizedOutput;
