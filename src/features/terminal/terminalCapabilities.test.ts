@@ -281,6 +281,41 @@ describe("terminal capability broker", () => {
     expect(plan.normalizedOutput).toBe("\u001b[48;2;41;41;41m\n\u001b[K");
   });
 
+  it("remaps non-canonical Codex chrome grays (e.g. the active composer) in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    const plan = planTerminalCapabilityResponses("codex", ESC + "[48;2;48;48;48m typing" + ESC + "[K", {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe(ESC + "[48;2;242;240;235m typing" + ESC + "[K");
+  });
+
+  it("leaves colored (non-gray) Codex backgrounds untouched in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    const data = ESC + "[48;2;0;120;200m link" + ESC + "[K";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe(data);
+  });
+
+  it("leaves light-gray Codex backgrounds untouched in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    const data = ESC + "[48;2;200;200;200m x" + ESC + "[K";
+    const plan = planTerminalCapabilityResponses("codex", data, {
+      ...baseContext,
+      prefersLight: true,
+      backgroundRgb: "fc/fa/f5",
+    });
+
+    expect(plan.normalizedOutput).toBe(data);
+  });
+
   it("strips OpenTUI theme notification enablement from rendered output", () => {
     expect(normalizeOpenCodeOutput("\u001b[?2031hready\u001b[?2031l", "opencode")).toBe("ready");
   });

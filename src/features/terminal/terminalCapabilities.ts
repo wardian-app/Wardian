@@ -34,8 +34,13 @@ const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
-const CODEX_DARK_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;41;41;41m/g;
 const CODEX_LIGHT_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;242;240;235m/g;
+// Any standalone truecolor background SGR, so codex's RGB can be inspected. Codex
+// draws its composer / user-message chrome with near-uniform dark grays (41;41;41
+// plus focused/idle variants); matching only 41;41;41 left the active (typing)
+// composer and some history fragments black in light mode.
+const CODEX_BACKGROUND_SGR =
+  /\u001b\[48;2;(\d+);(\d+);(\d+)m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
@@ -139,15 +144,31 @@ function foregroundRgbForSgr(foregroundRgb: string) {
   return values.length === 3 && values.every(Number.isFinite) ? values.join(";") : "255;255;255";
 }
 
+// A near-uniform dark gray is codex chrome (composer / user-message fill), not
+// content: code and syntax highlighting use colored or terminal-default
+// backgrounds, never a flat near-black gray. In light mode no codex background
+// should be near-black, so every such gray is stale chrome to re-theme -- this is
+// why the active (typing) composer and a few history fragments, which use slightly
+// different grays than the canonical 41;41;41, were leaking through black.
+function isCodexChromeDarkGray(r: number, g: number, b: number) {
+  return (
+    Number.isFinite(r) &&
+    Number.isFinite(g) &&
+    Number.isFinite(b) &&
+    Math.max(r, g, b) <= 96 &&
+    Math.max(r, g, b) - Math.min(r, g, b) <= 16
+  );
+}
+
 export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
   if (context.prefersLight) {
-    return data.replace(
-      CODEX_DARK_USER_MESSAGE_BACKGROUND,
-      `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`,
+    const lightFill = `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`;
+    return data.replace(CODEX_BACKGROUND_SGR, (match, r: string, g: string, b: string) =>
+      isCodexChromeDarkGray(Number(r), Number(g), Number(b)) ? lightFill : match,
     );
   }
 
-  return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, "\u001b[48;2;41;41;41m");
+  return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, `\u001b[48;2;41;41;41m`);
 }
 
 function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
