@@ -113,6 +113,36 @@ function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
   return max - min <= 40 && max <= 220;
 }
 
+// A line that carries an explicit muted-grey foreground (38;2;<grey> or the
+// 232-255 grayscale ramp) is Antigravity primary-response prose, not faint
+// (SGR 2) tool detail, so it must still brighten even when indented under a
+// tool/status marker. Without this, the model's grey prose under a Bash(...) or
+// "Thought" marker stays grey instead of going white.
+function antigravityLineHasMutedForeground(line: string) {
+  for (const match of line.matchAll(/\u001b\[([0-9;]*)m/g)) {
+    const raw = match[1].split(";");
+    for (let i = 0; i < raw.length; i += 1) {
+      if (raw[i] === "38" && raw[i + 1] === "2") {
+        const rgb = raw.slice(i + 2, i + 5).map((component) => Number.parseInt(component, 10));
+        if (
+          rgb.length === 3 &&
+          rgb.every(Number.isFinite) &&
+          isMutedPrimaryForegroundRgb(rgb[0], rgb[1], rgb[2])
+        ) {
+          return true;
+        }
+      }
+      if (raw[i] === "38" && raw[i + 1] === "5") {
+        const colorIndex = Number.parseInt(raw[i + 2] ?? "", 10);
+        if (Number.isFinite(colorIndex) && colorIndex >= 232 && colorIndex <= 255) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 function normalizeAntigravitySgrParams(
   params: string,
   foregroundRgb: string,
@@ -328,7 +358,9 @@ function normalizeAntigravityPrimaryText(
           ? `${state.antigravityPendingToolMarkerText}${plain}`
           : null;
       const suppressPendingTool = pendingToolCandidate !== null && isAntigravityToolOrPrefix(pendingToolCandidate);
-      const suppressPrimaryBrightening = (suppressIndentedToolDetail && isIndentedDetail) || suppressPendingTool;
+      const suppressPrimaryBrightening =
+        (suppressIndentedToolDetail && isIndentedDetail && !antigravityLineHasMutedForeground(part)) ||
+        suppressPendingTool;
       const normalized = normalizeAntigravityLine(part, foregroundRgb, suppressPrimaryBrightening);
 
       if (state) {

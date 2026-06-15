@@ -163,6 +163,20 @@ describe("terminal capability broker", () => {
     ).toBe("\u001b[2m  Tool call detail stays muted\u001b[22m\r\n");
   });
 
+  it("brightens indented Antigravity primary prose under a tool marker while keeping faint detail muted", () => {
+    const state: AntigravityRenderState = {};
+    const output =
+      "● \u001b[38;2;227;116;0m\u001b[1mBash\u001b[22m\u001b[38;2;60;64;67m(python script.py) (ctrl+o to expand)\u001b[0m\r\n" +
+      "  \u001b[38;2;184;184;184mI will wait for the task to complete.\u001b[39m\r\n" +
+      "  \u001b[2mtool stdout stays muted\u001b[22m";
+    const result = normalizeTerminalOutputBatch([output], "antigravity", state);
+    // Indented grey model prose brightens to white even under a tool marker...
+    expect(result).toContain("\u001b[38;2;255;255;255mI will wait for the task to complete.");
+    expect(result).not.toContain("38;2;184;184;184");
+    // ...but faint (SGR 2) tool detail stays muted.
+    expect(result).toContain("\u001b[2mtool stdout stays muted\u001b[22m");
+  });
+
   it("does not answer Codex color probes (the modern ConPTY does) but still themes output", () => {
     const data = "\u001b[?996n\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
     const plan = planTerminalCapabilityResponses("codex", data, {
