@@ -2312,15 +2312,14 @@ export const AgentTerminal = memo(function AgentTerminal({
       previousSignaledTheme !== null &&
       previousSignaledTheme !== activeTermTheme;
     // Push ?997 + OSC color replies as input so the TUI repaints in the new scheme.
-    // opencode/antigravity get this on every signal. Codex runs under the bundled
-    // modern ConPTY, which answers codex's probes natively with its OWN colors (not
-    // Wardian's theme), so this push is the only channel that conveys a Wardian
-    // theme swap to codex. It echoes back into codex's output, so it is gated to
-    // real theme changes: firing it on every maximize/minimize re-render was the
-    // ]11;rgb / ?997;1n bombardment across every mounted codex terminal. The rare
-    // echo on an actual swap is scrubbed by stripCodexTerminalStatusEchoes on the
-    // output side.
-    if (entry.provider === "opencode" || entry.provider === "antigravity" || isCodexThemeChange) {
+    // ONLY opencode/antigravity: these are terminal->application REPLIES, valid only
+    // as answers to a probe the app made. Codex sits at an interactive prompt under
+    // the bundled modern ConPTY, so injecting them into its stdin just types them
+    // into the composer as literal "[?997;1n]11;rgb:..." text -- they are never
+    // interpreted as a theme signal. Codex has no "theme changed" input command, so
+    // its recoloring is done entirely Wardian-side via the preview replay below
+    // (plus normalizeCodexComposerBackgroundForTheme on streamed output).
+    if (entry.provider === "opencode" || entry.provider === "antigravity") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
