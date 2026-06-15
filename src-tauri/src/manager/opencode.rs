@@ -339,21 +339,73 @@ pub(crate) fn opencode_log_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// A line that records the creation of an opencode session, in either log
+/// format: pre-1.17 (`service=session ... created id=ses_x`) or 1.17+
+/// (`... run=xxxx message=created id=ses_x slug=...`).
+fn is_opencode_session_created_line(line: &str) -> bool {
+    (line.contains("service=session") && line.contains("created"))
+        || line.contains("message=created")
+}
+
+fn opencode_created_session_id_from_line(line: &str) -> Option<String> {
+    if !is_opencode_session_created_line(line) {
+        return None;
+    }
+    line.split_whitespace()
+        .find(|w| w.starts_with("id=ses_"))
+        .and_then(|w| w.strip_prefix("id="))
+        .map(|id| id.to_string())
+}
+
 /// Extract the real opencode session ID (ses_xxx) from a log file.
-/// Looks for `service=session id=ses_xxx ... created` lines and returns
-/// the last one found (most recently created session in the log).
+/// Returns the last session-created entry found (most recent in the log).
 pub fn opencode_extract_created_session_id(log_path: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(log_path).ok()?;
     content
         .lines()
-        .filter(|line| line.contains("service=session") && line.contains("created"))
+        .filter_map(opencode_created_session_id_from_line)
+        .next_back()
+}
+
+/// Extract the opencode session ID created by THIS agent's opencode instance.
+///
+/// opencode 1.17+ writes a single rolling `opencode.log` shared by every
+/// concurrently running instance, so the last `created id=ses_x` line in the
+/// file may belong to another agent. Each instance tags its lines with a
+/// `run=<id>` token, and the agent's Wardian session UUID appears in that
+/// instance's `message=loading path="...agents/<uuid>/..."` lines, so the
+/// run ids seen on marker lines scope the search. Falls back to the unscoped
+/// last-created entry for the pre-1.17 one-file-per-instance format.
+pub fn opencode_extract_created_session_id_for_agent(
+    log_path: &std::path::Path,
+    agent_marker: &str,
+) -> Option<String> {
+    let content = std::fs::read_to_string(log_path).ok()?;
+    let agent_runs: std::collections::HashSet<&str> = content
+        .lines()
+        .filter(|line| line.contains(agent_marker))
         .filter_map(|line| {
             line.split_whitespace()
-                .find(|w| w.starts_with("id=ses_"))
-                .and_then(|w| w.strip_prefix("id="))
-                .map(|id| id.to_string())
+                .find(|w| w.starts_with("run="))
+                .and_then(|w| w.strip_prefix("run="))
         })
-        .next_back()
+        .collect();
+    let scoped = content
+        .lines()
+        .filter(|line| {
+            line.split_whitespace()
+                .find(|w| w.starts_with("run="))
+                .and_then(|w| w.strip_prefix("run="))
+                .is_some_and(|run| agent_runs.contains(run))
+        })
+        .filter_map(opencode_created_session_id_from_line)
+        .next_back();
+    scoped.or_else(|| {
+        content
+            .lines()
+            .filter_map(opencode_created_session_id_from_line)
+            .next_back()
+    })
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -385,13 +437,26 @@ pub(crate) fn opencode_metrics_from_log(content: &str, session_id: &str) -> Open
         }
 
         if metrics.init_timestamp.is_none() {
+            // 1.17+ format: a `timestamp=<rfc3339>` token; pre-1.17 format:
+            // a local-time timestamp as the second whitespace-separated token.
             metrics.init_timestamp = line
                 .split_whitespace()
-                .nth(1)
-                .and_then(opencode_log_timestamp_to_rfc3339);
+                .find_map(|token| token.strip_prefix("timestamp="))
+                .filter(|value| value.ends_with('Z'))
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    line.split_whitespace()
+                        .nth(1)
+                        .and_then(opencode_log_timestamp_to_rfc3339)
+                });
         }
 
-        if line.contains("service=session.prompt") {
+        // Prompt-loop markers: pre-1.17 logs tag them `service=session.prompt`,
+        // 1.17+ logs use `message=loop ... step=N` / `message="exiting loop"`.
+        let prompt_marker = line.contains("service=session.prompt")
+            || line.contains("message=loop")
+            || line.contains("message=\"exiting loop\"");
+        if prompt_marker {
             if line.contains("exiting loop") {
                 last_prompt_exited = true;
                 saw_prompt = true;
@@ -403,7 +468,7 @@ pub(crate) fn opencode_metrics_from_log(content: &str, session_id: &str) -> Open
             continue;
         }
 
-        if line.starts_with("ERROR ") || line.contains(" ERROR ") {
+        if line.starts_with("ERROR ") || line.contains(" ERROR ") || line.contains("level=ERROR") {
             saw_error = true;
         }
     }
@@ -1108,5 +1173,119 @@ mod tests {
                 "C:/Users/test/.wardian/agents/ses_test/habitat/workspace".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn extract_created_session_id_supports_pre_117_format() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log = temp.path().join("2026-04-12T100001.log");
+        std::fs::write(
+            &log,
+            concat!(
+                "INFO  2026-03-30T07:35:50 +0ms service=session id=ses_old created\n",
+                "INFO  2026-03-30T07:35:53 +0ms service=session id=ses_new created\n",
+            ),
+        )
+        .expect("write log");
+
+        assert_eq!(
+            opencode_extract_created_session_id(&log).as_deref(),
+            Some("ses_new")
+        );
+    }
+
+    #[test]
+    fn extract_created_session_id_supports_117_rolling_log_format() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log = temp.path().join("opencode.log");
+        std::fs::write(
+            &log,
+            concat!(
+                "timestamp=2026-06-12T13:47:45.348Z level=INFO run=382d6755 message=created id=ses_first slug=stellar-meadow version=1.17.4\n",
+                "timestamp=2026-06-12T13:56:30.417Z level=INFO run=2afdc4b8 message=created id=ses_second slug=quiet-canyon version=1.17.4\n",
+            ),
+        )
+        .expect("write log");
+
+        assert_eq!(
+            opencode_extract_created_session_id(&log).as_deref(),
+            Some("ses_second")
+        );
+    }
+
+    #[test]
+    fn extract_created_session_id_for_agent_scopes_by_run_id() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log = temp.path().join("opencode.log");
+        // Two concurrent instances interleave in the shared rolling log; only
+        // run=aaaa1111 loaded this agent's config (path embeds the UUID).
+        std::fs::write(
+            &log,
+            concat!(
+                "timestamp=2026-06-12T13:47:45.000Z level=INFO run=aaaa1111 message=loading path=\"C:\\\\tmp\\\\agents\\\\11111111-2222-3333-4444-555555555555\\\\habitat\\\\.opencode\\\\opencode.json\"\n",
+                "timestamp=2026-06-12T13:47:45.348Z level=INFO run=aaaa1111 message=created id=ses_mine slug=stellar-meadow version=1.17.4\n",
+                "timestamp=2026-06-12T13:56:30.417Z level=INFO run=bbbb2222 message=created id=ses_other slug=quiet-canyon version=1.17.4\n",
+            ),
+        )
+        .expect("write log");
+
+        assert_eq!(
+            opencode_extract_created_session_id_for_agent(
+                &log,
+                "11111111-2222-3333-4444-555555555555"
+            )
+            .as_deref(),
+            Some("ses_mine")
+        );
+    }
+
+    #[test]
+    fn extract_created_session_id_for_agent_falls_back_when_marker_absent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log = temp.path().join("2026-04-12T100001.log");
+        std::fs::write(
+            &log,
+            "INFO  2026-03-30T07:35:53 +0ms service=session id=ses_legacy created\n",
+        )
+        .expect("write log");
+
+        assert_eq!(
+            opencode_extract_created_session_id_for_agent(&log, "no-such-uuid").as_deref(),
+            Some("ses_legacy")
+        );
+    }
+
+    #[test]
+    fn opencode_metrics_from_log_parses_117_rolling_log_format() {
+        let content = concat!(
+            "timestamp=2026-06-12T13:56:30.468Z level=INFO run=2afdc4b8 message=loop session.id=ses_target step=0\n",
+            "timestamp=2026-06-12T13:56:30.482Z level=INFO run=2afdc4b8 message=stream providerID=opencode session.id=ses_target small=true\n",
+            "timestamp=2026-06-12T13:56:33.236Z level=INFO run=2afdc4b8 message=loop session.id=ses_target step=1\n",
+            "timestamp=2026-06-12T13:56:33.237Z level=INFO run=2afdc4b8 message=\"exiting loop\" session.id=ses_target\n",
+            "timestamp=2026-06-12T13:56:34.000Z level=INFO run=ffff9999 message=loop session.id=ses_other step=0\n",
+        );
+
+        let metrics = opencode_metrics_from_log(content, "ses_target");
+
+        assert_eq!(metrics.query_count, 2);
+        assert_eq!(metrics.status.as_deref(), Some("Idle"));
+        assert_eq!(
+            metrics.init_timestamp.as_deref(),
+            Some("2026-06-12T13:56:30.468Z")
+        );
+    }
+
+    #[test]
+    fn opencode_metrics_from_log_117_format_reports_processing_and_error() {
+        let processing = "timestamp=2026-06-12T13:56:30.468Z level=INFO run=2afdc4b8 message=loop session.id=ses_target step=0\n";
+        let metrics = opencode_metrics_from_log(processing, "ses_target");
+        assert_eq!(metrics.status.as_deref(), Some("Processing..."));
+
+        let errored = concat!(
+            "timestamp=2026-06-12T13:56:30.468Z level=INFO run=2afdc4b8 message=loop session.id=ses_target step=0\n",
+            "timestamp=2026-06-12T13:56:31.000Z level=ERROR run=2afdc4b8 message=failed session.id=ses_target\n",
+        );
+        let metrics = opencode_metrics_from_log(errored, "ses_target");
+        assert_eq!(metrics.status.as_deref(), Some("Error"));
     }
 }

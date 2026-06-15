@@ -8,11 +8,20 @@ globalThis.ResizeObserver = class ResizeObserver {
   disconnect() {}
 } as unknown as typeof ResizeObserver;
 
+// jsdom has no layout, so report every observed element as visible — this
+// matches how components behave in a real viewport-sized window and keeps
+// visibility-gated features (e.g. terminal WebGL promotion) active in tests.
 globalThis.IntersectionObserver = class IntersectionObserver {
   root = null;
   rootMargin = "";
   thresholds = [];
-  observe() {}
+  private callback: (entries: unknown[], observer: unknown) => void;
+  constructor(callback: (entries: unknown[], observer: unknown) => void) {
+    this.callback = callback;
+  }
+  observe(target: Element) {
+    this.callback([{ isIntersecting: true, target }], this);
+  }
   unobserve() {}
   disconnect() {}
   takeRecords() { return []; }

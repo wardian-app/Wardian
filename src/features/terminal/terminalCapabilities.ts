@@ -9,6 +9,16 @@ const OSC_FOREGROUND_QUERY_BEL = "\u001b]10;?\u0007";
 const OSC_BACKGROUND_QUERY_BEL = "\u001b]11;?\u0007";
 const OSC_FOREGROUND_QUERY_ST = "\u001b]10;?\u001b\\";
 const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
+// Terminal-status REPLIES that xterm.js auto-generates when it sees a color /
+// light-dark probe: the OSC 10/11/4 "rgb:..." reports and the CSI ?997;<n>n
+// light-dark report. Under the modern ConPTY, OpenConsole answers codex's probes
+// natively, so xterm's duplicate reply (forwarded as input) is echoed back into
+// codex's output as stray ]11;rgb / ?997;1n garbage -- worst on maximize/resize,
+// where the probe burst is fragmented across PTY chunks and slips past the
+// output-side probe strip. Dropping these replies on the INPUT side is immune to
+// chunk fragmentation: xterm emits each reply as one complete onData string.
+const TERMINAL_COLOR_REPORT_REPLY =
+  /\u001b\[\?997;\d+n|\u001b\]1[01];rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)|\u001b\]4;\d+;rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)/g;
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
@@ -18,8 +28,6 @@ const CODEX_LIGHT_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;242;240;235m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
-const HOME_CURSOR = "\u001b[H";
-const TOP_CURSOR_ADDRESS = /\u001b\[(\d+);1H/;
 const REMOTE_HISTORY_FRAME_START = /\u001b\[\?2026h|\u001b\[\?25l\u001b\[H|\u001b\[H/g;
 
 export type TerminalCapabilityContext = {
@@ -39,111 +47,13 @@ export type TerminalCapabilityPlan = {
   focusReported: boolean;
 };
 
-export type TerminalOutputState = {
-  lastHomeRedrawLines: string[] | null;
-  homeRedrawScrollbackSeen?: Set<string>;
-  // Lines already represented in the parser buffer (scrollback + viewport).
-  // Used by home-redraw reconstruction to avoid pushing duplicates when the
-  // drop heuristic misfires on content shuffles.
-  existingKnownLines?: Set<string>;
-  transientHomeRedrawActive?: boolean;
+export type AntigravityRenderState = {
   antigravityForegroundRgb?: string;
   antigravityPendingToolMarkerText?: string;
   antigravitySuppressIndentedToolDetail?: boolean;
 };
 
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
-const CSI_SEQUENCE = /^\u001b\[([0-?]*)([ -/]*)([@-~])$/;
-
-function extractHomeRedrawLines(data: string) {
-  const homeIndex = data.indexOf(HOME_CURSOR);
-  if (homeIndex < 0) {
-    const cursorAddress = TOP_CURSOR_ADDRESS.exec(data);
-    const row = Number.parseInt(cursorAddress?.[1] ?? "", 10);
-    if (cursorAddress?.index !== undefined && cursorAddress.index <= 80 && Number.isFinite(row) && row <= 200) {
-      const lines = extractCursorAddressedHomeRedrawLines(data.slice(cursorAddress.index));
-      if (row <= 10 || lines?.some((line) => parseNumberedTail(line))) {
-        return lines;
-      }
-    }
-    return null;
-  }
-
-  if (homeIndex > 80) {
-    return null;
-  }
-
-  const plain = data
-    .slice(homeIndex + HOME_CURSOR.length)
-    .replace(ANSI_SEQUENCE, "")
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0);
-
-  if (plain.length >= 2) {
-    return plain;
-  }
-
-  return extractCursorAddressedHomeRedrawLines(data.slice(homeIndex));
-}
-
-function extractCursorAddressedHomeRedrawLines(data: string) {
-  const rows = new Map<number, string>();
-  let currentRow = 1;
-  let cursor = 0;
-
-  const appendText = (text: string) => {
-    for (const char of text) {
-      if (char === "\r") {
-        continue;
-      }
-      if (char === "\n") {
-        currentRow += 1;
-        continue;
-      }
-      if (char < " ") {
-        continue;
-      }
-      rows.set(currentRow, `${rows.get(currentRow) ?? ""}${char}`);
-    }
-  };
-
-  for (const match of data.matchAll(ANSI_SEQUENCE)) {
-    appendText(data.slice(cursor, match.index));
-    const sequence = match[0];
-    const csi = sequence.match(CSI_SEQUENCE);
-    if (csi && (csi[3] === "H" || csi[3] === "f")) {
-      const rowParam = csi[1].split(";")[0];
-      const row = Number.parseInt(rowParam || "1", 10);
-      currentRow = Number.isFinite(row) && row > 0 ? row : 1;
-    }
-    cursor = match.index + sequence.length;
-  }
-  appendText(data.slice(cursor));
-
-  const lines = Array.from(rows.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([, line]) => line.trimEnd())
-    .filter((line) => line.trim().length > 0);
-
-  return lines.length >= 2 ? lines : null;
-}
-
-function isSynchronizedHomeRedraw(data: string) {
-  return data.includes("\u001b[?2026") && extractHomeRedrawLines(data) !== null;
-}
-
-function normalizePlainLine(line: string) {
-  return line.replace(/\s+/g, " ").trim();
-}
-
-export function shouldHomeCursorBeforeTransientResize(
-  state: TerminalOutputState,
-  currentRows: number,
-  nextRows: number,
-) {
-  return Boolean(state.transientHomeRedrawActive && nextRows < currentRows);
-}
 
 function normalizeFullscreenClearByNewlines(data: string) {
   return data.replace(
@@ -155,6 +65,41 @@ function normalizeFullscreenClearByNewlines(data: string) {
 
 function stripProviderScrollbackErase(data: string, provider?: string) {
   return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
+}
+
+// Remove terminal color / light-dark PROBES from a provider's output before it
+// reaches xterm.js. xterm.js auto-answers OSC 10/11/4 (and ESC[?996n) queries;
+// under the modern ConPTY codex now emits those probes, and the reply lands back
+// in codex's composer as stray ]10;rgb / ]11;rgb text. Stripping the probe so
+// xterm never sees it suppresses the auto-reply. These are non-visible control
+// sequences, so the rendered output is unchanged.
+function stripTerminalColorQueries(data: string) {
+  return data
+    .split(OSC_FOREGROUND_QUERY_BEL)
+    .join("")
+    .split(OSC_FOREGROUND_QUERY_ST)
+    .join("")
+    .split(OSC_BACKGROUND_QUERY_BEL)
+    .join("")
+    .split(OSC_BACKGROUND_QUERY_ST)
+    .join("")
+    .split(OSC_PALETTE_QUERY)
+    .join("")
+    .split(LIGHT_DARK_QUERY)
+    .join("");
+}
+
+// Drop xterm.js's auto-generated terminal-status replies (OSC 10/11/4 rgb reports
+// and the CSI ?997 light-dark report) from a provider's INPUT before it is
+// forwarded to the PTY. Codex runs under the modern ConPTY, which answers codex's
+// probes itself; forwarding xterm's duplicate reply gets it echoed back into
+// codex's output as visible ]11;rgb / ?997;1n garbage (most visible on
+// maximize/resize, where the fragmented probe burst slips past the output-side
+// strip). xterm emits each reply as one complete onData string, so matching here
+// is immune to chunk fragmentation. Real keystrokes never contain these complete
+// report forms, so dropping them is safe.
+export function stripTerminalColorReportInputs(data: string) {
+  return data.replace(TERMINAL_COLOR_REPORT_REPLY, "");
 }
 
 function codexLightUserMessageBackground(backgroundRgb: string) {
@@ -189,6 +134,36 @@ function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
   return max - min <= 40 && max <= 220;
+}
+
+// A line that carries an explicit muted-grey foreground (38;2;<grey> or the
+// 232-255 grayscale ramp) is Antigravity primary-response prose, not faint
+// (SGR 2) tool detail, so it must still brighten even when indented under a
+// tool/status marker. Without this, the model's grey prose under a Bash(...) or
+// "Thought" marker stays grey instead of going white.
+function antigravityLineHasMutedForeground(line: string) {
+  for (const match of line.matchAll(/\u001b\[([0-9;]*)m/g)) {
+    const raw = match[1].split(";");
+    for (let i = 0; i < raw.length; i += 1) {
+      if (raw[i] === "38" && raw[i + 1] === "2") {
+        const rgb = raw.slice(i + 2, i + 5).map((component) => Number.parseInt(component, 10));
+        if (
+          rgb.length === 3 &&
+          rgb.every(Number.isFinite) &&
+          isMutedPrimaryForegroundRgb(rgb[0], rgb[1], rgb[2])
+        ) {
+          return true;
+        }
+      }
+      if (raw[i] === "38" && raw[i + 1] === "5") {
+        const colorIndex = Number.parseInt(raw[i + 2] ?? "", 10);
+        if (Number.isFinite(colorIndex) && colorIndex >= 232 && colorIndex <= 255) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 function normalizeAntigravitySgrParams(
@@ -386,7 +361,7 @@ function normalizeAntigravityLine(line: string, foregroundRgb: string, suppressP
 function normalizeAntigravityPrimaryText(
   data: string,
   foregroundRgb = "255;255;255",
-  state?: TerminalOutputState,
+  state?: AntigravityRenderState,
 ) {
   let suppressIndentedToolDetail = state?.antigravitySuppressIndentedToolDetail ?? false;
   const parts = data.split(/(\r\n|\n|\r)/);
@@ -406,7 +381,9 @@ function normalizeAntigravityPrimaryText(
           ? `${state.antigravityPendingToolMarkerText}${plain}`
           : null;
       const suppressPendingTool = pendingToolCandidate !== null && isAntigravityToolOrPrefix(pendingToolCandidate);
-      const suppressPrimaryBrightening = (suppressIndentedToolDetail && isIndentedDetail) || suppressPendingTool;
+      const suppressPrimaryBrightening =
+        (suppressIndentedToolDetail && isIndentedDetail && !antigravityLineHasMutedForeground(part)) ||
+        suppressPendingTool;
       const normalized = normalizeAntigravityLine(part, foregroundRgb, suppressPrimaryBrightening);
 
       if (state) {
@@ -441,47 +418,6 @@ function stripCursorStyleControls(data: string) {
   return data.replace(CURSOR_STYLE_SEQUENCE, "");
 }
 
-function parseNumberedTail(line: string) {
-  const match = normalizePlainLine(line).match(/^(.*?)(\d+)$/);
-  if (!match) {
-    return null;
-  }
-  const value = Number.parseInt(match[2], 10);
-  return Number.isFinite(value) ? { prefix: match[1], value } : null;
-}
-
-function findDroppedHomeRedrawLines(previous: string[] | null, next: string[]) {
-  if (!previous || previous.length < 2 || next.length < 2) {
-    return [];
-  }
-
-  const maxDrop = Math.min(previous.length - 1, next.length - 1);
-  for (let drop = 1; drop <= maxDrop; drop += 1) {
-    const remainingPrevious = previous.slice(drop);
-    const nextPrefix = next.slice(0, remainingPrevious.length);
-    if (
-      remainingPrevious.length > 0 &&
-      remainingPrevious.every((line, index) => line === nextPrefix[index])
-    ) {
-      return previous.slice(0, drop);
-    }
-  }
-
-  return previous.filter((line) => !next.includes(line));
-}
-
-function shouldReconstructProviderLine(provider: string | undefined) {
-  if (provider === "opencode") {
-    return true;
-  }
-
-  if (provider === "codex") {
-    return true;
-  }
-
-  return false;
-}
-
 function supportsTerminalCapabilityResponses(provider: string | undefined) {
   return provider === "opencode" || provider === "antigravity";
 }
@@ -490,128 +426,29 @@ function supportsTerminalThemeResponses(provider: string | undefined) {
   return provider === "opencode" || provider === "antigravity" || provider === "codex";
 }
 
-function isCodexTransientUiLine(line: string) {
-  const normalizedLine = normalizePlainLine(line);
-  if (!normalizedLine) {
-    return true;
-  }
-
-  if (/^[›>]\s/.test(normalizedLine)) {
-    return true;
-  }
-
-  if (/^[╭╰│┌└┐┘─━┃]/.test(normalizedLine)) {
-    return true;
-  }
-
-  if (
-    /^[•●✦✻*]\s*(?:Working|Thinking|Running|Ran|Reading|Searching|Editing|Checking|Waiting|Bash|PowerShell)\b/i.test(
-      normalizedLine,
-    )
-  ) {
-    return true;
-  }
-
-  if (/\b(thinking|tokens?|esc to interrupt|ctrl\+c|press enter|approval)\b/i.test(normalizedLine)) {
-    return true;
-  }
-
-  return false;
-}
-
-function extractNumberedLinesFromData(data: string) {
-  const lines = data
-    .replace(ANSI_SEQUENCE, "")
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => parseNumberedTail(line));
-  return lines.length >= 2 ? lines : null;
-}
-
-function reconstructHomeRedrawScrollback(
-  data: string,
-  state?: TerminalOutputState,
-  nextLines: string[] | null = extractHomeRedrawLines(data),
-  provider?: string,
-) {
-  if (!state) {
-    return data;
-  }
-
-  if (!nextLines) {
-    return data;
-  }
-
-  const droppedLines = findDroppedHomeRedrawLines(state.lastHomeRedrawLines, nextLines);
-  state.lastHomeRedrawLines = nextLines;
-
-  const seen = state.homeRedrawScrollbackSeen ?? new Set<string>();
-  state.homeRedrawScrollbackSeen = seen;
-  const newDroppedLines = droppedLines.filter((line) => {
-    if (!shouldReconstructProviderLine(provider)) {
-      return false;
-    }
-    if (provider === "codex" && isCodexTransientUiLine(line)) {
-      return false;
-    }
-    const normalizedLine = normalizePlainLine(line);
-    if (
-      seen.has(normalizedLine) ||
-      state.existingKnownLines?.has(normalizedLine) ||
-      state.existingKnownLines?.has(line)
-    ) {
-      return false;
-    }
-    seen.add(normalizedLine);
-    return true;
-  });
-
-  if (newDroppedLines.length === 0) {
-    return data;
-  }
-
-  return `\u001b[999;1H${newDroppedLines.join("\r\n")}\r\n${data}`;
+// Whether Wardian should REPLY to the terminal's color/light-dark probes. Codex
+// is excluded: under the bundled modern ConPTY, OpenConsole answers codex's OSC
+// 10/11 (and DSR) probes itself, so an extra Wardian reply is a duplicate that
+// leaks into codex's composer as stray ]10;rgb / ]11;rgb text. Codex does not
+// block on these probes, so dropping the reply is safe.
+function respondsToThemeColorQueries(provider: string | undefined) {
+  return provider === "opencode" || provider === "antigravity";
 }
 
 export function normalizeOpenCodeOutput(
   data: string,
   provider?: string,
-  state?: TerminalOutputState,
+  _state?: AntigravityRenderState,
 ) {
   if (!data) {
     return data;
   }
 
-  const homeRedrawLines = state ? extractHomeRedrawLines(data) : null;
-  const detectedRedrawLines = homeRedrawLines ?? (provider === "opencode" ? extractNumberedLinesFromData(data) : null);
-
   if (provider !== "opencode") {
-    if (state && isSynchronizedHomeRedraw(data)) {
-      state.transientHomeRedrawActive = true;
-    }
-    if (provider === "codex" && state && homeRedrawLines) {
-      data = reconstructHomeRedrawScrollback(data, state, homeRedrawLines, provider);
-    }
     return stripProviderScrollbackErase(normalizeFullscreenClearByNewlines(data), provider);
   }
 
-  if (state && isSynchronizedHomeRedraw(data)) {
-    state.transientHomeRedrawActive = true;
-  }
-
-  if (state && detectedRedrawLines) {
-    if (homeRedrawLines) {
-      data = reconstructHomeRedrawScrollback(data, state, detectedRedrawLines, provider);
-    }
-  }
-
-  data = stripProviderScrollbackErase(data, provider);
-
-  if (provider !== "opencode") {
-    return data;
-  }
-
-  return data
+  return stripProviderScrollbackErase(data, provider)
     .replace(DECRQM_QUERY, "")
     .replace(SYNC_OUTPUT_TOGGLE, "")
     .replace(THEME_MODE_NOTIFICATION_TOGGLE, "");
@@ -620,7 +457,7 @@ export function normalizeOpenCodeOutput(
 export function normalizeTerminalOutputBatch(
   rawChunks: string[],
   provider?: string,
-  state?: TerminalOutputState,
+  state?: AntigravityRenderState,
 ) {
   const normalizedChunks = rawChunks
     .map((data) => normalizeOpenCodeOutput(data, provider, state))
@@ -653,7 +490,7 @@ function splitRemoteTerminalHistoryFrames(data: string) {
 export function normalizeRemoteTerminalOutput(
   data: string,
   provider?: string,
-  state?: TerminalOutputState,
+  state?: AntigravityRenderState,
   context?: TerminalCapabilityContext,
 ) {
   if (!data) {
@@ -662,7 +499,7 @@ export function normalizeRemoteTerminalOutput(
   const contextForeground = provider === "antigravity" && context
     ? foregroundRgbForSgr(context.foregroundRgb)
     : undefined;
-  const outputState = state ?? (contextForeground ? { lastHomeRedrawLines: null } : undefined);
+  const outputState = state ?? (contextForeground ? ({} as AntigravityRenderState) : undefined);
   const previousAntigravityForeground = outputState?.antigravityForegroundRgb;
   if (outputState && contextForeground) {
     outputState.antigravityForegroundRgb = contextForeground;
@@ -682,7 +519,7 @@ export function normalizeRemoteTerminalLiveOutput(
   data: string,
   provider?: string,
   context?: TerminalCapabilityContext,
-  state?: TerminalOutputState,
+  state?: AntigravityRenderState,
 ) {
   const normalized = stripCursorStyleControls(data);
   return provider === "codex" && context
@@ -720,7 +557,7 @@ export function planTerminalCapabilityResponses(
     outgoingInputs.push("\u001b[?0u");
   }
 
-  if (supportsTerminalThemeResponses(provider) && data.includes(LIGHT_DARK_QUERY)) {
+  if (respondsToThemeColorQueries(provider) && data.includes(LIGHT_DARK_QUERY)) {
     outgoingInputs.push(`\u001b[?997;${context.prefersLight ? 2 : 1}n`);
   }
 
@@ -744,19 +581,19 @@ export function planTerminalCapabilityResponses(
     outgoingInputs.push(`\u001b[4;${context.pixelHeight};${context.pixelWidth}t`);
   }
 
-  if (supportsTerminalThemeResponses(provider) && data.includes(OSC_PALETTE_QUERY)) {
+  if (respondsToThemeColorQueries(provider) && data.includes(OSC_PALETTE_QUERY)) {
     outgoingInputs.push(`\u001b]4;0;rgb:${context.backgroundRgb}\u001b\\`);
   }
 
   if (
-    supportsTerminalThemeResponses(provider) &&
+    respondsToThemeColorQueries(provider) &&
     (data.includes(OSC_FOREGROUND_QUERY_BEL) || data.includes(OSC_FOREGROUND_QUERY_ST))
   ) {
     outgoingInputs.push(`\u001b]10;rgb:${context.foregroundRgb}\u001b\\`);
   }
 
   if (
-    supportsTerminalThemeResponses(provider) &&
+    respondsToThemeColorQueries(provider) &&
     (data.includes(OSC_BACKGROUND_QUERY_BEL) || data.includes(OSC_BACKGROUND_QUERY_ST))
   ) {
     outgoingInputs.push(`\u001b]11;rgb:${context.backgroundRgb}\u001b\\`);
@@ -773,7 +610,7 @@ export function planTerminalCapabilityResponses(
       provider === "opencode"
         ? normalizeOpenCodeOutput(data, "opencode")
         : provider === "codex"
-          ? normalizeCodexComposerBackgroundForTheme(data, context)
+          ? normalizeCodexComposerBackgroundForTheme(stripTerminalColorQueries(data), context)
           : provider === "antigravity"
             ? normalizeAntigravityPrimaryText(data, foregroundRgbForSgr(context.foregroundRgb))
           : data,

@@ -965,7 +965,10 @@ fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
                 .find_map(|dir| manager::opencode_log_path_in(&dir, &config.session_id))
         });
         if let Some(log_path) = log_path_snap {
-            if let Some(ses_id) = manager::opencode_extract_created_session_id(&log_path) {
+            if let Some(ses_id) = manager::opencode_extract_created_session_id_for_agent(
+                &log_path,
+                &config.session_id,
+            ) {
                 config.resume_session = Some(ses_id);
             }
         }

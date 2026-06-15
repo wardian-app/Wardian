@@ -58,6 +58,26 @@ fn load_conpty() -> ConPtyFuncs {
     // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
     // alongside the application.  We check for this after checking for kernel
     // support so that we don't try to proceed and do something crazy.
+    //
+    // Wardian patch: the in-box kernel32 ConPTY flattens an inline-viewport
+    // TUI's scroll-region history (e.g. codex) into in-place repaints and loses
+    // terminal scrollback. Wardian ships the modern Microsoft ConPTY
+    // redistributable in a `conpty/x64` folder next to the executable; prefer
+    // it (loaded by absolute path so `conpty.dll` finds its co-located
+    // `OpenConsole.exe`). Falls back to a bare sideloaded `conpty.dll`, then to
+    // kernel32, so absence of the bundle preserves the previous behaviour.
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+    {
+        let bundled = exe_dir.join("conpty").join("x64").join("conpty.dll");
+        if bundled.exists() {
+            if let Ok(sideloaded) = ConPtyFuncs::open(&bundled) {
+                return sideloaded;
+            }
+        }
+    }
+
     if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
         sideloaded
     } else {

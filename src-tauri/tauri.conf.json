@@ -48,7 +48,9 @@
       "agent_prompts/*",
       "../scripts/*",
       "resources/bin/*",
-      "resources/library/skills/**/*"
+      "resources/library/skills/**/*",
+      "conpty/x64/conpty.dll",
+      "conpty/x64/OpenConsole.exe"
     ]
   },
   "plugins": {

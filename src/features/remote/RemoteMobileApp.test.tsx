@@ -1460,7 +1460,7 @@ describe("RemoteMobileApp", () => {
     expect(terminalInstance.write).toHaveBeenCalledTimes(2);
   });
 
-  it("normalizes flattened Codex repaint history before writing to the remote terminal", async () => {
+  it("renders Codex repaint frames natively without journaling in the remote terminal", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -1534,7 +1534,9 @@ describe("RemoteMobileApp", () => {
       });
     });
 
-    expect(terminalInstance.write.mock.calls[0]?.[0]).toContain("\u001b[999;1H  60\r\n");
+    const written = terminalInstance.write.mock.calls[0]?.[0];
+        expect(written).not.toContain("\u001b[999;1H");
+        expect(written).toContain("  63");
   });
 
   it("renders Codex's dark composer background as a light fill in the remote mobile terminal", async () => {

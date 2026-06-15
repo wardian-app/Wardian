@@ -319,6 +319,147 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("force-loses the WebGL context when a renderer is disposed", async () => {
+    // @xterm/addon-webgl never calls WEBGL_lose_context on dispose, so Chromium
+    // keeps counting evicted contexts as active until GC. Disposal must lose the
+    // context explicitly or churn still trips the browser's context cap.
+    const firstRender = render(
+      <AgentTerminal sessionId="webgl-lose" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("webgl-lose")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const loseContext = vi.fn();
+    const canvas = document.createElement("canvas");
+    canvas.getContext = vi.fn(
+      () => ({
+        getExtension: vi.fn((name: string) =>
+          name === "WEBGL_lose_context" ? { loseContext } : null,
+        ),
+      }),
+    ) as never;
+    (instance.element as HTMLElement).appendChild(canvas);
+
+    vi.useFakeTimers();
+    try {
+      firstRender.unmount();
+      vi.advanceTimersByTime(30_000);
+
+      expect(instance.dispose).toHaveBeenCalled();
+      expect(loseContext).toHaveBeenCalledTimes(1);
+      expect(canvas.getContext).toHaveBeenCalledWith("webgl2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("computes columns from the cell size without the FitAddon overview-ruler gutter", () => {
+    // FitAddon reserves a flat 14px gutter when scrollback is enabled, costing
+    // ~2 columns even though we never render an overview ruler. Our computation
+    // must use the full host width / cell width instead.
+    const fallback = vi.fn(() => ({ cols: 1, rows: 1 }));
+    const renderer = {
+      term: {
+        _core: { _renderService: { dimensions: { css: { cell: { width: 8, height: 16 } } } } },
+      },
+      host: { clientWidth: 800, clientHeight: 320 },
+      fitAddon: { proposeDimensions: fallback },
+    } as never;
+
+    const dims = __terminalTesting.proposeTerminalDimensions(renderer);
+
+    // 800 / 8 = 100 cols (FitAddon would give floor((800-14)/8) = 98), 320/16 = 20.
+    expect(dims).toEqual({ cols: 100, rows: 20 });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("falls back to FitAddon when xterm cell internals are unavailable", () => {
+    const fallback = vi.fn(() => ({ cols: 77, rows: 19 }));
+    const renderer = {
+      term: {},
+      host: { clientWidth: 800, clientHeight: 320 },
+      fitAddon: { proposeDimensions: fallback },
+    } as never;
+
+    expect(__terminalTesting.proposeTerminalDimensions(renderer)).toEqual({ cols: 77, rows: 19 });
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases WebGL1 fallback contexts (not just webgl2) on disposal", async () => {
+    // @xterm/addon-webgl silently falls back to a WebGL1 context when webgl2 is
+    // unavailable (common once the browser nears its context cap). Probing only
+    // "webgl2" returns null for those canvases, so their context never gets
+    // WEBGL_lose_context — they accumulate as zombies and re-trip the cap. The
+    // release path must try "webgl" too.
+    const firstRender = render(
+      <AgentTerminal sessionId="webgl1-lose" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("webgl1-lose")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const loseContext = vi.fn();
+    const canvas = document.createElement("canvas");
+    // Emulate a WebGL1-only canvas: getContext("webgl2") → null, "webgl" → ctx.
+    canvas.getContext = vi.fn((type: string) =>
+      type === "webgl"
+        ? {
+            getExtension: (name: string) =>
+              name === "WEBGL_lose_context" ? { loseContext } : null,
+          }
+        : null,
+    ) as never;
+    (instance.element as HTMLElement).appendChild(canvas);
+
+    vi.useFakeTimers();
+    try {
+      firstRender.unmount();
+      vi.advanceTimersByTime(30_000);
+
+      expect(instance.dispose).toHaveBeenCalled();
+      expect(canvas.getContext).toHaveBeenCalledWith("webgl2");
+      expect(canvas.getContext).toHaveBeenCalledWith("webgl");
+      expect(loseContext).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a headless parser when an xterm reflow resize throws", async () => {
+    // xterm 6.0.0 reflow can throw mid-resize on large headless buffers,
+    // leaving the buffer half-resized so every later write/serialize throws.
+    // resizeParser must catch the throw, reset the parser, and re-apply the
+    // size instead of letting the uncaught error cascade.
+    render(<AgentTerminal sessionId="parser-recover" provider="codex" theme="dark" />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("parser-recover")?.renderer).toBeTruthy();
+    });
+
+    const parser = getLatestHeadlessTerminalInstance();
+    parser.resize = vi.fn(() => {
+      throw new TypeError("Cannot read properties of undefined (reading 'resize')");
+    });
+    parser.reset = vi.fn();
+
+    expect(() =>
+      __terminalTesting.resizeParser(
+        { parser, lastReportedSize: null } as never,
+        120,
+        40,
+      ),
+    ).not.toThrow();
+
+    // After the failed reflow it reset the parser and retried the resize.
+    expect(parser.reset).toHaveBeenCalledTimes(1);
+    expect(parser.resize).toHaveBeenCalledTimes(2);
+  });
+
   it("caps live WebGL renderers without promoting a focused terminal onto the GPU", async () => {
     // Render more terminals than the WebGL pool cap (12). The pool must stay at
     // 12 live contexts; the rest fall back to the DOM renderer. Newly mounted
@@ -432,12 +573,105 @@ describe("AgentTerminal scrollback", () => {
     expect(term.buffer.active.getLine(9)).toBeUndefined();
   });
 
-  it("treats only top-left cursor addresses as provider viewport redraws", () => {
-    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[1;1H1\r\n2")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[H1\r\n2")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(true);
-    expect(__terminalTesting.isProviderViewportRedraw("claude", "\u001b[12;1Hstatus")).toBe(false);
+  it("never treats provider frames as viewport redraws", () => {
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[1;1H1\r\n2")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[H1\r\n2")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[2J\u001b[H")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("codex", "\u001b[12;1Hstatus")).toBe(false);
     expect(__terminalTesting.isProviderViewportRedraw("opencode", "\u001b[1;1H1\r\n2")).toBe(false);
+  });
+
+  it("never routes Claude or Gemini frames through viewport redraws", () => {
+    // Claude/Gemini are diff renderers that assume the terminal retained their
+    // previous frame; replacing their viewport via a scratch screen corrupts
+    // cells (blank rows with a fresh scratch, merged rows with a preserved
+    // one — observed live against Claude Code 2.1.173). Their streams are
+    // written natively.
+    const esc = String.fromCharCode(27);
+    expect(__terminalTesting.isProviderViewportRedraw("claude", `${esc}[H1` + "\r\n2")).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("claude", `${esc}[2J${esc}[H`)).toBe(false);
+    expect(__terminalTesting.isProviderViewportRedraw("gemini", `${esc}[H1` + "\r\n2")).toBe(false);
+  });
+
+  it("keeps rows a partial home-anchored redraw did not repaint when preserving the viewport", async () => {
+    // Unit coverage for applyViewportRedrawInPlace's preserveExistingViewport
+    // option: with it enabled, rows the frame does not write must keep their
+    // prior content instead of going blank.
+    const createLine = (text: string) => ({
+      clone: () => createLine(text),
+      translateToString: () => text,
+    });
+    function createHeadlessTerm(
+      ybase: number,
+      options?: ConstructorParameters<typeof HeadlessTerminal>[0],
+    ) {
+      const lines: ReturnType<typeof createLine>[] = [];
+      const internalBuffer = {
+        x: 0,
+        y: 0,
+        ybase,
+        ydisp: ybase,
+        lines: {
+          get: (index: number) => lines[index],
+          set: (index: number, value: ReturnType<typeof createLine>) => {
+            lines[index] = value;
+            terminal.buffer.active.length = Math.max(terminal.buffer.active.length, index + 1);
+          },
+        },
+      };
+      const terminal = {
+        cols: options?.cols ?? 80,
+        rows: options?.rows ?? 24,
+        options: { ...(options ?? {}) },
+        buffer: {
+          active: {
+            baseY: internalBuffer.ybase,
+            viewportY: internalBuffer.ydisp,
+            length: 0,
+            getLine: (index: number) => lines[index],
+          },
+        },
+        _core: { _bufferService: { buffer: internalBuffer } },
+        write: vi.fn((data: string, callback?: () => void) => {
+          const rendered = data
+            .replace(new RegExp("\\u001b\\[[0-?]*[ -/]*[@-~]", "g"), "")
+            .split(new RegExp("\\r?\\n"))
+            .map((line) => line.trimEnd());
+          rendered.forEach((line, row) => {
+            if (line.length > 0) {
+              internalBuffer.lines.set(internalBuffer.ybase + row, createLine(line));
+            }
+          });
+          callback?.();
+        }),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      } as any;
+      return terminal;
+    }
+    // Scratch terminals are created with scrollback 0, so their base stays 0.
+    mockHeadlessTerminal.mockImplementation(function MockScratchTerm(
+      options?: ConstructorParameters<typeof HeadlessTerminal>[0],
+    ) {
+      return createHeadlessTerm(0, options);
+    });
+    const term = createHeadlessTerm(10, { cols: 80, rows: 24 });
+    for (let index = 0; index < 24; index += 1) {
+      term._core._bufferService.buffer.lines.set(10 + index, createLine(` stale ${index + 1}`));
+    }
+
+    const esc = String.fromCharCode(27);
+    const applied = await __terminalTesting.applyViewportRedrawInPlace(
+      term,
+      `${esc}[H header${esc}[K\r\n 130989 tokens${esc}[K`,
+      { preserveExistingViewport: true },
+    );
+
+    expect(applied).toBe(true);
+    expect(term.buffer.active.getLine(10)?.translateToString()).toBe(" header");
+    expect(term.buffer.active.getLine(11)?.translateToString()).toBe(" 130989 tokens");
+    expect(term.buffer.active.getLine(12)?.translateToString()).toBe(" stale 3");
+    expect(term.buffer.active.getLine(33)?.translateToString()).toBe(" stale 24");
   });
 
   it("journals new substantive rows from provider redraw frames before applying them in place", () => {
@@ -771,7 +1005,11 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("preserves Codex primary-buffer clears into scrollback", async () => {
+  it("does not scroll Codex erase-in-display clears into scrollback (avoids composer snapshots)", async () => {
+    // Codex's conversation history reaches scrollback natively via its
+    // top-anchored DECSTBM scroll region; scrollOnEraseInDisplay would also push
+    // the pinned composer/status viewport into scrollback on every ESC[2J
+    // repaint, leaving frozen composer snapshots in history. It must stay off.
     render(<AgentTerminal sessionId="codex-3" provider="codex" theme="dark" />);
 
     await waitFor(() => {
@@ -783,7 +1021,7 @@ describe("AgentTerminal scrollback", () => {
       unknown
     >;
     expect(terminalOptions.reflowCursorLine).toBe(false);
-    expect(terminalOptions.scrollOnEraseInDisplay).toBe(true);
+    expect(terminalOptions.scrollOnEraseInDisplay).toBe(false);
   });
 
   it("keeps non-Codex erase-in-display behavior at xterm defaults", async () => {
@@ -1536,73 +1774,6 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
-  it("homes transient TUI redraws before shrinking rows so complex glyph rows do not reflow", async () => {
-    let readCount = 0;
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      switch (cmd) {
-        case "read_agent_pty":
-          readCount += 1;
-          return readCount === 1
-            ? "\u001b[?2026h\u001b[38;2;215;119;87m\u001b[H ▐▛███▜▌   Claude Code v2.1.101\u001b[K\r\n▝▜█████▛▘  Sonnet 4.6 · Claude Pro\u001b[K\u001b[?2026l"
-            : null;
-        case "resize_agent_terminal":
-          return null;
-        default:
-          return null;
-      }
-    });
-
-    const { rerender } = render(
-      <AgentTerminal sessionId="claude-transient-shrink" provider="claude" isMaximized theme="dark" />,
-    );
-
-    await waitFor(() => {
-      const instance = getLatestTerminalInstance();
-      expect(instance.write).toHaveBeenCalledWith(expect.stringContaining("Claude Code"), expect.any(Function));
-    });
-
-    rectSpy.mockReturnValue({
-      width: 900,
-      height: 300,
-      top: 0,
-      left: 0,
-      right: 900,
-      bottom: 300,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    fitDimensions = { cols: 80, rows: 12 };
-
-    rerender(
-      <AgentTerminal
-        sessionId="claude-transient-shrink"
-        provider="claude"
-        isMaximized={false}
-        theme="dark"
-      />,
-    );
-
-    await waitFor(
-      () => {
-        const instance = getLatestTerminalInstance();
-        expect(instance.write).toHaveBeenCalledWith("\u001b[H", expect.any(Function));
-        expect(instance.resize).toHaveBeenCalledWith(80, 12);
-      },
-      { timeout: 400 },
-    );
-
-    const instance = getLatestTerminalInstance();
-    const homeWriteOrder = instance.write.mock.invocationCallOrder.find(
-      (_order: number, index: number) => instance.write.mock.calls[index]?.[0] === "\u001b[H",
-    );
-    const shrinkOrder = instance.resize.mock.invocationCallOrder.find(
-      (_order: number, index: number) =>
-        instance.resize.mock.calls[index]?.[0] === 80 && instance.resize.mock.calls[index]?.[1] === 12,
-    );
-    expect(homeWriteOrder).toBeLessThan(shrinkOrder);
-  });
-
   it("reports each distinct backend PTY row resize during bursty terminal resize events", async () => {
     render(<AgentTerminal sessionId="claude-resize" provider="claude" theme="dark" />);
 
@@ -1613,6 +1784,9 @@ describe("AgentTerminal scrollback", () => {
     const instance = getLatestTerminalInstance();
     const onResize = instance.onResize.mock.calls[0]?.[0] as ((size: { cols: number; rows: number }) => void);
 
+    // Drop any initial-mount fit report so the assertion isolates the three
+    // deliberate onResize events below (matches the sibling resize tests).
+    mockInvoke.mockClear();
     onResize({ cols: 120, rows: 40 });
     onResize({ cols: 121, rows: 41 });
     onResize({ cols: 122, rows: 42 });
@@ -2065,7 +2239,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("replies to Codex OSC 10/11 probes during the initial preview window", async () => {
+  it("does not reply to Codex OSC 10/11 probes (the modern ConPTY answers them)", async () => {
     const probe = "\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {
@@ -2092,14 +2266,17 @@ describe("AgentTerminal scrollback", () => {
     render(<AgentTerminal sessionId="codex-theme-probe" provider="codex" theme="light" />);
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-theme-probe",
-        input: "\u001b]10;rgb:11/18/27\u001b\\",
-      });
-      expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
-        sessionId: "codex-theme-probe",
-        input: "\u001b]11;rgb:fc/fa/f5\u001b\\",
-      });
+      expect(mockInvoke).toHaveBeenCalledWith("read_agent_pty", expect.anything());
+    });
+    // Codex's OSC 10/11 color probes are answered by the bundled modern ConPTY
+    // (OpenConsole); a second Wardian reply would leak into codex's composer.
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-theme-probe",
+      input: "\u001b]10;rgb:11/18/27\u001b\\",
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_input_to_agent", {
+      sessionId: "codex-theme-probe",
+      input: "\u001b]11;rgb:fc/fa/f5\u001b\\",
     });
   });
 
@@ -2272,6 +2449,192 @@ describe("AgentTerminal scrollback", () => {
       const instance = getLatestTerminalInstance();
       expect(instance.write).toHaveBeenCalledWith("test", expect.any(Function));
     });
+  });
+
+  // jsdom canvases have no real rendering contexts; stub both the 2D context
+  // the snapshot overlay draws into and the WebGL context the release path
+  // loses.
+  function stubCanvasContexts() {
+    const drawImage = vi.fn();
+    const loseContext = vi.fn();
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(((type: string) =>
+        type === "2d"
+          ? ({ drawImage } as unknown as CanvasRenderingContext2D)
+          : ({
+              getExtension: (name: string) =>
+                name === "WEBGL_lose_context" ? { loseContext } : null,
+            } as unknown as RenderingContext)) as never);
+    return { spy, drawImage, loseContext };
+  }
+
+  function querySnapshotOverlay() {
+    return document.querySelector('[data-testid="terminal-snapshot-overlay"]') as HTMLCanvasElement | null;
+  }
+
+  it("freezes the last WebGL frame as a cosmetic overlay on demotion and removes it on promotion", async () => {
+    render(<AgentTerminal sessionId="snap-overlay" theme="dark" />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = 320;
+    sourceCanvas.height = 200;
+    (instance.element as HTMLElement).appendChild(sourceCanvas);
+    const { spy, drawImage } = stubCanvasContexts();
+
+    try {
+      act(() => {
+        __terminalTesting.demoteSessionToDom("snap-overlay");
+      });
+
+      const overlay = querySnapshotOverlay();
+      expect(overlay).toBeTruthy();
+      // Strictly cosmetic: clicks, wheel, and selection must reach the live
+      // terminal underneath.
+      expect(overlay?.style.pointerEvents).toBe("none");
+      expect(drawImage).toHaveBeenCalledWith(sourceCanvas, 0, 0);
+      expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(false);
+
+      act(() => {
+        __terminalTesting.promoteSessionToWebgl("snap-overlay");
+      });
+
+      expect(querySnapshotOverlay()).toBeNull();
+      expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("drops a stale snapshot overlay when fresh output arrives for the demoted terminal", async () => {
+    const listeners = new Map<string, (event: { payload?: { session_id?: string } }) => void>();
+    mockListen.mockImplementation((async (event: string, handler: never) => {
+      listeners.set(event, handler);
+      return () => {};
+    }) as never);
+    const pendingReads: string[] = ["hello from codex\n"];
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "read_agent_pty":
+          return pendingReads.shift() ?? null;
+        case "terminal_link_target_exists":
+          return true;
+        default:
+          return null;
+      }
+    });
+
+    render(<AgentTerminal sessionId="snap-stale" theme="dark" />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("snap-stale")?.renderer?.webglActive).toBe(true);
+    });
+
+    const instance = getLatestTerminalInstance();
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = 320;
+    sourceCanvas.height = 200;
+    (instance.element as HTMLElement).appendChild(sourceCanvas);
+    const { spy } = stubCanvasContexts();
+
+    try {
+      act(() => {
+        __terminalTesting.demoteSessionToDom("snap-stale");
+      });
+      expect(querySnapshotOverlay()).toBeTruthy();
+
+      // Output for the demoted terminal must lift the frozen still so the
+      // live DOM rendering shows the stream.
+      pendingReads.push("late output while demoted\n");
+      await act(async () => {
+        listeners.get("agent-pty-output-ready")?.({ payload: { session_id: "snap-stale" } });
+      });
+
+      await waitFor(() => {
+        expect(querySnapshotOverlay()).toBeNull();
+      });
+      expect(instance.write).toHaveBeenCalledWith(
+        expect.stringContaining("late output while demoted"),
+        expect.any(Function),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("releases the WebGL context after a terminal leaves the viewport and re-promotes on re-entry", async () => {
+    type ObservationCallback = (
+      entries: Array<{ isIntersecting: boolean; target?: Element }>,
+      observer: unknown,
+    ) => void;
+    const ioCallbacks: ObservationCallback[] = [];
+    const OriginalIntersectionObserver = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class {
+      root = null;
+      rootMargin = "";
+      thresholds = [];
+      private callback: ObservationCallback;
+      constructor(callback: ObservationCallback) {
+        this.callback = callback;
+        ioCallbacks.push(callback);
+      }
+      observe(target: Element) {
+        this.callback([{ isIntersecting: true, target }], this);
+      }
+      unobserve() {}
+      disconnect() {}
+      takeRecords() {
+        return [];
+      }
+    } as unknown as typeof IntersectionObserver;
+    const { spy, loseContext } = stubCanvasContexts();
+
+    try {
+      render(<AgentTerminal sessionId="vis-scope" theme="dark" />);
+
+      await waitFor(() => {
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(true);
+      });
+
+      const instance = getLatestTerminalInstance();
+      const sourceCanvas = document.createElement("canvas");
+      sourceCanvas.width = 320;
+      sourceCanvas.height = 200;
+      (instance.element as HTMLElement).appendChild(sourceCanvas);
+      const leaveAndReenter = ioCallbacks[ioCallbacks.length - 1];
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          leaveAndReenter([{ isIntersecting: false }], null);
+        });
+        // Still within the grace window: layout churn must not thrash contexts.
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(true);
+
+        act(() => {
+          vi.advanceTimersByTime(1_000);
+        });
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(false);
+        expect(loseContext).toHaveBeenCalled();
+        expect(querySnapshotOverlay()).toBeTruthy();
+
+        act(() => {
+          leaveAndReenter([{ isIntersecting: true }], null);
+        });
+        expect(window.__wardianTerminalDebug?.snapshot("vis-scope")?.renderer?.webglActive).toBe(true);
+        expect(querySnapshotOverlay()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    } finally {
+      globalThis.IntersectionObserver = OriginalIntersectionObserver;
+      spy.mockRestore();
+    }
   });
 
 });

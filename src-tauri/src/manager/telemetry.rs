@@ -14,9 +14,9 @@ use super::codex::{
 };
 use super::display_log_path;
 use super::opencode::{
-    apply_opencode_log_metrics, opencode_extract_created_session_id, opencode_last_assistant_text,
-    opencode_log_dirs, opencode_log_path_after, opencode_log_path_in, opencode_session_diff_path,
-    opencode_should_fallback_to_idle,
+    apply_opencode_log_metrics, opencode_extract_created_session_id_for_agent,
+    opencode_last_assistant_text, opencode_log_dirs, opencode_log_path_after, opencode_log_path_in,
+    opencode_session_diff_path, opencode_should_fallback_to_idle,
 };
 use crate::providers::antigravity::AntigravityProvider;
 
@@ -1236,8 +1236,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                 "opencode" => {
                                     let mut status = snap.current_status.lock().unwrap().clone();
                                     let effective_session_id =
-                                        opencode_extract_created_session_id(path)
-                                            .unwrap_or_else(|| opencode_session_id.to_string());
+                                        opencode_extract_created_session_id_for_agent(
+                                            path,
+                                            &snap.session_id,
+                                        )
+                                        .unwrap_or_else(|| opencode_session_id.to_string());
                                     apply_opencode_log_metrics(
                                         &content,
                                         &effective_session_id,
