@@ -34,7 +34,6 @@ const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
-const CODEX_LIGHT_USER_MESSAGE_BACKGROUND = /\u001b\[48;2;242;240;235m/g;
 // Any standalone truecolor background SGR, so codex's RGB can be inspected. Codex
 // draws its composer / user-message chrome with near-uniform dark grays (41;41;41
 // plus focused/idle variants); matching only 41;41;41 left the active (typing)
@@ -144,20 +143,30 @@ function foregroundRgbForSgr(foregroundRgb: string) {
   return values.length === 3 && values.every(Number.isFinite) ? values.join(";") : "255;255;255";
 }
 
-// A near-uniform dark gray is codex chrome (composer / user-message fill), not
-// content: code and syntax highlighting use colored or terminal-default
-// backgrounds, never a flat near-black gray. In light mode no codex background
-// should be near-black, so every such gray is stale chrome to re-theme -- this is
-// why the active (typing) composer and a few history fragments, which use slightly
-// different grays than the canonical 41;41;41, were leaking through black.
-function isCodexChromeDarkGray(r: number, g: number, b: number) {
+// Codex draws its composer / user-message chrome as a flat, near-uniform gray and
+// does not reliably track Wardian's runtime light<->dark swaps, so the gray it
+// emits can be the OPPOSITE of the active theme. Content (code, syntax) never uses
+// a flat near-black or near-white gray background, so re-theming these is safe:
+//   - light mode: no codex background should be near-black
+//   - dark mode:  no codex background should be near-white
+// Matching only the two canonical values (41;41;41 / 242;240;235) left the active
+// composer and history fragments inverted, since codex uses slightly different
+// shades for focused/idle states.
+function isNearUniformGray(r: number, g: number, b: number) {
   return (
     Number.isFinite(r) &&
     Number.isFinite(g) &&
     Number.isFinite(b) &&
-    Math.max(r, g, b) <= 96 &&
     Math.max(r, g, b) - Math.min(r, g, b) <= 16
   );
+}
+
+function isCodexChromeDarkGray(r: number, g: number, b: number) {
+  return isNearUniformGray(r, g, b) && Math.max(r, g, b) <= 96;
+}
+
+function isCodexChromeLightGray(r: number, g: number, b: number) {
+  return isNearUniformGray(r, g, b) && Math.min(r, g, b) >= 176;
 }
 
 export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
@@ -168,7 +177,10 @@ export function normalizeCodexComposerBackgroundForTheme(data: string, context: 
     );
   }
 
-  return data.replace(CODEX_LIGHT_USER_MESSAGE_BACKGROUND, `\u001b[48;2;41;41;41m`);
+  const darkFill = `\u001b[48;2;41;41;41m`;
+  return data.replace(CODEX_BACKGROUND_SGR, (match, r: string, g: string, b: string) =>
+    isCodexChromeLightGray(Number(r), Number(g), Number(b)) ? darkFill : match,
+  );
 }
 
 function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
