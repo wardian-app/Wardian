@@ -92,7 +92,7 @@
     "tailwindcss": "^4.3.1",
     "terser": "^5.46.1",
     "typescript": "~5.8.3",
-    "vite": "6.4.2",
+    "vite": "6.4.3",
     "vitepress": "^1.6.4",
     "vitest": "^4.1.8"
   },
@@ -101,7 +101,7 @@
     "minimatch@10.2.5": {
       "brace-expansion": "5.0.6"
     },
-    "vite": "6.4.2",
-    "ws": "8.20.1"
+    "vite": "6.4.3",
+    "ws": "8.21.0"
   }
 }
