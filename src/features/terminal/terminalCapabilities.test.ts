@@ -214,6 +214,33 @@ describe("terminal capability broker", () => {
     expect(stripTerminalColorReportInputs(data)).toBe("ls -la\r");
   });
 
+  it("strips ConPTY-echoed color/light-dark replies from Codex output even when fragmented across chunks", () => {
+    const ESC = String.fromCharCode(27);
+    const ST = ESC + String.fromCharCode(92); // ESC \  (string terminator)
+    // The echoed reply burst codex emits on maximize/resize, split mid-sequence
+    // across PTY chunks -- this is what defeats the per-chunk probe strip.
+    const chunks = [
+      "before" + ESC + "[?997;1n" + ESC + "]11;rgb:1a",
+      "/1a/1a" + ST + ESC + "]10;rgb:eb/eb/eb" + ST + ESC + "]4;0;rgb:1a/1a/1a" + ST + "after",
+    ];
+    expect(normalizeTerminalOutputBatch(chunks, "codex")).toBe("beforeafter");
+  });
+
+  it("strips fragmented Codex color/light-dark probes from output (suppresses xterm auto-reply)", () => {
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const ST = ESC + String.fromCharCode(92);
+    const chunks = [ESC + "[?996n" + ESC + "]10;", "?" + BEL + ESC + "]11;?" + ST + "ok"];
+    expect(normalizeTerminalOutputBatch(chunks, "codex")).toBe("ok");
+  });
+
+  it("leaves non-codex provider output color sequences untouched", () => {
+    const ESC = String.fromCharCode(27);
+    const ST = ESC + String.fromCharCode(92);
+    const data = ESC + "]11;rgb:1a/1a/1a" + ST + "text";
+    expect(normalizeTerminalOutputBatch([data], "antigravity")).toContain("]11;rgb:1a/1a/1a");
+  });
+
   it("does not answer non-color Codex terminal probes from the frontend", () => {
     const data = "\u001b[6n\u001b[14t\u001b[?1004h";
     const plan = planTerminalCapabilityResponses("codex", data, baseContext);

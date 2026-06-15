@@ -19,6 +19,17 @@ const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
 // chunk fragmentation: xterm emits each reply as one complete onData string.
 const TERMINAL_COLOR_REPORT_REPLY =
   /\u001b\[\?997;\d+n|\u001b\]1[01];rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)|\u001b\]4;\d+;rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)/g;
+// The full set of terminal color / light-dark STATUS sequences in codex's OUTPUT:
+// the OSC 10/11/4 + CSI ?996n probes codex emits, plus the OSC 10/11/4 "rgb:..."
+// reports and the CSI ?997;<n>n light-dark report that the modern ConPTY answers
+// them with. On maximize/resize codex emits a burst of probes; OpenConsole's
+// native answers get echoed back into codex's output, and because the burst is
+// fragmented across PTY chunks it slips past the per-chunk probe strip and renders
+// as stray ]11;rgb / ?997;1n garbage. Stripping on the JOINED output batch is
+// immune to that fragmentation. Codex never legitimately emits a light-dark report
+// or an OSC color "set", so dropping these from its display stream is safe.
+const CODEX_TERMINAL_STATUS_SEQUENCE =
+  /\u001b\[\?99[67](?:;\d+)?n|\u001b\]1[01];(?:\?|rgb:[0-9a-fA-F/]+)(?:\u0007|\u001b\\)|\u001b\]4;\d+;(?:\?|rgb:[0-9a-fA-F/]+)(?:\u0007|\u001b\\)/g;
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
@@ -65,6 +76,15 @@ function normalizeFullscreenClearByNewlines(data: string) {
 
 function stripProviderScrollbackErase(data: string, provider?: string) {
   return provider === "codex" ? data.replace(CODEX_SCROLLBACK_ERASE, "") : data;
+}
+
+// Strip codex's color / light-dark probes AND the ConPTY-answered reply echoes
+// from its rendered OUTPUT. Runs on the JOINED output batch (see
+// CODEX_TERMINAL_STATUS_SEQUENCE) so it heals the cross-chunk fragmentation that
+// lets a maximize/resize probe burst slip past the per-chunk probe strip and
+// surface as stray ]11;rgb / ?997;1n text in codex's composer.
+function stripCodexTerminalStatusEchoes(data: string) {
+  return data.replace(CODEX_TERMINAL_STATUS_SEQUENCE, "");
 }
 
 // Remove terminal color / light-dark PROBES from a provider's output before it
@@ -462,7 +482,9 @@ export function normalizeTerminalOutputBatch(
   const normalizedChunks = rawChunks
     .map((data) => normalizeOpenCodeOutput(data, provider, state))
     .join("");
-  const normalizedOutput = stripProviderScrollbackErase(normalizedChunks, provider);
+  const scrollbackStripped = stripProviderScrollbackErase(normalizedChunks, provider);
+  const normalizedOutput =
+    provider === "codex" ? stripCodexTerminalStatusEchoes(scrollbackStripped) : scrollbackStripped;
   const themedOutput = provider === "antigravity"
     ? normalizeAntigravityPrimaryText(normalizedOutput, state?.antigravityForegroundRgb, state)
     : normalizedOutput;
