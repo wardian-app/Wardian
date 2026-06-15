@@ -2303,7 +2303,17 @@ export const AgentTerminal = memo(function AgentTerminal({
     const previousSignaledTheme = lastThemeSignalRef.current;
     lastThemeSignalRef.current = activeTermTheme;
     entry.currentTheme = activeTermTheme;
-    if (entry.provider === "opencode" || entry.provider === "codex" || entry.provider === "antigravity") {
+    // Opencode/antigravity infer their visible mode from these proactively-pushed
+    // ?997 + OSC color replies. Codex is deliberately excluded: it runs under the
+    // bundled modern ConPTY, which answers codex's own color/light-dark probes
+    // natively (see respondsToThemeColorQueries, which already excludes codex on
+    // the reactive path). Pushing Wardian's duplicate replies as input just gets
+    // them echoed back into codex's output as stray ]11;rgb / ?997;1n garbage --
+    // and because this theme effect re-runs on every maximize/minimize re-render,
+    // it bombards *every* mounted codex terminal at once, not just the resized one.
+    // Codex's visible theming is handled by output normalization
+    // (normalizeCodexComposerBackgroundForTheme) plus preview replay below.
+    if (entry.provider === "opencode" || entry.provider === "antigravity") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
@@ -2319,9 +2329,13 @@ export const AgentTerminal = memo(function AgentTerminal({
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
-      if (entry.provider === "codex" && previousSignaledTheme !== null && previousSignaledTheme !== activeTermTheme) {
-        void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
-      }
+    }
+    if (
+      entry.provider === "codex" &&
+      previousSignaledTheme !== null &&
+      previousSignaledTheme !== activeTermTheme
+    ) {
+      void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
     }
   }, [effectiveTheme, provider, sessionId, termTheme]);
 
