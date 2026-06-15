@@ -281,6 +281,31 @@ describe("terminal capability broker", () => {
     expect(plan.normalizedOutput).toBe("\u001b[48;2;41;41;41m\n\u001b[K");
   });
 
+  it("remaps Codex's chrome background combined with a foreground in one SGR (active composer) in light mode", () => {
+    const ESC = String.fromCharCode(27);
+    // Codex emits the typing composer / xterm re-serializes scrollback as a compound
+    // SGR: foreground + background in one sequence. The standalone-only match missed
+    // these, leaving them black in light mode.
+    const plan = planTerminalCapabilityResponses(
+      "codex",
+      ESC + "[38;2;235;235;235;48;2;41;41;41m typing" + ESC + "[K",
+      { ...baseContext, prefersLight: true, backgroundRgb: "fc/fa/f5" },
+    );
+
+    expect(plan.normalizedOutput).toBe(ESC + "[38;2;235;235;235;48;2;242;240;235m typing" + ESC + "[K");
+  });
+
+  it("remaps a compound light Codex chrome SGR back to dark in dark mode", () => {
+    const ESC = String.fromCharCode(27);
+    const plan = planTerminalCapabilityResponses(
+      "codex",
+      ESC + "[1;38;2;20;20;20;48;2;242;240;235m x" + ESC + "[K",
+      { ...baseContext, prefersLight: false, backgroundRgb: "02/04/02" },
+    );
+
+    expect(plan.normalizedOutput).toBe(ESC + "[1;38;2;20;20;20;48;2;41;41;41m x" + ESC + "[K");
+  });
+
   it("remaps non-canonical Codex chrome grays (e.g. the active composer) in light mode", () => {
     const ESC = String.fromCharCode(27);
     const plan = planTerminalCapabilityResponses("codex", ESC + "[48;2;48;48;48m typing" + ESC + "[K", {

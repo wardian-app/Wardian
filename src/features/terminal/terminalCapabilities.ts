@@ -34,12 +34,11 @@ const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
-// Any standalone truecolor background SGR, so codex's RGB can be inspected. Codex
-// draws its composer / user-message chrome with near-uniform dark grays (41;41;41
-// plus focused/idle variants); matching only 41;41;41 left the active (typing)
-// composer and some history fragments black in light mode.
-const CODEX_BACKGROUND_SGR =
-  /\u001b\[48;2;(\d+);(\d+);(\d+)m/g;
+// Matches any SGR sequence so codex's chrome background can be remapped even when
+// it is COMBINED with a foreground/attributes in one SGR. Codex emits the active
+// (typing) composer that way, and xterm's serializer re-emits scrollback that way
+// on a theme swap; matching only the standalone form left those black/inverted.
+const CODEX_SGR_SEQUENCE = /\u001b\[([0-9;]*)m/g;
 const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
 const FULLSCREEN_CLEAR_BY_NEWLINES =
   /\u001b\[\?25l(?:\u001b\[K\r?\n){8,}\u001b\[K\u001b\[H(\u001b\[\?25h)?/g;
@@ -149,9 +148,6 @@ function foregroundRgbForSgr(foregroundRgb: string) {
 // a flat near-black or near-white gray background, so re-theming these is safe:
 //   - light mode: no codex background should be near-black
 //   - dark mode:  no codex background should be near-white
-// Matching only the two canonical values (41;41;41 / 242;240;235) left the active
-// composer and history fragments inverted, since codex uses slightly different
-// shades for focused/idle states.
 function isNearUniformGray(r: number, g: number, b: number) {
   return (
     Number.isFinite(r) &&
@@ -169,18 +165,44 @@ function isCodexChromeLightGray(r: number, g: number, b: number) {
   return isNearUniformGray(r, g, b) && Math.min(r, g, b) >= 176;
 }
 
+// Remap a codex chrome background to `fill` wherever a 48;2;R;G;B run appears in an
+// SGR parameter list -- standalone OR combined with other attributes. Walking the
+// params (instead of a standalone-only regex) is what makes the active composer and
+// serialized scrollback re-theme on a swap rather than staying the opposite color.
+function remapCodexChromeBackground(
+  data: string,
+  isChrome: (r: number, g: number, b: number) => boolean,
+  fill: string,
+) {
+  const fillParts = fill.split(";");
+  return data.replace(CODEX_SGR_SEQUENCE, (whole: string, params: string) => {
+    const parts = params.split(";");
+    let changed = false;
+    for (let i = 0; i < parts.length; ) {
+      if (parts[i] === "48" && parts[i + 1] === "2" && i + 4 < parts.length) {
+        if (isChrome(Number(parts[i + 2]), Number(parts[i + 3]), Number(parts[i + 4]))) {
+          parts.splice(i, 5, "48", "2", fillParts[0], fillParts[1], fillParts[2]);
+          changed = true;
+        }
+        i += 5;
+      } else {
+        i += 1;
+      }
+    }
+    return changed ? `\u001b[${parts.join(";")}m` : whole;
+  });
+}
+
 export function normalizeCodexComposerBackgroundForTheme(data: string, context: TerminalCapabilityContext) {
   if (context.prefersLight) {
-    const lightFill = `\u001b[48;2;${codexLightUserMessageBackground(context.backgroundRgb)}m`;
-    return data.replace(CODEX_BACKGROUND_SGR, (match, r: string, g: string, b: string) =>
-      isCodexChromeDarkGray(Number(r), Number(g), Number(b)) ? lightFill : match,
+    return remapCodexChromeBackground(
+      data,
+      isCodexChromeDarkGray,
+      codexLightUserMessageBackground(context.backgroundRgb),
     );
   }
 
-  const darkFill = `\u001b[48;2;41;41;41m`;
-  return data.replace(CODEX_BACKGROUND_SGR, (match, r: string, g: string, b: string) =>
-    isCodexChromeLightGray(Number(r), Number(g), Number(b)) ? darkFill : match,
-  );
+  return remapCodexChromeBackground(data, isCodexChromeLightGray, "41;41;41");
 }
 
 function isMutedPrimaryForegroundRgb(r: number, g: number, b: number) {
