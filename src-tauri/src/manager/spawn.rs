@@ -426,6 +426,20 @@ pub async fn spawn_agent(
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
+    // Record the size the PTY was actually opened at so `resize_pty` can drop
+    // redundant no-op resizes. ConPTY's `ResizePseudoConsole` is unconditional:
+    // a resize to the identical dimensions still makes inline-viewport TUIs
+    // (notably codex) do a full clear-and-redraw, and codex's redraw emits
+    // `ESC[3J` (purge scrollback) — so a spurious identical resize silently
+    // wipes the terminal's scrollback. Seeding the baseline here lets us skip
+    // those.
+    {
+        let app_state = app.state::<AppState>();
+        if let Ok(mut sizes) = app_state.pty_sizes.write() {
+            sizes.insert(config.session_id.clone(), (initial_cols, initial_rows));
+        };
+    }
+
     let (bin, mut provider_args) = provider.get_executable();
     let claude_hook = if config.provider == "claude" {
         Some(ensure_claude_permission_hook(&config.session_id)?)
@@ -1586,6 +1600,25 @@ pub async fn resize_pty(
     if cols < 10 {
         return Ok(());
     }
+
+    // Drop redundant no-op resizes. ConPTY's `ResizePseudoConsole` is
+    // unconditional, and an identical-dimension resize still forces inline
+    // TUIs like codex into a full clear-and-redraw whose `ESC[3J` purges the
+    // terminal's scrollback. The frontend's fit loop can re-report a size that
+    // already matches (e.g. `reportTerminalSize(..., force: true)` for an
+    // unchanged fit), so guard here at the authoritative PTY boundary. Only
+    // skip when we have a recorded size that matches exactly; an absent record
+    // means the PTY size is unknown, so let the resize through.
+    if state
+        .pty_sizes
+        .read()
+        .ok()
+        .and_then(|sizes| sizes.get(&session_id).copied())
+        == Some((cols, rows))
+    {
+        return Ok(());
+    }
+
     let master_arc = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
@@ -1731,6 +1764,29 @@ mod tests {
         let result = resize_pty("missing".to_string(), 124, 30, &state).await;
         assert!(result.is_err());
         assert!(state.pty_sizes.read().unwrap().is_empty());
+    }
+
+    // A resize to the exact size already recorded is a no-op: it must not reach
+    // the PTY (ConPTY's unconditional `ResizePseudoConsole` would make codex
+    // purge its scrollback). The dedup short-circuits before the agent lookup,
+    // so even a missing agent returns Ok when the size already matches.
+    #[tokio::test]
+    async fn resize_to_recorded_size_is_skipped() {
+        let state = AppState::new();
+        state
+            .pty_sizes
+            .write()
+            .unwrap()
+            .insert("agent".to_string(), (124, 30));
+
+        // No agent registered: without the dedup this would error "not found".
+        let result = resize_pty("agent".to_string(), 124, 30, &state).await;
+        assert!(result.is_ok());
+
+        // A genuinely different size is not skipped and still reaches the
+        // (missing) agent lookup, surfacing the not-found error.
+        let changed = resize_pty("agent".to_string(), 125, 30, &state).await;
+        assert!(changed.is_err());
     }
 
     #[test]
