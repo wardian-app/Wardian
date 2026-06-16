@@ -1,9 +1,10 @@
 use crate::manager;
 use crate::providers::ProviderFactory;
+use crate::state::conversation_archive::effective_conversation_logging;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::{AppHandle, Emitter, State};
-use wardian_core::conversations::ConversationBoundaryReason;
+use wardian_core::conversations::{ConversationBoundaryReason, ConversationLoggingSetting};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
     DeployedSkillRef, ProviderConfig,
@@ -2546,6 +2547,33 @@ pub async fn clear_agent_session_with_reason(
     ));
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
+    let agent_conversation_logging = {
+        let agents = state.agents.lock().await;
+        agents.get(&session_id).and_then(|agent| {
+            agent
+                .config
+                .lock()
+                .ok()
+                .map(|config| config.conversation_logging)
+        })
+    };
+    if let Some(agent_conversation_logging) = agent_conversation_logging {
+        let global_conversation_logging = crate::utils::shell::load_shell_settings()
+            .unwrap_or_default()
+            .conversation_logging;
+        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
+            == ConversationLoggingSetting::Enabled
+        {
+            if let Err(error) = state
+                .conversation_archive
+                .append_lifecycle_boundary(&session_id, boundary_reason)
+            {
+                manager::log_debug(&format!(
+                    "[WARDIAN] conversation archive lifecycle append failed for {session_id}: {error}"
+                ));
+            }
+        }
+    }
     if let Err(error) = state
         .conversation_archive
         .rollover_agent(&session_id, boundary_reason)

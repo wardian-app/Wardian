@@ -1,4 +1,5 @@
 use crate::manager;
+use crate::state::conversation_archive::effective_conversation_logging;
 use crate::state::{AppState, MailboxMessageDraft};
 use std::{
     fmt,
@@ -16,6 +17,7 @@ use wardian_core::control::{
     ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
     WatchDeliverySnapshot, WatchEvidenceError,
 };
+use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 
 const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
@@ -297,6 +299,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 origin.as_ref(),
             )
             .await?;
+            record_conversation_delivery(&state, &delivery, &message, origin.as_ref()).await;
             ok_json(&SendMessageResponse {
                 schema: wardian_core::control::CONTROL_SCHEMA,
                 ok: true,
@@ -2730,6 +2733,65 @@ async fn record_delivery_attempt(state: &AppState, detail: &DeliveryDetail) {
     }
 }
 
+async fn record_conversation_delivery(
+    state: &AppState,
+    delivery: &[DeliveryDetail],
+    message: &str,
+    origin: Option<&MessageOrigin>,
+) {
+    if message.trim().is_empty() {
+        return;
+    }
+
+    let global_conversation_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    let sender_agent_id = match origin {
+        Some(MessageOrigin::WardianAgent { session_id }) => Some(session_id.as_str()),
+        None => None,
+    };
+    let target_settings = {
+        let agents = state.agents.lock().await;
+        delivery
+            .iter()
+            .filter(|detail| conversation_delivery_state_is_recordable(&detail.delivery_state))
+            .filter_map(|detail| {
+                let setting = agents
+                    .get(&detail.uuid)?
+                    .config
+                    .lock()
+                    .ok()
+                    .map(|config| config.conversation_logging)?;
+                Some((detail.uuid.clone(), setting))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (agent_id, agent_conversation_logging) in target_settings {
+        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
+            != ConversationLoggingSetting::Enabled
+        {
+            continue;
+        }
+        if let Err(error) =
+            state
+                .conversation_archive
+                .append_delivered_input(&agent_id, message, sender_agent_id)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive delivery append failed for {agent_id}: {error}"
+            ));
+        }
+    }
+}
+
+fn conversation_delivery_state_is_recordable(delivery_state: &str) -> bool {
+    matches!(
+        delivery_state,
+        "submitted" | "submit_sent_unverified" | "queued" | "submit_started"
+    )
+}
+
 pub(crate) fn spawn_mailbox_drain_if_idle(
     app: &AppHandle,
     session_id: &str,
@@ -3496,6 +3558,73 @@ mod tests {
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\x1b[13u".to_vec());
+    }
+
+    #[tokio::test]
+    async fn message_delivery_archives_accepted_input_with_agent_origin() {
+        let _home = TestWardianHome::new();
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Disabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().conversation_logging =
+                wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        }
+        let delivery = vec![DeliveryDetail {
+            uuid: "agent-1".to_string(),
+            name: "CoderOne".to_string(),
+            provider: "mock".to_string(),
+            runtime_state: "live_pty_available".to_string(),
+            delivery_state: "submitted".to_string(),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            message_id: None,
+            delivery_phase: Some("payload_sent".to_string()),
+            observed_state: Some("bytes_sent".to_string()),
+            reason: None,
+            profile: None,
+            error: None,
+        }];
+
+        record_conversation_delivery(
+            &state,
+            &delivery,
+            "Review this change.",
+            Some(&MessageOrigin::WardianAgent {
+                session_id: "source-agent".to_string(),
+            }),
+        )
+        .await;
+
+        let conversation_id = state
+            .conversation_archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            wardian_core::paths::agent_conversation_dir("agent-1", &conversation_id)
+                .expect("conversation dir")
+                .join("conversation.jsonl");
+        let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(&conversation_path)
+                .expect("read records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].kind,
+            wardian_core::conversations::ConversationRecordKind::Message
+        );
+        assert_eq!(records[0].role.as_deref(), Some("user"));
+        assert_eq!(
+            records[0].speaker_type,
+            Some(wardian_core::conversations::ConversationSpeakerType::Agent)
+        );
+        assert_eq!(records[0].text.as_deref(), Some("Review this change."));
     }
 
     #[tokio::test]

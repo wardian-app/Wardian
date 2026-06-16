@@ -5,11 +5,11 @@ use std::{
 };
 
 use wardian_core::conversations::{
-    AgentConversationLoggingSetting, CONVERSATION_SCHEMA, ConversationBoundaryReason,
-    ConversationFormatVersions, ConversationIndexEntry, ConversationLoggingSetting,
-    ConversationManifest, ConversationNarrativeRecord, ConversationRecordKind,
-    ConversationSpeakerType, ConversationStatus, append_index_upsert, append_jsonl_record,
-    read_jsonl_records, write_json_atomic,
+    append_index_upsert, append_jsonl_record, read_jsonl_records, write_json_atomic,
+    AgentConversationLoggingSetting, ConversationBoundaryReason, ConversationFormatVersions,
+    ConversationIndexEntry, ConversationLoggingSetting, ConversationManifest,
+    ConversationNarrativeRecord, ConversationRecordKind, ConversationSpeakerType,
+    ConversationStatus, CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
@@ -132,6 +132,87 @@ impl ConversationArchiveState {
         Ok(appended.len())
     }
 
+    pub fn append_delivered_input(
+        &self,
+        agent_id: &str,
+        text: &str,
+        sender_agent_id: Option<&str>,
+    ) -> io::Result<usize> {
+        if text.trim().is_empty() {
+            return Ok(0);
+        }
+
+        self.append_generated_record(agent_id, "unknown", |seq| {
+            narrative_from_delivered_input(&current_rfc3339_millis(), text, sender_agent_id, seq)
+        })
+    }
+
+    pub fn append_lifecycle_boundary(
+        &self,
+        agent_id: &str,
+        reason: ConversationBoundaryReason,
+    ) -> io::Result<usize> {
+        self.append_generated_record(agent_id, "unknown", |seq| {
+            lifecycle_record(seq, reason, &current_rfc3339_millis())
+        })
+    }
+
+    fn append_generated_record(
+        &self,
+        agent_id: &str,
+        provider: &str,
+        make_record: impl FnOnce(u64) -> ConversationNarrativeRecord,
+    ) -> io::Result<usize> {
+        let mut active = lock_active(&self.active)?;
+        let mut handle =
+            active
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_else(|| ActiveConversationHandle {
+                    conversation_id: new_conversation_id(agent_id),
+                    next_seq: 1,
+                });
+        let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
+        let conversation_path = conversation_dir.join("conversation.jsonl");
+        let existing_records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path)?;
+        let next_seq = handle.next_seq.max(
+            existing_records
+                .iter()
+                .map(|record| record.seq)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
+        let record = make_record(next_seq);
+        append_jsonl_record(&conversation_path, &record)?;
+
+        let first_record = existing_records.first().unwrap_or(&record);
+        let record_count = (existing_records.len() + 1) as u64;
+        let manifest = open_manifest(
+            agent_id,
+            &handle.conversation_id,
+            provider,
+            first_record.at.clone(),
+            record.at.clone(),
+        );
+        write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
+        append_index_upsert(
+            &index_path(agent_id)?,
+            &index_entry_from_manifest(
+                &manifest,
+                None,
+                excerpt_from_record(first_record),
+                excerpt_from_record(&record),
+                record_count,
+            ),
+        )?;
+
+        handle.next_seq = next_seq.saturating_add(1);
+        active.insert(agent_id.to_string(), handle);
+        Ok(1)
+    }
+
     pub fn rollover_agent(
         &self,
         agent_id: &str,
@@ -223,6 +304,62 @@ pub fn narrative_from_chat_event(
     })
 }
 
+pub fn narrative_from_delivered_input(
+    at: &str,
+    text: &str,
+    sender_agent_id: Option<&str>,
+    seq: u64,
+) -> ConversationNarrativeRecord {
+    ConversationNarrativeRecord {
+        schema: CONVERSATION_SCHEMA,
+        seq,
+        at: at.to_string(),
+        kind: ConversationRecordKind::Message,
+        role: Some("user".to_string()),
+        speaker_type: Some(if sender_agent_id.is_some() {
+            ConversationSpeakerType::Agent
+        } else {
+            ConversationSpeakerType::Unknown
+        }),
+        text: Some(text.to_string()),
+        tool: None,
+        status: None,
+        summary: None,
+        excerpt: None,
+        event_refs: Vec::new(),
+        source_refs: sender_agent_id
+            .map(|sender| vec![format!("agent:{sender}")])
+            .unwrap_or_default(),
+        artifact_refs: Vec::new(),
+    }
+}
+
+pub fn lifecycle_record(
+    seq: u64,
+    reason: ConversationBoundaryReason,
+    at: &str,
+) -> ConversationNarrativeRecord {
+    ConversationNarrativeRecord {
+        schema: CONVERSATION_SCHEMA,
+        seq,
+        at: at.to_string(),
+        kind: ConversationRecordKind::Lifecycle,
+        role: Some("system".to_string()),
+        speaker_type: Some(ConversationSpeakerType::System),
+        text: None,
+        tool: None,
+        status: Some(boundary_reason_to_string(reason)),
+        summary: Some(format!(
+            "conversation {}",
+            boundary_reason_to_string(reason)
+        )),
+        excerpt: None,
+        event_refs: Vec::new(),
+        source_refs: Vec::new(),
+        artifact_refs: Vec::new(),
+    }
+}
+
 fn record_kind_from_chat_event_kind(kind: &AgentChatEventKind) -> Option<ConversationRecordKind> {
     match kind {
         AgentChatEventKind::Message => Some(ConversationRecordKind::Message),
@@ -264,6 +401,18 @@ fn status_to_string(status: &wardian_core::models::chat::AgentChatStatus) -> Str
         wardian_core::models::chat::AgentChatStatus::Idle => "idle",
         wardian_core::models::chat::AgentChatStatus::Processing => "processing",
         wardian_core::models::chat::AgentChatStatus::Unknown => "unknown",
+    }
+    .to_string()
+}
+
+fn boundary_reason_to_string(reason: ConversationBoundaryReason) -> String {
+    match reason {
+        ConversationBoundaryReason::Spawn => "spawn",
+        ConversationBoundaryReason::ProviderSourceChanged => "provider_source_changed",
+        ConversationBoundaryReason::Clear => "clear",
+        ConversationBoundaryReason::WorktreeSwitch => "worktree_switch",
+        ConversationBoundaryReason::LoggingEnabled => "logging_enabled",
+        ConversationBoundaryReason::Shutdown => "shutdown",
     }
     .to_string()
 }
@@ -433,13 +582,13 @@ fn status_for_boundary_reason(reason: ConversationBoundaryReason) -> Conversatio
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveConversationHandle, ConversationArchiveState, effective_conversation_logging,
-        narrative_from_chat_event,
+        effective_conversation_logging, lifecycle_record, narrative_from_chat_event,
+        narrative_from_delivered_input, ActiveConversationHandle, ConversationArchiveState,
     };
     use wardian_core::conversations::{
-        AgentConversationLoggingSetting, CONVERSATION_SCHEMA, ConversationBoundaryReason,
+        read_jsonl_records, AgentConversationLoggingSetting, ConversationBoundaryReason,
         ConversationLoggingSetting, ConversationNarrativeRecord, ConversationRecordKind,
-        ConversationSpeakerType, read_jsonl_records,
+        ConversationSpeakerType, CONVERSATION_SCHEMA,
     };
     use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
     use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
@@ -478,6 +627,40 @@ mod tests {
         );
 
         assert!(narrative_from_chat_event(&event, 1).is_none());
+    }
+
+    #[test]
+    fn delivered_input_becomes_user_narrative_record() {
+        let record = narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "Please review the patch.",
+            Some("source-agent"),
+            7,
+        );
+
+        assert_eq!(record.schema, CONVERSATION_SCHEMA);
+        assert_eq!(record.seq, 7);
+        assert_eq!(record.at, "2026-06-15T00:00:01.000Z");
+        assert_eq!(record.kind, ConversationRecordKind::Message);
+        assert_eq!(record.role.as_deref(), Some("user"));
+        assert_eq!(record.speaker_type, Some(ConversationSpeakerType::Agent));
+        assert_eq!(record.text.as_deref(), Some("Please review the patch."));
+    }
+
+    #[test]
+    fn lifecycle_record_captures_clear_reason() {
+        let record = lifecycle_record(
+            8,
+            ConversationBoundaryReason::Clear,
+            "2026-06-15T00:00:02.000Z",
+        );
+
+        assert_eq!(record.schema, CONVERSATION_SCHEMA);
+        assert_eq!(record.seq, 8);
+        assert_eq!(record.at, "2026-06-15T00:00:02.000Z");
+        assert_eq!(record.kind, ConversationRecordKind::Lifecycle);
+        assert_eq!(record.speaker_type, Some(ConversationSpeakerType::System));
+        assert_eq!(record.status.as_deref(), Some("clear"));
     }
 
     #[test]
@@ -558,6 +741,84 @@ mod tests {
     }
 
     #[test]
+    fn append_delivered_input_appends_to_active_conversation_with_monotonic_seq() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+
+        let first = archive
+            .append_delivered_input("agent-1", "First live prompt.", Some("source-agent"))
+            .expect("first append succeeds");
+        let second = archive
+            .append_delivered_input("agent-1", "Second live prompt.", None)
+            .expect("second append succeeds");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[1].seq, 2);
+        assert_eq!(
+            records[0].speaker_type,
+            Some(ConversationSpeakerType::Agent)
+        );
+        assert_eq!(
+            records[1].speaker_type,
+            Some(ConversationSpeakerType::Unknown)
+        );
+    }
+
+    #[test]
+    fn append_empty_delivered_input_does_not_create_conversation_files() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+
+        let appended = archive
+            .append_delivered_input("agent-1", "   ", Some("source-agent"))
+            .expect("append succeeds");
+
+        assert_eq!(appended, 0);
+        assert_eq!(archive.active_conversation_id_for_test("agent-1"), None);
+        assert!(!agent_conversations_dir("agent-1")
+            .expect("conversations dir")
+            .exists());
+    }
+
+    #[test]
+    fn append_lifecycle_boundary_uses_existing_active_conversation() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input("agent-1", "Before clear.", None)
+            .expect("append input");
+
+        let appended = archive
+            .append_lifecycle_boundary("agent-1", ConversationBoundaryReason::Clear)
+            .expect("append lifecycle");
+
+        assert_eq!(appended, 1);
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].seq, 2);
+        assert_eq!(records[1].kind, ConversationRecordKind::Lifecycle);
+        assert_eq!(records[1].status.as_deref(), Some("clear"));
+    }
+
+    #[test]
     fn terminal_output_events_are_skipped_and_do_not_create_conversation_files() {
         let (_guard, _temp) = isolated_home();
         let archive = ConversationArchiveState::default();
@@ -574,11 +835,9 @@ mod tests {
 
         assert_eq!(appended, 0);
         assert_eq!(archive.active_conversation_id_for_test("agent-1"), None);
-        assert!(
-            !agent_conversations_dir("agent-1")
-                .expect("conversations dir")
-                .exists()
-        );
+        assert!(!agent_conversations_dir("agent-1")
+            .expect("conversations dir")
+            .exists());
     }
 
     fn chat_event(
