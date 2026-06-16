@@ -7,9 +7,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse,
-    ReplyStatus, SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError,
-    WorkflowRunResponse,
+    ControlRequest, ConversationListResponse, ConversationShowResponse, DeliveryDetail,
+    MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse,
+    StructuredReply, WatchEvent, WatchEvidenceError, WorkflowRunResponse,
 };
 use wardian_core::identity::AgentIdentity;
 
@@ -72,6 +72,8 @@ enum ControlOperation {
     AgentWorktreeEnable,
     AgentWorktreeJoin,
     AgentWorktreeDisable,
+    ConversationList,
+    ConversationShow,
     WorkflowRun,
     SendMessage,
     Ask {
@@ -366,6 +368,34 @@ pub fn agent_worktree_disable(target: &str) -> io::Result<AgentWorktreeMutationR
         ControlOperation::AgentWorktreeDisable,
         send_request(ControlRequest::AgentWorktreeDisable {
             target: target.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn conversation_list(
+    agent: Option<&str>,
+    scope_all: bool,
+) -> io::Result<ConversationListResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::ConversationList,
+        send_request(ControlRequest::ConversationList {
+            agent: agent.map(str::to_string),
+            scope_all,
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn conversation_show(conversation_id: &str) -> io::Result<ConversationShowResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::ConversationShow,
+        send_request(ControlRequest::ConversationShow {
+            conversation_id: conversation_id.to_string(),
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
@@ -743,6 +773,7 @@ fn timeout_block(
 fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
         ControlOperation::AgentList => CONTROL_TIMEOUT,
+        ControlOperation::ConversationList | ControlOperation::ConversationShow => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
@@ -1106,6 +1137,18 @@ mod tests {
     fn agent_list_keeps_short_control_timeout() {
         assert_eq!(
             operation_timeout(&ControlOperation::AgentList),
+            CONTROL_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn conversation_control_operations_keep_short_timeout() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::ConversationList),
+            CONTROL_TIMEOUT
+        );
+        assert_eq!(
+            operation_timeout(&ControlOperation::ConversationShow),
             CONTROL_TIMEOUT
         );
     }
