@@ -15,6 +15,7 @@ import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES } from "../queue/queueFilters";
 import { useQueueStore } from "../../store/useQueueStore";
 import type {
   AppThemeSetting,
+  ConversationLoggingSetting,
   ExplorerFileClickAction,
   ExternalEditorSetting,
   WatchlistNewAgentPosition,
@@ -187,6 +188,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "Regular agent sessions",
     detail: "Controls whether off agents resume or start fresh.",
     keywords: ["agent", "session", "resume", "fresh"],
+  },
+  {
+    id: "conversation-logging",
+    category: "Agent Runtime",
+    label: "Conversation logging",
+    detail: "Writes agent-owned conversation archives for new activity.",
+    keywords: ["agent", "conversation", "logging", "archive", "transcript"],
   },
   {
     id: "codex-sandbox",
@@ -379,6 +387,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setWatchlistNewAgentPosition,
     shell_id,
     agent_session_persistence,
+    conversation_logging,
     default_provider,
     codex_runtime_policy,
     available_shells,
@@ -390,6 +399,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setCustomExecutable,
     setCustomArgs,
     setAgentSessionPersistence,
+    setConversationLogging,
     setDefaultProvider,
     setCodexSandboxMode,
     setCodexApprovalPolicy,
@@ -540,6 +550,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const handleExplorerFileClickActionChange = async (value: ExplorerFileClickAction) => {
     setExplorerFileClickAction(value);
     await useSettingsStore.getState().saveAppSettings();
+  };
+
+  const handleConversationLoggingChange = (value: ConversationLoggingSetting) => {
+    setConversationLogging(value);
   };
 
   const handleSaveRuntime = async () => {
@@ -925,6 +939,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             >
               <option value="resume">Resume sessions</option>
               <option value="fresh">Start fresh</option>
+            </select>
+          </SettingRow>
+        );
+      case "conversation-logging":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <select
+              aria-label="Conversation logging"
+              value={conversation_logging}
+              onChange={(event) => handleConversationLoggingChange(event.target.value as ConversationLoggingSetting)}
+              className={optionClass}
+            >
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
             </select>
           </SettingRow>
         );
