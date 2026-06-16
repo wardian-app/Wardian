@@ -30,6 +30,7 @@ docs/.vitepress/dist/
 .claude/*
 .antigravitycli/*
 .superpowers/*
+.wardian-review/
 
 # Backup and test files
 *.bak
