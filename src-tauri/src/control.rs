@@ -12,10 +12,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
     AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, DeliveryDetail, DeliveryErrorDetail, InteractionBodyRef, MessageInputMode,
-    MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy,
-    ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
-    WatchDeliverySnapshot, WatchEvidenceError,
+    ControlRequest, ConversationListResponse, ConversationShowResponse, DeliveryDetail,
+    DeliveryErrorDetail, InteractionBodyRef, MessageInputMode, MessageOrigin, OkResponse,
+    ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy, ReplyResponse, ReplyStatus,
+    SendMessageResponse, StructuredReply, WatchAgentSnapshot, WatchDeliverySnapshot,
+    WatchEvidenceError,
 };
 use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
@@ -271,6 +272,29 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
 
         ControlRequest::AgentWorktreeDisable { target } => {
             handle_agent_worktree_disable(app, &target).await
+        }
+
+        ControlRequest::ConversationList { agent, scope_all } => {
+            let state = app.state::<AppState>();
+            let response: ConversationListResponse =
+                crate::commands::conversation::list_conversations_for_state(
+                    &state,
+                    agent.as_deref(),
+                    scope_all,
+                )
+                .map_err(ControlError::request_failed)?;
+            ok_json(&response)
+        }
+
+        ControlRequest::ConversationShow { conversation_id } => {
+            let state = app.state::<AppState>();
+            let response: ConversationShowResponse =
+                crate::commands::conversation::show_conversation_for_state(
+                    &state,
+                    &conversation_id,
+                )
+                .map_err(ControlError::request_failed)?;
+            ok_json(&response)
         }
 
         request @ ControlRequest::WorkflowRun { .. } => {

@@ -5,14 +5,14 @@ use std::{
 };
 
 use wardian_core::conversations::{
-    append_index_upsert, append_jsonl_record, read_jsonl_records, write_json_atomic,
-    AgentConversationLoggingSetting, ConversationBoundaryReason, ConversationFormatVersions,
-    ConversationIndexEntry, ConversationLoggingSetting, ConversationManifest,
-    ConversationNarrativeRecord, ConversationRecordKind, ConversationSpeakerType,
-    ConversationStatus, CONVERSATION_SCHEMA,
+    append_index_upsert, append_jsonl_record, read_jsonl_records, read_latest_index_entries,
+    write_json_atomic, AgentConversationLoggingSetting, ConversationBoundaryReason,
+    ConversationFormatVersions, ConversationIndexEntry, ConversationLoggingSetting,
+    ConversationManifest, ConversationNarrativeRecord, ConversationRecordKind,
+    ConversationSpeakerType, ConversationStatus, CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
-use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
+use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agents_dir};
 
 #[derive(Debug, Default)]
 pub struct ConversationArchiveState {
@@ -38,6 +38,66 @@ pub fn effective_conversation_logging(
 }
 
 impl ConversationArchiveState {
+    pub fn list(
+        &self,
+        agent: Option<&str>,
+        scope_all: bool,
+    ) -> io::Result<Vec<ConversationIndexEntry>> {
+        if let Some(agent_id) = agent.map(str::trim).filter(|agent_id| !agent_id.is_empty()) {
+            return read_agent_index(agent_id);
+        }
+
+        if scope_all {
+            return read_all_agent_indexes();
+        }
+
+        let current_agent = std::env::var("WARDIAN_SESSION_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "conversation list requires an agent or scope_all=true when WARDIAN_SESSION_ID is not set",
+                )
+            })?;
+        read_agent_index(&current_agent)
+    }
+
+    pub fn show(
+        &self,
+        conversation_id: &str,
+    ) -> io::Result<(ConversationManifest, Vec<ConversationNarrativeRecord>)> {
+        let conversation_id = conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "conversation_id is required",
+            ));
+        }
+
+        let entry = read_all_agent_indexes()?
+            .into_iter()
+            .find(|entry| entry.conversation_id == conversation_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("conversation not found: {conversation_id}"),
+                )
+            })?;
+        let conversation_dir = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
+        let manifest =
+            read_manifest(&conversation_dir.join("manifest.json"))?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("conversation manifest not found: {conversation_id}"),
+                )
+            })?;
+        let conversation = read_jsonl_records(&conversation_dir.join("conversation.jsonl"))?;
+
+        Ok((manifest, conversation))
+    }
+
     pub fn append_chat_events(
         &self,
         agent_id: &str,
@@ -440,6 +500,42 @@ fn index_path(agent_id: &str) -> io::Result<std::path::PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe agent path"))
 }
 
+fn read_agent_index(agent_id: &str) -> io::Result<Vec<ConversationIndexEntry>> {
+    read_latest_index_entries(&index_path(agent_id)?)
+}
+
+fn read_all_agent_indexes() -> io::Result<Vec<ConversationIndexEntry>> {
+    let Some(agents_dir) = agents_dir() else {
+        return Ok(Vec::new());
+    };
+    if !agents_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(agents_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(agent_id) = entry.file_name().to_str().map(ToString::to_string) else {
+            continue;
+        };
+        entries.extend(read_agent_index(&agent_id)?);
+    }
+    sort_conversation_entries(&mut entries);
+    Ok(entries)
+}
+
+fn sort_conversation_entries(entries: &mut [ConversationIndexEntry]) {
+    entries.sort_by(|left, right| {
+        right
+            .started_at
+            .cmp(&left.started_at)
+            .then_with(|| left.conversation_id.cmp(&right.conversation_id))
+    });
+}
+
 fn new_conversation_id(agent_id: &str) -> String {
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
     format!("conv_{timestamp}_{}", safe_agent_suffix(agent_id))
@@ -816,6 +912,104 @@ mod tests {
         assert_eq!(records[1].seq, 2);
         assert_eq!(records[1].kind, ConversationRecordKind::Lifecycle);
         assert_eq!(records[1].status.as_deref(), Some("clear"));
+    }
+
+    #[test]
+    fn list_conversation_archive_reads_requested_agent_only() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input("agent-1", "Agent one prompt.", None)
+            .expect("append agent one");
+        archive
+            .append_delivered_input("agent-2", "Agent two prompt.", None)
+            .expect("append agent two");
+
+        let entries = archive
+            .list(Some("agent-1"), false)
+            .expect("list agent conversations");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "agent-1");
+        assert!(entries[0].path.starts_with("agents/agent-1/conversations/"));
+    }
+
+    #[test]
+    fn list_conversation_archive_scope_all_scans_agent_owned_indexes() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input("agent-1", "Agent one prompt.", None)
+            .expect("append agent one");
+        archive
+            .append_delivered_input("agent-2", "Agent two prompt.", None)
+            .expect("append agent two");
+
+        let entries = archive
+            .list(None, true)
+            .expect("list all agent conversations");
+        let agent_ids = entries
+            .iter()
+            .map(|entry| entry.agent_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(entries.len(), 2);
+        assert!(agent_ids.contains("agent-1"));
+        assert!(agent_ids.contains("agent-2"));
+    }
+
+    #[test]
+    fn list_conversation_archive_without_scope_all_uses_current_agent_env() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input("agent-1", "Agent one prompt.", None)
+            .expect("append agent one");
+        archive
+            .append_delivered_input("agent-2", "Agent two prompt.", None)
+            .expect("append agent two");
+        std::env::set_var("WARDIAN_SESSION_ID", "agent-2");
+
+        let entries = archive
+            .list(None, false)
+            .expect("list current agent conversations");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "agent-2");
+        std::env::remove_var("WARDIAN_SESSION_ID");
+    }
+
+    #[test]
+    fn list_conversation_archive_without_agent_or_scope_all_requires_current_agent() {
+        let (_guard, _temp) = isolated_home();
+        std::env::remove_var("WARDIAN_SESSION_ID");
+        let archive = ConversationArchiveState::default();
+
+        let error = archive.list(None, false).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("WARDIAN_SESSION_ID"));
+    }
+
+    #[test]
+    fn show_conversation_archive_reads_manifest_and_records_from_agent_owned_path() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input("agent-1", "Show this prompt.", None)
+            .expect("append prompt");
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation");
+
+        let (manifest, records) = archive
+            .show(&conversation_id)
+            .expect("show conversation archive");
+
+        assert_eq!(manifest.agent_id, "agent-1");
+        assert_eq!(manifest.conversation_id, conversation_id);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text.as_deref(), Some("Show this prompt."));
     }
 
     #[test]

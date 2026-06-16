@@ -1,3 +1,6 @@
+use crate::conversations::{
+    ConversationIndexEntry, ConversationManifest, ConversationNarrativeRecord,
+};
 use crate::identity::AgentIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,6 +42,14 @@ pub enum ControlRequest {
     },
     AgentWorktreeDisable {
         target: String,
+    },
+    ConversationList {
+        agent: Option<String>,
+        #[serde(default)]
+        scope_all: bool,
+    },
+    ConversationShow {
+        conversation_id: String,
     },
     SendMessage {
         target: String,
@@ -146,6 +157,41 @@ impl AgentListResponse {
         Self {
             schema: CONTROL_SCHEMA,
             agents,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationListResponse {
+    pub schema: u8,
+    pub conversations: Vec<ConversationIndexEntry>,
+}
+
+impl ConversationListResponse {
+    pub fn new(conversations: Vec<ConversationIndexEntry>) -> Self {
+        Self {
+            schema: CONTROL_SCHEMA,
+            conversations,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationShowResponse {
+    pub schema: u8,
+    pub manifest: ConversationManifest,
+    pub conversation: Vec<ConversationNarrativeRecord>,
+}
+
+impl ConversationShowResponse {
+    pub fn new(
+        manifest: ConversationManifest,
+        conversation: Vec<ConversationNarrativeRecord>,
+    ) -> Self {
+        Self {
+            schema: CONTROL_SCHEMA,
+            manifest,
+            conversation,
         }
     }
 }
@@ -987,6 +1033,43 @@ mod tests {
         })
         .unwrap();
         assert!(disable.contains(r#""command":"agent_worktree_disable""#));
+    }
+
+    #[test]
+    fn conversation_requests_serialize() {
+        let list = serde_json::to_string(&ControlRequest::ConversationList {
+            agent: Some("agent-1".to_string()),
+            scope_all: true,
+        })
+        .unwrap();
+        assert!(list.contains(r#""command":"conversation_list""#));
+        assert!(list.contains(r#""agent":"agent-1""#));
+        assert!(list.contains(r#""scope_all":true"#));
+
+        let default_list: ControlRequest =
+            serde_json::from_str(r#"{"command":"conversation_list"}"#).unwrap();
+        assert_eq!(
+            default_list,
+            ControlRequest::ConversationList {
+                agent: None,
+                scope_all: false,
+            }
+        );
+
+        let show = serde_json::to_string(&ControlRequest::ConversationShow {
+            conversation_id: "conv_20260615_agent_1".to_string(),
+        })
+        .unwrap();
+        let roundtrip: ControlRequest = serde_json::from_str(&show).unwrap();
+
+        assert!(show.contains(r#""command":"conversation_show""#));
+        assert!(show.contains(r#""conversation_id":"conv_20260615_agent_1""#));
+        assert_eq!(
+            roundtrip,
+            ControlRequest::ConversationShow {
+                conversation_id: "conv_20260615_agent_1".to_string(),
+            }
+        );
     }
 
     #[test]

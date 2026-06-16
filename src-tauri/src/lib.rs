@@ -455,6 +455,8 @@ pub fn run() {
             commands::agent::delete_agent_worktree,
             commands::agent::disable_agent_worktree,
             commands::chat::load_agent_chat_transcript,
+            commands::conversation::list_conversations,
+            commands::conversation::show_conversation,
             commands::debug::debug_remove_agent_input_sender,
             commands::debug::debug_push_agent_watch_output,
             commands::debug::debug_set_agent_status,
