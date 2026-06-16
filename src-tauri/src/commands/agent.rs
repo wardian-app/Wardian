@@ -3,6 +3,7 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::{AppHandle, Emitter, State};
+use wardian_core::conversations::ConversationBoundaryReason;
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
     DeployedSkillRef, ProviderConfig,
@@ -24,6 +25,26 @@ pub struct SpawnAgentRequest {
 pub enum CloneAgentMode {
     Fresh,
     Profile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentClearReason {
+    UserClear,
+    WorktreeSwitch,
+}
+
+fn agent_clear_reason_from_input(reason: Option<&str>) -> AgentClearReason {
+    match reason.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("worktree_switch") => AgentClearReason::WorktreeSwitch,
+        _ => AgentClearReason::UserClear,
+    }
+}
+
+fn conversation_boundary_for_clear_reason(reason: Option<&str>) -> ConversationBoundaryReason {
+    match agent_clear_reason_from_input(reason) {
+        AgentClearReason::UserClear => ConversationBoundaryReason::Clear,
+        AgentClearReason::WorktreeSwitch => ConversationBoundaryReason::WorktreeSwitch,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2506,6 +2527,16 @@ pub async fn resume_agent(
 #[tauri::command]
 pub async fn clear_agent_session(
     session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    clear_agent_session_with_reason(session_id, reason, state, app).await
+}
+
+pub async fn clear_agent_session_with_reason(
+    session_id: String,
+    reason: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
@@ -2514,6 +2545,15 @@ pub async fn clear_agent_session(
         session_id
     ));
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
+    if let Err(error) = state
+        .conversation_archive
+        .rollover_agent(&session_id, boundary_reason)
+    {
+        manager::log_debug(&format!(
+            "[WARDIAN] conversation archive rollover failed for {session_id}: {error}"
+        ));
+    }
     let mut prepared = {
         let mut agents = state.agents.lock().await;
         let Some(agent) = agents.get_mut(&session_id) else {
@@ -3250,9 +3290,10 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered,
-        configured_new_agent_order_placement, detach_agent_for_kill, disable_worktree_config,
-        discover_git_worktrees_for_configs, discover_git_worktrees_for_sources_with,
-        enable_worktree_config, ensure_existing_worktree_is_git_registered,
+        configured_new_agent_order_placement, conversation_boundary_for_clear_reason,
+        detach_agent_for_kill, disable_worktree_config, discover_git_worktrees_for_configs,
+        discover_git_worktrees_for_sources_with, enable_worktree_config,
+        ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_managed_agent_worktree_root, is_under_wardian_agent_worktree_root,
@@ -5982,6 +6023,14 @@ mod tests {
             "019db30f-12fc-7ef0-8faa-8d88703dc124",
             &excluded
         ));
+    }
+
+    #[test]
+    fn conversation_rollover_reason_for_worktree_switch_is_worktree_switch() {
+        assert_eq!(
+            conversation_boundary_for_clear_reason(Some("worktree_switch")),
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch
+        );
     }
 
     #[test]

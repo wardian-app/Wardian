@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::manager::opencode::opencode_database_path;
+use crate::manager::{self, opencode::opencode_database_path};
 use crate::providers::chat_transcript::{normalize_chat_lines, visible_chat_text};
 use crate::state::AppState;
+use crate::state::conversation_archive::effective_conversation_logging;
 use tauri::State;
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
+use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::normalize_status;
 use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
@@ -39,6 +41,7 @@ pub async fn load_agent_chat_transcript_for_state(
         last_status_at,
         log_path,
         cleared_provider_sessions,
+        agent_conversation_logging,
     ) = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -49,6 +52,7 @@ pub async fn load_agent_chat_transcript_for_state(
             .lock()
             .map_err(|_| "agent config lock poisoned".to_string())?;
         let provider = config.provider.clone();
+        let agent_conversation_logging = config.conversation_logging;
         let resume_session = config.resume_session.clone();
         let cleared_provider_sessions = if provider == "codex" {
             config.codex_config().cleared_provider_sessions
@@ -78,6 +82,7 @@ pub async fn load_agent_chat_transcript_for_state(
             last_status_at,
             log_path,
             cleared_provider_sessions,
+            agent_conversation_logging,
         )
     };
 
@@ -112,7 +117,24 @@ pub async fn load_agent_chat_transcript_for_state(
         include_terminal_output: !provider_has_transcript,
     });
 
-    Ok(merge_chat_events(watch_events, provider_events))
+    let events = merge_chat_events(watch_events, provider_events);
+    let global_conversation_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
+        == ConversationLoggingSetting::Enabled
+    {
+        if let Err(error) = state
+            .conversation_archive
+            .append_chat_events(&session_id, &events)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive append failed for {session_id}: {error}"
+            ));
+        }
+    }
+
+    Ok(events)
 }
 
 struct WatchSnapshotChatInput<'a> {

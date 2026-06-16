@@ -599,6 +599,7 @@ async fn clear_agent_after_worktree_move(
 ) -> Result<(), ControlError> {
     crate::commands::agent::clear_agent_session(
         session_id.to_string(),
+        Some("worktree_switch".to_string()),
         app.state::<AppState>(),
         app.clone(),
     )
