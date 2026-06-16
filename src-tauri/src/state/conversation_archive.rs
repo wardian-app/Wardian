@@ -162,6 +162,7 @@ impl ConversationArchiveState {
         }
         let mut handle = active_handle_for_context(&mut active, &context, provider_source_key)?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
+        let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
@@ -228,7 +229,7 @@ impl ConversationArchiveState {
             .expect("conversation has at least one record");
         let record_count = (existing_records.len() + appended.len()) as u64;
         let manifest = open_manifest(
-            &context,
+            &effective_context,
             &handle.conversation_id,
             first_record.at.clone(),
             last_record.at.clone(),
@@ -312,6 +313,7 @@ impl ConversationArchiveState {
         }
         let mut handle = active_handle_for_context(&mut active, &context, provider_source_key)?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
+        let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
@@ -330,7 +332,7 @@ impl ConversationArchiveState {
         let first_record = existing_records.first().unwrap_or(&record);
         let record_count = (existing_records.len() + 1) as u64;
         let manifest = open_manifest(
-            &context,
+            &effective_context,
             &handle.conversation_id,
             first_record.at.clone(),
             record.at.clone(),
@@ -808,8 +810,16 @@ fn hydrate_open_handle(
         }
         let keys_are_compatible =
             match (manifest.provider_source_key.as_deref(), provider_source_key) {
-                (Some(existing_key), Some(next_key)) => existing_key == next_key,
-                (None, Some(_)) | (Some(_), None) | (None, None) => true,
+                (Some(existing_key), Some(next_key)) if existing_key != next_key => {
+                    close_conversation_dir(
+                        &entry.agent_id,
+                        &entry.conversation_id,
+                        &conversation_dir,
+                        ConversationBoundaryReason::ProviderSourceChanged,
+                    )?;
+                    false
+                }
+                (Some(_), Some(_)) | (None, Some(_)) | (Some(_), None) | (None, None) => true,
             };
         if !keys_are_compatible {
             continue;
@@ -831,6 +841,31 @@ fn hydrate_open_handle(
         }));
     }
     Ok(None)
+}
+
+fn effective_context_for_handle(
+    context: &ConversationArchiveContext,
+    handle: &ActiveConversationHandle,
+    conversation_dir: &std::path::Path,
+) -> io::Result<ConversationArchiveContext> {
+    let existing_manifest = read_manifest(&conversation_dir.join("manifest.json"))?;
+    let mut effective = context.clone();
+
+    if effective.provider_source_key.is_none() {
+        effective.provider_source_key = handle.provider_source_key.clone().or_else(|| {
+            existing_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.provider_source_key.clone())
+        });
+    }
+
+    if effective.provider_session_ids.is_empty() {
+        if let Some(manifest) = existing_manifest.as_ref() {
+            effective.provider_session_ids = manifest.provider_session_ids.clone();
+        }
+    }
+
+    Ok(effective)
 }
 
 fn close_conversation_handle(
@@ -1416,6 +1451,80 @@ mod tests {
         assert_eq!(
             manifest.provider_source_key.as_deref(),
             Some("codex:session:session-one")
+        );
+    }
+
+    #[test]
+    fn append_preserves_adopted_provider_source_key_across_unkeyed_append_and_restart() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let unkeyed_context = ConversationArchiveContext {
+            provider_source_key: None,
+            provider_session_ids: Vec::new(),
+            ..archive_context("session-one")
+        };
+        archive
+            .append_delivered_input_with_context(
+                unkeyed_context.clone(),
+                "User prompt before source.",
+                None,
+            )
+            .expect("append unkeyed delivered input");
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("input conversation id");
+        let response = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Assistant response after source discovery."),
+        );
+        archive
+            .append_chat_events_with_context(archive_context("session-one"), &[response])
+            .expect("append keyed response");
+        archive
+            .append_delivered_input_with_context(
+                unkeyed_context,
+                "Follow-up prompt without source metadata.",
+                None,
+            )
+            .expect("append later unkeyed delivered input");
+
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read manifest");
+        assert_eq!(
+            manifest.provider_source_key.as_deref(),
+            Some("codex:session:session-one")
+        );
+        assert_eq!(manifest.provider_session_ids, vec!["session-one"]);
+
+        let second_archive = ConversationArchiveState::default();
+        let next_response = chat_event(
+            "event-2",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Different provider session response."),
+        );
+        second_archive
+            .append_chat_events_with_context(archive_context("session-two"), &[next_response])
+            .expect("append different session after restart");
+        let next_conversation_id = second_archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("next active conversation id");
+
+        assert_ne!(next_conversation_id, conversation_id);
+        let old_manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read old manifest");
+        assert_eq!(old_manifest.status, ConversationStatus::Interrupted);
+        assert_eq!(
+            old_manifest.boundary_reason,
+            ConversationBoundaryReason::ProviderSourceChanged
         );
     }
 
